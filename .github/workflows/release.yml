@@ -1,0 +1,58 @@
+name: Release
+
+# Tag vX.Y.Z -> run CI, build the static musl binary, publish it with its
+# sha256 as a GitHub Release. The tag must match Cargo.toml's version.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    needs: ci
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - name: Install musl-gcc
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Version must match the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          [ "v$v" = "${GITHUB_REF_NAME}" ] || { echo "::error::tag ${GITHUB_REF_NAME} != Cargo.toml version $v"; exit 1; }
+      - name: Build static binary
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+        run: cargo build --release --locked --target x86_64-unknown-linux-musl
+      - name: Verify static, package, checksum
+        run: |
+          bash scripts/check-static.sh target/x86_64-unknown-linux-musl/release/nawa
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          out="nawa-${v}-x86_64-linux-musl"
+          cp target/x86_64-unknown-linux-musl/release/nawa "$out"
+          strip "$out"
+          sha256sum "$out" > "$out.sha256"
+          echo "ASSET=$out" >> "$GITHUB_ENV"
+      - name: Publish
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" "$ASSET" "$ASSET.sha256" --title "nawa ${GITHUB_REF_NAME}" --notes-file CHANGELOG.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nawa-static
+          path: |
+            ${{ env.ASSET }}
+            ${{ env.ASSET }}.sha256

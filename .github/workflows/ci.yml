@@ -1,0 +1,235 @@
+name: CI
+
+# nawa CI:
+#
+#   nawa          build + clippy + the full cargo test suite (normal user)
+#   nawa-matrix   the same suite on other hosts / as root (the rootless and
+#                sandbox tests behave differently per uid and kernel)
+#   isolation    the real `nawa build` CLI at EACH isolation level
+#   smoke        end-to-end CLI smoke tests (signing, upgrade, rollback,
+#                remote repos, services)
+#   static       the musl release build: must produce a fully static binary
+#
+# A sandbox test that SKIPS because the runner refused a kernel feature is a
+# failure here (scripts/ci-no-skips.sh).
+
+on:
+#
+#   nawa                 build + clippy + the full cargo test suite (normal user)
+#   nawa-matrix          the same suite on other hosts / as root (the rootless
+#                       and sandbox tests behave differently per uid and kernel)
+#   isolation           the real `nawa build` CLI at EACH isolation level:
+#                       none | env | sandbox | closure
+#   smoke               end-to-end CLI smoke tests (signing, upgrade, rollback,
+#                       remote repos, services)
+#   scripts             shell syntax, ShellCheck, recipe validation and every
+#                       script-level test, plus build-all.sh dry runs at each
+#                       isolation level
+#
+# A sandbox test that SKIPS because the runner refused a kernel feature is a
+# failure here (scripts/ci-no-skips.sh): a green run must mean the isolation
+# was really exercised.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # weekly: runner images change kernel / AppArmor settings under us
+    - cron: "0 4 * * 1"
+  workflow_call: # reused by release.yml as a gate before publishing
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  nawa:
+    name: nawa (build, clippy, tests)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Allow unprivileged user namespaces (needed by the sandbox tests)
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ubuntu-24.04
+
+      - name: Build
+        run: cargo build --release --locked
+      - name: Clippy (warnings are errors)
+        run: cargo clippy --release --all-targets --locked -- -D warnings
+      - name: Test (normal user)
+        run: |
+          set -o pipefail
+          cargo test --release --locked --no-fail-fast -- --nocapture 2>&1 | tee "$RUNNER_TEMP/test.log"
+      - name: Fail if an isolation test was skipped
+        run: bash scripts/ci-no-skips.sh "$RUNNER_TEMP/test.log"
+
+  nawa-matrix:
+    name: nawa tests (${{ matrix.os }}, ${{ matrix.as }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # the (ubuntu-24.04, user) combination is the `nawa` job above
+          - { os: ubuntu-24.04, as: root }
+          - { os: ubuntu-22.04, as: user }
+          - { os: ubuntu-22.04, as: root }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Allow unprivileged user namespaces
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        if: matrix.as == 'user'
+        with:
+          key: ${{ matrix.os }}
+
+      - name: Test as a normal user
+        if: matrix.as == 'user'
+        run: |
+          set -o pipefail
+          cargo test --release --locked --no-fail-fast -- --nocapture 2>&1 | tee "$RUNNER_TEMP/test.log"
+
+      # Root run: the rootless test drops to `nobody` (setpriv) and needs a
+      # world-traversable scratch path, which the runner's home is not — so
+      # root uses its own target dir. It must carry NO default ACL: an
+      # inherited default ACL replaces the umask, every staged file came out
+      # 777/666 and nawa's lint (rightly) rejected the packages.
+      - name: Test as root
+        if: matrix.as == 'root'
+        env:
+          CARGO_TARGET_DIR: /var/tmp/nawa-target
+        run: |
+          set -o pipefail
+          sudo mkdir -p "$CARGO_TARGET_DIR"
+          sudo chown "$USER" "$CARGO_TARGET_DIR"
+          chmod 755 "$CARGO_TARGET_DIR"
+          if command -v setfacl >/dev/null; then sudo setfacl -R -b -k "$CARGO_TARGET_DIR"; fi
+          echo "umask (user): $(umask)   sudo umask: $(sudo sh -c umask)"
+          stat -c '%a %U %n' "$CARGO_TARGET_DIR" /var/tmp
+          getfacl -p "$CARGO_TARGET_DIR" 2>/dev/null || true
+          cargo test --release --locked --no-fail-fast --no-run
+          sudo -E env "PATH=$PATH" "HOME=$HOME" "CARGO_HOME=$HOME/.cargo" "RUSTUP_HOME=$HOME/.rustup" \
+            bash -c 'umask 022; exec cargo test --release --locked --no-fail-fast -- --nocapture' 2>&1 \
+            | tee "$RUNNER_TEMP/test.log"
+
+      - name: Fail if an isolation test was skipped
+        run: bash scripts/ci-no-skips.sh "$RUNNER_TEMP/test.log"
+
+  isolation:
+    name: nawa build, isolation=${{ matrix.level }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        level: [none, env, sandbox, closure]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Allow unprivileged user namespaces
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ubuntu-24.04-release-bins
+
+      - name: Build nawa
+        run: cargo build --release --locked
+
+      - name: Sandbox capability report of this runner (informational)
+        if: matrix.level == 'sandbox' || matrix.level == 'closure'
+        continue-on-error: true
+        run: bash scripts/spike-sandbox.sh
+
+      - name: Real nawa builds at this isolation level
+        run: bash scripts/test-isolation-matrix.sh "${{ matrix.level }}"
+
+  smoke:
+    name: nawa CLI smoke tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ubuntu-24.04-release-bins
+
+      - name: Build nawa and the mkfake example
+        # `--examples` alone would build only the examples and skip the nawa binary
+        run: cargo build --release --locked --bins --examples
+
+      - name: Signing, upgrade, rollback (smoke-v05)
+        env:
+          NAWA: ${{ github.workspace }}/target/release/nawa
+          MKFAKE: ${{ github.workspace }}/target/release/examples/mkfake
+        run: bash scripts/smoke-v05.sh
+      - name: Remote repositories and services (smoke-v06)
+        env:
+          NAWA: ${{ github.workspace }}/target/release/nawa
+          MKFAKE: ${{ github.workspace }}/target/release/examples/mkfake
+        run: bash scripts/smoke-v06.sh
+
+  static:
+    name: static musl binary
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: musl
+      - name: Install musl-gcc (bzip2, zstd and ring compile C)
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+        run: cargo build --release --locked --target x86_64-unknown-linux-musl
+      - name: Binary must be static (no DT_NEEDED, no interpreter)
+        run: bash scripts/check-static.sh target/x86_64-unknown-linux-musl/release/nawa
+
+  # One required check for branch protection: green only if EVERY job above is.
+  ci-ok:
+    name: CI passed
+    if: always()
+    needs: [nawa, nawa-matrix, isolation, smoke, static]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: All jobs must have succeeded
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "job results: $RESULTS"
+          for r in $RESULTS; do
+            [ "$r" = success ] || { echo "::error::a CI job finished as '$r'"; exit 1; }
+          done

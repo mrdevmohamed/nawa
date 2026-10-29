@@ -1,0 +1,53 @@
+[package]
+name = "nawa"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.82"
+description = "nawa — source-based package manager for a from-scratch Linux distribution"
+license = "GPL-3.0"
+
+[dependencies]
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+sha2 = "0.10"
+hex = "0.4"
+clap = { version = "4.5", features = ["derive"] }
+tar = "0.4"
+zstd = "0.13"
+walkdir = "2.5"
+ed25519-dalek = { version = "2", default-features = false, features = ["fast"] }
+# already in Cargo.lock via transitive deps (filetime etc.), so the offline
+# vendored bootstrap of `nawa` keeps working unchanged
+libc = "0.2"
+
+# native HTTP client (replaces shelling out to curl): rustls TLS with the
+# bundled webpki roots (works inside chroots with no /etc/ssl), gzip
+# content-encoding, and automatic proxy discovery from the environment.
+ureq = { version = "2.12", default-features = false, features = [
+    "tls",
+    "gzip",
+    "proxy-from-env",
+] }
+url = "2" # redirect-target resolution (already in the ureq dependency tree)
+# source-tarball decompression, all linked in-process (replaces the external
+# `tar` binary which silently depended on host gzip/xz/bzip2 being installed):
+flate2 = { version = "1", default-features = false, features = [
+    "rust_backend",
+] } # .tar.gz — pure-Rust miniz_oxide backend
+# .tar.xz — pure Rust, streaming `Read` adapter, supports every xz check type
+# (CRC32/CRC64/SHA-256; xz-utils >= 5.8 tarballs use SHA-256, which lzma-rs 0.3
+# rejected). 0.15.x is the last line on sha2 0.10, matching the dep above.
+lzma-rust2 = { version = "0.15.8", default-features = false, features = ["std", "xz"] }
+bzip2 = { version = "0.4", default-features = false, features = [
+    "static",
+] } # .tar.bz2 — vendored C, statically linked
+filetime = "0.2" # timestamp-preserving local copies (cp -a parity)
+
+[[bin]]
+name = "nawa"
+path = "src/main.rs"
+
+[dev-dependencies]
+# xz *encoder* for building test archives only (not linked into nawa itself)
+lzma-rust2 = { version = "0.15.8", default-features = false, features = ["std", "xz", "encoder"] }
