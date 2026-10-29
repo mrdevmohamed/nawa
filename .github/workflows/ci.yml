@@ -2,8 +2,8 @@ name: CI
 
 # nawa CI:
 #
-#   nawa          build + clippy + the full cargo test suite (normal user)
-#   nawa-matrix   the same suite on other hosts / as root (the rootless and
+#   nawa         build + clippy + the full cargo test suite (normal user)
+#   nawa-matrix  the same suite on other hosts / as root (the rootless and
 #                sandbox tests behave differently per uid and kernel)
 #   isolation    the real `nawa build` CLI at EACH isolation level
 #   smoke        end-to-end CLI smoke tests (signing, upgrade, rollback,
@@ -12,23 +12,6 @@ name: CI
 #
 # A sandbox test that SKIPS because the runner refused a kernel feature is a
 # failure here (scripts/ci-no-skips.sh).
-
-on:
-#
-#   nawa                 build + clippy + the full cargo test suite (normal user)
-#   nawa-matrix          the same suite on other hosts / as root (the rootless
-#                       and sandbox tests behave differently per uid and kernel)
-#   isolation           the real `nawa build` CLI at EACH isolation level:
-#                       none | env | sandbox | closure
-#   smoke               end-to-end CLI smoke tests (signing, upgrade, rollback,
-#                       remote repos, services)
-#   scripts             shell syntax, ShellCheck, recipe validation and every
-#                       script-level test, plus build-all.sh dry runs at each
-#                       isolation level
-#
-# A sandbox test that SKIPS because the runner refused a kernel feature is a
-# failure here (scripts/ci-no-skips.sh): a green run must mean the isolation
-# was really exercised.
 
 on:
   push:
