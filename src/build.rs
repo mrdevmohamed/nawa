@@ -581,7 +581,7 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
 /// `SOURCE_DATE_EPOCH` is unaffected) and never runs through a symlink.
 fn grant_source_write(dir: &Path) {
     use std::os::unix::fs::PermissionsExt;
-    let euid = unsafe { libc::geteuid() };
+    let euid = rustix::process::geteuid().as_raw();
     let root = euid == 0;
     for e in walkdir::WalkDir::new(dir).into_iter().flatten() {
         // chmod(2)/chown(2) would follow the link — never grant through one

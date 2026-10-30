@@ -19,21 +19,12 @@
 //! open file descriptions.
 
 use anyhow::{bail, Context, Result};
+use rustix::fd::AsFd;
+use rustix::fs::{flock, FlockOperation};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::os::raw::c_int;
-use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-
-extern "C" {
-    // part of libc, which std already links — no extra crate needed (the
-    // bootstrap builds nawa offline, so new dependencies are expensive)
-    fn flock(fd: c_int, operation: c_int) -> c_int;
-}
-const LOCK_SH: c_int = 1;
-const LOCK_EX: c_int = 2;
-const LOCK_NB: c_int = 4;
 
 /// Set in the environment of hooks so nested nawa calls skip locking.
 pub const HELD_ENV: &str = "NAWA_LOCK_HELD";
@@ -135,20 +126,22 @@ pub fn try_acquire(root: &Path, mode: Mode) -> Result<Attempt> {
     };
 
     let op = match mode {
-        Mode::Shared => LOCK_SH,
-        Mode::Exclusive => LOCK_EX,
-    } | LOCK_NB;
+        Mode::Shared => FlockOperation::NonBlockingLockShared,
+        Mode::Exclusive => FlockOperation::NonBlockingLockExclusive,
+    };
     loop {
-        // SAFETY: plain syscall wrapper on a file descriptor we own.
-        let rc = unsafe { flock(file.as_raw_fd(), op) };
-        if rc == 0 {
-            break;
-        }
-        let err = std::io::Error::last_os_error();
-        match err.kind() {
-            std::io::ErrorKind::Interrupted => continue,
-            std::io::ErrorKind::WouldBlock => return Ok(Attempt::Busy),
-            _ => return Err(err).context("flock on the database lock failed"),
+        // rustix::fs::flock is a thin, safe wrapper around flock(2); only
+        // EINTR needs manual handling (rustix reports it like any error)
+        match flock(file.as_fd(), op) {
+            Ok(()) => break,
+            Err(e) => match std::io::Error::from(e).kind() {
+                std::io::ErrorKind::Interrupted => continue,
+                std::io::ErrorKind::WouldBlock => return Ok(Attempt::Busy),
+                kind => {
+                    let err = std::io::Error::from(e);
+                    bail!("flock on the database lock failed: {err} (kind {kind:?})")
+                }
+            },
         }
     }
 
@@ -231,6 +224,69 @@ mod tests {
         let _l = locked(try_acquire(&root, Mode::Exclusive).unwrap());
         let s = std::fs::read_to_string(lock_path(&root)).unwrap();
         assert_eq!(s.trim(), std::process::id().to_string());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- concurrency -------------------------------------------------------
+
+    /// Threads holding their **own open file description** contend for the
+    /// same kernel lock, exactly like separate processes. `try_acquire` is
+    /// non-blocking, so "excluded until released" is observable directly.
+    #[test]
+    fn four_threads_excluded_until_exclusive_release_then_all_proceed() {
+        let root = std::env::temp_dir().join(format!("nawa-lock-threads-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("var/lib/nawa")).unwrap();
+
+        let first = locked(try_acquire(&root, Mode::Exclusive).unwrap());
+
+        std::thread::scope(|s| {
+            // 3 readers + 1 writer: all must see Busy while the holder lives
+            let mut handles = Vec::new();
+            for mode in [
+                Mode::Shared,
+                Mode::Shared,
+                Mode::Shared,
+                Mode::Exclusive,
+            ] {
+                let root = root.clone();
+                handles.push(s.spawn(move || {
+                    match try_acquire(&root, mode) {
+                        Ok(Attempt::Busy) => true,
+                        other => panic!("expected Busy under contention, got {other:?}"),
+                    }
+                }));
+            }
+            for h in handles {
+                assert!(h.join().unwrap(), "contention while the lock is held");
+            }
+            // double-check the total observation count
+        });
+
+        // after release every thread must win its own lock (shared first,
+        // so the final exclusive attempt is the release point)
+        drop(first);
+        std::thread::scope(|_| {
+            let mut locks = Vec::new();
+            for _ in 0..3 {
+                locks.push(locked(try_acquire(&root, Mode::Shared).unwrap()));
+            }
+            assert!(matches!(try_acquire(&root, Mode::Exclusive).unwrap(), Attempt::Busy));
+            drop(locks);
+        });
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A failed (Busy) attempt must leave the lock file openable and the
+    /// final state clean — no stray fd leaks that could hold the lock.
+    #[test]
+    fn busy_attempt_does_not_leak_a_lock() {
+        let root = tmp("leak");
+        let _holder = locked(try_acquire(&root, Mode::Exclusive).unwrap());
+        assert!(matches!(try_acquire(&root, Mode::Shared).unwrap(), Attempt::Busy));
+        // repeated busy attempts stay busy (no fd was left locked behind)
+        assert!(matches!(try_acquire(&root, Mode::Shared).unwrap(), Attempt::Busy));
+        assert!(matches!(try_acquire(&root, Mode::Exclusive).unwrap(), Attempt::Busy));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

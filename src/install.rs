@@ -662,15 +662,10 @@ fn load_hooks(db: &Db, name: &str) -> archive::Hooks {
         .unwrap_or_default()
 }
 
-extern "C" {
-    // part of libc, which std already links (same approach as lock.rs)
-    fn geteuid() -> u32;
-}
-
 /// True when this process runs as root. Uses the effective uid directly:
 /// it must not depend on /proc being mounted (it is not inside a fresh chroot).
 fn running_as_root() -> bool {
-    unsafe { geteuid() == 0 }
+    rustix::process::geteuid().is_root()
 }
 
 /// Does `path` exist as seen from inside a chroot at `root`? Symlinks are
@@ -798,12 +793,8 @@ fn chroot_command(root: &Path, sh: &str, script: &str) -> Result<std::process::E
             .env("NAWA_ROOT", "/")
             .env(crate::lock::HELD_ENV, "1") // we hold the db lock; nested nawa must not wait
             .pre_exec(move || {
-                if libc::chroot(root_c.as_ptr()) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                if libc::chdir(c"/".as_ptr()) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
+                rustix::process::chroot(&root_c).map_err(std::io::Error::from)?;
+                rustix::process::chdir(c"/").map_err(std::io::Error::from)?;
                 Ok(())
             })
             .status()

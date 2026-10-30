@@ -1,34 +1,12 @@
 //! "Did you mean?" suggestions for mistyped package names.
 //!
-//! Hand-rolled so the offline vendored bootstrap (`cargo build --offline`
-//! in the nawa recipe) never needs a new dependency. Levenshtein distance
-//! with a small cutoff is enough for the package-name vocabulary of a
-//! source distribution.
+//! The edit distance is `strsim::levenshtein` (same insert/delete/substitute
+//! cost-1 definition as the hand-written version this replaces, case
+//! sensitive like it was — callers compare lowercased names). A small cutoff
+//! is enough for the package-name vocabulary of a source distribution.
 
-/// Plain Levenshtein distance (insert / delete / substitute, all cost 1).
-/// Case-sensitive here; callers compare lowercased names.
-pub fn levenshtein(a: &str, b: &str) -> usize {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    if a.is_empty() {
-        return b.len();
-    }
-    if b.is_empty() {
-        return a.len();
-    }
-    // single rolling row
-    let mut prev: Vec<usize> = (0..=b.len()).collect();
-    let mut cur = vec![0usize; b.len() + 1];
-    for (i, ca) in a.iter().enumerate() {
-        cur[0] = i + 1;
-        for (j, cb) in b.iter().enumerate() {
-            let subst = prev[j] + usize::from(ca != cb);
-            cur[j + 1] = (prev[j + 1] + 1).min(cur[j] + 1).min(subst);
-        }
-        std::mem::swap(&mut prev, &mut cur);
-    }
-    prev[b.len()]
-}
+/// Levenshtein distance (insert / delete / substitute, all cost 1).
+pub use strsim::levenshtein;
 
 /// Rank `target` against candidate names; best matches first.
 ///
@@ -89,6 +67,62 @@ mod tests {
         assert_eq!(levenshtein("gzip", "gzip"), 0);
         assert_eq!(levenshtein("gzp", "gzip"), 1);
         assert_eq!(levenshtein("", "abc"), 3);
+    }
+
+    /// Reference implementation (full-matrix DP) the strsim call is checked
+    /// against — guards the dependency swap against subtle differences, incl.
+    /// the empty-string edges strsim's rolling-row aliases must satisfy.
+    fn reference_levenshtein(a: &str, b: &str) -> usize {
+        let a: Vec<char> = a.chars().collect();
+        let b: Vec<char> = b.chars().collect();
+        let mut m = vec![vec![0usize; b.len() + 1]; a.len() + 1];
+        for (i, row) in m.iter_mut().enumerate() {
+            row[0] = i;
+        }
+        for (j, c) in m[0].iter_mut().enumerate() {
+            *c = j;
+        }
+        for i in 1..=a.len() {
+            for j in 1..=b.len() {
+                m[i][j] = std::cmp::min(
+                    m[i - 1][j] + 1,
+                    std::cmp::min(
+                        m[i][j - 1] + 1,
+                        m[i - 1][j - 1] + usize::from(a[i - 1] != b[j - 1]),
+                    ),
+                );
+            }
+        }
+        m[a.len()][b.len()]
+    }
+
+    #[test]
+    fn levenshtein_matches_reference_implementation() {
+        // one namespace's alnum soup including many edit neighbours, and a
+        // non-ASCII name: every pair must agree with the full DP reference
+        let names = [
+            "gzip", "gzp", "zstd", "zst", "grep", "gawk", "gmp", "mpfr", "glibc",
+            "libz", "zlib", "curl", "openssl", "openssl1", "", "换行包",
+        ];
+        for a in names {
+            for b in names {
+                assert_eq!(
+                    levenshtein(a, b),
+                    reference_levenshtein(a, b),
+                    "strsim distance disagrees for {a:?} vs {b:?}"
+                );
+            }
+        }
+        // a random-ish sweep of generated one-char families
+        let mut base;
+        for seed in 0..40 {
+            base = format!("pkg-{}-suffix{}", seed, seed % 7);
+            for cut in [0, 1, 2] {
+                let shorter = &base[..base.len().saturating_sub(cut * 2)];
+                assert_eq!(levenshtein(&base, shorter), reference_levenshtein(&base, shorter));
+                assert_eq!(levenshtein(shorter, &base), reference_levenshtein(shorter, &base));
+            }
+        }
     }
 
     #[test]

@@ -44,6 +44,27 @@ bzip2 = { version = "0.4", default-features = false, features = [
 ] } # .tar.bz2 — vendored C, statically linked
 filetime = "0.2" # timestamp-preserving local copies (cp -a parity)
 
+# --- library replacements for hand-written internals (MSRV-compatible) -------
+# ELF reader (elf32/elf64, dynamic sections): replaces the handwritten parser
+# in lint.rs. Only the ELF features are enabled — no mach/pe/archive pulls.
+goblin = { version = "0.9.3", default-features = false, features = [
+    "std",
+    "elf32",
+    "elf64",
+    "endian_fd",
+] }
+# safe syscall wrappers: flock for the database lock (lock.rs), openat2 for
+# archive extraction (archive.rs); narrow feature set, no default features
+rustix = { version = "1.0", default-features = false, features = [
+    "std",
+    "fs",
+    "mount",
+    "process",
+    "thread",
+] }
+# Levenshtein ("did you mean"): replaces the handwritten distance in suggest.rs
+strsim = { version = "0.11.1", default-features = false }
+
 [[bin]]
 name = "nawa"
 path = "src/main.rs"
