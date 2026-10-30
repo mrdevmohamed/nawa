@@ -161,7 +161,8 @@ fn redirect_target(current: &url::Url, loc: &str) -> Result<url::Url> {
 }
 
 fn stderr_is_tty() -> bool {
-    unsafe { libc::isatty(libc::STDERR_FILENO) == 1 }
+    use std::io::IsTerminal;
+    std::io::stderr().is_terminal()
 }
 
 /// Stream the response body into `dest` with an occasional MiB counter on
@@ -270,7 +271,7 @@ pub fn copy_local(src: &Path, dest: &Path) -> Result<()> {
         return Ok(());
     }
     std::fs::create_dir_all(dest).with_context(|| format!("create {}", dest.display()))?;
-    let as_root = unsafe { libc::geteuid() } == 0;
+    let as_root = rustix::process::geteuid().is_root();
     let mut seen: HashMap<(u64, u64), PathBuf> = HashMap::new(); // (dev, ino) -> first copy
     let mut dir_times: Vec<(PathBuf, PathBuf)> = Vec::new();
     for entry in walkdir::WalkDir::new(src).follow_links(false) {
@@ -323,14 +324,14 @@ pub fn copy_local(src: &Path, dest: &Path) -> Result<()> {
 }
 
 fn preserve_owner(dst: &Path, md: &std::fs::Metadata) {
-    use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::MetadataExt;
-    let c = match std::ffi::CString::new(dst.as_os_str().as_bytes()) {
-        Ok(c) => c,
-        Err(_) => return,
-    };
+    use rustix::fs::{Gid, Uid};
     // best effort, like cp -a on a filesystem that ignores ownership
-    unsafe { libc::chown(c.as_ptr(), md.uid(), md.gid()) };
+    let _ = rustix::fs::chown(
+        dst,
+        Some(Uid::from_raw(md.uid())),
+        Some(Gid::from_raw(md.gid())),
+    );
 }
 
 fn copy_file_times(src: &Path, dst: &Path) -> Result<()> {
