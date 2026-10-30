@@ -31,12 +31,26 @@ pub struct UpgradeOpts {
     pub yes: bool,
 }
 
-pub fn upgrade(
+/// A repository materialized on disk: for a local repo its own directory,
+/// for a remote one the per-URL cache holding the freshly fetched index.
+pub struct OpenRepo {
+    /// directory holding `index.toml` (and, locally, the archives)
+    pub dir: PathBuf,
+    /// `Some(url)` for a remote repository — archives are fetched on demand
+    pub base_url: Option<String>,
+    /// the parsed, signature-checked, freshness-checked index
+    pub index: repo::Index,
+}
+
+/// Fetch (remote) or locate (local) a repository, then parse and
+/// authenticate its index: trust policy for remote repos, signature check,
+/// rollback/freeze protection. Shared by `nawa upgrade` and `nawa install`.
+pub fn open_repo(
     root: &Path,
     repo_ref: &RepoRef,
-    recipes: &Path,
-    opts: &UpgradeOpts,
-) -> Result<()> {
+    allow_unsigned: bool,
+    force: bool,
+) -> Result<OpenRepo> {
     // ---- materialize the repository (local dir, or fetch over http(s)) -----
     let repo_dir: PathBuf;
     let base_url: Option<String>;
@@ -49,7 +63,7 @@ pub fn upgrade(
             base_url = None;
         }
         RepoRef::Remote(url) => {
-            require_trust_for_remote(root, url, opts.allow_unsigned)?;
+            require_trust_for_remote(root, url, allow_unsigned)?;
             let cache = fetch::remote_cache_dir(root, url);
             std::fs::create_dir_all(&cache)
                 .with_context(|| format!("create cache {}", cache.display()))?;
@@ -113,7 +127,7 @@ pub fn upgrade(
             Err(e) => bail!("repository index signature is INVALID: {e:#}"),
         }
     } else {
-        if !opts.allow_unsigned && !sign::trusted_keys(root)?.is_empty() {
+        if !allow_unsigned && !sign::trusted_keys(root)?.is_empty() {
             bail!(
                 "repository index {} is unsigned but trusted keys are configured\n(pass --allow-unsigned to override)",
                 index_path.display()
@@ -126,7 +140,86 @@ pub fn upgrade(
     // "newest index seen" marker — otherwise one forged index with a huge
     // timestamp would block every later (genuine) upgrade from this repo
     let authenticated = sig_path.exists() && !sign::trusted_keys(root)?.is_empty();
-    check_index_freshness(&repo_dir, &index, base_url.is_some(), opts.force, authenticated)?;
+    check_index_freshness(&repo_dir, &index, base_url.is_some(), force, authenticated)?;
+    Ok(OpenRepo { dir: repo_dir, base_url, index })
+}
+
+/// Make one index entry's archive available locally and fully verified:
+/// downloaded into the cache (remote) or located in the repo dir (local),
+/// then sha256 against the index, signature policy, and the `.PKGINFO`
+/// must match what the index promised.
+pub fn fetch_entry(
+    root: &Path,
+    open: &OpenRepo,
+    re: &repo::RepoEntry,
+    allow_unsigned: bool,
+) -> Result<PathBuf> {
+    let repo_dir = &open.dir;
+    let base_url = &open.base_url;
+    // a malicious or compromised index must not be able to escape the
+    // repo/cache directory through crafted archive paths (local indexes
+    // are validated exactly like remote ones — repo-create only ever
+    // writes plain file names, so nothing legitimate is excluded)
+    validate_entry_filename(&re.file)?;
+    let src = match base_url {
+        None => {
+            let p = repo_dir.join(&re.file);
+            if !p.exists() {
+                bail!("archive {} listed in the index is missing", p.display());
+            }
+            p
+        }
+        Some(url) => {
+            let dest = repo_dir.join(&re.file);
+            fetch::download_cached(&format!("{url}/{}", re.file), &dest, Some(&re.sha256))?;
+            // the detached signature travels with the archive; it lands in
+            // a .part file first so an interrupted transfer cannot corrupt
+            // the cached copy (a truncated .sig would fail every future
+            // upgrade until removed by hand)
+            let sig_dest = sign::sig_path_for(&dest);
+            let sig_part = sig_dest.with_file_name(format!(
+                "{}.part",
+                sig_dest.file_name().unwrap_or_default().to_string_lossy()
+            ));
+            match fetch::download_opt(&format!("{url}/{}.sig", re.file), &sig_part) {
+                Ok(true) => {
+                    std::fs::rename(&sig_part, &sig_dest).with_context(|| {
+                        format!("activate {}", sig_dest.display())
+                    })?;
+                }
+                Ok(false) => {
+                    let _ = std::fs::remove_file(&sig_part);
+                    let _ = std::fs::remove_file(&sig_dest);
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_file(&sig_part);
+                    eprintln!(
+                        "nawa: warning: could not fetch signature for {} ({e:#})",
+                        re.file
+                    );
+                }
+            }
+            dest
+        }
+    };
+    // integrity: sha256 recorded in the index
+    fetch::verify_sha256(&src, &re.sha256)?;
+    // authenticity: signature policy (trust store / embedded / allow-unsigned)
+    sign::verify_for_install(&src, root, None, allow_unsigned)?;
+    // the archive must be the package/version the index promised
+    // (blocks replaying an older signed archive as an "upgrade")
+    check_archive_matches_index(&src, re)?;
+    Ok(src)
+}
+
+pub fn upgrade(
+    root: &Path,
+    repo_ref: &RepoRef,
+    recipes: &Path,
+    opts: &UpgradeOpts,
+) -> Result<()> {
+    let open = open_repo(root, repo_ref, opts.allow_unsigned, opts.force)?;
+    let index = &open.index;
 
     // ---- compute the upgrade plan -------------------------------------------
     let db = Db::new(root);
@@ -196,59 +289,7 @@ pub fn upgrade(
             .iter()
             .find(|(r, _)| &r.name == name)
             .expect("ordered name came from the plan");
-        // a malicious or compromised index must not be able to escape the
-        // repo/cache directory through crafted archive paths (local indexes
-        // are validated exactly like remote ones — repo-create only ever
-        // writes plain file names, so nothing legitimate is excluded)
-        validate_entry_filename(&re.file)?;
-        let src = match &base_url {
-            None => {
-                let p = repo_dir.join(&re.file);
-                if !p.exists() {
-                    bail!("archive {} listed in the index is missing", p.display());
-                }
-                p
-            }
-            Some(url) => {
-                let dest = repo_dir.join(&re.file);
-                fetch::download_cached(&format!("{url}/{}", re.file), &dest, Some(&re.sha256))?;
-                // the detached signature travels with the archive; it lands in
-                // a .part file first so an interrupted transfer cannot corrupt
-                // the cached copy (a truncated .sig would fail every future
-                // upgrade until removed by hand)
-                let sig_dest = sign::sig_path_for(&dest);
-                let sig_part = sig_dest.with_file_name(format!(
-                    "{}.part",
-                    sig_dest.file_name().unwrap_or_default().to_string_lossy()
-                ));
-                match fetch::download_opt(&format!("{url}/{}.sig", re.file), &sig_part) {
-                    Ok(true) => {
-                        std::fs::rename(&sig_part, &sig_dest).with_context(|| {
-                            format!("activate {}", sig_dest.display())
-                        })?;
-                    }
-                    Ok(false) => {
-                        let _ = std::fs::remove_file(&sig_part);
-                        let _ = std::fs::remove_file(&sig_dest);
-                    }
-                    Err(e) => {
-                        let _ = std::fs::remove_file(&sig_part);
-                        eprintln!(
-                            "nawa: warning: could not fetch signature for {} ({e:#})",
-                            re.file
-                        );
-                    }
-                }
-                dest
-            }
-        };
-        // integrity: sha256 recorded in the index
-        fetch::verify_sha256(&src, &re.sha256)?;
-        // authenticity: signature policy (trust store / embedded / allow-unsigned)
-        sign::verify_for_install(&src, root, None, opts.allow_unsigned)?;
-        // the archive must be the package/version the index promised
-        // (blocks replaying an older signed archive as an "upgrade")
-        check_archive_matches_index(&src, re)?;
+        let src = fetch_entry(root, &open, re, opts.allow_unsigned)?;
         install::install_archive(&src, root, opts.force, opts.allow_unsigned, None, "keep")?;
         done += 1;
     }

@@ -169,7 +169,9 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
         } else {
             println!("nawa: downloading {source}");
         }
-        fetch::download_cached(&source, &tarball, Some(sha))?;
+        let mirrors: Vec<String> =
+            rec.package.mirrors.iter().map(|m| rec.expand(m, &ctx)).collect();
+        fetch::download_cached_with_mirrors(&source, &mirrors, &tarball, Some(sha))?;
         fetch::verify_sha256(&tarball, sha)?;
 
         // tarball or single file (e.g. a pinned CA bundle)? Detection is by

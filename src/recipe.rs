@@ -44,6 +44,11 @@ pub struct Package {
     /// sha256 of the source tarball (required unless `local:` / empty).
     #[serde(default)]
     pub sha256: String,
+    /// Extra download URLs for the same tarball, tried in order when
+    /// `source` (and its built-in GNU mirrors) fails. `%{version}` & co. are
+    /// expanded. They need no trust: the bytes must still match `sha256`.
+    #[serde(default)]
+    pub mirrors: Vec<String>,
     /// Directory name inside the extracted tarball. Defaults to
     /// `{name}-{version}`. Ignored for `local:` sources.
     #[serde(default)]
@@ -136,6 +141,18 @@ impl Recipe {
         }
         if self.package.version.is_empty() {
             bail!("recipe {} has empty package.version", self.package.name);
+        }
+        if !self.package.mirrors.is_empty() {
+            let src = self.package.source.as_str();
+            if src.is_empty() || src.starts_with("local:") {
+                bail!(
+                    "recipe {} sets package.mirrors but has no downloadable package.source",
+                    self.package.name
+                );
+            }
+            if self.package.mirrors.iter().any(|m| m.trim().is_empty()) {
+                bail!("recipe {} has an empty entry in package.mirrors", self.package.name);
+            }
         }
         // names/versions become directory and archive file names
         crate::db::check_name(&self.package.name)?;
@@ -259,6 +276,31 @@ mod tests {
         [sandbox]
         network = false
     "#;
+
+    #[test]
+    fn mirrors_default_to_empty_and_parse() {
+        let rec: Recipe = toml::from_str(SAMPLE).unwrap();
+        assert!(rec.package.mirrors.is_empty());
+        let with = SAMPLE.replace(
+            "sha256 = \"abc\"",
+            "sha256 = \"abc\"\n        mirrors = [\"https://m1.example/gzip-%{version}.tar.xz\"]",
+        );
+        let rec: Recipe = toml::from_str(&with).unwrap();
+        rec.validate().unwrap();
+        assert_eq!(rec.package.mirrors, vec!["https://m1.example/gzip-%{version}.tar.xz"]);
+    }
+
+    #[test]
+    fn mirrors_need_a_downloadable_source() {
+        let bad = SAMPLE
+            .replace(
+                "source = \"https://ftp.gnu.org/gnu/gzip/gzip-%{version}.tar.xz\"",
+                "source = \"local:/src/gzip\"\n        mirrors = [\"https://m1.example/x.tar.xz\"]",
+            );
+        let rec: Recipe = toml::from_str(&bad).unwrap();
+        let err = rec.validate().unwrap_err().to_string();
+        assert!(err.contains("package.mirrors"), "got: {err}");
+    }
 
     #[test]
     fn parses_sample_recipe() {

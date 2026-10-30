@@ -46,6 +46,55 @@ fn confirm_with(
     }
 }
 
+/// Ask a one-letter question: `allowed` are the lowercase answers, an empty
+/// answer picks `default`. Without a terminal there is nobody to ask, so the
+/// default is returned (unlike [`confirm`], which refuses: a *choice* between
+/// two safe sources is not a destructive step). Prompt goes to stderr.
+pub fn choose(prompt: &str, default: char, allowed: &[char]) -> Result<char> {
+    let interactive = std::io::stdin().is_terminal();
+    choose_with(prompt, default, allowed, interactive, &mut std::io::stdin().lock())
+}
+
+fn choose_with(
+    prompt: &str,
+    default: char,
+    allowed: &[char],
+    interactive: bool,
+    input: &mut dyn BufRead,
+) -> Result<char> {
+    if !interactive {
+        return Ok(default);
+    }
+    let mut shown: Vec<String> = Vec::new();
+    for c in allowed {
+        shown.push(if *c == default {
+            c.to_ascii_uppercase().to_string()
+        } else {
+            c.to_ascii_lowercase().to_string()
+        });
+    }
+    let mut err = std::io::stderr();
+    loop {
+        write!(err, "{prompt} [{}] ", shown.join("/"))?;
+        err.flush()?;
+        let mut line = String::new();
+        if input.read_line(&mut line)? == 0 {
+            bail!("no answer (end of input) — nothing was changed");
+        }
+        let t = line.trim().to_ascii_lowercase();
+        if t.is_empty() {
+            return Ok(default);
+        }
+        let mut chars = t.chars();
+        if let (Some(c), None) = (chars.next(), chars.next()) {
+            if allowed.contains(&c) {
+                return Ok(c);
+            }
+        }
+        writeln!(err, "please answer with one of: {}", shown.join(", "))?;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,5 +123,21 @@ mod tests {
             let err = ask(false, true, no).unwrap_err();
             assert!(err.to_string().contains("aborted"), "input {no:?}");
         }
+    }
+
+    #[test]
+    fn choose_defaults_without_a_terminal() {
+        let c = choose_with("q?", 'r', &['r', 'b'], false, &mut "b\n".as_bytes()).unwrap();
+        assert_eq!(c, 'r');
+    }
+
+    #[test]
+    fn choose_reads_letter_empty_means_default_and_reprompts_on_junk() {
+        let ask = |typed: &str| choose_with("q?", 'r', &['r', 'b'], true, &mut typed.as_bytes());
+        assert_eq!(ask("b\n").unwrap(), 'b');
+        assert_eq!(ask(" B \n").unwrap(), 'b');
+        assert_eq!(ask("\n").unwrap(), 'r');
+        assert_eq!(ask("x\nb\n").unwrap(), 'b', "junk is re-asked");
+        assert!(ask("").is_err(), "EOF must not loop forever");
     }
 }

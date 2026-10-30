@@ -1,4 +1,4 @@
-//! nawa — Distro Package Manager
+//! nawa — source-based package manager
 //! A source-based package manager for a from-scratch Linux distribution.
 
 mod archive;
@@ -31,7 +31,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use color::{Palette, Stream};
-use config::{Config, Overrides};
+use config::{Config, InstallMode, Overrides};
 
 #[derive(Parser)]
 #[command(
@@ -40,12 +40,17 @@ use config::{Config, Overrides};
     about = "nawa — source-based package manager for a from-scratch Linux distribution",
     after_help = "Global flags (--root --recipes --builddir --profiles --jobs) work \
                   anywhere on the line and may come from $NAWA_* variables or a nawa.toml \
-                  config file (see `nawa init`, inspect with `nawa config show`).
+                  config file (see `nawa init`, inspect with `nawa config show`).\n\
+                  System-wide defaults (repository, install mode, ...) live in \
+                  /etc/nawa/nawa.toml.
 
 Examples:
   nawa search zip                        find recipes matching \"zip\"
   nawa info zstd                         full package details
-  nawa install curl                      build curl AND its missing dependencies
+  nawa install curl                      install curl (+ missing deps): from the
+                                        repository when it has them, else build
+  nawa install --build curl              always build from the recipes
+  nawa install --from-repo curl          repository only (error if not there)
   nawa install -n curl                   show that plan, change nothing
   nawa outdated / nawa update             see and apply newer recipe versions
   nawa autoremove                        drop dependencies nothing needs
@@ -128,9 +133,9 @@ enum Cmd {
         force: bool,
     },
 
-    /// Install packages by name (builds them and every missing dependency
-    /// from the recipes, after showing the plan) or install built
-    /// .nawa.tar.zst archives
+    /// Install packages by name — from the binary repository when it has
+    /// them, otherwise built from the recipes (dependencies included, after
+    /// showing the plan) — or install built .nawa.tar.zst archives
     Install {
         /// package names (`nawa install curl`) or archive paths
         /// (`nawa install build/out/curl-8.9-1.nawa.tar.zst`)
@@ -138,13 +143,28 @@ enum Cmd {
         targets: Vec<String>,
         #[command(flatten)]
         flags: PlanFlags,
-        /// By name: build only the named packages, skip their dependencies
+        /// By name: install only the named packages, skip their dependencies
         #[arg(long)]
         no_deps: bool,
         /// Archives only: verify the signature against this public key
         /// instead of the trust store
         #[arg(long)]
         key: Option<PathBuf>,
+        /// Always build from the recipes (same as `--from build`)
+        #[arg(short = 'b', long, conflicts_with_all = ["from_repo", "from"])]
+        build: bool,
+        /// Install from the repository only; a package it lacks is an error
+        /// (same as `--from repo`)
+        #[arg(short = 'r', long = "from-repo", conflicts_with = "from")]
+        from_repo: bool,
+        /// Where packages come from: auto | repo | build | ask
+        /// (default: `install_mode` in nawa.toml, else auto)
+        #[arg(long, value_name = "MODE")]
+        from: Option<String>,
+        /// Repository directory or http(s) URL for this run
+        /// (default: the `repo` key in nawa.toml / $NAWA_REPO / built-in)
+        #[arg(long, value_name = "DIR_OR_URL")]
+        repo: Option<String>,
     },
 
     /// List installed packages whose recipe has a newer version
@@ -282,7 +302,7 @@ enum Cmd {
     /// plan and asks for confirmation unless --yes is passed
     Upgrade {
         /// Repository directory or http(s) URL containing index.toml
-        /// (default: the `repo` key in nawa.toml / $NAWA_REPO)
+        /// (default: the `repo` key in nawa.toml / $NAWA_REPO / built-in)
         #[arg(long)]
         repo: Option<String>,
         /// Show the upgrade plan without changing anything
@@ -315,10 +335,14 @@ enum Cmd {
     },
 
     /// Write a commented nawa.toml template into the current directory
+    /// (or, with --system, the system-wide /etc/nawa/nawa.toml)
     Init {
         /// overwrite an existing nawa.toml
         #[arg(long)]
         force: bool,
+        /// write /etc/nawa/nawa.toml (repository + install mode) instead
+        #[arg(long)]
+        system: bool,
     },
 
     /// Print shell completion scripts: nawa completions bash|zsh|fish
@@ -406,6 +430,7 @@ struct Ctx {
     profiles: PathBuf,
     jobs: Option<u32>,
     repo: Option<String>,
+    install_mode: InstallMode,
     /// the resolved configuration, kept for `config show` (sources + file)
     cfg: Config,
 }
@@ -419,6 +444,7 @@ impl Ctx {
             profiles: cfg.profiles.clone(),
             jobs: cfg.jobs,
             repo: cfg.repo.clone(),
+            install_mode: cfg.install_mode,
             cfg: cfg.clone(),
         }
     }
@@ -433,6 +459,7 @@ fn main() {
         profiles,
         jobs,
         repo: None,
+        install_mode: None,
     };
     // config errors happen before anything else; report them in style
     let cfg = match config::load(&overrides) {
@@ -543,8 +570,17 @@ fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
                 force,
             )
         }
-        Cmd::Install { targets, flags, no_deps, key } => {
-            cmd_install(ctx, &targets, &flags, no_deps, key)
+        Cmd::Install { targets, flags, no_deps, key, build, from_repo, from, repo } => {
+            let mode = if build {
+                Some(InstallMode::Build)
+            } else if from_repo {
+                Some(InstallMode::Repo)
+            } else if let Some(m) = from {
+                Some(InstallMode::parse(&m)?)
+            } else {
+                None
+            };
+            cmd_install(ctx, &targets, &flags, no_deps, key, mode, repo)
         }
         Cmd::Outdated => cmd_outdated(ctx),
         Cmd::Update { names, flags } => cmd_update(ctx, &names, &flags),
@@ -599,8 +635,9 @@ fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             let repo = match repo.or_else(|| ctx.repo.clone()) {
                 Some(r) => r,
                 None => bail!(
-                    "no repository given: pass --repo <dir-or-url>, set `repo` in nawa.toml, \
-                     or export NAWA_REPO"
+                    "no repository configured (it is switched off with `repo = \"\"`): \
+                     pass --repo <dir-or-url>, set `repo` in nawa.toml or \
+                     /etc/nawa/nawa.toml, or export NAWA_REPO"
                 ),
             };
             let repo_ref = fetch::RepoRef::parse(&repo)?;
@@ -635,7 +672,7 @@ fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         Cmd::Config { action } => match action {
             ConfigCmd::Show => cmd_config_show(ctx),
         },
-        Cmd::Init { force } => cmd_init(force),
+        Cmd::Init { force, system } => cmd_init(force, system),
         Cmd::Completions { shell } => {
             print!("{}", completions_script(shell));
             Ok(())
@@ -835,6 +872,8 @@ fn cmd_install(
     flags: &PlanFlags,
     no_deps: bool,
     key: Option<PathBuf>,
+    mode: Option<InstallMode>,
+    repo: Option<String>,
 ) -> Result<()> {
     let archives = targets.iter().filter(|t| is_archive_arg(t)).count();
     if archives == targets.len() {
@@ -847,15 +886,164 @@ fn cmd_install(
         bail!("do not mix package names and archive files in one `nawa install`");
     }
     if key.is_some() {
-        bail!("--key only applies to archive files (package names are built locally)");
+        bail!("--key only applies to archive files (package names come from the repository or are built locally)");
     }
+
+    // where packages come from: flag > install_mode (env / nawa.toml / default)
+    let mode = mode.unwrap_or(ctx.install_mode);
+    let repo_url = repo.or_else(|| ctx.repo.clone());
+    let sourcing = open_sourcing(ctx, mode, repo_url.as_deref(), flags)?;
+
     let known = recipe::load_all(&ctx.recipes)?;
     let installed = installed_map(ctx)?;
-    let plan = plan::install_plan(targets, &installed, &known, plan::Why::Explicit, !no_deps)?;
+
+    // a name without a recipe can still be installed when the repository has
+    // it (a binary-only package: no dependency resolution, no build)
+    let mut recipe_targets: Vec<String> = Vec::new();
+    let mut extras: Vec<repo::RepoEntry> = Vec::new();
+    for t in targets {
+        if known.contains_key(t) {
+            recipe_targets.push(t.clone());
+            continue;
+        }
+        match sourcing.entry(t) {
+            Some(re) => match installed.get(t) {
+                Some(cur)
+                    if version::vercmp(
+                        &format!("{}-{}", cur.version, cur.rel),
+                        &format!("{}-{}", re.version, re.rel),
+                    ) != std::cmp::Ordering::Less =>
+                {
+                    println!("nawa: {t} is already installed and up to date");
+                }
+                _ => extras.push(re.clone()),
+            },
+            // neither a recipe nor a repository package: the planner reports
+            // it with a "did you mean" hint
+            None => recipe_targets.push(t.clone()),
+        }
+    }
+
+    let plan = plan::install_plan(&recipe_targets, &installed, &known, plan::Why::Explicit, !no_deps)?;
     for name in &plan.up_to_date {
         println!("nawa: {name} is already installed and up to date");
     }
-    run_plan(ctx, &plan, flags)
+    run_plan(ctx, &plan, flags, &sourcing, &extras)
+}
+
+/// Where each package of a plan comes from, decided per package.
+enum Source {
+    /// build it from its recipe
+    Build,
+    /// install this archive from the repository
+    Repo(repo::RepoEntry),
+}
+
+/// The repository (when one is usable) plus the policy for using it.
+struct Sourcing {
+    /// `Auto` (repository when it has the package at least as new as the
+    /// recipe, else build), `Repo` (strict: repository only) or `Build`
+    mode: InstallMode,
+    /// `install_mode = ask`: offer "repository or build?" on a terminal
+    ask: bool,
+    open: Option<upgrade::OpenRepo>,
+}
+
+impl Sourcing {
+    /// Always build — what `update` and `--build` do.
+    fn build_only() -> Self {
+        Sourcing { mode: InstallMode::Build, ask: false, open: None }
+    }
+
+    /// The repository's entry for `name`, if a repository is open and
+    /// usable on this machine's architecture.
+    fn entry(&self, name: &str) -> Option<&repo::RepoEntry> {
+        let open = self.open.as_ref()?;
+        let re = open.index.find(name)?;
+        if arch_fits(&re.arch) {
+            Some(re)
+        } else {
+            None
+        }
+    }
+
+    /// Decide the source of one recipe-backed package.
+    fn pick(&self, rec: &recipe::Recipe) -> Result<Source> {
+        if self.mode == InstallMode::Build {
+            return Ok(Source::Build);
+        }
+        let name = &rec.package.name;
+        let have = self.entry(name);
+        let strict = self.mode == InstallMode::Repo;
+        match have {
+            None if strict => bail!(
+                "`{name}` is not in the repository for this architecture \
+                 (use --build to build it, or the default `auto` mode to fall back to a build)"
+            ),
+            None => Ok(Source::Build),
+            Some(re) => {
+                let theirs = format!("{}-{}", re.version, re.rel);
+                let ours = format!("{}-{}", rec.package.version, rec.package.rel);
+                let older = version::vercmp(&theirs, &ours) == std::cmp::Ordering::Less;
+                if older && !strict {
+                    // the recipe tree is newer than the repository: honour the recipe
+                    Ok(Source::Build)
+                } else {
+                    if older {
+                        eprintln!(
+                            "nawa: note: repository has {name} {theirs}, the recipe is {ours} \
+                             — installing the repository version"
+                        );
+                    }
+                    Ok(Source::Repo(re.clone()))
+                }
+            }
+        }
+    }
+}
+
+/// Is an archive built for `arch` usable on this machine?
+fn arch_fits(arch: &str) -> bool {
+    let host = std::env::var("NAWA_ARCH").unwrap_or_else(|_| std::env::consts::ARCH.to_string());
+    arch.is_empty() || matches!(arch, "any" | "noarch" | "all") || arch == host
+}
+
+/// Open the configured repository according to the install mode. A repository
+/// that cannot be used (offline, empty, no trusted key yet, switched off) is
+/// an error only in strict `repo` mode; otherwise it is one `note:` line and
+/// packages are built from source.
+fn open_sourcing(
+    ctx: &Ctx,
+    mode: InstallMode,
+    repo_url: Option<&str>,
+    flags: &PlanFlags,
+) -> Result<Sourcing> {
+    let ask = mode == InstallMode::Ask;
+    let eff = if ask { InstallMode::Auto } else { mode };
+    if eff == InstallMode::Build {
+        return Ok(Sourcing::build_only());
+    }
+    let strict = eff == InstallMode::Repo;
+    let url = match repo_url {
+        Some(u) => u,
+        None if strict => bail!(
+            "no repository configured: pass --repo <dir-or-url>, set `repo` in nawa.toml \
+             or /etc/nawa/nawa.toml, or export NAWA_REPO"
+        ),
+        None => {
+            println!("nawa: note: no repository configured — building from source");
+            return Ok(Sourcing::build_only());
+        }
+    };
+    let repo_ref = fetch::RepoRef::parse(url)?;
+    match upgrade::open_repo(&ctx.root, &repo_ref, flags.allow_unsigned, flags.force) {
+        Ok(open) => Ok(Sourcing { mode: eff, ask, open: Some(open) }),
+        Err(e) if strict => Err(e).with_context(|| format!("repository {url} is not usable")),
+        Err(e) => {
+            println!("nawa: note: repository {url} is not usable ({e:#}) — building from source");
+            Ok(Sourcing::build_only())
+        }
+    }
 }
 
 /// The installed packages by name, read under a brief shared lock.
@@ -877,81 +1065,207 @@ fn format_duration(secs: u64) -> String {
     }
 }
 
-/// Show the plan, ask, then build and install every item in order —
-/// dependencies first, one `[n/total]` line per step.
-fn run_plan(ctx: &Ctx, plan: &plan::Plan, flags: &PlanFlags) -> Result<()> {
-    let total = plan.items.len();
+/// Build one planned package from its recipe and return the archive.
+fn build_one(
+    ctx: &Ctx,
+    it: &plan::Item,
+    flags: &PlanFlags,
+    n: usize,
+    total: usize,
+) -> Result<PathBuf> {
+    let id = it.rec.id();
+    println!("nawa: [{n}/{total}] building {id}");
+    let opts = prepare_build(
+        ctx,
+        &it.rec,
+        build::CheckMode::Off,
+        flags.isolation.as_deref(),
+        false,
+        flags.allow_degraded,
+        None,
+        flags.use_cache,
+    )?;
+    Ok(build::build(&it.rec, &opts)
+        .with_context(|| format!("[{n}/{total}] build of {id} failed"))?
+        .archive)
+}
+
+/// Install one ready archive. The library functions never lock; hold the db
+/// lock for this one install only, never through a build or a download.
+fn install_one(
+    ctx: &Ctx,
+    archive: &Path,
+    flags: &PlanFlags,
+    reason: &str,
+    what: &str,
+    n: usize,
+    total: usize,
+) -> Result<()> {
+    println!("nawa: [{n}/{total}] installing {what}");
+    let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
+    install::install_archive(archive, &ctx.root, flags.force, flags.allow_unsigned, None, reason)
+        .with_context(|| format!("[{n}/{total}] install of {what} failed"))?;
+    Ok(())
+}
+
+/// Show the plan, ask, then install every item in order — dependencies
+/// first, one `[n/total]` line per step. Each item comes from the repository
+/// or is built from its recipe (see [`Sourcing`]); `extras` are repository
+/// packages without a recipe, installed last.
+fn run_plan(
+    ctx: &Ctx,
+    plan: &plan::Plan,
+    flags: &PlanFlags,
+    sourcing: &Sourcing,
+    extras: &[repo::RepoEntry],
+) -> Result<()> {
+    let total = plan.items.len() + extras.len();
     if total == 0 {
         println!("nawa: nothing to do");
         return Ok(());
     }
-    let pal = Palette::auto(Stream::Stdout);
-    println!(
-        "nawa: {total} package(s) to build and install into {}:",
-        ctx.root.display()
-    );
-    for (i, it) in plan.items.iter().enumerate() {
-        let replaces = match &it.replaces {
-            Some(old) => format!("  replaces {old}"),
-            None => String::new(),
-        };
-        println!(
-            "  {:>3}. {} {}  {}{}",
-            i + 1,
-            pal.name(&format!("{:<22}", it.rec.package.name)),
-            pal.ver(&format!(
-                "{:<12}",
-                format!("{}-{}", it.rec.package.version, it.rec.package.rel)
-            )),
-            pal.dim(it.why.label()),
-            pal.dim(&replaces),
-        );
+
+    // decide every source up front: a strict `repo` run must fail BEFORE the
+    // first package is touched, not halfway through
+    let mut sources: Vec<Source> = Vec::with_capacity(plan.items.len());
+    for it in &plan.items {
+        sources.push(sourcing.pick(&it.rec)?);
     }
+
+    let pal = Palette::auto(Stream::Stdout);
+    let count_repo = |sources: &[Source]| -> usize {
+        sources.iter().filter(|s| matches!(s, Source::Repo(_))).count() + extras.len()
+    };
+    let print_plan = |sources: &[Source]| {
+        let from_repo = count_repo(sources);
+        println!(
+            "nawa: {total} package(s) to install into {} ({from_repo} from the repository, {} to build):",
+            ctx.root.display(),
+            total - from_repo
+        );
+        for (i, it) in plan.items.iter().enumerate() {
+            let replaces = match &it.replaces {
+                Some(old) => format!("  replaces {old}"),
+                None => String::new(),
+            };
+            let tag = match &sources[i] {
+                Source::Repo(_) => "repo ",
+                Source::Build => "build",
+            };
+            println!(
+                "  {:>3}. {} {}  {} {}{}",
+                i + 1,
+                pal.name(&format!("{:<22}", it.rec.package.name)),
+                pal.ver(&format!(
+                    "{:<12}",
+                    format!("{}-{}", it.rec.package.version, it.rec.package.rel)
+                )),
+                pal.dim(&format!("[{tag}]")),
+                pal.dim(it.why.label()),
+                pal.dim(&replaces),
+            );
+        }
+        for (j, re) in extras.iter().enumerate() {
+            println!(
+                "  {:>3}. {} {}  {} {}",
+                plan.items.len() + j + 1,
+                pal.name(&format!("{:<22}", re.name)),
+                pal.ver(&format!("{:<12}", format!("{}-{}", re.version, re.rel))),
+                pal.dim("[repo ]"),
+                pal.dim("explicit  (no recipe: dependencies not resolved)"),
+            );
+        }
+    };
+    print_plan(sources.as_slice());
     if flags.dry_run {
         println!("nawa: dry run — nothing was built or installed");
         return Ok(());
     }
-    confirm::confirm(&format!("nawa: build and install {total} package(s)?"), flags.yes)?;
+
+    // `install_mode = ask`: on a terminal, let the user choose the source
+    // for everything the repository could supply
+    if sourcing.ask && count_repo(sources.as_slice()) > 0 {
+        let c = confirm::choose(
+            "nawa: install the repository-available packages from the repository (r) or build them from source (b)?",
+            'r',
+            &['r', 'b'],
+        )?;
+        if c == 'b' {
+            if let Some(re) = extras.first() {
+                bail!(
+                    "`{}` has no recipe, so it cannot be built — it exists only in the repository",
+                    re.name
+                );
+            }
+            for s in sources.iter_mut() {
+                *s = Source::Build;
+            }
+            println!("nawa: building all {total} package(s) from source");
+        }
+    }
+    confirm::confirm(&format!("nawa: install {total} package(s)?"), flags.yes)?;
 
     let started = std::time::Instant::now();
     for (i, it) in plan.items.iter().enumerate() {
         let n = i + 1;
         let id = it.rec.id();
         let step = || -> Result<()> {
-            println!("nawa: [{n}/{total}] building {id}");
-            let opts = prepare_build(
-                ctx,
-                &it.rec,
-                build::CheckMode::Off,
-                flags.isolation.as_deref(),
-                false,
-                flags.allow_degraded,
-                None,
-                flags.use_cache,
-            )?;
-            let archive = build::build(&it.rec, &opts)
-                .with_context(|| format!("[{n}/{total}] build of {id} failed"))?
-                .archive;
-            println!("nawa: [{n}/{total}] installing {id}");
-            // the library functions never lock; hold the db lock for this one
-            // install only, never through a build
-            let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
-            install::install_archive(
-                &archive,
-                &ctx.root,
-                flags.force,
-                flags.allow_unsigned,
-                None,
-                it.why.db_reason(),
-            )
-            .with_context(|| format!("[{n}/{total}] install of {id} failed"))?;
-            Ok(())
+            let archive: PathBuf = match &sources[i] {
+                Source::Build => build_one(ctx, it, flags, n, total)?,
+                Source::Repo(re) => {
+                    println!("nawa: [{n}/{total}] fetching {id} from the repository");
+                    let open = sourcing
+                        .open
+                        .as_ref()
+                        .context("internal: repository source without an open repository")?;
+                    match upgrade::fetch_entry(&ctx.root, open, re, flags.allow_unsigned) {
+                        Ok(a) => a,
+                        // strict repo mode never builds behind the user's back
+                        Err(e) if sourcing.mode == InstallMode::Repo => {
+                            return Err(e)
+                                .with_context(|| format!("[{n}/{total}] repository fetch of {id} failed"));
+                        }
+                        // auto: the recipe pins its sources, so a build is a safe fallback
+                        Err(e) => {
+                            eprintln!(
+                                "nawa: warning: cannot use the repository copy of {id} ({e:#}) — building from source"
+                            );
+                            build_one(ctx, it, flags, n, total)?
+                        }
+                    }
+                }
+            };
+            install_one(ctx, &archive, flags, it.why.db_reason(), &id, n, total)
         };
         if let Err(e) = step() {
             if i > 0 {
                 eprintln!(
                     "nawa: {i} of {total} package(s) were installed before this failure — \
                      re-run the same command to continue (installed packages are skipped)"
+                );
+            }
+            return Err(e);
+        }
+    }
+    for (j, re) in extras.iter().enumerate() {
+        let n = plan.items.len() + j + 1;
+        let what = format!("{}-{}-{}", re.name, re.version, re.rel);
+        let step = || -> Result<()> {
+            println!("nawa: [{n}/{total}] fetching {what} from the repository");
+            let open = sourcing
+                .open
+                .as_ref()
+                .context("internal: repository package without an open repository")?;
+            let archive = upgrade::fetch_entry(&ctx.root, open, re, flags.allow_unsigned)
+                .with_context(|| format!("[{n}/{total}] repository fetch of {what} failed"))?;
+            install_one(ctx, &archive, flags, "explicit", &what, n, total)
+        };
+        if let Err(e) = step() {
+            if n > 1 {
+                eprintln!(
+                    "nawa: {} of {total} package(s) were installed before this failure — \
+                     re-run the same command to continue (installed packages are skipped)",
+                    n - 1
                 );
             }
             return Err(e);
@@ -1004,7 +1318,8 @@ fn cmd_update(ctx: &Ctx, names: &[String], flags: &PlanFlags) -> Result<()> {
         return Ok(());
     }
     let plan = plan::install_plan(&targets, &installed, &known, plan::Why::Update, true)?;
-    run_plan(ctx, &plan, flags)
+    // `update` follows the recipes (rebuilds); binary upgrades are `nawa upgrade`
+    run_plan(ctx, &plan, flags, &Sourcing::build_only(), &[])
 }
 
 fn cmd_autoremove(ctx: &Ctx, dry_run: bool, yes: bool, build_deps: bool) -> Result<()> {
@@ -1440,7 +1755,11 @@ fn cmd_config_show(ctx: &Ctx) -> Result<()> {
     // the config resolved at startup, flags included, so sources are truthful
     let cfg = &ctx.cfg;
     let pal = Palette::auto(Stream::Stdout);
-    println!("{} {}", pal.header("nawa config"), pal.dim("(precedence: flag > env > nawa.toml > default)"));
+    println!(
+        "{} {}",
+        pal.header("nawa config"),
+        pal.dim("(precedence: flag > env > nawa.toml > /etc/nawa/nawa.toml > default)")
+    );
     let show = |key: &str, value: String, source: &str| {
         println!("{:<10} {:<40} {}", pal.header(key), value, pal.dim(&format!("({source})")));
     };
@@ -1455,27 +1774,48 @@ fn cmd_config_show(ctx: &Ctx) -> Result<()> {
     show("jobs", jobs, cfg.source_of("jobs"));
     show(
         "repo",
-        ctx.repo.clone().unwrap_or_else(|| "(not set — pass --repo to upgrade)".into()),
+        ctx.repo.clone().unwrap_or_else(|| "(switched off — pass --repo to use one)".into()),
         cfg.source_of("repo"),
     );
+    show("install_mode", ctx.install_mode.as_str().to_string(), cfg.source_of("install_mode"));
     if let Some(f) = &cfg.file {
         println!("{:<10} {}", pal.header("config"), f.display());
     } else {
-        println!("{:<10} {}", pal.header("config"), pal.dim("(none found — run `nawa init` to create one)"));
+        println!("{:<10} {}", pal.header("config"), pal.dim("(no project nawa.toml — run `nawa init` to create one)"));
+    }
+    match &cfg.system_file {
+        Some(f) => println!("{:<10} {}", pal.header("system"), f.display()),
+        None => println!(
+            "{:<10} {}",
+            pal.header("system"),
+            pal.dim(&format!(
+                "(none at {} — `nawa init --system` creates it)",
+                config::system_file().display()
+            ))
+        ),
     }
     Ok(())
 }
 
-fn cmd_init(force: bool) -> Result<()> {
-    let path = PathBuf::from(config::CONFIG_FILE);
+fn cmd_init(force: bool, system: bool) -> Result<()> {
+    let (path, body) = if system {
+        (config::system_file(), config::system_template())
+    } else {
+        (PathBuf::from(config::CONFIG_FILE), config::template())
+    };
     if path.exists() && !force {
         bail!(
-            "{} already exists here (use --force to overwrite)",
+            "{} already exists (use --force to overwrite)",
             path.display()
         );
     }
-    std::fs::write(&path, config::template())
-        .with_context(|| format!("write {}", path.display()))?;
+    if let Some(dir) = path.parent() {
+        if !dir.as_os_str().is_empty() {
+            std::fs::create_dir_all(dir)
+                .with_context(|| format!("create {} (are you root?)", dir.display()))?;
+        }
+    }
+    std::fs::write(&path, body).with_context(|| format!("write {}", path.display()))?;
     println!(
         "nawa: wrote {} — uncomment what you need, then check with `nawa config show`",
         path.display()

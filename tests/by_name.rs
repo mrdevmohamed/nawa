@@ -29,6 +29,11 @@ fn recipe(dir: &Path, name: &str, version: &str, build: &[&str], run: &[&str]) {
 fn nawa(dir: &Path, args: &[&str]) -> Output {
     Command::new(nawa_bin())
         .env_remove("NAWA_CONFIG")
+        .env_remove("NAWA_REPO")
+        // never read the host's /etc/nawa/nawa.toml; these tests cover the
+        // build path (the repository path lives in tests/repo_install.rs)
+        .env("NAWA_SYSCONFDIR", std::env::temp_dir().join("nawa-test-no-sysconf"))
+        .env("NAWA_INSTALL_MODE", "build")
         .env("NO_COLOR", "1")
         .current_dir(dir)
         .args(["--recipes", dir.join("recipes").to_str().unwrap()])

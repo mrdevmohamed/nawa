@@ -1,4 +1,4 @@
-//! Configuration resolution: `nawa.toml` file + environment variables +
+//! Configuration resolution: `nawa.toml` files + environment variables +
 //! command-line flags, with a single documented precedence.
 //!
 //! Per-key precedence (highest wins):
@@ -6,22 +6,72 @@
 //!   2. environment variable         (`NAWA_ROOT=/x`)
 //!   3. the nearest `nawa.toml`       (searched upward from the CWD, like
 //!      git; `NAWA_CONFIG` names one directly)
-//!   4. built-in default
+//!   4. the system file              (`/etc/nawa/nawa.toml`; the directory can
+//!      be moved with `NAWA_SYSCONFDIR`, e.g. for tests)
+//!   5. built-in default
 //!
-//! Relative paths in `nawa.toml` resolve against the *file's* directory, so
-//! the file means the same thing from any subdirectory. Paths from flags and
-//! the environment resolve against the CWD as usual.
+//! Relative paths in a config file resolve against *that file's* directory,
+//! so the file means the same thing from any subdirectory. Paths from flags
+//! and the environment resolve against the CWD as usual.
 //!
-//! Nothing here talks to the filesystem beyond finding + reading the file,
+//! The built-in default repository is [`DEFAULT_REPO`]; `repo = ""` (or
+//! `none`) in any layer switches binary repositories off entirely.
+//!
+//! Nothing here talks to the filesystem beyond finding + reading the files,
 //! so it is trivially testable.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-/// The config file name searched in the CWD and every ancestor.
+/// The config file name searched in the CWD and every ancestor, and the
+/// name of the system-wide file inside the system config directory.
 pub const CONFIG_FILE: &str = "nawa.toml";
+
+/// Where the system-wide configuration lives (`/etc/nawa/nawa.toml`).
+pub const SYSCONF_DIR: &str = "/etc/nawa";
+
+/// The repository used when nothing else is configured. `index.toml`, the
+/// optional `index.toml.sig` and the `*.nawa.tar.zst` archives are expected
+/// directly under this URL.
+pub const DEFAULT_REPO: &str =
+    "https://github.com/mrdevmohamed/faseela-repo/releases/download/stable";
+
+/// Where `nawa install <name>` gets a package from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallMode {
+    /// use the repository when it has the package (at least as new as the
+    /// recipe), otherwise build it from the recipe — the default
+    Auto,
+    /// repository only: a package the repository lacks is an error
+    Repo,
+    /// always build from the recipes (the pre-repository behaviour)
+    Build,
+    /// like `auto`, but a terminal user is asked repo-or-build first
+    Ask,
+}
+
+impl InstallMode {
+    pub fn parse(s: &str) -> Result<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(InstallMode::Auto),
+            "repo" | "binary" => Ok(InstallMode::Repo),
+            "build" | "source" => Ok(InstallMode::Build),
+            "ask" => Ok(InstallMode::Ask),
+            other => bail!("unknown install mode {other:?} (want auto | repo | build | ask)"),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            InstallMode::Auto => "auto",
+            InstallMode::Repo => "repo",
+            InstallMode::Build => "build",
+            InstallMode::Ask => "ask",
+        }
+    }
+}
 
 /// What the user passed on the command line (already `None` when absent —
 /// the CLI declares no defaults for these, resolution happens here).
@@ -33,6 +83,7 @@ pub struct Overrides {
     pub profiles: Option<PathBuf>,
     pub jobs: Option<u32>,
     pub repo: Option<String>,
+    pub install_mode: Option<InstallMode>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -44,6 +95,14 @@ struct FileCfg {
     profiles: Option<String>,
     jobs: Option<u32>,
     repo: Option<String>,
+    install_mode: Option<String>,
+}
+
+/// One parsed config file plus the directory its relative paths anchor at.
+struct Layer {
+    path: PathBuf,
+    base: PathBuf,
+    cfg: FileCfg,
 }
 
 /// Fully resolved configuration plus where every value came from
@@ -55,9 +114,13 @@ pub struct Config {
     pub builddir: PathBuf,
     pub profiles: PathBuf,
     pub jobs: Option<u32>,
+    /// the binary repository (`None` = switched off with `repo = ""`)
     pub repo: Option<String>,
-    /// The file that was applied, if any.
+    pub install_mode: InstallMode,
+    /// The project `nawa.toml` that was applied, if any.
     pub file: Option<PathBuf>,
+    /// The system-wide file (`/etc/nawa/nawa.toml`) that was applied, if any.
+    pub system_file: Option<PathBuf>,
     /// key -> human-readable source ("flag", "env NAWA_ROOT", "<path>", "default")
     pub sources: BTreeMap<String, String>,
 }
@@ -66,6 +129,20 @@ impl Config {
     pub fn source_of(&self, key: &str) -> &str {
         self.sources.get(key).map(|s| s.as_str()).unwrap_or("default")
     }
+}
+
+/// The directory holding the system-wide configuration: `$NAWA_SYSCONFDIR`
+/// if set, else [`SYSCONF_DIR`].
+pub fn sysconf_dir() -> PathBuf {
+    match std::env::var("NAWA_SYSCONFDIR") {
+        Ok(s) if !s.trim().is_empty() => PathBuf::from(s.trim()),
+        _ => PathBuf::from(SYSCONF_DIR),
+    }
+}
+
+/// The system-wide config file (`/etc/nawa/nawa.toml` by default).
+pub fn system_file() -> PathBuf {
+    sysconf_dir().join(CONFIG_FILE)
 }
 
 /// Find the nearest `nawa.toml`: `$NAWA_CONFIG` if set, else the first file
@@ -88,23 +165,72 @@ pub fn discover() -> Option<PathBuf> {
     }
 }
 
-/// Resolve the effective configuration from all four layers.
+fn read_layer(path: &Path) -> Result<Layer> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("cannot read config {}", path.display()))?;
+    let cfg: FileCfg =
+        toml::from_str(&raw).with_context(|| format!("bad config {}", path.display()))?;
+    let base = path.parent().map(|d| d.to_path_buf()).unwrap_or_default();
+    Ok(Layer { path: path.to_path_buf(), base, cfg })
+}
+
+/// First layer (highest precedence first) that sets the key.
+fn pick<T>(
+    layers: &[Layer],
+    get: impl Fn(&FileCfg) -> Option<T>,
+) -> Option<(T, &Layer)> {
+    layers.iter().find_map(|l| get(&l.cfg).map(|v| (v, l)))
+}
+
+/// flag > env > config layers > default, for a path-valued key.
+fn resolve_path(
+    key: &str,
+    flag: Option<PathBuf>,
+    env: &str,
+    layers: &[Layer],
+    get: impl Fn(&FileCfg) -> Option<String>,
+    default: PathBuf,
+    sources: &mut BTreeMap<String, String>,
+) -> PathBuf {
+    if let Some(v) = flag {
+        sources.insert(key.into(), "flag".into());
+        return v;
+    }
+    if let Some(v) = env_path(env) {
+        sources.insert(key.into(), format!("env {env}"));
+        return v;
+    }
+    if let Some((v, layer)) = pick(layers, get) {
+        sources.insert(key.into(), layer.path.display().to_string());
+        return layer.base.join(v);
+    }
+    default
+}
+
+/// `""`, `none`, `off` and `disabled` mean "no repository".
+fn normalize_repo(s: &str) -> Option<String> {
+    let t = s.trim();
+    match t.to_ascii_lowercase().as_str() {
+        "" | "none" | "off" | "disabled" => None,
+        _ => Some(t.to_string()),
+    }
+}
+
+/// Resolve the effective configuration from all layers.
 pub fn load(ov: &Overrides) -> Result<Config> {
-    let file_path = discover();
-    let file: FileCfg = match &file_path {
-        Some(p) => {
-            let raw = std::fs::read_to_string(p)
-                .with_context(|| format!("cannot read config {}", p.display()))?;
-            toml::from_str(&raw)
-                .with_context(|| format!("bad config {}", p.display()))?
-        }
-        None => FileCfg::default(),
-    };
-    // relative paths inside nawa.toml are anchored at the file's directory
-    let base: PathBuf = file_path
-        .as_ref()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        .unwrap_or_default();
+    let project_path = discover();
+    let sys_path = system_file();
+
+    // layers, highest precedence first: project file, then the system file
+    let mut layers: Vec<Layer> = Vec::new();
+    if let Some(p) = &project_path {
+        layers.push(read_layer(p)?);
+    }
+    let mut system_applied: Option<PathBuf> = None;
+    if sys_path.is_file() && project_path.as_deref() != Some(sys_path.as_path()) {
+        layers.push(read_layer(&sys_path)?);
+        system_applied = Some(sys_path.clone());
+    }
 
     let mut cfg = Config {
         root: PathBuf::from("/"),
@@ -112,58 +238,30 @@ pub fn load(ov: &Overrides) -> Result<Config> {
         builddir: PathBuf::from("build"),
         profiles: PathBuf::from("profiles"),
         jobs: None,
-        repo: None,
-        file: file_path.clone(),
+        repo: Some(DEFAULT_REPO.to_string()),
+        install_mode: InstallMode::Auto,
+        file: project_path.clone(),
+        system_file: system_applied,
         sources: BTreeMap::new(),
     };
 
-    // ---- root -------------------------------------------------------------
-    if let Some(v) = ov.root.clone() {
-        cfg.root = v;
-        cfg.sources.insert("root".into(), "flag".into());
-    } else if let Some(v) = env_path("NAWA_ROOT") {
-        cfg.root = v;
-        cfg.sources.insert("root".into(), "env NAWA_ROOT".into());
-    } else if let Some(v) = file.root.clone() {
-        cfg.root = base.join(v);
-        cfg.sources.insert("root".into(), file_label(&file_path));
-    }
-
-    // ---- recipes ----------------------------------------------------------
-    if let Some(v) = ov.recipes.clone() {
-        cfg.recipes = v;
-        cfg.sources.insert("recipes".into(), "flag".into());
-    } else if let Some(v) = env_path("NAWA_RECIPES") {
-        cfg.recipes = v;
-        cfg.sources.insert("recipes".into(), "env NAWA_RECIPES".into());
-    } else if let Some(v) = file.recipes.clone() {
-        cfg.recipes = base.join(v);
-        cfg.sources.insert("recipes".into(), file_label(&file_path));
-    }
-
-    // ---- builddir ---------------------------------------------------------
-    if let Some(v) = ov.builddir.clone() {
-        cfg.builddir = v;
-        cfg.sources.insert("builddir".into(), "flag".into());
-    } else if let Some(v) = env_path("NAWA_BUILDDIR") {
-        cfg.builddir = v;
-        cfg.sources.insert("builddir".into(), "env NAWA_BUILDDIR".into());
-    } else if let Some(v) = file.builddir.clone() {
-        cfg.builddir = base.join(v);
-        cfg.sources.insert("builddir".into(), file_label(&file_path));
-    }
-
-    // ---- profiles ---------------------------------------------------------
-    if let Some(v) = ov.profiles.clone() {
-        cfg.profiles = v;
-        cfg.sources.insert("profiles".into(), "flag".into());
-    } else if let Some(v) = env_path("NAWA_PROFILES") {
-        cfg.profiles = v;
-        cfg.sources.insert("profiles".into(), "env NAWA_PROFILES".into());
-    } else if let Some(v) = file.profiles.clone() {
-        cfg.profiles = base.join(v);
-        cfg.sources.insert("profiles".into(), file_label(&file_path));
-    }
+    // ---- the four path keys -------------------------------------------------
+    cfg.root = resolve_path(
+        "root", ov.root.clone(), "NAWA_ROOT", &layers,
+        |c| c.root.clone(), PathBuf::from("/"), &mut cfg.sources,
+    );
+    cfg.recipes = resolve_path(
+        "recipes", ov.recipes.clone(), "NAWA_RECIPES", &layers,
+        |c| c.recipes.clone(), PathBuf::from("recipes"), &mut cfg.sources,
+    );
+    cfg.builddir = resolve_path(
+        "builddir", ov.builddir.clone(), "NAWA_BUILDDIR", &layers,
+        |c| c.builddir.clone(), PathBuf::from("build"), &mut cfg.sources,
+    );
+    cfg.profiles = resolve_path(
+        "profiles", ov.profiles.clone(), "NAWA_PROFILES", &layers,
+        |c| c.profiles.clone(), PathBuf::from("profiles"), &mut cfg.sources,
+    );
 
     // ---- jobs -------------------------------------------------------------
     if let Some(v) = ov.jobs {
@@ -172,31 +270,37 @@ pub fn load(ov: &Overrides) -> Result<Config> {
     } else if let Some(v) = env_u32("NAWA_JOBS")? {
         cfg.jobs = Some(v);
         cfg.sources.insert("jobs".into(), "env NAWA_JOBS".into());
-    } else if let Some(v) = file.jobs {
+    } else if let Some((v, layer)) = pick(&layers, |c| c.jobs) {
         cfg.jobs = Some(v);
-        cfg.sources.insert("jobs".into(), file_label(&file_path));
+        cfg.sources.insert("jobs".into(), layer.path.display().to_string());
     }
 
-    // ---- repo -------------------------------------------------------------
+    // ---- repo (built-in default: DEFAULT_REPO) -------------------------------
     if let Some(v) = ov.repo.clone() {
-        cfg.repo = Some(v);
+        cfg.repo = normalize_repo(&v);
         cfg.sources.insert("repo".into(), "flag".into());
     } else if let Some(v) = std::env::var("NAWA_REPO").ok().filter(|s| !s.trim().is_empty()) {
-        cfg.repo = Some(v.trim().to_string());
+        cfg.repo = normalize_repo(&v);
         cfg.sources.insert("repo".into(), "env NAWA_REPO".into());
-    } else if let Some(v) = file.repo.clone() {
-        cfg.repo = Some(v);
-        cfg.sources.insert("repo".into(), file_label(&file_path));
+    } else if let Some((v, layer)) = pick(&layers, |c| c.repo.clone()) {
+        cfg.repo = normalize_repo(&v);
+        cfg.sources.insert("repo".into(), layer.path.display().to_string());
+    }
+
+    // ---- install_mode (default: auto) -----------------------------------------
+    if let Some(m) = ov.install_mode {
+        cfg.install_mode = m;
+        cfg.sources.insert("install_mode".into(), "flag".into());
+    } else if let Some(v) = std::env::var("NAWA_INSTALL_MODE").ok().filter(|s| !s.trim().is_empty()) {
+        cfg.install_mode = InstallMode::parse(&v).context("bad NAWA_INSTALL_MODE")?;
+        cfg.sources.insert("install_mode".into(), "env NAWA_INSTALL_MODE".into());
+    } else if let Some((v, layer)) = pick(&layers, |c| c.install_mode.clone()) {
+        cfg.install_mode = InstallMode::parse(&v)
+            .with_context(|| format!("bad install_mode in {}", layer.path.display()))?;
+        cfg.sources.insert("install_mode".into(), layer.path.display().to_string());
     }
 
     Ok(cfg)
-}
-
-fn file_label(file_path: &Option<PathBuf>) -> String {
-    match file_path {
-        Some(p) => format!("{}", p.display()),
-        None => CONFIG_FILE.to_string(),
-    }
 }
 
 fn env_path(key: &str) -> Option<PathBuf> {
@@ -214,13 +318,15 @@ fn env_u32(key: &str) -> Result<Option<u32>> {
     }
 }
 
-/// The commented template `nawa init` writes.
+/// The commented template `nawa init` writes (a per-project file).
 pub fn template() -> String {
     format!(
         r#"# {CONFIG_FILE} — nawa configuration
 # nawa reads the nearest {CONFIG_FILE} at or above the current directory
-# (or the file named by $NAWA_CONFIG). Every key is optional.
-# Precedence: command-line flag > environment variable > this file > default.
+# (or the file named by $NAWA_CONFIG), then the system-wide /etc/nawa/{CONFIG_FILE}.
+# Every key is optional.
+# Precedence: command-line flag > environment variable > this file >
+#             /etc/nawa/{CONFIG_FILE} > built-in default.
 # Relative paths here resolve against this file's directory.
 
 # Target root filesystem (env: NAWA_ROOT)
@@ -234,8 +340,55 @@ pub fn template() -> String {
 # Default parallel build jobs (env: NAWA_JOBS)
 #jobs = 8
 
-# Default repository for `nawa upgrade` (env: NAWA_REPO) — local dir or http(s) URL
-#repo = "https://mirror.example.com/mydistro/stable"
+# Binary repository for `nawa install` and `nawa upgrade` (env: NAWA_REPO) —
+# local dir or http(s) URL. "" switches the repository off.
+# Built-in default: {DEFAULT_REPO}
+#repo = "{DEFAULT_REPO}"
+
+# Where `nawa install <name>` gets packages (env: NAWA_INSTALL_MODE):
+#   auto  - repository when it has the package, otherwise build  (default)
+#   repo  - repository only (error if the package is not there)
+#   build - always build from the recipes
+#   ask   - like auto, but asks "repository or build?" in a terminal
+#install_mode = "auto"
+"#
+    )
+}
+
+/// The file `nawa init --system` writes to `/etc/nawa/nawa.toml`, and the one
+/// the `nawa` package ships: the repository and install mode are active, the
+/// rest is commented.
+pub fn system_template() -> String {
+    format!(
+        r#"# /etc/nawa/{CONFIG_FILE} — system-wide nawa configuration
+#
+# Precedence (highest wins): command-line flag > NAWA_* environment variable >
+# the nearest {CONFIG_FILE} in or above the working directory > this file >
+# built-in default.  Inspect the result with `nawa config show`.
+# Relative paths in this file resolve against /etc/nawa.
+
+# Default binary repository (env: NAWA_REPO).  A local directory or an
+# http(s) URL that serves index.toml, index.toml.sig and the *.nawa.tar.zst
+# archives.  Set it to "" to switch repositories off.
+# Remote repositories need a trusted key (`nawa trust <key.pub>`) unless you
+# pass --allow-unsigned.
+repo = "{DEFAULT_REPO}"
+
+# Where `nawa install <name>` gets packages (env: NAWA_INSTALL_MODE):
+#   auto  - install from the repository when it has the package, otherwise
+#           build it from the recipe (default)
+#   repo  - repository only; a package the repository lacks is an error
+#   build - always build from source
+#   ask   - like auto, but asks "repository or build?" in a terminal
+# Per command: `nawa install --build foo` / `--from-repo foo` / `--from ask foo`.
+install_mode = "auto"
+
+# Recipes used for building and for dependency resolution (env: NAWA_RECIPES).
+# The nawa-recipes package installs the recipe tree here.
+recipes = "/usr/share/nawa/recipes"
+#builddir = "/var/tmp/nawa-build"
+#profiles = "/etc/nawa/profiles"
+#jobs = 8
 "#
     )
 }
@@ -253,6 +406,10 @@ mod tests {
     fn isolate(dir: &Path) -> MutexGuard<'static, ()> {
         let guard = CFG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_current_dir(dir).unwrap();
+        // never read the developer's real /etc/nawa/nawa.toml
+        std::env::set_var("NAWA_SYSCONFDIR", dir.join("__no-sysconf__"));
+        std::env::remove_var("NAWA_REPO");
+        std::env::remove_var("NAWA_INSTALL_MODE");
         guard
     }
 
@@ -280,8 +437,10 @@ mod tests {
         assert_eq!(cfg.builddir, PathBuf::from("build"));
         assert_eq!(cfg.profiles, PathBuf::from("profiles"));
         assert_eq!(cfg.jobs, None);
-        assert_eq!(cfg.repo, None);
+        assert_eq!(cfg.repo.as_deref(), Some(DEFAULT_REPO), "built-in default repo");
+        assert_eq!(cfg.install_mode, InstallMode::Auto);
         assert_eq!(cfg.source_of("root"), "default");
+        assert_eq!(cfg.source_of("repo"), "default");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -363,5 +522,123 @@ mod tests {
         restore(g, &dir);
         assert_eq!(cfg.repo.as_deref(), Some("https://example.com/repo"));
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn system_file_is_a_layer_below_the_project_file() {
+        let base = tempdir("sys");
+        let sysdir = base.join("etc-nawa");
+        std::fs::create_dir_all(&sysdir).unwrap();
+        std::fs::write(
+            sysdir.join("nawa.toml"),
+            "jobs = 3\nrecipes = \"sysrecipes\"\nrepo = \"https://sys.example/repo\"\ninstall_mode = \"build\"\n",
+        )
+        .unwrap();
+        let project = base.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("nawa.toml"), "jobs = 5\n").unwrap();
+
+        let g = isolate(&project);
+        std::env::set_var("NAWA_SYSCONFDIR", &sysdir);
+        std::env::remove_var("NAWA_CONFIG");
+        let cfg = load(&Overrides::default()).unwrap();
+        restore(g, &project);
+
+        // project file wins where both set a key ...
+        assert_eq!(cfg.jobs, Some(5));
+        assert_eq!(cfg.source_of("jobs"), project.join("nawa.toml").to_string_lossy());
+        // ... the system file fills in everything else, relative paths
+        // anchored at /etc/nawa (here: the temp sysconf dir)
+        assert_eq!(cfg.recipes, sysdir.join("sysrecipes"));
+        assert_eq!(cfg.repo.as_deref(), Some("https://sys.example/repo"));
+        assert_eq!(cfg.install_mode, InstallMode::Build);
+        assert_eq!(cfg.source_of("repo"), sysdir.join("nawa.toml").to_string_lossy());
+        assert_eq!(cfg.system_file, Some(sysdir.join("nawa.toml")));
+        assert_eq!(cfg.file, Some(project.join("nawa.toml")));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn env_and_flag_beat_the_files_for_repo_and_install_mode() {
+        let base = tempdir("mode");
+        std::fs::write(
+            base.join("nawa.toml"),
+            "repo = \"https://file.example/r\"\ninstall_mode = \"repo\"\n",
+        )
+        .unwrap();
+        let g = isolate(&base);
+        std::env::remove_var("NAWA_CONFIG");
+        std::env::set_var("NAWA_INSTALL_MODE", "ask");
+        std::env::set_var("NAWA_REPO", "https://env.example/r");
+        let cfg = load(&Overrides::default()).unwrap();
+        assert_eq!(cfg.install_mode, InstallMode::Ask, "env > file");
+        assert_eq!(cfg.repo.as_deref(), Some("https://env.example/r"));
+        let ov = Overrides {
+            install_mode: Some(InstallMode::Build),
+            repo: Some("/srv/local-repo".into()),
+            ..Default::default()
+        };
+        let cfg2 = load(&ov).unwrap();
+        std::env::remove_var("NAWA_INSTALL_MODE");
+        std::env::remove_var("NAWA_REPO");
+        restore(g, &base);
+        assert_eq!(cfg2.install_mode, InstallMode::Build, "flag > env");
+        assert_eq!(cfg2.repo.as_deref(), Some("/srv/local-repo"));
+        assert_eq!(cfg2.source_of("repo"), "flag");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn empty_repo_switches_the_repository_off() {
+        let base = tempdir("norepo");
+        std::fs::write(base.join("nawa.toml"), "repo = \"\"\n").unwrap();
+        let g = isolate(&base);
+        std::env::remove_var("NAWA_CONFIG");
+        let cfg = load(&Overrides::default()).unwrap();
+        restore(g, &base);
+        assert_eq!(cfg.repo, None);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn bad_install_mode_is_rejected_loudly() {
+        let base = tempdir("badmode");
+        std::fs::write(base.join("nawa.toml"), "install_mode = \"sometimes\"\n").unwrap();
+        let g = isolate(&base);
+        std::env::remove_var("NAWA_CONFIG");
+        let err = load(&Overrides::default()).unwrap_err();
+        restore(g, &base);
+        assert!(format!("{err:#}").contains("unknown install mode"), "{err:#}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn install_mode_parses_aliases() {
+        assert_eq!(InstallMode::parse("Auto").unwrap(), InstallMode::Auto);
+        assert_eq!(InstallMode::parse("binary").unwrap(), InstallMode::Repo);
+        assert_eq!(InstallMode::parse("source").unwrap(), InstallMode::Build);
+        assert!(InstallMode::parse("x").is_err());
+    }
+
+    #[test]
+    fn shipped_system_template_parses() {
+        let base = tempdir("tpl");
+        std::fs::write(base.join("nawa.toml"), system_template()).unwrap();
+        let g = isolate(&base);
+        std::env::remove_var("NAWA_CONFIG");
+        let cfg = load(&Overrides::default()).unwrap();
+        restore(g, &base);
+        assert_eq!(cfg.repo.as_deref(), Some(DEFAULT_REPO));
+        assert_eq!(cfg.install_mode, InstallMode::Auto);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn shipped_dist_file_matches_the_system_template() {
+        assert_eq!(
+            include_str!("../dist/nawa.toml"),
+            system_template(),
+            "pkgmgr/dist/nawa.toml (installed as /etc/nawa/nawa.toml) drifted from config::system_template()"
+        );
     }
 }

@@ -1,0 +1,29 @@
+# /etc/nawa/nawa.toml — system-wide nawa configuration
+#
+# Precedence (highest wins): command-line flag > NAWA_* environment variable >
+# the nearest nawa.toml in or above the working directory > this file >
+# built-in default.  Inspect the result with `nawa config show`.
+# Relative paths in this file resolve against /etc/nawa.
+
+# Default binary repository (env: NAWA_REPO).  A local directory or an
+# http(s) URL that serves index.toml, index.toml.sig and the *.nawa.tar.zst
+# archives.  Set it to "" to switch repositories off.
+# Remote repositories need a trusted key (`nawa trust <key.pub>`) unless you
+# pass --allow-unsigned.
+repo = "https://github.com/mrdevmohamed/faseela-repo/releases/download/stable"
+
+# Where `nawa install <name>` gets packages (env: NAWA_INSTALL_MODE):
+#   auto  - install from the repository when it has the package, otherwise
+#           build it from the recipe (default)
+#   repo  - repository only; a package the repository lacks is an error
+#   build - always build from source
+#   ask   - like auto, but asks "repository or build?" in a terminal
+# Per command: `nawa install --build foo` / `--from-repo foo` / `--from ask foo`.
+install_mode = "auto"
+
+# Recipes used for building and for dependency resolution (env: NAWA_RECIPES).
+# The nawa-recipes package installs the recipe tree here.
+recipes = "/usr/share/nawa/recipes"
+#builddir = "/var/tmp/nawa-build"
+#profiles = "/etc/nawa/profiles"
+#jobs = 8

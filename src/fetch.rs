@@ -411,11 +411,36 @@ pub fn candidate_urls(url: &str) -> Vec<String> {
     v
 }
 
+/// [`candidate_urls`] plus the recipe's own `mirrors`, appended in order
+/// (duplicates dropped). Built-in GNU fallbacks come first, then the recipe's.
+pub fn candidate_urls_with(url: &str, extra: &[String]) -> Vec<String> {
+    let mut v = candidate_urls(url);
+    for m in extra {
+        if !v.contains(m) {
+            v.push(m.clone());
+        }
+    }
+    v
+}
+
 /// Download `url` into `dest` unless a copy is already cached.
 /// With `expect_sha256`, a cached copy is reused only after re-verifying it,
 /// so a corrupted or truncated cache entry is transparently re-downloaded.
 /// The transfer lands in a `.part` sibling first and is renamed atomically.
 pub fn download_cached(url: &str, dest: &Path, expect_sha256: Option<&str>) -> Result<()> {
+    download_cached_with_mirrors(url, &[], dest, expect_sha256)
+}
+
+/// Like [`download_cached`], but after `url` (and the built-in GNU mirrors)
+/// fails it also tries `mirrors` — the recipe's `package.mirrors`. Every
+/// candidate is checked against `expect_sha256`, so a mirror serving the
+/// wrong bytes is rejected and the next one is tried.
+pub fn download_cached_with_mirrors(
+    url: &str,
+    mirrors: &[String],
+    dest: &Path,
+    expect_sha256: Option<&str>,
+) -> Result<()> {
     if dest.exists() {
         match expect_sha256 {
             Some(expected) => {
@@ -429,7 +454,7 @@ pub fn download_cached(url: &str, dest: &Path, expect_sha256: Option<&str>) -> R
     }
     let tmp = dest.with_extension("part");
     let mut last_err = None;
-    for cand in candidate_urls(url) {
+    for cand in candidate_urls_with(url, mirrors) {
         if cand != url {
             eprintln!("nawa: trying alternate mirror {cand}");
         }
@@ -694,6 +719,61 @@ mod tests {
         assert_eq!(v[0], "https://mirrors.kernel.org/gnu/screen/screen-5.0.0.tar.gz");
         assert!(v.contains(&"https://ftpmirror.gnu.org/screen/screen-5.0.0.tar.gz".to_string()));
         assert_eq!(candidate_urls("https://example.com/x.tgz").len(), 1);
+    }
+
+    #[test]
+    fn recipe_mirrors_are_appended_without_duplicates() {
+        let url = "https://download.samba.org/pub/rsync/src/rsync-3.4.1.tar.gz";
+        let m = "https://rsync.samba.org/ftp/rsync/src/rsync-3.4.1.tar.gz".to_string();
+        let v = candidate_urls_with(url, &[m.clone(), m.clone(), url.to_string()]);
+        assert_eq!(v, vec![url.to_string(), m]);
+        // no mirrors -> identical to candidate_urls
+        assert_eq!(candidate_urls_with(url, &[]), candidate_urls(url));
+    }
+
+    #[test]
+    fn download_cached_falls_back_to_recipe_mirror() {
+        // 404 is not retryable, so the primary fails immediately
+        let bad = scripted_server(vec![http_response("HTTP/1.1 404 Not Found", b"nope", "")]);
+        let good = scripted_server(vec![http_response("HTTP/1.1 200 OK", b"archive-data", "")]);
+        let dir = scratch("mirror-ok");
+        let dest = dir.join("pkg.tar");
+        let sha = {
+            let mut h = Sha256::new();
+            h.update(b"archive-data");
+            hex::encode(h.finalize())
+        };
+        download_cached_with_mirrors(
+            &format!("{bad}/pkg.tar"),
+            &[format!("{good}/pkg.tar")],
+            &dest,
+            Some(&sha),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"archive-data");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn download_cached_rejects_a_mirror_with_wrong_bytes() {
+        let bad = scripted_server(vec![http_response("HTTP/1.1 404 Not Found", b"nope", "")]);
+        let evil = scripted_server(vec![http_response("HTTP/1.1 200 OK", b"tampered", "")]);
+        let dir = scratch("mirror-bad");
+        let dest = dir.join("pkg.tar");
+        let sha = {
+            let mut h = Sha256::new();
+            h.update(b"archive-data");
+            hex::encode(h.finalize())
+        };
+        let res = download_cached_with_mirrors(
+            &format!("{bad}/pkg.tar"),
+            &[format!("{evil}/pkg.tar")],
+            &dest,
+            Some(&sha),
+        );
+        assert!(res.is_err(), "a mirror serving other bytes must not be accepted");
+        assert!(!dest.exists(), "nothing may be left in the cache");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

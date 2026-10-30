@@ -17,10 +17,14 @@ fn nawa() -> Command {
     let mut c = Command::new(nawa_bin());
     for k in [
         "NAWA_CONFIG", "NAWA_ROOT", "NAWA_RECIPES", "NAWA_BUILDDIR",
-        "NAWA_PROFILES", "NAWA_JOBS", "NAWA_REPO",
+        "NAWA_PROFILES", "NAWA_JOBS", "NAWA_REPO", "NAWA_INSTALL_MODE",
     ] {
         c.env_remove(k);
     }
+    // never read the host's /etc/nawa/nawa.toml, and keep installs by name
+    // deterministic (no network): these tests exercise the build path
+    c.env("NAWA_SYSCONFDIR", std::env::temp_dir().join("nawa-test-no-sysconf"));
+    c.env("NAWA_INSTALL_MODE", "build");
     c.current_dir(std::env::temp_dir());
     c
 }
