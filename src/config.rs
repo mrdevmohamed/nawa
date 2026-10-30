@@ -384,7 +384,7 @@ repo = "{DEFAULT_REPO}"
 install_mode = "auto"
 
 # Recipes used for building and for dependency resolution (env: NAWA_RECIPES).
-# The nawa-recipes package installs the recipe tree here.
+# `nawa sync` installs and updates the recipe tree here (signed, from the repository).
 recipes = "/usr/share/nawa/recipes"
 #builddir = "/var/tmp/nawa-build"
 #profiles = "/etc/nawa/profiles"
