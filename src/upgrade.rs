@@ -406,7 +406,7 @@ fn check_archive_matches_index(archive: &Path, re: &repo::RepoEntry) -> Result<(
 
 /// A malicious or compromised index must not be able to escape the cache
 /// directory through crafted archive paths.
-fn validate_entry_filename(file: &str) -> Result<()> {
+pub(crate) fn validate_entry_filename(file: &str) -> Result<()> {
     if file.is_empty()
         || file.contains('/')
         || file.contains('\\')
@@ -675,7 +675,7 @@ mod tests {
     fn index_older_than_seen_is_rejected() {
         let base = tmpdir("freshness");
         std::fs::write(base.join("index.seen"), "200").unwrap();
-        let idx = |g| repo::Index { generated: Some(g), expires: None, packages: vec![] };
+        let idx = |g| repo::Index { generated: Some(g), expires: None, recipes: None, packages: vec![] };
         assert!(check_index_freshness(&base, &idx(100), true, false, true).is_err());
         assert!(check_index_freshness(&base, &idx(300), true, false, true).is_ok());
         assert_eq!(std::fs::read_to_string(base.join("index.seen")).unwrap(), "300");
@@ -717,7 +717,7 @@ mod tests {
     #[test]
     fn expired_remote_index_is_refused_unless_forced() {
         let base = tmpdir("expiry");
-        let idx = repo::Index { generated: Some(1000), expires: Some(2000), packages: vec![] };
+        let idx = repo::Index { generated: Some(1000), expires: Some(2000), recipes: None, packages: vec![] };
         assert!(check_index_freshness(&base, &idx, true, false, true).is_err());
         assert!(check_index_freshness(&base, &idx, true, true, true).is_ok());
         // local repos only warn

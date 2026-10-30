@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased — feat: `nawa sync` — signed recipe tree from the repository
+
+- New `nawa sync [--repo <dir-or-url>] [--force] [--allow-unsigned]`: fetches
+  the newest recipe tree published by the repository and installs it at the
+  configured `recipes` path. Replaces shipping the tree as the `nawa-recipes`
+  package, whose pinned source always lagged the code it was cut from.
+- The tree is carried by the signed `index.toml` (`[recipes]` rev / file /
+  sha256), so it gets the same checks as `nawa upgrade`: trusted key,
+  signature, rollback (`index.seen`) and freeze (`expires`) protection; the
+  tarball must match the sha256 in the authenticated index.
+- The tree is unpacked beside the target and swapped in with two renames
+  (an interrupted sync never leaves a mixed tree); an archive without any
+  `recipe.toml` never replaces a working tree. The synced revision is kept in
+  `<root>/var/lib/nawa/recipes.rev`; syncing the same revision is a no-op.
+- `nawa repo-create --recipes <dir> --recipes-rev <rev>` packs the tree
+  (`recipes-<rev>.recipes.tar.zst`, deterministic, `.git` skipped, symlinks
+  refused) and records it in the index; `--sign` signs it as before.
+
 ## Unreleased — feat: system config `/etc/nawa/nawa.toml`, default repository, install from repo or build
 
 - New config layer `/etc/nawa/nawa.toml` (dir overridable with

@@ -241,6 +241,25 @@ pub(crate) enum Cmd {
         /// Signing key for --sign
         #[arg(long)]
         key: Option<PathBuf>,
+        /// Also pack this recipe tree into the repository (for `nawa sync`)
+        #[arg(long, requires = "recipes_rev")]
+        recipes: Option<PathBuf>,
+        /// Revision recorded for --recipes (commit sha or tag)
+        #[arg(long, requires = "recipes")]
+        recipes_rev: Option<String>,
+    },
+
+    /// Fetch the newest recipe tree from the repository (signature-checked)
+    Sync {
+        /// Repository (dir or URL); default: `repo` from the config
+        #[arg(long)]
+        repo: Option<String>,
+        /// Accept an expired repository index
+        #[arg(long)]
+        force: bool,
+        /// Accept an unsigned index (only when no trusted keys are configured)
+        #[arg(long)]
+        allow_unsigned: bool,
     },
 
     /// Generate an ed25519 signing keypair (nawa.sec + nawa.pub)
@@ -430,6 +449,7 @@ pub(crate) fn lock_mode(cmd: &Cmd) -> Option<lock::Mode> {
         | Cmd::Sign { .. }
         | Cmd::Verify { .. }
         | Cmd::Trust { .. }
+        | Cmd::Sync { .. }
         | Cmd::Search { .. }
         | Cmd::Completions { .. }
         | Cmd::Config { .. }

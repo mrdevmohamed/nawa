@@ -25,6 +25,7 @@ mod sandbox;
 mod service;
 mod sign;
 mod suggest;
+mod sync;
 mod sys;
 mod upgrade;
 mod version;
@@ -172,10 +173,14 @@ fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         }
         Cmd::Files { name } => cmd_files(ctx, &name),
         Cmd::Owner { file } => cmd_owner(ctx, &file),
-        Cmd::RepoCreate { dir, out, sign, key } => {
+        Cmd::RepoCreate { dir, out, sign, key, recipes, recipes_rev } => {
             // a relative --out lands inside the repo dir, not in the CWD
             let out = if out.is_absolute() { out } else { dir.join(out) };
-            repo::create_index(&dir, &out)?;
+            let tree = match (&recipes, &recipes_rev) {
+                (Some(t), Some(r)) => Some((t.as_path(), r.as_str())),
+                _ => None,
+            };
+            repo::create_index_with(&dir, &out, tree)?;
             if sign {
                 let kp = sign::resolve_signing_key(key.as_deref())?;
                 let sp = sign::sign(&out, &kp)?;
@@ -221,6 +226,18 @@ fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
                 &ctx.recipes,
                 &upgrade::UpgradeOpts { dry_run, force, allow_unsigned, yes },
             )
+        }
+        Cmd::Sync { repo, force, allow_unsigned } => {
+            let repo = match repo.or_else(|| ctx.repo.clone()) {
+                Some(r) => r,
+                None => bail!(
+                    "no repository configured (it is switched off with `repo = \"\"`): \
+                     pass --repo <dir-or-url>, set `repo` in nawa.toml or \
+                     /etc/nawa/nawa.toml, or export NAWA_REPO"
+                ),
+            };
+            let repo_ref = fetch::RepoRef::parse(&repo)?;
+            sync::sync(&ctx.root, &repo_ref, &ctx.recipes, &sync::SyncOpts { force, allow_unsigned })
         }
         Cmd::Rollback { name } => install::rollback(&name, &ctx.root),
         Cmd::Service { action } => match action {
