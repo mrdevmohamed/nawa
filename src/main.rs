@@ -22,6 +22,7 @@ mod sandbox;
 mod service;
 mod sign;
 mod suggest;
+mod sys;
 mod upgrade;
 mod version;
 

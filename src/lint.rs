@@ -16,11 +16,13 @@
 //!    may land there. World-writable files are errors (sticky dirs like
 //!    /tmp are fine).
 //!
-//! The ELF reader is ~150 lines of pure Rust instead of a `readelf`
-//! subprocess: no dependency on binutils being present, unit-testable, and
-//! safe to run on untrusted-looking bytes.
+//! The ELF reader is the `goblin` crate (elf32 + elf64, dynamic sections)
+//! instead of a `readelf` subprocess or a hand-rolled byte walker: no
+//! dependency on binutils being present, unit-testable, bounds-checked
+//! against hostile inputs (malformed ELFs produce ordinary errors) and safe
+//! to run on untrusted-looking bytes.
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::Path;
@@ -236,7 +238,7 @@ fn looks_texty(data: &[u8]) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Minimal ELF reader (DT_NEEDED / DT_RUNPATH / DT_RPATH / DT_SONAME)
+// ELF reader (goblin): DT_NEEDED / DT_RUNPATH / DT_RPATH / DT_SONAME
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Default, Clone)]
@@ -244,191 +246,56 @@ pub struct ElfInfo {
     pub needed: Vec<String>,
     pub rpath: Option<String>,
     pub runpath: Option<String>,
+    /// DT_SONAME, when the file carries one. The run-dep policy itself keys
+    /// on DT_NEEDED only; the field is kept (like the reader it replaced)
+    /// so the info stays complete for consumers.
+    #[allow(dead_code)]
     pub soname: Option<String>,
-}
-
-const DT_NULL: u64 = 0;
-const DT_NEEDED: u64 = 1;
-const DT_STRTAB: u64 = 5;
-const DT_STRSZ: u64 = 10;
-const DT_SONAME: u64 = 14;
-const DT_RPATH: u64 = 15;
-const DT_RUNPATH: u64 = 29;
-const PT_LOAD: u32 = 1;
-const PT_DYNAMIC: u32 = 2;
-
-struct Cursor<'a> {
-    data: &'a [u8],
-    le: bool,
-}
-
-impl<'a> Cursor<'a> {
-    fn u16(&self, off: usize) -> u64 {
-        let b = self.get(off, 2);
-        if self.le {
-            u16::from_le_bytes([b[0], b[1]]) as u64
-        } else {
-            u16::from_be_bytes([b[0], b[1]]) as u64
-        }
-    }
-    fn u32(&self, off: usize) -> u64 {
-        let b = self.get(off, 4);
-        if self.le {
-            u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as u64
-        } else {
-            u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as u64
-        }
-    }
-    fn u64(&self, off: usize) -> u64 {
-        let b = self.get(off, 8);
-        if self.le {
-            u64::from_le_bytes(b.try_into().unwrap())
-        } else {
-            u64::from_be_bytes(b.try_into().unwrap())
-        }
-    }
-    fn get(&self, off: usize, len: usize) -> &'a [u8] {
-        &self.data[off..off + len]
-    }
 }
 
 /// Parse an ELF file's dynamic section. `Ok(None)` for non-dynamic ELFs
 /// (relocatable objects, core files). Endianness and class are taken from
 /// the file; both ELF32 and ELF64 are supported.
+///
+/// goblin is bounds-checked throughout: truncated headers, oversized field
+/// values and dangling string offsets are reported as errors instead of
+/// panics — this function must stay safe to call on adversarial bytes.
 pub fn parse_elf(data: &[u8]) -> Result<Option<ElfInfo>> {
     if data.len() < 16 || &data[..4] != b"\x7fELF" {
         bail!("not an ELF");
     }
-    let class = data[4];
-    let le = match data[5] {
-        1 => true,
-        2 => false,
-        other => bail!("unknown ELF data encoding {other}"),
-    };
-    let c = Cursor { data, le };
-    let (is64, _) = match class {
-        1 => (false, ()),
-        2 => (true, ()),
-        other => bail!("unknown ELF class {other}"),
-    };
-
-    let (e_type, phoff, phentsize, phnum) = if is64 {
-        (c.u16(16), c.u64(32) as usize, c.u16(54) as usize, c.u16(56) as usize)
-    } else {
-        (c.u16(16), c.u32(28) as usize, c.u16(42) as usize, c.u16(44) as usize)
-    };
-    // 1 = relocatable, 4 = core — no dynamic section to read
-    if e_type == 1 || e_type == 4 {
+    let elf = goblin::elf::Elf::parse(data).context("malformed ELF file")?;
+    // relocatable objects (ET_REL) and kernel core dumps (ET_CORE) never
+    // carry an ELF interpreter / dynamic linking info worth auditing;
+    // matching the previous reader, they parse to nothing
+    if matches!(elf.header.e_type, goblin::elf::header::ET_REL | goblin::elf::header::ET_CORE) {
         return Ok(None);
     }
-
-    // collect PT_LOAD (vaddr→offset) and find PT_DYNAMIC
-    let mut loads: Vec<(u64, u64, u64)> = Vec::new(); // (vaddr, filesz, offset)
-    let mut dyn_off: Option<usize> = None;
-    let mut dyn_len: usize = 0;
-    for i in 0..phnum {
-        let p = phoff + i * phentsize;
-        if p + phentsize > data.len() {
-            bail!("program header {i} out of bounds");
-        }
-        let p_type = c.u32(p) as u32;
-        if is64 {
-            let offset = c.u64(p + 8);
-            let vaddr = c.u64(p + 16);
-            let filesz = c.u64(p + 32);
-            if p_type == PT_LOAD {
-                loads.push((vaddr, filesz, offset));
-            } else if p_type == PT_DYNAMIC {
-                dyn_off = Some(offset as usize);
-                dyn_len = filesz as usize;
-            }
-        } else {
-            let offset = c.u32(p + 4);
-            let vaddr = c.u32(p + 8);
-            let filesz = c.u32(p + 16);
-            if p_type == PT_LOAD {
-                loads.push((vaddr, filesz, offset));
-            } else if p_type == PT_DYNAMIC {
-                dyn_off = Some(offset as usize);
-                dyn_len = filesz as usize;
-            }
-        }
-    }
-    let Some(doff) = dyn_off else { return Ok(None) };
-    if doff + dyn_len > data.len() {
-        bail!("dynamic section out of bounds");
-    }
-
-    let vaddr_to_off = |v: u64| -> Option<usize> {
-        for (vaddr, filesz, offset) in &loads {
-            if v >= *vaddr && v < vaddr + filesz {
-                return Some((offset + (v - vaddr)) as usize);
-            }
-        }
-        None
+    let Some(dynamic) = &elf.dynamic else {
+        // dynamic executables and shared objects always have PT_DYNAMIC;
+        // a stripped/odd file without one has no dependencies to audit
+        return Ok(None);
     };
-
-    let mut info = ElfInfo::default();
-    let entry_size = if is64 { 16 } else { 8 };
-    // first pass: collect the raw entries and locate the string table —
-    // entry order in the section is not guaranteed (our own fixtures put
-    // DT_STRTAB last, some strip/patch tools reorder entries)
-    let mut raw: Vec<(u64, u64)> = Vec::new();
-    let mut off = doff;
-    let end = doff + dyn_len;
-    while off + entry_size <= end {
-        let (tag, val) = if is64 {
-            (c.u64(off), c.u64(off + 8))
-        } else {
-            (c.u32(off), c.u32(off + 4))
-        };
-        if tag == DT_NULL {
-            break;
-        }
-        raw.push((tag, val));
-        off += entry_size;
-    }
-    // string table address and size are only final after the whole scan
-    let mut strtab: Option<usize> = None;
-    let mut strsz: usize = 0;
-    for (tag, val) in &raw {
-        match *tag {
-            DT_STRTAB => strtab = vaddr_to_off(*val),
-            DT_STRSZ => strsz = *val as usize,
-            _ => {}
-        }
-    }
-    // second pass: the string-dependent entries
-    for (tag, val) in &raw {
-        match *tag {
-            DT_NEEDED => {
-                if let Some(s) = dyn_string(&c, strtab, strsz, *val) {
-                    info.needed.push(s);
-                }
-            }
-            DT_SONAME => info.soname = dyn_string(&c, strtab, strsz, *val),
-            DT_RPATH => info.rpath = dyn_string(&c, strtab, strsz, *val),
-            DT_RUNPATH => info.runpath = dyn_string(&c, strtab, strsz, *val),
-            _ => {}
-        }
-    }
+    let info = ElfInfo {
+        needed: dynamic
+            .get_libraries(&elf.dynstrtab)
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        // goblin keeps every DT_RPATH/DT_RUNPATH occurrence; the previous
+        // reader kept the last non-empty one — same drop-in behaviour
+        rpath: last_non_empty(&elf.rpaths),
+        runpath: last_non_empty(&elf.runpaths),
+        soname: elf
+            .soname
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+    };
     Ok(Some(info))
 }
 
-/// Read a NUL-terminated string from the dynamic string table.
-fn dyn_string(c: &Cursor<'_>, strtab: Option<usize>, strsz: usize, off: u64) -> Option<String> {
-    let base = strtab?;
-    let start = base.checked_add(off as usize)?;
-    if strsz > 0 && off as usize >= strsz {
-        return None;
-    }
-    let bytes = c.data.get(start..)?;
-    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    let s = &bytes[..end];
-    if s.is_empty() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(s).into_owned())
+fn last_non_empty(paths: &[&str]) -> Option<String> {
+    paths.iter().rev().find(|p| !p.is_empty()).map(|p| (*p).to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -591,79 +458,154 @@ mod tests {
 
     // ---- ELF fixtures --------------------------------------------------
 
-    /// Hand-built ELF64 LE shared object with the given dynamic entries.
-    /// Layout: ehdr(64) | phdr[PT_LOAD, PT_DYNAMIC] | dyn | strtab, with the
-    /// single PT_LOAD mapping file offset == vaddr so vaddr_to_off is the
-    /// identity — exactly enough for the parser to find DT_NEEDED etc.
-    fn elf64_fixture(needed: &[&str], runpath: Option<&str>, soname: Option<&str>) -> Vec<u8> {
-        const EH: usize = 64;
-        const PH: usize = 56;
-        // 1) string table first — its layout is independent of everything else
+    /// Byte writer for fixture headers, honouring the ELF data encoding.
+    struct Endian {
+        le: bool,
+    }
+    impl Endian {
+        fn u16(&self, v: u16) -> Vec<u8> {
+            if self.le { v.to_le_bytes().to_vec() } else { v.to_be_bytes().to_vec() }
+        }
+        fn u32(&self, v: u32) -> Vec<u8> {
+            if self.le { v.to_le_bytes().to_vec() } else { v.to_be_bytes().to_vec() }
+        }
+        fn u64(&self, v: u64) -> Vec<u8> {
+            if self.le { v.to_le_bytes().to_vec() } else { v.to_be_bytes().to_vec() }
+        }
+    }
+
+    /// Hand-built ELF (32- or 64-bit, LE or BE) shared object with the given
+    /// dynamic entries. Layout: ehdr | phdr[PT_LOAD, PT_DYNAMIC] | dyn |
+    /// strtab, with the single PT_LOAD mapping file offset == vaddr so the
+    /// vaddr→offset translation is the identity — exactly enough for any ELF
+    /// reader to find DT_NEEDED etc.
+    fn elf_fixture(
+        class: u8,  // 1 = ELF32, 2 = ELF64
+        data: u8,   // 1 = little endian, 2 = big endian
+        needed: &[&str],
+        runpath: Option<&str>,
+        rpath: Option<&str>,
+        soname: Option<&str>,
+    ) -> Vec<u8> {
+        const DT_NEEDED: u64 = 1;
+        const DT_STRTAB: u64 = 5;
+        const DT_STRSZ: u64 = 10;
+        const DT_SONAME: u64 = 14;
+        const DT_RPATH: u64 = 15;
+        const DT_RUNPATH: u64 = 29;
+        const DT_NULL: u64 = 0;
+        const PT_LOAD: u32 = 1;
+        const PT_DYNAMIC: u32 = 2;
+
+        let is64 = class == 2;
+        let (eh_len, ph_len, dyn_entry_len) = if is64 { (64, 56, 16) } else { (52, 32, 8) };
+        let e = Endian { le: data == 1 };
+
+        // 1) string table — its layout is independent of everything else
         let mut strtab: Vec<u8> = vec![0];
-        let mut str = |s: &str| -> u64 {
+        let mut add = |s: &str| -> u64 {
             let off = strtab.len() as u64;
             strtab.extend_from_slice(s.as_bytes());
             strtab.push(0);
             off
         };
-        let needed_offs: Vec<u64> = needed.iter().map(|n| str(n)).collect();
-        let runpath_off = runpath.map(&mut str);
-        let soname_off = soname.map(str);
+        let needed_offs: Vec<u64> = needed.iter().map(|n| add(n)).collect();
+        let runpath_off = runpath.map(&mut add);
+        let rpath_off = rpath.map(&mut add);
+        let soname_off = soname.map(&mut add);
 
-        // 2) dynamic section: NEEDED* [RUNPATH] [SONAME] STRTAB STRSZ NULL
-        let n_dyn = needed.len() + runpath.is_some() as usize + soname.is_some() as usize + 3;
-        let dyn_len = n_dyn * 16;
-        let strtab_off = (EH + 2 * PH + dyn_len) as u64;
-        let file_len = strtab_off as usize + strtab.len();
+        // 2) dynamic section: NEEDED* [RUNPATH] [RPATH] [SONAME] STRTAB STRSZ NULL
+        let n_dyn =
+            needed.len() + runpath.is_some() as usize + rpath.is_some() as usize + soname.is_some() as usize + 3;
+        let dyn_len = n_dyn * dyn_entry_len;
+        // identity mapping: vaddr == file offset in this fixture
+        let strtab_off: u64 = (eh_len + 2 * ph_len + dyn_len) as u64;
+        let file_len = eh_len + 2 * ph_len + dyn_len + strtab.len();
 
         let mut dyn_bytes: Vec<u8> = Vec::with_capacity(dyn_len);
-        let mut push = |tag: u64, val: u64| {
-            dyn_bytes.extend_from_slice(&tag.to_le_bytes());
-            dyn_bytes.extend_from_slice(&val.to_le_bytes());
+        let push = |tag: u64, val: u64, out: &mut Vec<u8>| {
+            if is64 {
+                out.extend_from_slice(&e.u64(tag));
+                out.extend_from_slice(&e.u64(val));
+            } else {
+                out.extend_from_slice(&e.u32(tag as u32));
+                out.extend_from_slice(&e.u32(val as u32));
+            }
         };
-        for off in needed_offs {
-            push(DT_NEEDED, off);
+        for off in &needed_offs {
+            push(DT_NEEDED, *off, &mut dyn_bytes);
         }
         if let Some(off) = runpath_off {
-            push(DT_RUNPATH, off);
+            push(DT_RUNPATH, off, &mut dyn_bytes);
+        }
+        if let Some(off) = rpath_off {
+            push(DT_RPATH, off, &mut dyn_bytes);
         }
         if let Some(off) = soname_off {
-            push(DT_SONAME, off);
+            push(DT_SONAME, off, &mut dyn_bytes);
         }
-        push(DT_STRTAB, strtab_off); // identity: vaddr == file offset
-        push(DT_STRSZ, strtab.len() as u64);
-        push(DT_NULL, 0);
+        push(DT_STRTAB, strtab_off, &mut dyn_bytes); // identity: vaddr == offset
+        push(DT_STRSZ, strtab.len() as u64, &mut dyn_bytes);
+        push(DT_NULL, 0, &mut dyn_bytes);
         debug_assert_eq!(dyn_bytes.len(), dyn_len);
 
         // 3) ELF header
-        let mut v = vec![0u8; EH];
+        let mut v = vec![0u8; eh_len];
         v[..4].copy_from_slice(b"\x7fELF");
-        v[4] = 2; // 64-bit
-        v[5] = 1; // little endian
+        v[4] = class;
+        v[5] = data; // data encoding
         v[6] = 1; // version
-        v[16..18].copy_from_slice(&3u16.to_le_bytes()); // ET_DYN
-        v[18..20].copy_from_slice(&62u16.to_le_bytes()); // EM_X86_64
-        v[32..40].copy_from_slice(&(EH as u64).to_le_bytes()); // e_phoff
-        v[54..56].copy_from_slice(&(PH as u16).to_le_bytes()); // e_phentsize
-        v[56..58].copy_from_slice(&2u16.to_le_bytes()); // e_phnum
+        v[16..18].copy_from_slice(&e.u16(3 /* ET_DYN */));
+        let machine = if is64 { e.u16(62 /* EM_X86_64 */) } else { e.u16(3 /* EM_386 */) };
+        v[18..20].copy_from_slice(&machine);
+        if is64 {
+            v[32..40].copy_from_slice(&e.u64(eh_len as u64)); // e_phoff
+            v[54..56].copy_from_slice(&e.u16(ph_len as u16)); // e_phentsize
+            v[56..58].copy_from_slice(&e.u16(2)); // e_phnum
+        } else {
+            v[28..32].copy_from_slice(&e.u32(eh_len as u32)); // e_phoff
+            v[42..44].copy_from_slice(&e.u16(ph_len as u16)); // e_phentsize
+            v[44..46].copy_from_slice(&e.u16(2)); // e_phnum
+        }
 
         // 4) program headers
-        let ph = |ptype: u32, offset: u64, vaddr: u64, filesz: u64, out: &mut Vec<u8>| {
-            out.extend_from_slice(&ptype.to_le_bytes());
-            out.extend_from_slice(&4u32.to_le_bytes()); // PF_R
-            out.extend_from_slice(&offset.to_le_bytes());
-            out.extend_from_slice(&vaddr.to_le_bytes());
-            out.extend_from_slice(&vaddr.to_le_bytes()); // paddr
-            out.extend_from_slice(&filesz.to_le_bytes());
-            out.extend_from_slice(&filesz.to_le_bytes()); // memsz
-            out.extend_from_slice(&0x1000u64.to_le_bytes()); // align
+        let ph64 = |ptype: u32, offset: u64, vaddr: u64, filesz: u64, out: &mut Vec<u8>| {
+            out.extend_from_slice(&e.u32(ptype)); // p_type
+            out.extend_from_slice(&e.u32(4)); // p_flags (PF_R)
+            out.extend_from_slice(&e.u64(offset));
+            out.extend_from_slice(&e.u64(vaddr));
+            out.extend_from_slice(&e.u64(vaddr)); // p_paddr
+            out.extend_from_slice(&e.u64(filesz));
+            out.extend_from_slice(&e.u64(filesz)); // p_memsz
+            out.extend_from_slice(&e.u64(0x1000)); // p_align
         };
-        ph(PT_LOAD, 0, 0, file_len as u64, &mut v); // identity mapping
-        ph(PT_DYNAMIC, (EH + 2 * PH) as u64, (EH + 2 * PH) as u64, dyn_len as u64, &mut v);
+        let ph32 = |ptype: u32, offset: u64, vaddr: u64, filesz: u64, out: &mut Vec<u8>| {
+            out.extend_from_slice(&e.u32(ptype));
+            out.extend_from_slice(&e.u32(offset as u32));
+            out.extend_from_slice(&e.u32(vaddr as u32));
+            out.extend_from_slice(&e.u32(vaddr as u32)); // p_paddr
+            out.extend_from_slice(&e.u32(filesz as u32));
+            out.extend_from_slice(&e.u32(filesz as u32)); // p_memsz
+            out.extend_from_slice(&e.u32(4)); // p_flags (PF_R)
+            out.extend_from_slice(&e.u32(0x1000)); // p_align
+        };
+        let dyn_off = (eh_len + 2 * ph_len) as u64;
+        if is64 {
+            ph64(PT_LOAD, 0, 0, file_len as u64, &mut v); // identity mapping
+            ph64(PT_DYNAMIC, dyn_off, dyn_off, dyn_len as u64, &mut v);
+        } else {
+            ph32(PT_LOAD, 0, 0, file_len as u64, &mut v);
+            ph32(PT_DYNAMIC, dyn_off, dyn_off, dyn_len as u64, &mut v);
+        }
 
         v.extend_from_slice(&dyn_bytes);
         v.extend_from_slice(&strtab);
         v
+    }
+
+    /// The old call site's shorthand: ELF64 little endian.
+    fn elf64_fixture(needed: &[&str], runpath: Option<&str>, soname: Option<&str>) -> Vec<u8> {
+        elf_fixture(2, 1, needed, runpath, None, soname)
     }
 
     #[test]
@@ -672,6 +614,7 @@ mod tests {
         let info = parse_elf(&v).unwrap().expect("dynamic ELF");
         assert_eq!(info.needed, vec!["libz.so.1", "libc.so.6"]);
         assert_eq!(info.runpath.as_deref(), Some("/build/src/lib"));
+        assert!(info.rpath.is_none(), "only runpath was written");
     }
 
     #[test]
@@ -681,6 +624,108 @@ mod tests {
         assert_eq!(info.needed, vec!["libc.so.6"]);
         assert!(info.runpath.is_none());
         assert_eq!(info.soname.as_deref(), Some("libprobe.so.1"));
+    }
+
+    /// DT_RPATH is the pre-2005 field; legacy toolchains still emit it.
+    #[test]
+    fn rpath_is_reported_like_runpath() {
+        let v = elf_fixture(2, 1, &["libc.so.6"], None, Some("/old-rpath"), None);
+        let info = parse_elf(&v).unwrap().expect("dynamic ELF");
+        assert_eq!(info.rpath.as_deref(), Some("/old-rpath"));
+        assert_eq!(info.runpath.as_deref(), None);
+    }
+
+    /// ELF32 parses the same fields, little AND big endian — goblin's
+    /// class/endianness handling must hold for both.
+    #[test]
+    fn elf32_fixtures_parse_in_both_endiannesses() {
+        for (name, data_encoding) in [("LE", 1u8), ("BE", 2u8)] {
+            let v = elf_fixture(
+                1,
+                data_encoding,
+                &["libssl.so.3", "libc.so.6"],
+                Some("/build/pkg/lib"),
+                None,
+                Some("libcrypto.so.3"),
+            );
+            let info = parse_elf(&v)
+                .unwrap_or_else(|e| panic!("ELF32 {name} must parse: {e}"))
+                .expect("dynamic ELF");
+            assert_eq!(info.needed, vec!["libssl.so.3", "libc.so.6"]);
+            assert_eq!(info.runpath.as_deref(), Some("/build/pkg/lib"));
+            assert_eq!(info.soname.as_deref(), Some("libcrypto.so.3"));
+        }
+    }
+
+    /// A big-endian ELF64 reads identically to its LE twin.
+    #[test]
+    fn elf64_be_fixture_parses() {
+        let v = elf_fixture(2, 2, &["libm.so.6"], None, None, None);
+        let info = parse_elf(&v).unwrap().expect("dynamic ELF");
+        assert_eq!(info.needed, vec!["libm.so.6"]);
+    }
+
+    /// Truncations, mutated header bytes and extreme field values must all
+    /// come back as ordinary errors / empty info, never a panic (the reader
+    /// runs over untrusted staged files).
+    #[test]
+    fn malformed_elf_inputs_never_panic() {
+        let good = elf64_fixture(&["libc.so.6"], Some("/r"), Some("s.so.1"));
+
+        // 1) every truncation length
+        for n in 0..=good.len() {
+            let _ = parse_elf(&good[..n]);
+        }
+
+        // 2) every EL header byte mutated in isolation
+        for i in 0..64 {
+            for delta in [1u8, 0x7f, 0xff] {
+                let mut m = good.clone();
+                m[i] = m[i].wrapping_add(delta);
+                let _ = parse_elf(&m);
+            }
+        }
+
+        // 3) extreme header field values (offset 32..40 = e_phoff on ELF64,
+        //    54..56 = e_phentsize, 56..58 = e_phnum)
+        let mut m = good.clone();
+        m[32..40].copy_from_slice(&u64::MAX.to_le_bytes()); // e_phoff far OOB
+        assert!(parse_elf(&m).is_err(), "huge e_phoff is an error");
+        let mut m = good.clone();
+        m[56..58].copy_from_slice(&0xffffu16.to_le_bytes()); // e_phnum
+        let _ = parse_elf(&m); // must not panic
+        let mut m = good.clone();
+        m[54..56].copy_from_slice(&0xffffu16.to_le_bytes()); // e_phentsize
+        let _ = parse_elf(&m); // must not panic
+    }
+
+    /// Dangling string-table addresses must not panic the parser.
+    #[test]
+    fn dangling_string_offsets_do_not_panic() {
+        let good = elf64_fixture(&["libc.so.6"], Some("/r"), None);
+        let dyn_off = 64 + 2 * 56; // fixture layout: dyn section right after both phdrs
+        // DT_STRTAB holds the vaddr; point it far out of bounds
+        let mut m = good.clone();
+        m[dyn_off + 8..dyn_off + 16].copy_from_slice(&0xffff_ffff_u64.to_le_bytes());
+        let _ = parse_elf(&m);
+        // and every DT_NEEDED val into the dynamic section bytes themselves
+        // (in bounds, but not a real string-table position)
+        let mut m = good.clone();
+        let garbage = (dyn_off + 10) as u64; // mid-dyn-section byte position
+        m[dyn_off + 8..dyn_off + 16].copy_from_slice(&garbage.to_le_bytes());
+        let _ = parse_elf(&m);
+    }
+
+    /// Relocatable objects and core files have no interpreter-driven
+    /// dynamic info to audit (matching the previous reader).
+    #[test]
+    fn rel_and_core_objects_parse_to_none() {
+        let mut rel = elf64_fixture(&["libc.so.6"], None, None);
+        rel[16..18].copy_from_slice(&1u16.to_le_bytes()); // ET_REL
+        assert!(matches!(parse_elf(&rel), Ok(None)));
+        let mut core = rel.clone();
+        core[16..18].copy_from_slice(&4u16.to_le_bytes()); // ET_CORE
+        assert!(matches!(parse_elf(&core), Ok(None)));
     }
 
     #[test]
