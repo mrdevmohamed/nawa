@@ -460,34 +460,51 @@ enum Run {
     Missing,
 }
 
-fn run_strip(flag: &str, files: &[PathBuf]) -> Run {
+/// Strip ONE file out of place: `strip -o <tmp> <file>`, and only a clean run
+/// replaces the original. `strip` can exit 0 yet write a broken file (binutils
+/// 2.43 on rustc's `librustc_driver`/`libLLVM`: "section `.text` can't be
+/// allocated in segment" on stderr, output segfaults on load), so ANY output on
+/// stderr counts as failure and the untouched original stays in place.
+fn strip_one(flag: &str, file: &Path) -> Run {
+    let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = file.with_file_name(format!(".{name}.nawa-strip"));
+    let _ = std::fs::remove_file(&tmp);
     let out = Command::new("strip")
         .arg("-p") // keep mtimes
         .arg(flag)
-        .args(files)
+        .arg("-o")
+        .arg(&tmp)
+        .arg(file)
         .stdin(Stdio::null())
         .output();
+    let fail = |why: String| {
+        let _ = std::fs::remove_file(&tmp);
+        Run::Failed(why)
+    };
     match out {
-        Ok(o) if o.status.success() => Run::Done,
+        Ok(o) if o.status.success() && o.stderr.iter().all(|b| b.is_ascii_whitespace()) => {
+            let mode = match std::fs::symlink_metadata(file) {
+                Ok(m) => m.permissions().mode() & 0o7777,
+                Err(e) => return fail(e.to_string()),
+            };
+            if let Err(e) = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode)) {
+                return fail(e.to_string());
+            }
+            match std::fs::rename(&tmp, file) {
+                Ok(()) => Run::Done,
+                Err(e) => fail(e.to_string()),
+            }
+        }
         Ok(o) => {
             let err = String::from_utf8_lossy(&o.stderr);
-            Run::Failed(err.lines().next().unwrap_or("strip failed").to_string())
+            let first = err.lines().find(|l| !l.trim().is_empty()).unwrap_or("strip failed");
+            fail(format!("{first} (original kept)"))
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Run::Missing,
-        Err(e) => Run::Failed(e.to_string()),
-    }
-}
-
-/// `strip` writes a new file next to the old one, so a read-only file needs
-/// `u+w` for the duration; the original mode is put back afterwards.
-fn make_writable(p: &Path, restore: &mut Vec<(PathBuf, u32)>) {
-    if let Ok(md) = std::fs::symlink_metadata(p) {
-        let mode = md.permissions().mode() & 0o7777;
-        if mode & 0o200 == 0
-            && std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode | 0o200)).is_ok()
-        {
-            restore.push((p.to_path_buf(), mode));
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let _ = std::fs::remove_file(&tmp);
+            Run::Missing
         }
+        Err(e) => fail(e.to_string()),
     }
 }
 
@@ -499,51 +516,25 @@ fn total_size(files: &[PathBuf]) -> u64 {
         .sum()
 }
 
-/// Strip `files` with `flag`, a chunk per `strip` call; a chunk that fails is
-/// retried file by file so one odd file never hides the rest. Returns
+/// Strip `files` with `flag`, file by file; a file that fails is reported and
+/// left as it was, so one odd file never hides the rest. Returns
 /// (files stripped, bytes saved), or `None` when `strip` is not installed.
 fn strip_group(files: &[PathBuf], flag: &str) -> Option<(usize, u64)> {
     if files.is_empty() {
         return Some((0, 0));
     }
     let before = total_size(files);
-    let mut restore: Vec<(PathBuf, u32)> = Vec::new();
-    for p in files {
-        make_writable(p, &mut restore);
-    }
     let mut ok = 0usize;
-    let mut missing = false;
-    'outer: for chunk in files.chunks(64) {
-        match run_strip(flag, chunk) {
-            Run::Done => ok += chunk.len(),
-            Run::Missing => {
-                missing = true;
-                break 'outer;
-            }
-            Run::Failed(_) => {
-                for p in chunk {
-                    match run_strip(flag, std::slice::from_ref(p)) {
-                        Run::Done => ok += 1,
-                        Run::Missing => {
-                            missing = true;
-                            break 'outer;
-                        }
-                        Run::Failed(why) => {
-                            eprintln!("nawa: slim: warning: cannot strip {}: {why}", p.display())
-                        }
-                    }
-                }
+    for p in files {
+        match strip_one(flag, p) {
+            Run::Done => ok += 1,
+            Run::Missing => return None,
+            Run::Failed(why) => {
+                eprintln!("nawa: slim: warning: not stripping {}: {why}", p.display())
             }
         }
     }
-    for (p, mode) in restore {
-        let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode));
-    }
-    if missing {
-        None
-    } else {
-        Some((ok, before.saturating_sub(total_size(files))))
-    }
+    Some((ok, before.saturating_sub(total_size(files))))
 }
 
 fn strip(pkgdir: &Path, rep: &mut Report) {
@@ -740,5 +731,20 @@ mod tests {
         assert!(s.strip && s.cleanup && s.split);
         let s: Slim = toml::from_str("strip = false\n").unwrap();
         assert!(!s.strip && s.cleanup && s.split);
+    }
+
+    #[test]
+    fn strip_failure_keeps_the_original() {
+        // not an ELF: strip errors, the file must survive byte for byte and
+        // no temp file may be left behind
+        let d = tmp("stripfail");
+        touch(&d, "bad.so", b"definitely not an object file");
+        let f = d.join("bad.so");
+        match strip_one("--strip-unneeded", &f) {
+            Run::Failed(_) | Run::Missing => {}
+            Run::Done => panic!("strip of a non-ELF must not report success"),
+        }
+        assert_eq!(std::fs::read(&f).unwrap(), b"definitely not an object file");
+        assert!(!d.join(".bad.so.nawa-strip").exists());
     }
 }
