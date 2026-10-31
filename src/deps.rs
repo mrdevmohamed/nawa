@@ -3,7 +3,6 @@
 
 use anyhow::{bail, Result};
 use std::collections::{BTreeMap, HashSet};
-use std::path::Path;
 
 use crate::recipe::Recipe;
 
@@ -62,14 +61,36 @@ fn visit(
     Ok(())
 }
 
-/// Load all recipes under `root` and print/return the resolution order.
-pub fn resolve_from_recipes(
-    recipes_root: &Path,
-    targets: &[String],
+/// Like [`resolve`] for ONE explicitly requested package: its own
+/// dependencies are walked even when the package itself is installed.
+///
+/// `resolve` seeds `done` with the installed set, the target included, so for
+/// an installed target it returns nothing and never looks at its dependencies.
+/// That is wrong for a package that ships in the rootfs but is being rebuilt
+/// (glibc): the tools its recipe needs (bison) are not necessarily installed.
+/// Here the target stays in `done` while its dependencies are visited — a
+/// dependency that leads back to it counts as satisfied instead of a cycle —
+/// and it is listed last, like any other target.
+pub fn resolve_target(
+    name: &str,
     installed: &HashSet<String>,
+    known: &BTreeMap<String, Recipe>,
 ) -> Result<Vec<Recipe>> {
-    let known = crate::recipe::load_all(recipes_root)?;
-    resolve(targets, installed, &known)
+    if !installed.contains(name) {
+        return resolve(&[name.to_string()], installed, known);
+    }
+    // installed from somewhere else (seed, third party): nothing to resolve
+    let Some(rec) = known.get(name) else {
+        return Ok(Vec::new());
+    };
+    let mut order = Vec::new();
+    let mut visiting: HashSet<String> = HashSet::new();
+    let mut done: HashSet<String> = installed.clone();
+    for dep in &rec.depends.build {
+        visit(dep, known, &mut done, &mut visiting, &mut order)?;
+    }
+    order.push(rec.clone());
+    Ok(order)
 }
 
 #[cfg(test)]
@@ -131,6 +152,54 @@ mod tests {
         let known: BTreeMap<String, Recipe> =
             [("a", rec("a", &["ghost"]))].into_iter().map(|(k, v)| (k.to_string(), v)).collect();
         assert!(resolve(&["a".to_string()], &HashSet::new(), &known).is_err());
+    }
+
+    fn names(order: &[Recipe]) -> Vec<&str> {
+        order.iter().map(|r| r.package.name.as_str()).collect()
+    }
+
+    fn graph(list: &[(&str, &[&str])]) -> BTreeMap<String, Recipe> {
+        list.iter().map(|(n, d)| (n.to_string(), rec(n, d))).collect()
+    }
+
+    fn set(list: &[&str]) -> HashSet<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn installed_target_still_walks_its_missing_deps() {
+        // glibc ships in the rootfs, bison does not: `deps glibc` must name bison
+        let known = graph(&[("m4", &[]), ("bison", &["m4"]), ("glibc", &["bison"])]);
+        let order = resolve_target("glibc", &set(&["glibc"]), &known).unwrap();
+        assert_eq!(names(&order), vec!["m4", "bison", "glibc"]);
+    }
+
+    #[test]
+    fn installed_target_with_installed_deps_lists_only_itself() {
+        let known = graph(&[("bison", &[]), ("glibc", &["bison"])]);
+        let order = resolve_target("glibc", &set(&["glibc", "bison"]), &known).unwrap();
+        assert_eq!(names(&order), vec!["glibc"]);
+    }
+
+    #[test]
+    fn dependency_leading_back_to_installed_target_is_not_a_cycle() {
+        let known = graph(&[("a", &["b"]), ("b", &["a"])]);
+        let order = resolve_target("a", &set(&["a"]), &known).unwrap();
+        assert_eq!(names(&order), vec!["b", "a"]);
+    }
+
+    #[test]
+    fn installed_target_without_recipe_resolves_to_nothing() {
+        let known = graph(&[]);
+        assert!(resolve_target("seedpkg", &set(&["seedpkg"]), &known).unwrap().is_empty());
+    }
+
+    #[test]
+    fn uninstalled_target_resolves_like_resolve() {
+        let known = graph(&[("gmp", &[]), ("mpfr", &["gmp"])]);
+        let order = resolve_target("mpfr", &set(&["gmp"]), &known).unwrap();
+        assert_eq!(names(&order), vec!["mpfr"]);
+        assert!(resolve_target("ghost", &set(&[]), &known).is_err());
     }
 
     #[test]
