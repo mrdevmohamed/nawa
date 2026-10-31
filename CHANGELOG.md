@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased — fix: `nawa deps <pkg>` ignored the dependencies of an installed package
+
+- `nawa deps <name>` seeded the resolver with the installed set, the requested
+  package included, so for an installed package it printed nothing and never
+  looked at its dependencies. A package that ships in the rootfs but is being
+  rebuilt (glibc in the min build rootfs) therefore never got its build tools
+  (bison) installed, and its configure failed with "critical programs are
+  missing". The requested package is now always walked: its missing
+  dependencies are listed first and the package itself last, as for an
+  uninstalled one. `deps-all` is unchanged (it still skips what is installed).
+
 ## Unreleased — feat: `nawa sync` — signed recipe tree from the repository
 
 - New `nawa sync [--repo <dir-or-url>] [--force] [--allow-unsigned]`: fetches

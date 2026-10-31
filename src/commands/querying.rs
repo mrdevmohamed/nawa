@@ -205,7 +205,8 @@ pub(crate) fn cmd_deps(ctx: &Ctx, name: &str) -> Result<()> {
     let db = db::Db::new(&ctx.root);
     let installed: HashSet<String> =
         db.installed()?.into_iter().map(|e| e.name).collect();
-    let order = deps::resolve_from_recipes(&ctx.recipes, &[name.to_string()], &installed)?;
+    let known = recipe::load_all(&ctx.recipes)?;
+    let order = deps::resolve_target(name, &installed, &known)?;
     let pal = Palette::auto(Stream::Stdout);
     for (i, r) in order.iter().enumerate() {
         println!(

@@ -184,7 +184,10 @@ pub(crate) enum Cmd {
         tree: bool,
     },
 
-    /// Print the dependency resolution order for a package
+    /// Print the dependency resolution order for a package: what is not
+    /// installed yet, dependencies first, the package itself last. The
+    /// package is walked even when it is installed (a rebuild of glibc still
+    /// needs its build tools).
     Deps { name: String },
 
     /// Print the global build order for ALL recipes in the tree
