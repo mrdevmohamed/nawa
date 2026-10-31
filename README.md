@@ -71,6 +71,7 @@ nawa deps <name>                                # show dependency order
 nawa list [pattern] [-e|-d]                    # installed packages; -e explicit only, -d dependencies only
 nawa files <name>                               # files owned by package
 nawa owner /usr/bin/foo                         # which package owns file
+nawa revdep [name...] [--unowned]               # broken shared-library links (exit 1 if any)
 nawa remove --yes <name>                        # remove package (--yes skips the confirmation)
 nawa repo-create <dir-of-archives> --out index.toml --sign  # signed repo index
 nawa upgrade --yes --repo <dir-or-url>          # upgrade from a repo (repo also comes from nawa.toml)

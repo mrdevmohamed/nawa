@@ -672,8 +672,10 @@ fn running_as_root() -> bool {
 /// resolved relative to `root` (an absolute target like `/usr/bin` means
 /// `root/usr/bin`, not the host's), unlike `root.join(path).exists()`, which
 /// follows absolute links out of the root and can report a shell that the
-/// chroot does not actually have.
-fn exists_in_root(root: &Path, path: &str) -> bool {
+/// chroot does not actually have. `resolve_in_root` returns the real host
+/// path of the final target (what to open to read it), `None` if any link
+/// in the chain is dangling.
+pub(crate) fn resolve_in_root(root: &Path, path: &str) -> Option<PathBuf> {
     let mut cur = root.to_path_buf();
     let mut todo: Vec<std::ffi::OsString> = Path::new(path)
         .components()
@@ -687,15 +689,15 @@ fn exists_in_root(root: &Path, path: &str) -> bool {
     while let Some(part) = todo.pop() {
         cur.push(&part);
         match std::fs::symlink_metadata(&cur) {
-            Err(_) => return false,
+            Err(_) => return None,
             Ok(md) if md.file_type().is_symlink() => {
                 hops += 1;
                 if hops > 40 {
-                    return false;
+                    return None;
                 }
                 let target = match std::fs::read_link(&cur) {
                     Ok(t) => t,
-                    Err(_) => return false,
+                    Err(_) => return None,
                 };
                 cur.pop();
                 if target.is_absolute() {
@@ -717,7 +719,12 @@ fn exists_in_root(root: &Path, path: &str) -> bool {
             }
         }
     }
-    true
+    Some(cur)
+}
+
+/// [`resolve_in_root`] as a yes/no question.
+pub(crate) fn exists_in_root(root: &Path, path: &str) -> bool {
+    resolve_in_root(root, path).is_some()
 }
 
 /// Hooks run either on the live system (`--root /`) or, when nawa runs as

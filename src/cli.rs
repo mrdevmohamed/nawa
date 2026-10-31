@@ -232,6 +232,28 @@ pub(crate) enum Cmd {
     /// Find which installed package owns a file
     Owner { file: String },
 
+    /// Check installed ELF files for broken shared-library links
+    /// (missing libraries / interpreter) and list the packages to rebuild
+    Revdep {
+        /// only these packages (default: every installed package)
+        names: Vec<String>,
+        /// extra library directory, searched before the system ones
+        #[arg(long = "lib-dir", value_name = "DIR")]
+        lib_dirs: Vec<String>,
+        /// do not report missing libraries matching this glob (repeatable)
+        #[arg(long, value_name = "GLOB")]
+        ignore: Vec<String>,
+        /// do not report broken symlinks
+        #[arg(long)]
+        no_symlinks: bool,
+        /// also scan files that no package owns (/usr /bin /sbin /lib /lib64 /opt)
+        #[arg(long)]
+        unowned: bool,
+        /// scan this directory for unowned files (repeatable, implies --unowned)
+        #[arg(long = "scan-dir", value_name = "DIR")]
+        scan_dirs: Vec<String>,
+    },
+
     /// Create a repository index from a directory of archives
     #[command(name = "repo-create")]
     RepoCreate {
@@ -444,6 +466,7 @@ pub(crate) fn lock_mode(cmd: &Cmd) -> Option<lock::Mode> {
         | Cmd::Why { .. }
         | Cmd::Files { .. }
         | Cmd::Owner { .. }
+        | Cmd::Revdep { .. }
         | Cmd::Deps { .. }
         | Cmd::DepsAll { .. } => Some(Shared),
         // repo/sign tooling and everything below touches no package database

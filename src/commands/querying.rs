@@ -325,6 +325,78 @@ pub(crate) fn cmd_owner(ctx: &Ctx, file: &str) -> Result<()> {
     Ok(())
 }
 
+/// `nawa revdep`: broken shared-library links among installed packages (and,
+/// with `--unowned`, among files no package owns). Exits non-zero when
+/// anything is broken, so scripts can gate on it.
+pub(crate) fn cmd_revdep(
+    ctx: &Ctx,
+    names: &[String],
+    lib_dirs: &[String],
+    ignore: &[String],
+    no_symlinks: bool,
+    unowned: bool,
+    scan_dirs: &[String],
+) -> Result<()> {
+    let db = db::Db::new(&ctx.root);
+    for n in names {
+        if db.entry(n)?.is_none() {
+            bail!("`{n}` is not installed");
+        }
+    }
+    let opts = revdep::Options { lib_dirs, ignore, symlinks: !no_symlinks, unowned, scan_dirs };
+    let rep = revdep::scan(&ctx.root, &db, names, &opts)?;
+    let pal = Palette::auto(Stream::Stdout);
+
+    for (pkg, pr) in &rep.packages {
+        println!("{}", pal.name(pkg));
+        print_revdep_pkg(&pal, pr);
+    }
+    if !rep.unowned.is_clean() {
+        println!("{}", pal.name("(not owned by any package)"));
+        print_revdep_pkg(&pal, &rep.unowned);
+    }
+    if rep.unparseable > 0 {
+        println!("{} {} ELF file(s) could not be parsed", pal.warn("warning:"), rep.unparseable);
+    }
+    let extra = if rep.unowned_checked {
+        format!(" + {} unowned file(s)", rep.unowned_files)
+    } else {
+        String::new()
+    };
+    println!(
+        "{}",
+        pal.dim(&format!(
+            "scanned {} ELF file(s) in {} package(s){extra}",
+            rep.elf_files, rep.scanned_packages
+        ))
+    );
+    if rep.is_clean() {
+        println!("{}", pal.ok("all links OK"));
+        return Ok(());
+    }
+    if !rep.packages.is_empty() {
+        let broken: Vec<&str> = rep.packages.keys().map(|s| s.as_str()).collect();
+        println!("packages to rebuild: {}", broken.join(" "));
+    }
+    let unowned_note = if rep.unowned.is_clean() { "" } else { " and unowned files" };
+    bail!("broken links found in {} package(s){unowned_note}", rep.packages.len())
+}
+
+fn print_revdep_pkg(pal: &Palette, pr: &revdep::PkgReport) {
+    for f in &pr.files {
+        println!("  {}", f.path);
+        for m in &f.missing {
+            println!("      {} {m}", pal.err("missing:"));
+        }
+        if let Some(i) = &f.interp {
+            println!("      {} {i}", pal.err("missing interpreter:"));
+        }
+    }
+    for l in &pr.dead_links {
+        println!("  {l}  {}", pal.warn("(broken symlink)"));
+    }
+}
+
 /// Every known package name: the recipes tree plus the local db. One bare
 /// name per line — the completion scripts call this dynamically.
 pub(crate) fn cmd_complete_pkgs(ctx: &Ctx) -> Result<()> {

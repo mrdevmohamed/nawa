@@ -27,6 +27,26 @@
   dependencies are listed first and the package itself last, as for an
   uninstalled one. `deps-all` is unchanged (it still skips what is installed).
 
+## Unreleased — feat: `nawa revdep` — find broken shared-library links
+
+- New `nawa revdep [name...] [--lib-dir DIR]... [--ignore GLOB]... [--no-symlinks]
+  [--unowned] [--scan-dir DIR]...`: reads every ELF file owned by the installed
+  packages (db file lists) with the existing goblin reader (`lint::parse_elf`)
+  and checks each `DT_NEEDED` the way the loader resolves it: RPATH/RUNPATH with
+  `$ORIGIN`, `--lib-dir`, `/etc/ld.so.conf` + includes, `/etc/ld-musl-*.path`,
+  then `/lib /usr/lib /lib64 /usr/lib64 /usr/local/lib`. A candidate must have
+  the same ELF class and machine as the file needing it (a 32-bit library does
+  not satisfy a 64-bit program; reported as "wrong architecture"). Also checks
+  the ELF interpreter and dangling symlinks.
+- `--unowned` (or `--scan-dir`) additionally walks `/usr /bin /sbin /lib /lib64
+  /opt` (or the given dirs) with `walkdir` and checks files no package owns,
+  reported under "(not owned by any package)".
+- Output is grouped by package and ends with the list of packages to rebuild;
+  exit status 1 when anything is broken. Takes the shared db lock; all lookups
+  happen inside `--root`. No new dependencies.
+- `lint::ElfInfo` gained `interp`, `is_64` and `machine`; `install` gained
+  `resolve_in_root` (`exists_in_root` is now built on it, both `pub(crate)`).
+
 ## Unreleased — feat: `nawa sync` — signed recipe tree from the repository
 
 - New `nawa sync [--repo <dir-or-url>] [--force] [--allow-unsigned]`: fetches

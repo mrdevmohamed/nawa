@@ -21,6 +21,7 @@ mod plan;
 mod profile;
 mod recipe;
 mod repo;
+mod revdep;
 mod sandbox;
 mod service;
 mod sign;
@@ -174,6 +175,9 @@ fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         }
         Cmd::Files { name } => cmd_files(ctx, &name),
         Cmd::Owner { file } => cmd_owner(ctx, &file),
+        Cmd::Revdep { names, lib_dirs, ignore, no_symlinks, unowned, scan_dirs } => {
+            cmd_revdep(ctx, &names, &lib_dirs, &ignore, no_symlinks, unowned, &scan_dirs)
+        }
         Cmd::RepoCreate { dir, out, sign, key, recipes, recipes_rev } => {
             // a relative --out lands inside the repo dir, not in the CWD
             let out = if out.is_absolute() { out } else { dir.join(out) };

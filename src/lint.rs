@@ -251,6 +251,13 @@ pub struct ElfInfo {
     /// so the info stays complete for consumers.
     #[allow(dead_code)]
     pub soname: Option<String>,
+    /// PT_INTERP (the dynamic loader path) when the file has one; `revdep`
+    /// checks that it exists in the target root.
+    pub interp: Option<String>,
+    /// ELFCLASS64 / e_machine of the file: `revdep` only accepts libraries
+    /// with the same class and machine, like the loader.
+    pub is_64: bool,
+    pub machine: u16,
 }
 
 /// Parse an ELF file's dynamic section. `Ok(None)` for non-dynamic ELFs
@@ -290,6 +297,9 @@ pub fn parse_elf(data: &[u8]) -> Result<Option<ElfInfo>> {
             .soname
             .filter(|s| !s.is_empty())
             .map(str::to_string),
+        interp: elf.interpreter.map(str::to_string),
+        is_64: elf.is_64,
+        machine: elf.header.e_machine,
     };
     Ok(Some(info))
 }
