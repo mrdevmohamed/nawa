@@ -44,6 +44,21 @@
 - Output is grouped by package and ends with the list of packages to rebuild;
   exit status 1 when anything is broken. Takes the shared db lock; all lookups
   happen inside `--root`. No new dependencies.
+- Automatic check: after `install`, `update` and `remove` nawa re-checks what
+  the change can have broken (the changed packages plus every installed
+  package that lists them in its run-dependencies) and prints a warning on
+  stderr; the command's exit status is unaffected. `NAWA_NO_REVDEP=1` turns it
+  off.
+- `--json` prints one JSON document (`ok`, `scanned`, `packages` with the
+  missing libraries and their providers, `unowned`, `rebuild`); the exit
+  status is still 1 when something is broken.
+- Missing libraries come with suggestions (disable with `--no-suggest`): the
+  packages whose locally built archive in `<builddir>/out` ships the file
+  (read from the archive's file list), else a recipe named like the library
+  (`libpng16.so.16` → `png`/`libpng`), with the `nawa install` hint, or
+  "installed but lacks the file" when the provider is already installed.
+- `scripts/check-rootfs.sh ROOTFS` runs `nawa --root ROOTFS revdep --unowned`
+  as a last gate for bootstrap/rootfs builds (exit 1 on broken links).
 - `lint::ElfInfo` gained `interp`, `is_64` and `machine`; `install` gained
   `resolve_in_root` (`exists_in_root` is now built on it, both `pub(crate)`).
 

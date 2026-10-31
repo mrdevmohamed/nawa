@@ -175,8 +175,8 @@ fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         }
         Cmd::Files { name } => cmd_files(ctx, &name),
         Cmd::Owner { file } => cmd_owner(ctx, &file),
-        Cmd::Revdep { names, lib_dirs, ignore, no_symlinks, unowned, scan_dirs } => {
-            cmd_revdep(ctx, &names, &lib_dirs, &ignore, no_symlinks, unowned, &scan_dirs)
+        Cmd::Revdep { names, lib_dirs, ignore, no_symlinks, unowned, scan_dirs, json, no_suggest } => {
+            cmd_revdep(ctx, &names, &lib_dirs, &ignore, no_symlinks, unowned, &scan_dirs, json, no_suggest)
         }
         Cmd::RepoCreate { dir, out, sign, key, recipes, recipes_rev } => {
             // a relative --out lands inside the repo dir, not in the CWD

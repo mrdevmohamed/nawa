@@ -252,6 +252,12 @@ pub(crate) enum Cmd {
         /// scan this directory for unowned files (repeatable, implies --unowned)
         #[arg(long = "scan-dir", value_name = "DIR")]
         scan_dirs: Vec<String>,
+        /// machine-readable output: one JSON document on stdout
+        #[arg(long)]
+        json: bool,
+        /// do not look for the packages that provide missing libraries
+        #[arg(long)]
+        no_suggest: bool,
     },
 
     /// Create a repository index from a directory of archives

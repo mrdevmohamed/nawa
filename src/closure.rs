@@ -298,7 +298,7 @@ fn owner_file_name(rel: &str) -> String {
 
 /// Is this payload path a shared library that will satisfy `-l`/DT_NEEDED?
 /// `/usr/lib*`, `/lib*`, files starting `lib` and containing `.so`.
-fn soname_of(rel: &str) -> Option<String> {
+pub(crate) fn soname_of(rel: &str) -> Option<String> {
     // library dirs are /lib, /lib64 and /usr/lib* — note the first path
     // component of "usr/lib/x" is "usr", so check the prefix, not just it
     let mut comps = rel.splitn(3, '/');

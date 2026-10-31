@@ -16,6 +16,11 @@ pub(crate) fn cmd_install(
         for t in targets {
             install_archive_file(ctx, Path::new(t), flags.force, flags.allow_unsigned, key.clone())?;
         }
+        let changed: Vec<String> = targets
+            .iter()
+            .filter_map(|t| revdep::archive_name(Path::new(t)))
+            .collect();
+        warn_revdep(ctx, &changed);
         return Ok(());
     }
     if archives > 0 {
@@ -377,6 +382,9 @@ pub(crate) fn run_plan(
         "nawa: done — {total} package(s) installed in {}",
         format_duration(started.elapsed().as_secs())
     );
+    let mut changed: Vec<String> = plan.items.iter().map(|it| it.rec.package.name.clone()).collect();
+    changed.extend(extras.iter().map(|re| re.name.clone()));
+    warn_revdep(ctx, &changed);
     Ok(())
 }
 
@@ -421,7 +429,11 @@ pub(crate) fn cmd_update(ctx: &Ctx, names: &[String], flags: &PlanFlags) -> Resu
     }
     let plan = plan::install_plan(&targets, &installed, &known, plan::Why::Update, true)?;
     // `update` follows the recipes (rebuilds); binary upgrades are `nawa upgrade`
-    run_plan(ctx, &plan, flags, &Sourcing::build_only(), &[])
+    let result = run_plan(ctx, &plan, flags, &Sourcing::build_only(), &[]);
+    // also after a partial run: whatever was installed is worth checking
+    let changed: Vec<String> = plan.items.iter().map(|it| it.rec.package.name.clone()).collect();
+    warn_revdep(ctx, &changed);
+    result
 }
 
 pub(crate) fn cmd_autoremove(ctx: &Ctx, dry_run: bool, yes: bool, build_deps: bool) -> Result<()> {
@@ -528,5 +540,8 @@ pub(crate) fn cmd_remove(ctx: &Ctx, name: &str, force: bool, yes: bool) -> Resul
         &format!("nawa: remove {name} from {}?", ctx.root.display()),
         yes,
     )?;
-    install::remove_with(name, &ctx.root, force)
+    install::remove_with(name, &ctx.root, force)?;
+    // the removed package is gone: this checks what depended on it
+    warn_revdep(ctx, &[name.to_string()]);
+    Ok(())
 }

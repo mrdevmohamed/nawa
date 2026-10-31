@@ -14,13 +14,18 @@
 //! With `--unowned` / `--scan-dir` the same checks also run (via `walkdir`)
 //! over files that no package owns, e.g. things installed by hand.
 //!
+//! Besides `scan`: `affected` (what an install/update/remove can have broken,
+//! used for the automatic check), `suggest` (which package provides a missing
+//! library: file lists of locally built archives, then a recipe-name match)
+//! and `Report::to_json` (machine-readable output).
+//!
 //! All lookups happen inside `--root`: `install::resolve_in_root` resolves
 //! absolute symlinks relative to the root instead of the host.
 
 use anyhow::Result;
 use goblin::elf::header::{ELFCLASS64, EI_CLASS};
 use goblin::elf::Elf;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Read;
 use std::path::Path;
 
@@ -47,10 +52,18 @@ pub struct Options<'a> {
     pub scan_dirs: &'a [String],
 }
 
+/// A `DT_NEEDED` entry that could not be satisfied.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Missing {
+    pub name: String,
+    /// a library of that name exists, but for another ELF class/machine
+    pub wrong_arch: bool,
+}
+
 #[derive(Debug)]
 pub struct BrokenFile {
     pub path: String,
-    pub missing: Vec<String>,
+    pub missing: Vec<Missing>,
     /// the ELF interpreter, when it does not exist in the root
     pub interp: Option<String>,
 }
@@ -84,6 +97,19 @@ pub struct Report {
 impl Report {
     pub fn is_clean(&self) -> bool {
         self.packages.is_empty() && self.unowned.is_clean()
+    }
+
+    /// Names of the libraries that are not there at all (what `suggest` can
+    /// look for; a wrong-architecture library is not "missing").
+    pub fn missing_libs(&self) -> BTreeSet<String> {
+        self.packages
+            .values()
+            .chain(std::iter::once(&self.unowned))
+            .flat_map(|pr| pr.files.iter())
+            .flat_map(|f| f.missing.iter())
+            .filter(|m| !m.wrong_arch)
+            .map(|m| m.name.clone())
+            .collect()
     }
 }
 
@@ -321,8 +347,8 @@ impl<'a> Scanner<'a> {
             }
             match self.lookup(lib, &own, &info) {
                 Lib::Found => {}
-                Lib::WrongArch => missing.push(format!("{lib} (wrong architecture)")),
-                Lib::Missing => missing.push(lib.clone()),
+                Lib::WrongArch => missing.push(Missing { name: lib.clone(), wrong_arch: true }),
+                Lib::Missing => missing.push(Missing { name: lib.clone(), wrong_arch: false }),
             }
         }
         let interp = info.interp.clone().filter(|i| !exists_in_root(self.root, i));
@@ -401,6 +427,261 @@ pub fn scan(root: &Path, db: &Db, names: &[String], opts: &Options) -> Result<Re
     rep.elf_files = sc.elf_files;
     rep.unparseable = sc.unparseable;
     Ok(rep)
+}
+
+// ---- what a change can have broken ------------------------------------------
+
+/// Packages worth re-checking after `changed` were installed, updated or
+/// removed: the ones still installed, plus every installed package that
+/// lists one of them in its run-dependencies (nawa derives those from
+/// `DT_NEEDED`, so they are exactly the programs linked against them).
+pub fn affected(db: &Db, changed: &[String]) -> Result<Vec<String>> {
+    let installed = db.installed()?;
+    let names: HashSet<&str> = installed.iter().map(|e| e.name.as_str()).collect();
+    let mut out: BTreeSet<String> = changed
+        .iter()
+        .filter(|c| names.contains(c.as_str()))
+        .cloned()
+        .collect();
+    for e in &installed {
+        if e.run.iter().any(|r| changed.contains(r)) {
+            out.insert(e.name.clone());
+        }
+    }
+    Ok(out.into_iter().collect())
+}
+
+/// `pkgname` of a package archive (`.PKGINFO`), if it can be read.
+pub fn archive_name(archive: &Path) -> Option<String> {
+    let info = crate::archive::read_pkginfo(archive).ok()?;
+    crate::archive::parse_pkginfo(&info).ok()?.remove("pkgname")
+}
+
+// ---- which package provides a missing library ----------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Source {
+    /// the file list of a locally built archive contains the library
+    Archive,
+    /// no file list known: a recipe is named like the library (`libfoo.so.1` → `foo`)
+    Recipe,
+}
+
+impl Source {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Source::Archive => "archive",
+            Source::Recipe => "recipe",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Provider {
+    pub package: String,
+    pub source: Source,
+    pub installed: bool,
+}
+
+/// missing library name → candidate providers
+pub type Suggestions = BTreeMap<String, Vec<Provider>>;
+
+/// Look for providers of `missing`: first the file lists of the archives in
+/// `out_dir` (authoritative), then — for what is still unexplained — recipes
+/// whose name matches the library name.
+pub fn suggest(
+    missing: &BTreeSet<String>,
+    out_dir: &Path,
+    recipes: &[String],
+    installed: &HashSet<String>,
+) -> Suggestions {
+    let mut sug = Suggestions::new();
+    if missing.is_empty() {
+        return sug;
+    }
+    for (lib, pkgs) in archive_providers(out_dir, missing) {
+        for p in pkgs {
+            let installed = installed.contains(&p);
+            sug.entry(lib.clone())
+                .or_default()
+                .push(Provider { package: p, source: Source::Archive, installed });
+        }
+    }
+    for lib in missing {
+        if sug.contains_key(lib) {
+            continue;
+        }
+        for cand in name_guesses(lib) {
+            if recipes.contains(&cand) {
+                let installed = installed.contains(&cand);
+                let v = sug.entry(lib.clone()).or_default();
+                if !v.iter().any(|p| p.package == cand) {
+                    v.push(Provider { package: cand, source: Source::Recipe, installed });
+                }
+            }
+        }
+    }
+    sug
+}
+
+/// `libpng16.so.16` → `png16`, `libpng16`, `png`, `libpng`.
+fn name_guesses(lib: &str) -> Vec<String> {
+    let stem = lib.strip_prefix("lib").unwrap_or(lib);
+    let stem = stem.split(".so").next().unwrap_or(stem);
+    if stem.is_empty() {
+        return Vec::new();
+    }
+    let bare = stem.trim_end_matches(|c: char| c.is_ascii_digit() || c == '-' || c == '.');
+    let mut out: Vec<String> = Vec::new();
+    for s in [stem, bare] {
+        if s.is_empty() {
+            continue;
+        }
+        for c in [s.to_string(), format!("lib{s}")] {
+            if !out.contains(&c) {
+                out.push(c);
+            }
+        }
+    }
+    out
+}
+
+/// library name → packages whose archive in `dir` ships it.
+fn archive_providers(dir: &Path, wanted: &BTreeSet<String>) -> BTreeMap<String, Vec<String>> {
+    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    let mut files: Vec<std::path::PathBuf> = rd
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.to_string_lossy().ends_with(".nawa.tar.zst"))
+        .collect();
+    files.sort();
+    for f in files {
+        let Some(libs) = archive_libs(&f, wanted) else {
+            continue;
+        };
+        if libs.is_empty() {
+            continue;
+        }
+        let Some(pkg) = archive_name(&f) else {
+            continue;
+        };
+        for l in libs {
+            let v = out.entry(l).or_default();
+            if !v.contains(&pkg) {
+                v.push(pkg.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Which of `wanted` does this archive ship? (same library-path rule as the
+/// soname index of the closure builder: `closure::soname_of`)
+fn archive_libs(archive: &Path, wanted: &BTreeSet<String>) -> Option<Vec<String>> {
+    let f = std::fs::File::open(archive).ok()?;
+    let dec = zstd::Decoder::new(f).ok()?;
+    let mut ar = tar::Archive::new(dec);
+    let mut found = Vec::new();
+    for entry in ar.entries().ok()? {
+        let Ok(entry) = entry else {
+            break;
+        };
+        let Ok(p) = entry.path() else {
+            continue;
+        };
+        let Ok(rel) = p.strip_prefix(crate::archive::PAYLOAD) else {
+            continue;
+        };
+        let rel_s = rel.to_string_lossy();
+        let rel_s: &str = &rel_s;
+        if crate::closure::soname_of(rel_s).is_some() {
+            let base = rel_s.rsplit('/').next().unwrap_or(rel_s);
+            if wanted.contains(base) {
+                found.push(base.to_string());
+            }
+        }
+    }
+    Some(found)
+}
+
+// ---- JSON ----------------------------------------------------------------------
+
+fn jstr(s: &str) -> String {
+    let mut o = String::with_capacity(s.len() + 2);
+    o.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => o.push_str("\\\""),
+            '\\' => o.push_str("\\\\"),
+            '\n' => o.push_str("\\n"),
+            '\r' => o.push_str("\\r"),
+            '\t' => o.push_str("\\t"),
+            c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
+            c => o.push(c),
+        }
+    }
+    o.push('"');
+    o
+}
+
+fn jlist<T>(items: impl IntoIterator<Item = T>, f: impl Fn(T) -> String) -> String {
+    format!("[{}]", items.into_iter().map(f).collect::<Vec<_>>().join(","))
+}
+
+fn json_file(f: &BrokenFile, sug: &Suggestions) -> String {
+    let missing = jlist(&f.missing, |m| {
+        let providers = sug.get(&m.name).map(Vec::as_slice).unwrap_or(&[]);
+        let providers = jlist(providers, |p| {
+            format!(
+                "{{\"package\":{},\"source\":{},\"installed\":{}}}",
+                jstr(&p.package),
+                jstr(p.source.as_str()),
+                p.installed
+            )
+        });
+        format!(
+            "{{\"name\":{},\"wrong_arch\":{},\"providers\":{providers}}}",
+            jstr(&m.name),
+            m.wrong_arch
+        )
+    });
+    let interp = f.interp.as_deref().map_or("null".to_string(), jstr);
+    format!("{{\"path\":{},\"missing\":{missing},\"interp\":{interp}}}", jstr(&f.path))
+}
+
+impl Report {
+    /// The whole report as one JSON document (for scripts and CI).
+    pub fn to_json(&self, sug: &Suggestions) -> String {
+        let pkgs = jlist(&self.packages, |(name, pr)| {
+            format!(
+                "{{\"name\":{},\"files\":{},\"dead_links\":{}}}",
+                jstr(name),
+                jlist(&pr.files, |f| json_file(f, sug)),
+                jlist(&pr.dead_links, |l| jstr(l))
+            )
+        });
+        let unowned = if self.unowned_checked {
+            format!(
+                "{{\"files\":{},\"dead_links\":{}}}",
+                jlist(&self.unowned.files, |f| json_file(f, sug)),
+                jlist(&self.unowned.dead_links, |l| jstr(l))
+            )
+        } else {
+            "null".to_string()
+        };
+        let rebuild = jlist(self.packages.keys(), |k| jstr(k));
+        format!(
+            "{{\"ok\":{},\"scanned\":{{\"packages\":{},\"elf_files\":{},\"unowned_files\":{},\"unparseable\":{}}},\"packages\":{pkgs},\"unowned\":{unowned},\"rebuild\":{rebuild}}}",
+            self.is_clean(),
+            self.scanned_packages,
+            self.elf_files,
+            self.unowned_files,
+            self.unparseable
+        )
+    }
 }
 
 #[cfg(test)]
@@ -540,5 +821,87 @@ mod tests {
         let off = Options { symlinks: false, ..opts(true, &[]) };
         assert!(scan(&root, &db, &[], &off).unwrap().is_clean());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn affected_is_the_package_plus_its_dependents() {
+        let root = tmp("affected");
+        let db = Db::new(&root);
+        let files = vec!["/usr/share/x".to_string()];
+        db.add(&entry("a"), &files, &HashMap::new()).unwrap();
+        db.add(&Entry { run: vec!["a".into()], ..entry("b") }, &files, &HashMap::new()).unwrap();
+        db.add(&Entry { run: vec!["b".into()], ..entry("c") }, &files, &HashMap::new()).unwrap();
+        db.add(&Entry { run: vec!["gone".into()], ..entry("d") }, &files, &HashMap::new()).unwrap();
+        assert_eq!(affected(&db, &["a".to_string()]).unwrap(), vec!["a", "b"]);
+        // a removed package is no longer installed: only its dependents remain
+        assert_eq!(affected(&db, &["gone".to_string()]).unwrap(), vec!["d"]);
+        assert!(affected(&db, &["nobody".to_string()]).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn name_guesses_cover_common_library_names() {
+        assert_eq!(name_guesses("libz.so.1"), vec!["z", "libz"]);
+        assert_eq!(name_guesses("libpng16.so.16"), vec!["png16", "libpng16", "png", "libpng"]);
+        assert_eq!(name_guesses("libglib-2.0.so.0"), vec!["glib-2.0", "libglib-2.0", "glib", "libglib"]);
+        assert!(name_guesses(".so").is_empty());
+    }
+
+    #[test]
+    fn suggestions_come_from_archive_file_lists_then_recipe_names() {
+        let base = tmp("suggest");
+        let out = base.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let st = base.join("st");
+        std::fs::create_dir_all(st.join("usr/lib")).unwrap();
+        std::fs::write(st.join("usr/lib/libfoo.so.1"), b"x").unwrap();
+        std::fs::write(st.join("usr/lib/other.txt"), b"x").unwrap();
+        let pkginfo = "pkgname = foo\npkgver = 1.0\npkgrel = 1\narch = x86_64\nsize = 1\n";
+        crate::archive::create(&st, pkginfo, &out.join("foo-1.0-1.nawa.tar.zst")).unwrap();
+
+        let missing: BTreeSet<String> =
+            ["libfoo.so.1", "libbar.so.2", "libnope.so"].iter().map(|s| s.to_string()).collect();
+        let recipes = vec!["bar".to_string(), "zzz".to_string()];
+        let installed: HashSet<String> = ["foo".to_string()].into_iter().collect();
+        let sug = suggest(&missing, &out, &recipes, &installed);
+        assert_eq!(
+            sug["libfoo.so.1"],
+            vec![Provider { package: "foo".into(), source: Source::Archive, installed: true }]
+        );
+        assert_eq!(
+            sug["libbar.so.2"],
+            vec![Provider { package: "bar".into(), source: Source::Recipe, installed: false }]
+        );
+        assert!(!sug.contains_key("libnope.so"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn json_output_is_escaped_and_complete() {
+        assert_eq!(jstr("a\"b\\c\n\u{1}"), "\"a\\\"b\\\\c\\n\\u0001\"");
+        let mut rep = Report { scanned_packages: 2, elf_files: 5, ..Default::default() };
+        rep.packages.insert(
+            "curl".into(),
+            PkgReport {
+                files: vec![BrokenFile {
+                    path: "/usr/bin/curl".into(),
+                    missing: vec![Missing { name: "libz.so.1".into(), wrong_arch: false }],
+                    interp: None,
+                }],
+                dead_links: vec![],
+            },
+        );
+        let mut sug = Suggestions::new();
+        sug.insert(
+            "libz.so.1".into(),
+            vec![Provider { package: "zlib".into(), source: Source::Recipe, installed: false }],
+        );
+        assert_eq!(rep.missing_libs().into_iter().collect::<Vec<_>>(), vec!["libz.so.1"]);
+        assert_eq!(
+            rep.to_json(&sug),
+            r#"{"ok":false,"scanned":{"packages":2,"elf_files":5,"unowned_files":0,"unparseable":0},"packages":[{"name":"curl","files":[{"path":"/usr/bin/curl","missing":[{"name":"libz.so.1","wrong_arch":false,"providers":[{"package":"zlib","source":"recipe","installed":false}]}],"interp":null}],"dead_links":[]}],"unowned":null,"rebuild":["curl"]}"#
+        );
+        let clean = Report::default().to_json(&Suggestions::new());
+        assert!(clean.starts_with("{\"ok\":true,") && clean.ends_with("\"rebuild\":[]}"));
     }
 }

@@ -327,7 +327,9 @@ pub(crate) fn cmd_owner(ctx: &Ctx, file: &str) -> Result<()> {
 
 /// `nawa revdep`: broken shared-library links among installed packages (and,
 /// with `--unowned`, among files no package owns). Exits non-zero when
-/// anything is broken, so scripts can gate on it.
+/// anything is broken, so scripts can gate on it; `--json` prints one JSON
+/// document instead of the text report.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn cmd_revdep(
     ctx: &Ctx,
     names: &[String],
@@ -336,6 +338,8 @@ pub(crate) fn cmd_revdep(
     no_symlinks: bool,
     unowned: bool,
     scan_dirs: &[String],
+    json: bool,
+    no_suggest: bool,
 ) -> Result<()> {
     let db = db::Db::new(&ctx.root);
     for n in names {
@@ -345,15 +349,37 @@ pub(crate) fn cmd_revdep(
     }
     let opts = revdep::Options { lib_dirs, ignore, symlinks: !no_symlinks, unowned, scan_dirs };
     let rep = revdep::scan(&ctx.root, &db, names, &opts)?;
-    let pal = Palette::auto(Stream::Stdout);
 
+    // which package provides what is missing? (archives built here, then recipe names)
+    let missing = rep.missing_libs();
+    let sug = if no_suggest || missing.is_empty() {
+        revdep::Suggestions::new()
+    } else {
+        let recipes: Vec<String> = recipe::load_all(&ctx.recipes)
+            .map(|m| m.into_keys().collect())
+            .unwrap_or_default();
+        let installed: std::collections::HashSet<String> =
+            db.installed()?.into_iter().map(|e| e.name).collect();
+        revdep::suggest(&missing, &ctx.builddir.join("out"), &recipes, &installed)
+    };
+
+    let unowned_note = if rep.unowned.is_clean() { "" } else { " and unowned files" };
+    if json {
+        println!("{}", rep.to_json(&sug));
+        if rep.is_clean() {
+            return Ok(());
+        }
+        bail!("broken links found in {} package(s){unowned_note}", rep.packages.len());
+    }
+
+    let pal = Palette::auto(Stream::Stdout);
     for (pkg, pr) in &rep.packages {
         println!("{}", pal.name(pkg));
-        print_revdep_pkg(&pal, pr);
+        print!("{}", fmt_revdep_pkg(&pal, pr, &sug));
     }
     if !rep.unowned.is_clean() {
         println!("{}", pal.name("(not owned by any package)"));
-        print_revdep_pkg(&pal, &rep.unowned);
+        print!("{}", fmt_revdep_pkg(&pal, &rep.unowned, &sug));
     }
     if rep.unparseable > 0 {
         println!("{} {} ELF file(s) could not be parsed", pal.warn("warning:"), rep.unparseable);
@@ -378,23 +404,79 @@ pub(crate) fn cmd_revdep(
         let broken: Vec<&str> = rep.packages.keys().map(|s| s.as_str()).collect();
         println!("packages to rebuild: {}", broken.join(" "));
     }
-    let unowned_note = if rep.unowned.is_clean() { "" } else { " and unowned files" };
     bail!("broken links found in {} package(s){unowned_note}", rep.packages.len())
 }
 
-fn print_revdep_pkg(pal: &Palette, pr: &revdep::PkgReport) {
+/// The text report of one package (or of the unowned files).
+fn fmt_revdep_pkg(pal: &Palette, pr: &revdep::PkgReport, sug: &revdep::Suggestions) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::new();
     for f in &pr.files {
-        println!("  {}", f.path);
+        let _ = writeln!(s, "  {}", f.path);
         for m in &f.missing {
-            println!("      {} {m}", pal.err("missing:"));
+            let note = if m.wrong_arch { " (wrong architecture)" } else { "" };
+            let _ = writeln!(s, "      {} {}{note}", pal.err("missing:"), m.name);
+            for p in sug.get(&m.name).into_iter().flatten() {
+                let _ = writeln!(s, "        {} {}", pal.dim("->"), fmt_provider(p));
+            }
         }
         if let Some(i) = &f.interp {
-            println!("      {} {i}", pal.err("missing interpreter:"));
+            let _ = writeln!(s, "      {} {i}", pal.err("missing interpreter:"));
         }
     }
     for l in &pr.dead_links {
-        println!("  {l}  {}", pal.warn("(broken symlink)"));
+        let _ = writeln!(s, "  {l}  {}", pal.warn("(broken symlink)"));
     }
+    s
+}
+
+fn fmt_provider(p: &revdep::Provider) -> String {
+    let how = match p.source {
+        revdep::Source::Archive => "ships it",
+        revdep::Source::Recipe => "name match",
+    };
+    if p.installed {
+        format!("{} ({how}) is installed but lacks the file — reinstall or rebuild it", p.package)
+    } else {
+        format!("{} ({how}) is not installed — nawa install {}", p.package, p.package)
+    }
+}
+
+/// After install / update / remove: re-check what the change can have broken
+/// (the packages themselves and everything that depends on them) and warn on
+/// stderr. Never fails the command; `NAWA_NO_REVDEP=1` turns it off.
+pub(crate) fn warn_revdep(ctx: &Ctx, changed: &[String]) {
+    if std::env::var("NAWA_NO_REVDEP").is_ok_and(|v| !v.is_empty() && v != "0") {
+        return;
+    }
+    let db = db::Db::new(&ctx.root);
+    let opts = revdep::Options { lib_dirs: &[], ignore: &[], symlinks: true, unowned: false, scan_dirs: &[] };
+    let checked = revdep::affected(&db, changed).and_then(|names| {
+        if names.is_empty() {
+            Ok(revdep::Report::default())
+        } else {
+            revdep::scan(&ctx.root, &db, &names, &opts)
+        }
+    });
+    let rep = match checked {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("nawa: warning: revdep check failed: {e:#}");
+            return;
+        }
+    };
+    if rep.is_clean() {
+        return;
+    }
+    let pal = Palette::auto(Stream::Stderr);
+    let none = revdep::Suggestions::new();
+    eprintln!("nawa: {} this change left broken shared-library links:", pal.warn("warning:"));
+    for (pkg, pr) in &rep.packages {
+        eprintln!("{}", pal.name(pkg));
+        eprint!("{}", fmt_revdep_pkg(&pal, pr, &none));
+    }
+    let pkgs: Vec<&str> = rep.packages.keys().map(|s| s.as_str()).collect();
+    eprintln!("nawa: details and fixes: nawa revdep {}   (silence: NAWA_NO_REVDEP=1)", pkgs.join(" "));
 }
 
 /// Every known package name: the recipes tree plus the local db. One bare
