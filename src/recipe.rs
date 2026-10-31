@@ -17,6 +17,10 @@ pub struct Recipe {
     pub hooks: Hooks,
     #[serde(default)]
     pub sandbox: Sandbox,
+    /// Per-recipe opt-outs of the post-install slimming passes
+    /// (`[slim] strip = false`, ...). See `slim.rs`.
+    #[serde(default)]
+    pub slim: crate::slim::Slim,
     /// The raw recipe.toml bytes, kept for the deterministic build id
     /// (§7 of docs/design/build-isolation.md). Not part of the TOML.
     #[serde(skip)]

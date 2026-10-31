@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased — feat: automatic package slimming (strip, cleanup, `-doc`/`-lang` split)
+
+- New `src/slim.rs`, run by the build engine between `install` and the
+  archive: removes junk files (libtool `*.la`, `share/info/dir`,
+  `charset.alias`, `perllocal.pod`, `.packlist`), splits man/info/doc into
+  `<name>-doc` and gettext catalogs into `<name>-lang` (separate
+  `.nawa.tar.zst`, same version/rel, `rundeps = <name>`), and strips ELF
+  files (`--strip-unneeded`; `--strip-debug` for `*.a`, `.o`, unsigned `.ko`).
+  A split that would empty the main package is skipped; `rustlib`, `/boot`,
+  `/usr/lib/debug` and `/usr/src` are never stripped.
+- Opt-outs: recipe `[slim] strip|cleanup|split = false`, profile
+  `[build] slim = false`, environment `NAWA_SLIM=0|1` (wins).
+- The slimming rules version is part of the build id: `--use-cache` rebuilds
+  archives made before this change.
+- `repo-create` / `sign` need no change: sub-packages are ordinary archives.
+
 ## Unreleased — fix: `nawa deps <pkg>` ignored the dependencies of an installed package
 
 - `nawa deps <name>` seeded the resolver with the installed set, the requested

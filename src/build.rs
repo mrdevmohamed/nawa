@@ -12,6 +12,7 @@ use crate::archive;
 use crate::buildenv::{self, Isolation};
 use crate::fetch;
 use crate::recipe::{ExpandCtx, Recipe};
+use crate::slim;
 
 /// What to do with a recipe's `[build] check` section (its test suite).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +56,9 @@ pub struct BuildOpts {
     /// The id covers the recipe bytes, source sha256, closure archive set
     /// and profile flags — not the wall clock, not the environment.
     pub use_cache: bool,
+    /// Post-install slimming (strip, cleanup, `-doc`/`-lang` split); see
+    /// `slim.rs`. On by default; a recipe can opt out of single passes.
+    pub slim: bool,
 }
 
 impl Default for BuildOpts {
@@ -74,6 +78,7 @@ impl Default for BuildOpts {
             allow_unsigned: false,
             profile_flags: String::new(),
             use_cache: false,
+            slim: true,
         }
     }
 }
@@ -413,6 +418,22 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
         )?;
     }
 
+    // ---- slim: cleanup, split off -doc/-lang, strip ----------------------
+    let slim_report = if opts.slim {
+        slim::run(&pkg, &work.join("split"), &rec.slim)?
+    } else {
+        slim::Report::default()
+    };
+    if let Some(line) = slim_report.summary() {
+        println!("{line}");
+    }
+    // a sub-package archive left by an earlier build of this very version
+    // must not outlive the rules that produced it
+    for suffix in slim::SUFFIXES {
+        let stale = slim::subpackage_file(name, suffix, &rec.package.version, rec.package.rel);
+        let _ = std::fs::remove_file(outdir.join(stale));
+    }
+
     // ---- collect staged files -------------------------------------------
     let mut files: Vec<String> = Vec::new();
     for e in walkdir::WalkDir::new(&pkg).sort_by_file_name() {
@@ -546,6 +567,38 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
         archive::create_with_hooks(&pkg, &pkginfo, Some(&hooks), &out_path)?;
     }
 
+    // ---- sub-packages (-doc, -lang) --------------------------------------
+    // Same version/rel, build inputs and normalisation as the main archive;
+    // each depends on it. repo-create / sign / upload pick them up by name.
+    for sp in &slim_report.subpackages {
+        let sub_name = format!("{}-{}", name, sp.suffix);
+        let sub_info = slim::derive_pkginfo(&pkginfo, name, &sub_name, sp.size);
+        let sub_path = outdir.join(slim::subpackage_file(
+            name,
+            sp.suffix,
+            &rec.package.version,
+            rec.package.rel,
+        ));
+        if opts.isolation >= Isolation::Env {
+            archive::create_normalized(
+                &sp.dir,
+                &sub_info,
+                None,
+                &sub_path,
+                &archive::Normalize { source_date_epoch: sde },
+            )?;
+        } else {
+            archive::create_with_hooks(&sp.dir, &sub_info, None, &sub_path)?;
+        }
+        println!(
+            "nawa: built {sub_name}-{}-{} ({} files) -> {}",
+            rec.package.version,
+            rec.package.rel,
+            sp.files,
+            sub_path.display()
+        );
+    }
+
     // v1/v2 assembly cleanup: the extract-per-build root is per-build
     // scratch; a layered root is only the empty mountpoint
     if let Some(root) = &assembled {
@@ -632,11 +685,17 @@ fn sandbox_inside_base(_work: &Path) -> String {
 /// The build id for `rec` as `build()` would record it: recipe bytes, pinned
 /// source sha256, the closure archive set (names pin versions) and flags.
 fn build_id_for(rec: &Recipe, opts: &BuildOpts, closure_archives: &[PathBuf]) -> String {
+    // slimming changes the archive, so its rules are an input of the id
+    let flags = if opts.slim {
+        format!("{} slim={}", opts.profile_flags, slim::VERSION)
+    } else {
+        format!("{} slim=off", opts.profile_flags)
+    };
     crate::lint::build_id(
         rec.raw.as_bytes(),
         &rec.package.sha256,
         closure_archives,
-        &opts.profile_flags,
+        &flags,
     )
 }
 

@@ -105,6 +105,13 @@ pub(crate) fn prepare_build(
     };
     let timeout_secs = timeout.or(build_profile.timeout).unwrap_or(0);
 
+    // slimming: NAWA_SLIM (explicit) > profile [build] slim > on
+    let slim = match std::env::var("NAWA_SLIM").ok().as_deref().map(str::trim) {
+        Some("0" | "off" | "no" | "false") => false,
+        Some("1" | "on" | "yes" | "true") => true,
+        _ => build_profile.slim.unwrap_or(true),
+    };
+
     let profile_flags = env
         .iter()
         .map(|(k, v)| format!("{k}={v}"))
@@ -126,6 +133,7 @@ pub(crate) fn prepare_build(
         allow_unsigned: false,
         profile_flags,
         use_cache,
+        slim,
     })
 }
 

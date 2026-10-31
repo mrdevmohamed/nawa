@@ -35,6 +35,11 @@ pub struct BuildProfile {
     /// Default: 4 h, as in the design.
     #[serde(default)]
     pub timeout: Option<u64>,
+    /// `slim = false` turns off the post-install slimming of every package
+    /// (strip, cleanup, `-doc`/`-lang` split). Default: on. The environment
+    /// variable `NAWA_SLIM=0|1` wins over this.
+    #[serde(default)]
+    pub slim: Option<bool>,
 }
 
 /// The `[profile]` table. Sub-tables (`[profile.toolchain]`,
@@ -141,11 +146,13 @@ min_kernel = "5.4"
         let b = Profile::parse_build(SHIPPED).unwrap();
         assert_eq!(b.isolation, None);
         assert_eq!(b.timeout, None);
+        assert_eq!(b.slim, None);
         let with_build = SHIPPED.to_string()
-            + "\n[build]\nisolation = \"sandbox\"\ntimeout = 600\n";
+            + "\n[build]\nisolation = \"sandbox\"\ntimeout = 600\nslim = false\n";
         let b = Profile::parse_build(&with_build).unwrap();
         assert_eq!(b.isolation.as_deref(), Some("sandbox"));
         assert_eq!(b.timeout, Some(600));
+        assert_eq!(b.slim, Some(false));
     }
 
     #[test]

@@ -24,6 +24,7 @@ mod repo;
 mod sandbox;
 mod service;
 mod sign;
+mod slim;
 mod suggest;
 mod sync;
 mod sys;

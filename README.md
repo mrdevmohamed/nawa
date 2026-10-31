@@ -203,6 +203,30 @@ Build output is streamed to the console as it is produced and also saved to
 `<builddir>/<pkg>-<ver>-<rel>/build-<section>.log` (stdout and stderr merged,
 in real order).
 
+### Slim packages (strip, cleanup, `-doc` / `-lang`)
+
+After a recipe's `install` finishes, the build engine slims the staged tree
+before it writes the archive — what Alpine's `abuild` does, with no recipe
+changes needed:
+
+* **cleanup** — libtool `*.la`, `share/info/dir`, `charset.alias`, perl's
+  `perllocal.pod` / `.packlist` are removed (they only cause file conflicts).
+* **split** — man pages, info and docs (`usr/share/{man,info,doc,gtk-doc}`)
+  go to `<name>-doc`, gettext catalogs (`usr/share/locale`, except
+  `locale.alias`) to `<name>-lang`. Both are ordinary archives of the same
+  version that depend on `<name>`: `nawa install bash-doc`. A split that would
+  leave the main package empty is skipped.
+* **strip** — `strip --strip-unneeded` on ELF executables and shared objects,
+  `--strip-debug` on `*.a`, `.o` and unsigned kernel modules. ELF files are
+  found by header, not by name; `rustlib`, `/boot`, `/usr/lib/debug`,
+  `/usr/src` are never touched. Without `strip` on the host the pass is
+  skipped with a note.
+
+Opt out per recipe with a `[slim]` table (`strip = false`, `cleanup = false`,
+`split = false`), or for every package with `slim = false` in the profile's
+`[build]` table; `NAWA_SLIM=0|1` overrides both. The slimming rules are part
+of the build id, so `--use-cache` rebuilds archives made by older rules.
+
 ### Build isolation
 
 `nawa build --isolation <level>` (or the profile's `[build] isolation`; default
