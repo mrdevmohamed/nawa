@@ -95,7 +95,7 @@ pub fn run(ctx: &LintCtx) -> LintReport {
             Ok(LintRead::ElfTooLarge { size }) => {
                 rep.elf_count += 1;
                 rep.warnings.push(format!(
-                    "{rel_s}: ELF exceeds the {MAX_ELF_SCAN_MIB} MiB lint size limit ({size} bytes) — dependency check skipped"
+                    "{rel_s}: ELF exceeds the {MAX_ELF_SCAN_MIB} MiB lint size limit (at least {size} bytes) — dependency check skipped"
                 ));
                 continue;
             }
