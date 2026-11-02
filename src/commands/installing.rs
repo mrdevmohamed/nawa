@@ -452,7 +452,19 @@ pub(crate) fn cmd_outdated(ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn cmd_update(ctx: &Ctx, names: &[String], flags: &PlanFlags) -> Result<()> {
+pub(crate) fn cmd_update(
+    ctx: &Ctx,
+    names: &[String],
+    flags: &PlanFlags,
+    mode: Option<InstallMode>,
+    repo: Option<String>,
+) -> Result<()> {
+    let mode = mode.unwrap_or_else(|| {
+        if repo.is_some() { InstallMode::Repo } else { InstallMode::Build }
+    });
+    let repo_url = repo.or_else(|| ctx.repo.clone());
+    let sourcing = open_sourcing(ctx, mode, repo_url.as_deref(), flags)?;
+
     let known = recipe::load_all(&ctx.recipes)?;
     let installed = installed_map(ctx)?;
     for n in names {
@@ -471,8 +483,27 @@ pub(crate) fn cmd_update(ctx: &Ctx, names: &[String], flags: &PlanFlags) -> Resu
         return Ok(());
     }
     let plan = plan::install_plan(&targets, &installed, &known, plan::Why::Update, true)?;
-    // `update` follows the recipes (rebuilds); binary upgrades are `nawa upgrade`
-    let result = run_plan(ctx, &plan, flags, &Sourcing::build_only(), &[]);
+
+    // In strict repository mode, every update target must be available at
+    // least at the version requested by its recipe. Never silently downgrade
+    // or report a stale repository package as a completed update.
+    if mode == InstallMode::Repo {
+        for item in plan.items.iter().filter(|item| item.why == plan::Why::Update) {
+            let name = &item.rec.package.name;
+            let re = sourcing.entry(name).ok_or_else(|| {
+                anyhow::anyhow!("\`{name}\` has no package for this architecture in the repository")
+            })?;
+            let available = format!("{}-{}", re.version, re.rel);
+            let wanted = format!("{}-{}", item.rec.package.version, item.rec.package.rel);
+            if version::vercmp(&available, &wanted) == std::cmp::Ordering::Less {
+                bail!(
+                    "repository has {name} {available}, but the recipe requires {wanted}; publish the newer package first, or use `--from auto` / `--build`"
+                );
+            }
+        }
+    }
+
+    let result = run_plan(ctx, &plan, flags, &sourcing, &[]);
     // also after a partial run: whatever was installed is worth checking
     let changed: Vec<String> = plan.items.iter().map(|it| it.rec.package.name.clone()).collect();
     warn_revdep(ctx, &changed);
