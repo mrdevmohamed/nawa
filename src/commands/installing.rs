@@ -462,8 +462,6 @@ pub(crate) fn cmd_update(
     let mode = mode.unwrap_or_else(|| {
         if repo.is_some() { InstallMode::Repo } else { InstallMode::Build }
     });
-    let repo_url = repo.or_else(|| ctx.repo.clone());
-    let sourcing = open_sourcing(ctx, mode, repo_url.as_deref(), flags)?;
 
     let known = recipe::load_all(&ctx.recipes)?;
     let installed = installed_map(ctx)?;
@@ -473,16 +471,19 @@ pub(crate) fn cmd_update(
         }
     }
     let list: Vec<db::Entry> = installed.values().cloned().collect();
-    let targets: Vec<String> = plan::outdated(&list, &known)
+    let mut targets: Vec<String> = plan::outdated(&list, &known)
         .into_iter()
         .map(|(e, _)| e.name.clone())
         .filter(|n| names.is_empty() || names.contains(n))
         .collect();
+    targets.sort(); // deterministic update plan even though installed_map is a HashMap
     if targets.is_empty() {
         println!("nawa: everything is up to date");
         return Ok(());
     }
     let plan = plan::install_plan(&targets, &installed, &known, plan::Why::Update, true)?;
+    let repo_url = repo.or_else(|| ctx.repo.clone());
+    let sourcing = open_sourcing(ctx, mode, repo_url.as_deref(), flags)?;
 
     // In strict repository mode, every update target must be available at
     // least at the version requested by its recipe. Never silently downgrade
@@ -491,13 +492,13 @@ pub(crate) fn cmd_update(
         for item in plan.items.iter().filter(|item| item.why == plan::Why::Update) {
             let name = &item.rec.package.name;
             let re = sourcing.entry(name).ok_or_else(|| {
-                anyhow::anyhow!("\`{name}\` has no package for this architecture in the repository")
+                anyhow::anyhow!("{name} has no package for this architecture in the repository")
             })?;
             let available = format!("{}-{}", re.version, re.rel);
             let wanted = format!("{}-{}", item.rec.package.version, item.rec.package.rel);
             if version::vercmp(&available, &wanted) == std::cmp::Ordering::Less {
                 bail!(
-                    "repository has {name} {available}, but the recipe requires {wanted}; publish the newer package first, or use `--from auto` / `--build`"
+                    "repository has {name} {available}, but the recipe requires {wanted}; publish the newer package first, or use --from auto / --build"
                 );
             }
         }
