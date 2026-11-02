@@ -24,6 +24,8 @@ Examples:
   nawa install --from-repo curl          repository only (error if not there)
   nawa install -n curl                   show that plan, change nothing
   nawa outdated / nawa update             see and apply newer recipe versions
+  nawa update --from repo                use the configured binary repository
+  nawa update --from auto                prefer repo, build when it is not current
   nawa autoremove                        drop dependencies nothing needs
   nawa build --install curl              build and install ONE recipe
   nawa install --root /mnt/root a.nawa.tar.zst
@@ -141,13 +143,25 @@ pub(crate) enum Cmd {
     /// List installed packages whose recipe has a newer version
     Outdated,
 
-    /// Rebuild and reinstall outdated packages from the recipes (all of
-    /// them, or just the names given); shows the plan first
+    /// Update installed packages whose local recipes are newer; defaults to building
+    /// from source, with an optional repository source
     Update {
         /// only update these packages (default: every outdated one)
         names: Vec<String>,
         #[command(flatten)]
         flags: PlanFlags,
+        /// Always build from the recipes (the default)
+        #[arg(short = 'b', long, conflicts_with_all = ["from_repo", "from"])]
+        build: bool,
+        /// Use only the binary repository; fail if it cannot provide an update
+        #[arg(short = 'r', long = "from-repo", conflicts_with = "from")]
+        from_repo: bool,
+        /// Package source: build | repo | auto | ask
+        #[arg(long, value_name = "MODE")]
+        from: Option<String>,
+        /// Repository directory or http(s) URL for this run
+        #[arg(long, value_name = "DIR_OR_URL")]
+        repo: Option<String>,
     },
 
     /// Remove dependency packages that nothing needs any more

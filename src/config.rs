@@ -340,7 +340,7 @@ pub fn template() -> String {
 # Default parallel build jobs (env: NAWA_JOBS)
 #jobs = 8
 
-# Binary repository for `nawa install` and `nawa upgrade` (env: NAWA_REPO) —
+# Binary repository for `nawa install`, `nawa update` and `nawa upgrade` (env: NAWA_REPO) —
 # local dir or http(s) URL. "" switches the repository off.
 # Built-in default: {DEFAULT_REPO}
 #repo = "{DEFAULT_REPO}"
@@ -367,7 +367,8 @@ pub fn system_template() -> String {
 # built-in default.  Inspect the result with `nawa config show`.
 # Relative paths in this file resolve against /etc/nawa.
 
-# Default binary repository (env: NAWA_REPO).  A local directory or an
+# Default binary repository for install/update/upgrade (env: NAWA_REPO).
+# A local directory or an
 # http(s) URL that serves index.toml, index.toml.sig and the *.nawa.tar.zst
 # archives.  Set it to "" to switch repositories off.
 # Remote repositories need a trusted key (`nawa trust <key.pub>`) unless you
@@ -381,6 +382,7 @@ repo = "{DEFAULT_REPO}"
 #   build - always build from source
 #   ask   - like auto, but asks "repository or build?" in a terminal
 # Per command: `nawa install --build foo` / `--from-repo foo` / `--from ask foo`.
+# `nawa update` builds by default; choose its source with `--from build|repo|auto|ask`.
 install_mode = "auto"
 
 # Recipes used for building and for dependency resolution (env: NAWA_RECIPES).

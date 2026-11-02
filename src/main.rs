@@ -160,7 +160,18 @@ fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             cmd_install(ctx, &targets, &flags, no_deps, key, mode, repo)
         }
         Cmd::Outdated => cmd_outdated(ctx),
-        Cmd::Update { names, flags } => cmd_update(ctx, &names, &flags),
+        Cmd::Update { names, flags, build, from_repo, from, repo } => {
+            let mode = if build {
+                Some(InstallMode::Build)
+            } else if from_repo {
+                Some(InstallMode::Repo)
+            } else if let Some(m) = from {
+                Some(InstallMode::parse(&m)?)
+            } else {
+                None
+            };
+            cmd_update(ctx, &names, &flags, mode, repo)
+        },
         Cmd::Autoremove { dry_run, yes, build_deps } => {
             cmd_autoremove(ctx, dry_run, yes, build_deps)
         }
