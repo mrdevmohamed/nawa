@@ -630,6 +630,8 @@ mod tests {
             arch: arch.into(),
             file: "demo-1.0-1.nawa.tar.zst".into(),
             sha256: String::new(),
+            size: 0,
+            installed_size: 0,
         };
         assert!(check_archive_matches_index(&a, &ok).is_ok());
         let newer = repo::RepoEntry { version: "2.0".into(), ..ok.clone() };

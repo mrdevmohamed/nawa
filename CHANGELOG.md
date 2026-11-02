@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased — ux: sizes in the install plan, readable download output
+
+- `nawa install` / `update` print a table (package, version, source, download
+  size, installed size, reason) and the totals, like `dnf`.
+- Repository indexes record each archive's `size` (bytes) and `installed_size`;
+  older indexes still parse (sizes show as `-`, the totals say how many are unknown).
+- Downloads on a terminal show `name  12.0 MiB / 48.0 MiB  25%` on one updating
+  line; small files (index, signatures) stay silent.
+- Redirect hops are no longer printed (the signed CDN URLs were hundreds of
+  characters); `NAWA_VERBOSE=1` prints host and path.
+
 ## Unreleased — feat: automatic package slimming (strip, cleanup, `-doc`/`-lang` split)
 
 - New `src/slim.rs`, run by the build engine between `install` and the
