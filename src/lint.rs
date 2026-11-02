@@ -90,7 +90,17 @@ pub fn run(ctx: &LintCtx) -> LintReport {
         if !md.is_file() {
             continue;
         }
-        let Ok(data) = read_limited(e.path()) else { continue };
+        let data = match read_for_lint(e.path()) {
+            Ok(LintRead::Data(data)) => data,
+            Ok(LintRead::ElfTooLarge { size }) => {
+                rep.elf_count += 1;
+                rep.warnings.push(format!(
+                    "{rel_s}: ELF exceeds the {MAX_ELF_SCAN_MIB} MiB lint size limit (at least {size} bytes) — dependency check skipped"
+                ));
+                continue;
+            }
+            Err(_) => continue,
+        };
         if data.starts_with(b"\x7fELF") {
             rep.elf_count += 1;
             match parse_elf(&data) {
@@ -212,23 +222,48 @@ fn check_text_leaks(rel: &str, data: &[u8], ctx: &LintCtx, rep: &mut LintReport)
     }
 }
 
-/// Read at most 4 MiB — enough for any config/script/library text the
-/// checks need, without loading giant payloads into memory.
-fn read_limited(path: &Path) -> std::io::Result<Vec<u8>> {
+/// ELF parsing needs the complete file because goblin follows offsets throughout
+/// it. Keep that read bounded: package contents are inputs to the linter and
+/// must not be able to force an unbounded allocation.
+const MAX_ELF_SCAN_MIB: u64 = 512;
+const MAX_ELF_SCAN: u64 = MAX_ELF_SCAN_MIB * 1024 * 1024;
+const MAX_TEXT_SCAN: usize = 4 * 1024 * 1024;
+
+enum LintRead {
+    Data(Vec<u8>),
+    ElfTooLarge { size: u64 },
+}
+
+fn read_for_lint(path: &Path) -> std::io::Result<LintRead> {
     let mut f = std::fs::File::open(path)?;
-    let mut buf = Vec::new();
-    let mut cap = 4 * 1024 * 1024;
-    let mut chunk = vec![0u8; 64 * 1024];
-    loop {
-        let n = f.read(&mut chunk)?;
-        if n == 0 || cap == 0 {
-            break;
+    let mut buf = Vec::with_capacity(4);
+    (&mut f).take(4).read_to_end(&mut buf)?;
+
+    if buf.as_slice() == b"\x7fELF" {
+        // Reject obviously oversized files before reading their payload. Read
+        // at most one byte beyond the limit as a second check in case the file
+        // grew after metadata() was queried.
+        let size = f.metadata()?.len();
+        if size > MAX_ELF_SCAN {
+            return Ok(LintRead::ElfTooLarge { size });
         }
-        let take = n.min(cap);
-        buf.extend_from_slice(&chunk[..take]);
-        cap -= take;
+
+        let remaining = MAX_ELF_SCAN
+            .saturating_sub(buf.len() as u64)
+            .saturating_add(1);
+        (&mut f).take(remaining).read_to_end(&mut buf)?;
+        if buf.len() as u64 > MAX_ELF_SCAN {
+            return Ok(LintRead::ElfTooLarge {
+                size: buf.len() as u64,
+            });
+        }
+    } else {
+        // Text/configuration leak scans stay deliberately small; large assets
+        // are not read into memory just to search for build-path strings.
+        let remaining = MAX_TEXT_SCAN.saturating_sub(buf.len());
+        (&mut f).take(remaining as u64).read_to_end(&mut buf)?;
     }
-    Ok(buf)
+    Ok(LintRead::Data(buf))
 }
 
 fn looks_texty(data: &[u8]) -> bool {
@@ -625,6 +660,79 @@ mod tests {
         assert_eq!(info.needed, vec!["libz.so.1", "libc.so.6"]);
         assert_eq!(info.runpath.as_deref(), Some("/build/src/lib"));
         assert!(info.rpath.is_none(), "only runpath was written");
+    }
+
+    #[test]
+    fn lint_parses_elf_larger_than_text_scan_limit() {
+        let dir = unique_temp_dir("nawa-lint-large-elf");
+        let pkgdir = dir.join("pkg");
+        std::fs::create_dir_all(pkgdir.join("usr/bin")).unwrap();
+
+        // A valid dynamic ELF with enough trailing payload to exceed the
+        // 4 MiB text-scan cap. goblin needs the full file, not a prefix.
+        let mut bytes = elf64_fixture(&["libc.so.6"], None, None);
+        bytes.resize(4 * 1024 * 1024 + 1, 0);
+        std::fs::write(pkgdir.join("usr/bin/large-elf"), bytes).unwrap();
+
+        let rundeps = Vec::new();
+        let sonames = BTreeMap::new();
+        let report = run(&LintCtx {
+            pkgdir: &pkgdir,
+            rundeps: &rundeps,
+            sonames: &sonames,
+            host_builddir: None,
+        });
+
+        assert_eq!(report.elf_count, 1);
+        assert!(
+            report.warnings.is_empty(),
+            "a valid large ELF must parse without warnings: {:?}",
+            report.warnings
+        );
+        assert!(report.ok(), "unexpected lint errors: {:?}", report.errors);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lint_skips_elf_larger_than_size_limit_with_clear_warning() {
+        use std::io::Write;
+
+        let dir = unique_temp_dir("nawa-lint-oversized-elf");
+        let pkgdir = dir.join("pkg");
+        std::fs::create_dir_all(pkgdir.join("usr/bin")).unwrap();
+
+        // A sparse file exercises the size guard without writing hundreds of
+        // MiB to disk or allocating that much memory in the test process.
+        let path = pkgdir.join("usr/bin/oversized-elf");
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(b"\x7fELF").unwrap();
+        file.set_len(MAX_ELF_SCAN + 1).unwrap();
+
+        let rundeps = Vec::new();
+        let sonames = BTreeMap::new();
+        let report = run(&LintCtx {
+            pkgdir: &pkgdir,
+            rundeps: &rundeps,
+            sonames: &sonames,
+            host_builddir: None,
+        });
+
+        assert_eq!(report.elf_count, 1);
+        assert!(
+            report.warnings.iter().any(|warning| {
+                warning.contains("exceeds the 512 MiB lint size limit")
+                    && warning.contains("dependency check skipped")
+            }),
+            "oversized ELF should have an explicit size-limit warning: {:?}",
+            report.warnings
+        );
+        assert!(
+            !report.warnings.iter().any(|warning| warning.contains("not a parseable ELF")),
+            "oversized ELF must not be mislabeled as malformed: {:?}",
+            report.warnings
+        );
+        assert!(report.ok(), "size limit is a warning, not a package error");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
