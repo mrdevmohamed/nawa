@@ -90,7 +90,7 @@ pub fn run(ctx: &LintCtx) -> LintReport {
         if !md.is_file() {
             continue;
         }
-        let Ok(data) = read_limited(e.path()) else { continue };
+        let Ok(data) = read_for_lint(e.path()) else { continue };
         if data.starts_with(b"\x7fELF") {
             rep.elf_count += 1;
             match parse_elf(&data) {
@@ -212,21 +212,20 @@ fn check_text_leaks(rel: &str, data: &[u8], ctx: &LintCtx, rep: &mut LintReport)
     }
 }
 
-/// Read at most 4 MiB — enough for any config/script/library text the
-/// checks need, without loading giant payloads into memory.
-fn read_limited(path: &Path) -> std::io::Result<Vec<u8>> {
+/// Read complete ELF files because goblin follows offsets throughout the
+/// file. Other content scans are capped at 4 MiB to avoid loading large assets.
+fn read_for_lint(path: &Path) -> std::io::Result<Vec<u8>> {
+    const MAX_TEXT_SCAN: usize = 4 * 1024 * 1024;
+
     let mut f = std::fs::File::open(path)?;
-    let mut buf = Vec::new();
-    let mut cap = 4 * 1024 * 1024;
-    let mut chunk = vec![0u8; 64 * 1024];
-    loop {
-        let n = f.read(&mut chunk)?;
-        if n == 0 || cap == 0 {
-            break;
-        }
-        let take = n.min(cap);
-        buf.extend_from_slice(&chunk[..take]);
-        cap -= take;
+    let mut buf = Vec::with_capacity(4);
+    (&mut f).take(4).read_to_end(&mut buf)?;
+
+    if buf.as_slice() == b"\x7fELF" {
+        f.read_to_end(&mut buf)?;
+    } else {
+        f.take(MAX_TEXT_SCAN.saturating_sub(buf.len()) as u64)
+            .read_to_end(&mut buf)?;
     }
     Ok(buf)
 }
@@ -625,6 +624,37 @@ mod tests {
         assert_eq!(info.needed, vec!["libz.so.1", "libc.so.6"]);
         assert_eq!(info.runpath.as_deref(), Some("/build/src/lib"));
         assert!(info.rpath.is_none(), "only runpath was written");
+    }
+
+    #[test]
+    fn lint_parses_elf_larger_than_text_scan_limit() {
+        let dir = unique_temp_dir("nawa-lint-large-elf");
+        let pkgdir = dir.join("pkg");
+        std::fs::create_dir_all(pkgdir.join("usr/bin")).unwrap();
+
+        // A valid dynamic ELF with enough trailing payload to exceed the
+        // 4 MiB text-scan cap. goblin needs the full file, not a prefix.
+        let mut bytes = elf64_fixture(&["libc.so.6"], None, None);
+        bytes.resize(4 * 1024 * 1024 + 1, 0);
+        std::fs::write(pkgdir.join("usr/bin/large-elf"), bytes).unwrap();
+
+        let rundeps = Vec::new();
+        let sonames = BTreeMap::new();
+        let report = run(&LintCtx {
+            pkgdir: &pkgdir,
+            rundeps: &rundeps,
+            sonames: &sonames,
+            host_builddir: None,
+        });
+
+        assert_eq!(report.elf_count, 1);
+        assert!(
+            report.warnings.is_empty(),
+            "a valid large ELF must parse without warnings: {:?}",
+            report.warnings
+        );
+        assert!(report.ok(), "unexpected lint errors: {:?}", report.errors);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
