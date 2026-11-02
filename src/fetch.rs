@@ -143,7 +143,11 @@ fn http_get(agent: &ureq::Agent, url: &str) -> Result<ureq::Response> {
             .header("Location")
             .with_context(|| format!("redirect from {current} without Location"))?
             .to_string();
-        eprintln!("nawa: following redirect {current} -> {loc}");
+        // signed CDN URLs are hundreds of characters of noise: show only the
+        // hosts, and only when asked (NAWA_VERBOSE=1)
+        if std::env::var_os("NAWA_VERBOSE").is_some_and(|v| v != "0" && !v.is_empty()) {
+            eprintln!("nawa: redirect {} -> {}", current.host_str().unwrap_or("?"), loc.split('?').next().unwrap_or(&loc));
+        }
         current = redirect_target(&current, &loc)?;
     }
     unreachable!("the loop returns on every path")
@@ -165,16 +169,46 @@ fn stderr_is_tty() -> bool {
     std::io::stderr().is_terminal()
 }
 
-/// Stream the response body into `dest` with an occasional MiB counter on
-/// interactive terminals (curl used to show a progress meter there).
+/// Downloads smaller than this get no progress line (index.toml, signatures).
+const PROGRESS_MIN_BYTES: u64 = 256 * 1024;
+
+/// Text of one progress line: `name  12.3 MiB / 45.0 MiB  27%` (no total: just the size).
+fn progress_line(label: &str, done: u64, total: Option<u64>) -> String {
+    use crate::humanize::format_size;
+    match total {
+        Some(t) if t > 0 => format!(
+            "  {label}  {} / {}  {:>3}%",
+            format_size(done),
+            format_size(t),
+            (done.min(t) * 100 / t)
+        ),
+        _ => format!("  {label}  {}", format_size(done)),
+    }
+}
+
+/// `libepoxy-1.5.9-1.nawa.tar.zst.part` -> `libepoxy-1.5.9-1`
+fn progress_label(dest: &Path) -> String {
+    let n = dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let n = n.trim_start_matches('.');
+    let n = n.strip_suffix(".part").unwrap_or(n);
+    n.strip_suffix(".nawa.tar.zst").unwrap_or(n).to_string()
+}
+
+/// Stream the response body into `dest`. On an interactive terminal, a
+/// download of a real size shows one self-updating line with the size and a
+/// percentage (when the server sent Content-Length), then leaves it as a
+/// finished line; small files and non-terminals stay silent.
 fn stream_body(resp: ureq::Response, dest: &Path) -> Result<u64> {
+    let total_len: Option<u64> = resp.header("Content-Length").and_then(|v| v.trim().parse().ok());
     let mut reader = resp.into_reader();
     let f = std::fs::File::create(dest).with_context(|| format!("create {}", dest.display()))?;
     let mut w = BufWriter::with_capacity(256 * 1024, f);
     let mut buf = [0u8; 128 * 1024];
     let mut total = 0u64;
-    let tty = stderr_is_tty();
-    let mut next_mark: u64 = 8 * 1024 * 1024;
+    let show = stderr_is_tty() && total_len.map_or(true, |t| t >= PROGRESS_MIN_BYTES);
+    let label = progress_label(dest);
+    let mut last = std::time::Instant::now();
+    let mut drawn = false;
     loop {
         let n = reader.read(&mut buf).context("read download body")?;
         if n == 0 {
@@ -182,15 +216,19 @@ fn stream_body(resp: ureq::Response, dest: &Path) -> Result<u64> {
         }
         w.write_all(&buf[..n]).with_context(|| format!("write {}", dest.display()))?;
         total += n as u64;
-        if tty && total >= next_mark {
-            eprint!("\r  nawa: {} MiB", total / (1024 * 1024));
+        if show && (!drawn || last.elapsed() >= Duration::from_millis(100)) {
+            // \x1b[K clears what a longer previous line left behind
+            eprint!("\r{}\x1b[K", progress_line(&label, total, total_len));
             let _ = std::io::stderr().flush();
-            next_mark += 8 * 1024 * 1024;
+            last = std::time::Instant::now();
+            drawn = true;
         }
     }
     w.flush().with_context(|| format!("flush {}", dest.display()))?;
-    if tty {
-        eprintln!("\r  nawa: {} MiB — {}", total / (1024 * 1024), dest.display());
+    if show && (drawn || total >= PROGRESS_MIN_BYTES) {
+        eprintln!("\r{}\x1b[K", progress_line(&label, total, Some(total)));
+    } else if drawn {
+        eprint!("\r\x1b[K");
     }
     Ok(total)
 }
@@ -692,6 +730,22 @@ fn sanitize_entry_path(p: &Path) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use std::os::unix::fs::MetadataExt;
+
+    #[test]
+    fn progress_line_shows_sizes_and_percent() {
+        let mib = 1024 * 1024;
+        assert_eq!(progress_line("gtk3-3.24.52-1", 12 * mib, Some(48 * mib)), "  gtk3-3.24.52-1  12.0 MiB / 48.0 MiB   25%");
+        assert_eq!(progress_line("x", 3 * mib, None), "  x  3.0 MiB");
+        // a server that lies (more bytes than Content-Length) never prints > 100%
+        assert!(progress_line("x", 2 * mib, Some(mib)).ends_with("100%"));
+    }
+
+    #[test]
+    fn progress_label_drops_part_and_archive_suffix() {
+        assert_eq!(progress_label(Path::new("/c/libepoxy-1.5.9-1.nawa.tar.zst.part")), "libepoxy-1.5.9-1");
+        assert_eq!(progress_label(Path::new("/c/.firefox-153.6.0-1.nawa.tar.zst.part")), "firefox-153.6.0-1");
+        assert_eq!(progress_label(Path::new("/c/index.toml.part")), "index.toml");
+    }
 
     #[test]
     fn repo_ref_parses_local_and_remote() {

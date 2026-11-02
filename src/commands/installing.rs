@@ -246,42 +246,86 @@ pub(crate) fn run_plan(
     let print_plan = |sources: &[Source]| {
         let from_repo = count_repo(sources);
         println!(
-            "nawa: {total} package(s) to install into {} ({from_repo} from the repository, {} to build):",
+            "nawa: {total} package(s) to install into {} ({from_repo} from the repository, {} to build)",
             ctx.root.display(),
             total - from_repo
         );
+        // one row per package: dnf-style table with sizes
+        struct Row {
+            name: String,
+            ver: String,
+            tag: &'static str,
+            dl: u64,
+            inst: u64,
+            note: String,
+        }
+        let mut rows: Vec<Row> = Vec::with_capacity(total);
         for (i, it) in plan.items.iter().enumerate() {
-            let replaces = match &it.replaces {
-                Some(old) => format!("  replaces {old}"),
-                None => String::new(),
+            let (tag, dl, inst) = match &sources[i] {
+                Source::Repo(re) => ("repo", re.size, re.installed_size),
+                Source::Build => ("build", 0, 0),
             };
-            let tag = match &sources[i] {
-                Source::Repo(_) => "repo ",
-                Source::Build => "build",
-            };
+            let mut note = it.why.label().to_string();
+            if let Some(old) = &it.replaces {
+                note.push_str(&format!(" (replaces {old})"));
+            }
+            rows.push(Row {
+                name: it.rec.package.name.clone(),
+                ver: format!("{}-{}", it.rec.package.version, it.rec.package.rel),
+                tag,
+                dl,
+                inst,
+                note,
+            });
+        }
+        for re in extras {
+            rows.push(Row {
+                name: re.name.clone(),
+                ver: format!("{}-{}", re.version, re.rel),
+                tag: "repo",
+                dl: re.size,
+                inst: re.installed_size,
+                note: "explicit (no recipe: dependencies not resolved)".to_string(),
+            });
+        }
+        let size_cell = |n: u64| if n == 0 { "-".to_string() } else { format_size(n) };
+        let wn = rows.iter().map(|r| r.name.len()).max().unwrap_or(0).max("Package".len());
+        let wv = rows.iter().map(|r| r.ver.len()).max().unwrap_or(0).max("Version".len());
+        let wd = rows.iter().map(|r| size_cell(r.dl).len()).max().unwrap_or(0).max("Download".len());
+        let wi = rows.iter().map(|r| size_cell(r.inst).len()).max().unwrap_or(0).max("Installed".len());
+        println!();
+        println!(
+            "{}",
+            pal.header(&format!(
+                "  {:>3}  {:<wn$}  {:<wv$}  {:<6}  {:>wd$}  {:>wi$}  Reason",
+                "#", "Package", "Version", "Source", "Download", "Installed"
+            ))
+        );
+        for (i, r) in rows.iter().enumerate() {
             println!(
-                "  {:>3}. {} {}  {} {}{}",
+                "  {:>3}  {}  {}  {}  {}  {}  {}",
                 i + 1,
-                pal.name(&format!("{:<22}", it.rec.package.name)),
-                pal.ver(&format!(
-                    "{:<12}",
-                    format!("{}-{}", it.rec.package.version, it.rec.package.rel)
-                )),
-                pal.dim(&format!("[{tag}]")),
-                pal.dim(it.why.label()),
-                pal.dim(&replaces),
+                pal.name(&format!("{:<wn$}", r.name)),
+                pal.ver(&format!("{:<wv$}", r.ver)),
+                pal.dim(&format!("{:<6}", r.tag)),
+                format!("{:>wd$}", size_cell(r.dl)),
+                format!("{:>wi$}", size_cell(r.inst)),
+                pal.dim(&r.note),
             );
         }
-        for (j, re) in extras.iter().enumerate() {
-            println!(
-                "  {:>3}. {} {}  {} {}",
-                plan.items.len() + j + 1,
-                pal.name(&format!("{:<22}", re.name)),
-                pal.ver(&format!("{:<12}", format!("{}-{}", re.version, re.rel))),
-                pal.dim("[repo ]"),
-                pal.dim("explicit  (no recipe: dependencies not resolved)"),
-            );
+        let dl_sum: u64 = rows.iter().map(|r| r.dl).sum();
+        let inst_sum: u64 = rows.iter().map(|r| r.inst).sum();
+        let unknown = rows.iter().filter(|r| r.inst == 0).count();
+        println!();
+        let mut line = format!(
+            "nawa: download size {}, installed size {}",
+            format_size(dl_sum),
+            format_size(inst_sum)
+        );
+        if unknown > 0 {
+            line.push_str(&format!(" (not counting {unknown} package(s) of unknown size)"));
         }
+        println!("{line}");
     };
     print_plan(sources.as_slice());
     if flags.dry_run {

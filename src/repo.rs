@@ -15,6 +15,16 @@ pub struct RepoEntry {
     pub arch: String,
     pub file: String, // file name inside the repo dir
     pub sha256: String,
+    /// archive size in bytes (download size); 0 = unknown (index written by an older nawa)
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub size: u64,
+    /// installed size in bytes, from the archive's `size` field; 0 = unknown
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub installed_size: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// The recipe tree published next to the packages (`nawa sync`). It lives in
@@ -107,6 +117,8 @@ pub fn create_index_with(
         let rel: u32 = info.get("pkgrel").and_then(|v| v.parse().ok()).unwrap_or(1);
         let arch = info.get("arch").cloned().unwrap_or_default();
         let sha256 = crate::fetch::sha256_of_file(&path)?;
+        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let installed_size: u64 = info.get("size").and_then(|v| v.parse().ok()).unwrap_or(0);
         println!("nawa: index -> {}-{}-{}", name, version, rel);
         packages.push(RepoEntry {
             name,
@@ -115,6 +127,8 @@ pub fn create_index_with(
             arch,
             file: path.file_name().unwrap().to_string_lossy().to_string(),
             sha256,
+            size,
+            installed_size,
         });
     }
 
@@ -240,6 +254,13 @@ mod tests {
         assert_eq!(idx.packages[0].version, "2.0");
         assert_eq!(idx.packages[0].rel, 1);
         assert_eq!(idx.find("demo").unwrap().version, "2.0");
+        let e = idx.find("demo").unwrap();
+        assert!(e.size > 0, "the index records the archive size");
+        assert_eq!(e.installed_size, 1, "and the installed size from the pkginfo");
+        // an index written before these fields existed still parses (sizes 0 = unknown)
+        let old = "[[package]]\nname = \"a\"\nversion = \"1\"\nrel = 1\narch = \"x86_64\"\nfile = \"a.nawa.tar.zst\"\nsha256 = \"00\"\n";
+        let parsed: Index = toml::from_str(old).unwrap();
+        assert_eq!((parsed.packages[0].size, parsed.packages[0].installed_size), (0, 0));
         let _ = std::fs::remove_dir_all(&base);
     }
 }
