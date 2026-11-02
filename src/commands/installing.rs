@@ -489,7 +489,7 @@ pub(crate) fn cmd_update(
     // least at the version requested by its recipe. Never silently downgrade
     // or report a stale repository package as a completed update.
     if mode == InstallMode::Repo {
-        for item in plan.items.iter().filter(|item| item.why == plan::Why::Update) {
+        for item in &plan.items {
             let name = &item.rec.package.name;
             let re = sourcing.entry(name).ok_or_else(|| {
                 anyhow::anyhow!("{name} has no package for this architecture in the repository")
