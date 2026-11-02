@@ -193,8 +193,18 @@ pub fn fetch_entry(
                 }
                 Err(e) => {
                     let _ = std::fs::remove_file(&sig_part);
+                    if !sig_dest.exists() {
+                        // Do not turn a server/network failure into an
+                        // "unsigned" package. A genuine HTTP 404 is already
+                        // represented by Ok(false); every other failure must
+                        // remain visible when no previously verified sidecar
+                        // is cached.
+                        return Err(e).with_context(|| {
+                            format!("could not fetch signature for {}", re.file)
+                        });
+                    }
                     eprintln!(
-                        "nawa: warning: could not fetch signature for {} ({e:#})",
+                        "nawa: warning: could not refresh signature for {} ({e:#}); using cached signature",
                         re.file
                     );
                 }

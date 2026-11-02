@@ -9,10 +9,9 @@
 //!     https (curl's `--proto =http,https --proto-redir =https`), retries on
 //!     transient failures (`--retry`), a 20s connect timeout and a read
 //!     timeout so a stalled mirror cannot hang a build forever;
-//!   * `download_opt` still treats HTTP 404-class answers as "file absent"
-//!     for optional `.sig` sidecars — but server errors (5xx) are retried and
-//!     then reported, so a misbehaving mirror can no longer silently hide a
-//!     signature;
+//!   * `download_opt` treats only HTTP 404 as an absent optional `.sig`
+//!     sidecar; permission errors and server failures remain errors, so a
+//!     broken or inaccessible signature URL cannot masquerade as unsigned;
 //!   * `copy_local` is a pure-Rust `cp -a` (symlinks, modes, timestamps,
 //!     hard links and — as root — ownership are preserved);
 //!   * source tarballs are recognised and extracted with the `tar` crate plus
@@ -67,8 +66,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(20); // curl --connect-tim
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
 /// curl --retry 3 for regular downloads (initial try + 3 retries).
 const DOWNLOAD_ATTEMPTS: u32 = 4;
-/// curl --retry 2 for optional sidecars.
-const OPT_ATTEMPTS: u32 = 3;
+/// Five total attempts for optional sidecars; transient 5xx responses can
+/// be short-lived at release/CDN edges, so give them a longer recovery window.
+const OPT_ATTEMPTS: u32 = 5;
 const MAX_REDIRECTS: usize = 10;
 
 fn agent() -> ureq::Agent {
@@ -235,7 +235,7 @@ fn stream_body(resp: ureq::Response, dest: &Path) -> Result<u64> {
 
 enum Outcome {
     Downloaded,
-    /// HTTP 404-class answer: the file is simply not there.
+    /// HTTP 404 answer: the optional file is simply not published.
     Absent,
 }
 
@@ -243,12 +243,11 @@ fn single_transfer(agent: &ureq::Agent, url: &str, dest: &Path) -> Result<Outcom
     match http_get(agent, url) {
         Ok(resp) => stream_body(resp, dest).map(|_| Outcome::Downloaded),
         Err(e) => {
-            // a non-transient 4xx means "not there" — optional sidecars ask
-            // for that explicitly; 408/429 stay retryable, 5xx fail loudly
-            if let Some(ureq::Error::Status(code, _)) = e.downcast_ref::<ureq::Error>() {
-                if (400..500).contains(code) && !transient_status(*code) {
-                    return Ok(Outcome::Absent);
-                }
+            // Only 404 means an optional sidecar is absent. A 403 can mean
+            // access/rate-limit policy, and other 4xx responses are real errors.
+            // 408/429 and 5xx are handled by the retry policy below.
+            if let Some(ureq::Error::Status(404, _)) = e.downcast_ref::<ureq::Error>() {
+                return Ok(Outcome::Absent);
             }
             Err(e)
         }
@@ -281,7 +280,7 @@ pub fn download(url: &str, dest: &Path) -> Result<()> {
     }
 }
 
-/// Like `download`, but treats 404-class HTTP answers as "file absent" and
+/// Like `download`, but treats HTTP 404 as "file absent" and
 /// returns `false` instead of failing (used for optional `.sig` sidecars).
 /// Server errors (5xx) are retried and still surface as an error, so a
 /// broken mirror can no longer make a signature look unpublished.
@@ -899,6 +898,17 @@ mod tests {
         let dest = dir.join("file");
         assert!(!download_opt(&format!("{base}/missing"), &dest).unwrap());
         assert!(download(&format!("{base}/missing"), &dest).is_err(), "curl -f parity");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn download_opt_does_not_treat_forbidden_as_absent() {
+        let base = scripted_server(vec![
+            http_response("HTTP/1.1 403 Forbidden", b"forbidden", ""),
+        ]);
+        let dir = scratch("403");
+        let dest = dir.join("file");
+        assert!(download_opt(&format!("{base}/file"), &dest).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
