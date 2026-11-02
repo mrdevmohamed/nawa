@@ -421,3 +421,142 @@ fn config_show_reports_flag_as_the_source() {
     let line = out.lines().find(|l| l.contains("/xyz")).expect("root line");
     assert!(line.contains("(flag)"), "got: {line}");
 }
+
+
+/// Repository-backed update must use the binary archive, and strict repo
+/// mode must refuse a stale repository version without changing the system.
+#[test]
+fn update_from_repo_uses_binary_archive_and_rejects_stale_repo_versions() {
+    let scratch = std::env::temp_dir().join(format!("nawa-e2e-update-repo-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&scratch);
+
+    let recipes = scratch.join("recipes");
+    let recipe_dir = recipes.join("demo");
+    let builddir = scratch.join("build");
+    let root = scratch.join("rootfs");
+    fs::create_dir_all(&recipe_dir).unwrap();
+    fs::create_dir_all(&root).unwrap();
+
+    let write_recipe = |version: &str, marker: &str| {
+        fs::write(
+            recipe_dir.join("recipe.toml"),
+            format!(
+                "[package]\nname = \"demo\"\nversion = \"{version}\"\nrel = 1\n\
+                 arch = [\"x86_64\"]\nsummary = \"demo update test\"\n\n\
+                 [build]\ninstall = \"\"\"\n\
+                 mkdir -p %{{pkgdir}}/usr/share\necho {marker} > %{{pkgdir}}/usr/share/demo-version\n\
+                 \"\"\"\n"
+            ),
+        )
+        .unwrap();
+    };
+
+    let build_demo = || {
+        let out = nawa()
+            .args([
+                "--recipes", recipes.to_str().unwrap(),
+                "--builddir", builddir.to_str().unwrap(),
+                "build", "demo",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "build failed:\n{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+
+    // Install 1.0 first, then make the local recipe request 2.0.
+    write_recipe("1.0", "v1");
+    build_demo();
+    let v1_archive = builddir.join("out/demo-1.0-1.nawa.tar.zst");
+    assert!(v1_archive.is_file());
+    let installed = nawa()
+        .args([
+            "--root", root.to_str().unwrap(),
+            "install", v1_archive.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        installed.status.success(),
+        "initial install failed:\n{}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+
+    write_recipe("2.0", "v2");
+    build_demo();
+    let v2_archive = builddir.join("out/demo-2.0-1.nawa.tar.zst");
+    assert!(v2_archive.is_file());
+
+    // A stale repo must be rejected before any package is touched.
+    let stale_repo = scratch.join("stale-repo");
+    fs::create_dir_all(&stale_repo).unwrap();
+    fs::copy(&v1_archive, stale_repo.join(v1_archive.file_name().unwrap())).unwrap();
+    let indexed = nawa()
+        .args(["repo-create", stale_repo.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(indexed.status.success(), "repo-create failed: {}", String::from_utf8_lossy(&indexed.stderr));
+
+    let stale = nawa()
+        .args([
+            "--root", root.to_str().unwrap(),
+            "--recipes", recipes.to_str().unwrap(),
+            "update", "--from", "repo",
+            "--repo", stale_repo.to_str().unwrap(),
+            "--yes",
+        ])
+        .output()
+        .unwrap();
+    assert!(!stale.status.success(), "strict repo mode must reject the stale package");
+    assert!(
+        String::from_utf8_lossy(&stale.stderr).contains("recipe requires"),
+        "unexpected error: {}",
+        String::from_utf8_lossy(&stale.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("usr/share/demo-version")).unwrap().trim(),
+        "v1",
+        "a rejected plan must leave the installed package untouched"
+    );
+
+    // A repository with the requested version must supply the update; no
+    // source build is needed for this invocation.
+    let current_repo = scratch.join("current-repo");
+    fs::create_dir_all(&current_repo).unwrap();
+    fs::copy(&v2_archive, current_repo.join(v2_archive.file_name().unwrap())).unwrap();
+    let indexed = nawa()
+        .args(["repo-create", current_repo.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(indexed.status.success(), "repo-create failed: {}", String::from_utf8_lossy(&indexed.stderr));
+
+    let updated = nawa()
+        .args([
+            "--root", root.to_str().unwrap(),
+            "--recipes", recipes.to_str().unwrap(),
+            "update", "--from", "repo",
+            "--repo", current_repo.to_str().unwrap(),
+            "--yes",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        updated.status.success(),
+        "repo update failed:\n{}\n{}",
+        String::from_utf8_lossy(&updated.stdout),
+        String::from_utf8_lossy(&updated.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&updated.stdout);
+    assert!(stdout.contains("fetching demo-2.0-1 from the repository"), "{stdout}");
+    assert!(!stdout.contains("building demo"), "repo mode unexpectedly built from source: {stdout}");
+    assert_eq!(
+        fs::read_to_string(root.join("usr/share/demo-version")).unwrap().trim(),
+        "v2"
+    );
+
+    let _ = fs::remove_dir_all(&scratch);
+}
