@@ -148,7 +148,7 @@ recipes   = "recipes"                            # env: NAWA_RECIPES
 builddir  = "build"                              # env: NAWA_BUILDDIR
 profiles  = "profiles"                           # env: NAWA_PROFILES
 jobs      = 8                                    # env: NAWA_JOBS
-repo      = "https://mirror.example.com/stable"  # env: NAWA_REPO — install/update/upgrade source
+repo      = "https://mirror.example.com/stable"  # env: NAWA_REPO — install/upgrade; update with --from repo|auto|ask
 ```
 
 Precedence per key: **flag > env var > nawa.toml > default**. Relative paths
