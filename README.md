@@ -57,10 +57,12 @@ Commands (global flags work anywhere on the line — see the config section
 below for making them unnecessary):
 
 ```
-nawa install <name>...                          # build + install packages AND all missing dependencies
+nawa install <name>...                          # repo when available, otherwise build + install
 nawa install -n <name>                          # show that plan, change nothing (--dry-run)
 nawa outdated                                   # installed packages whose recipe is newer
-nawa update [name...]                           # rebuild + reinstall the outdated ones
+nawa update [name...]                           # rebuild + reinstall outdated packages (default)
+nawa update --from repo [name...]               # update from the binary repository only
+nawa update --from auto [name...]               # prefer repo; build when repo is missing/stale
 nawa autoremove                                 # remove dependency packages nothing needs
 nawa build --install <name>                     # build ONE recipe and install it (no dependency handling)
 nawa install <archive.nawa.tar.zst>              # install a built archive into --root
@@ -88,7 +90,7 @@ throwaway directory instead of `/`.
 ### Installing by name
 
 ```
-nawa install curl          # shows the plan, asks, then builds + installs
+nawa install curl          # shows the plan; uses repo when available, otherwise builds
 ```
 
 `nawa install <name>` resolves `depends.build` **and** `depends.run`
@@ -96,29 +98,39 @@ transitively, skips whatever is already installed, and prints the order
 before touching anything:
 
 ```
-nawa: 3 package(s) to build and install into /:
-    1. zlib                   1.3.1-1       dependency
-    2. openssl                3.3.1-1       dependency
-    3. curl                   8.9.1-1       explicit
+nawa: 3 package(s) to install into / (2 from the repository, 1 to build)
+    #  Package                 Version       Source  Download  Installed  Reason
+    1  zlib                    1.3.1-1       repo    ...       ...        dependency
+    2  openssl                 3.3.1-1       repo    ...       ...        dependency
+    3  curl                    8.9.1-1       build   -         -          explicit
 ```
 
-Then each step is built and installed in turn (`[2/3] building ...`), the db
-lock is held only around each install, and a failure in the middle says how
-many packages already landed — re-running the same command continues, because
-installed packages are skipped. Packages you named are recorded as `explicit`,
-everything pulled in as `dependency`.
+Each step is fetched from the repository or built according to the selected
+source policy, then installed. The database lock is held only around each
+install, and a failure in the middle says how many packages already landed —
+re-running the same command continues, because installed packages are skipped.
+Packages you named are recorded as `explicit`, everything pulled in as
+`dependency`.
 
 * `-n/--dry-run` prints the plan and stops; `-y/--yes` is required when stdin
   is not a terminal (same contract as `remove` and `upgrade`)
-* `--no-deps` builds only the named packages
-* `--isolation`, `--use-cache`, `--allow-degraded`, `--force`,
-  `--allow-unsigned` work as for `nawa build` / `nawa install <archive>`
+* `--no-deps` installs/builds only the named packages
+* `--isolation`, `--use-cache`, and `--allow-degraded` affect source builds;
+  `--force` and `--allow-unsigned` also apply to repository/archive installs
 * a bare word is a package name; anything ending in `.nawa.tar.zst` or
   containing a `/` is an archive path (the two cannot be mixed in one call)
 
-`nawa outdated` lists installed packages whose recipe has a newer
-`version-rel`; `nawa update` plans and rebuilds exactly those (plus any missing
-dependency they gained), keeping each package's explicit/dependency reason.
+`nawa outdated` lists installed packages whose local recipe has a newer
+`version-rel`. `nawa update` plans those packages plus any newly required
+missing dependencies, preserving each package's explicit/dependency reason.
+It builds from source by default. Use `nawa update --from repo` to require
+repository packages only, or `--from auto` to prefer the repository and build
+only when the repository lacks a package at least as new as its recipe. A
+repository-only update preflights the complete plan and refuses missing or
+older repository packages before changing the target system. `--repo DIR_OR_URL`
+selects a repository for that invocation. `nawa upgrade` remains the direct
+repository-index updater: it can update installed packages even when the local
+recipe tree has not yet been synced.
 `nawa autoremove` removes `dependency` packages that no explicit package needs
 any more, dependents first. Build-only dependencies of packages you keep
 (compilers, headers) are **kept** unless you pass `--build-deps`, since the next
@@ -136,7 +148,7 @@ recipes   = "recipes"                            # env: NAWA_RECIPES
 builddir  = "build"                              # env: NAWA_BUILDDIR
 profiles  = "profiles"                           # env: NAWA_PROFILES
 jobs      = 8                                    # env: NAWA_JOBS
-repo      = "https://mirror.example.com/stable"  # env: NAWA_REPO — default for `nawa upgrade`
+repo      = "https://mirror.example.com/stable"  # env: NAWA_REPO — install/update/upgrade source
 ```
 
 Precedence per key: **flag > env var > nawa.toml > default**. Relative paths
@@ -147,10 +159,10 @@ came from.
 
 ### Confirmations, colors, suggestions
 
-* `remove` and `upgrade` print exactly what they are about to do and ask
-  `y/N`. Non-interactive runs (scripts, CI) must pass `--yes`; without it a
-  piped stdin is **refused** rather than guessed at. `install` never asks —
-  the bootstrap depends on it.
+* `remove`, `upgrade`, and source-based `update` print their plans and ask
+  `y/N`. Non-interactive runs must pass `--yes`; piped stdin is refused without
+  it. `install` does not use this second confirmation, although
+  `install_mode = "ask"` can prompt for repo vs build on a terminal.
 * Output is colored only on a real terminal; pipes and scripts get plain,
   byte-identical text. `NO_COLOR` disables colors, `NAWA_COLOR=always|never|auto`
   overrides the detection.
@@ -171,8 +183,9 @@ Package names complete dynamically — the scripts shell out to
 ### Database locking
 
 Every command that touches `<root>/var/lib/nawa` takes an `flock(2)` lock on
-`<root>/var/lib/nawa/lock`: `install`, `remove`, `rollback` and `upgrade`
-exclusively (held for the whole command, hooks included); `query`, `list`,
+`<root>/var/lib/nawa/lock`: `remove`, `rollback`, and `upgrade` hold an exclusive
+lock for the whole command; archive installs do too, while name-based `install`
+and `update` lock around each package install (not the build/download). `query`, `list`,
 `files`, `owner`, `info`, `why`, `deps`, `deps-all` and `upgrade --dry-run`
 shared, so readers never see a half-applied transaction and don't block each
 other (`build --install` locks around the install step only, never through
