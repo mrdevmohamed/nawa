@@ -91,7 +91,7 @@ pub(crate) struct Sourcing {
 }
 
 impl Sourcing {
-    /// Always build — what `update` and `--build` do.
+    /// Always build — the default for `update` and explicit `--build`.
     pub(crate) fn build_only() -> Self {
         Sourcing { mode: InstallMode::Build, ask: false, open: None }
     }
