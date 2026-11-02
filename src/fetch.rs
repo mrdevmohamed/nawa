@@ -205,7 +205,7 @@ fn stream_body(resp: ureq::Response, dest: &Path) -> Result<u64> {
     let mut w = BufWriter::with_capacity(256 * 1024, f);
     let mut buf = [0u8; 128 * 1024];
     let mut total = 0u64;
-    let show = stderr_is_tty() && total_len.map_or(true, |t| t >= PROGRESS_MIN_BYTES);
+    let show = stderr_is_tty() && !matches!(total_len, Some(t) if t < PROGRESS_MIN_BYTES);
     let label = progress_label(dest);
     let mut last = std::time::Instant::now();
     let mut drawn = false;

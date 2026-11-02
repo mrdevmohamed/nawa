@@ -302,14 +302,13 @@ pub(crate) fn run_plan(
             ))
         );
         for (i, r) in rows.iter().enumerate() {
+            let (dl, inst) = (size_cell(r.dl), size_cell(r.inst));
             println!(
-                "  {:>3}  {}  {}  {}  {}  {}  {}",
+                "  {:>3}  {}  {}  {}  {dl:>wd$}  {inst:>wi$}  {}",
                 i + 1,
                 pal.name(&format!("{:<wn$}", r.name)),
                 pal.ver(&format!("{:<wv$}", r.ver)),
                 pal.dim(&format!("{:<6}", r.tag)),
-                format!("{:>wd$}", size_cell(r.dl)),
-                format!("{:>wi$}", size_cell(r.inst)),
                 pal.dim(&r.note),
             );
         }
