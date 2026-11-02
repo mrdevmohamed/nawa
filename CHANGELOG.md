@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased — feat: update from binary repositories
+
+- `nawa update` keeps building from source by default; choose `--from repo`
+  (or `--from-repo` / `-r`) for repository-only updates, `--from auto` to use
+  repository archives when they are at least as new as the local recipes and
+  otherwise build, or `--from ask` to choose interactively. `--build` / `-b`
+  explicitly keeps source builds. `--repo DIR_OR_URL` selects the repository
+  for one run; without it, the configured repository is used.
+- Repository-only updates preflight every package in the complete plan and
+  reject missing, wrong-architecture, or stale entries before installing
+  anything. `nawa upgrade` remains the direct index-based binary updater.
+
 ## Unreleased — ux: sizes in the install plan, readable download output
 
 - `nawa install` / `update` print a table (package, version, source, download
