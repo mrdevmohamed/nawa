@@ -26,6 +26,26 @@ pub fn enabled_dir(root: &Path) -> PathBuf {
     root.join("etc/runit/runsvdir/default")
 }
 
+/// Markers for services an admin disabled on purpose: `<root>/etc/runit/disabled/<n>`.
+/// Packages ship their default runsvdir links, so without this a package
+/// upgrade would silently re-enable a service the admin turned off.
+pub fn disabled_dir(root: &Path) -> PathBuf {
+    root.join("etc/runit/disabled")
+}
+
+/// True when installing `dest` would recreate a runsvdir link the admin
+/// disabled: the install step then skips that one file.
+pub fn keep_disabled(root: &Path, dest: &Path) -> bool {
+    let Some(name) = dest.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let ed = enabled_dir(root);
+    dest.parent() == Some(ed.as_path())
+        && validate_name(name).is_ok()
+        && disabled_dir(root).join(name).exists()
+        && dest.symlink_metadata().is_err()
+}
+
 #[derive(Debug, Clone)]
 pub struct ServiceInfo {
     pub name: String,
@@ -101,6 +121,8 @@ pub fn enable(root: &Path, name: &str) -> Result<()> {
     }
     std::os::unix::fs::symlink(format!("/etc/sv/{name}"), &link)
         .with_context(|| format!("symlink {}", link.display()))?;
+    // explicit enable cancels an earlier explicit disable
+    let _ = std::fs::remove_file(disabled_dir(root).join(name));
     Ok(())
 }
 
@@ -116,20 +138,126 @@ pub fn disable(root: &Path, name: &str) -> Result<()> {
         bail!("refusing to remove {}: not a symlink", link.display());
     }
     std::fs::remove_file(&link)?;
+    // remember the choice so a package upgrade does not re-enable it
+    let dd = disabled_dir(root);
+    std::fs::create_dir_all(&dd).with_context(|| format!("create {}", dd.display()))?;
+    std::fs::write(dd.join(name), b"")
+        .with_context(|| format!("record disabled state of `{name}`"))?;
     Ok(())
 }
 
-/// `sv status` when the binary exists and runsv is supervising; None otherwise.
-fn live_status(name: &str) -> Option<String> {
-    let out = Command::new("sv")
-        .arg("status")
-        .arg(format!("/etc/sv/{name}"))
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
+/// Live control only makes sense against the running system: runsvdir of a
+/// throwaway `--root` is not supervising anything.
+fn require_live_root(root: &Path) -> Result<()> {
+    if root != Path::new("/") {
+        bail!("live service control works on the running system only (got --root {})", root.display());
     }
-    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    Ok(())
+}
+
+/// `sv` resolves a bare name against $SVDIR (default /service), which does not
+/// exist here, so it must always be given the full runsvdir path.
+fn sv_path(root: &Path, name: &str) -> PathBuf {
+    enabled_dir(root).join(name)
+}
+
+/// runsv has created `supervise/ok` for this service, i.e. it is supervised.
+pub fn is_supervised(root: &Path, name: &str) -> bool {
+    sv_path(root, name).join("supervise/ok").exists()
+}
+
+/// runsvdir only rescans every ~5 s after a link appears: wait for runsv.
+fn wait_supervised(root: &Path, name: &str, secs: u64) -> bool {
+    let steps = secs * 5;
+    for _ in 0..=steps {
+        if is_supervised(root, name) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    false
+}
+
+/// Run `sv <action> <runsvdir>/<name>` with inherited stdio so the user sees
+/// runit's own `ok: run: name: (pid N) 2s` / `timeout:` line.
+fn sv_run(root: &Path, action: &str, name: &str) -> Result<()> {
+    let st = Command::new("sv")
+        .arg(action)
+        .arg(sv_path(root, name))
+        .status()
+        .with_context(|| "cannot run `sv` (is the runit package installed?)")?;
+    if !st.success() {
+        bail!("`sv {action} {name}` failed ({st})");
+    }
+    Ok(())
+}
+
+fn require_enabled_supervised(root: &Path, name: &str) -> Result<()> {
+    validate_name(name)?;
+    require_live_root(root)?;
+    if !is_enabled(root, name)? {
+        bail!("service `{name}` is not enabled: run `nawa service enable {name}` first");
+    }
+    // just enabled: runsvdir rescans every ~5 s before runsv appears
+    if !wait_supervised(root, name, 10) {
+        bail!("service `{name}` is enabled but runsvdir did not start supervising it within 10 s (is runsvdir running?)");
+    }
+    Ok(())
+}
+
+/// Start a service now (it must be enabled).
+pub fn start(root: &Path, name: &str) -> Result<()> {
+    require_enabled_supervised(root, name)?;
+    sv_run(root, "start", name)
+}
+
+/// Stop a service now, without disabling it: it stays down until `start`,
+/// `restart` or the next boot.
+pub fn stop(root: &Path, name: &str) -> Result<()> {
+    require_enabled_supervised(root, name)?;
+    sv_run(root, "stop", name)
+}
+
+pub fn restart(root: &Path, name: &str) -> Result<()> {
+    require_enabled_supervised(root, name)?;
+    sv_run(root, "restart", name)
+}
+
+/// `enable --now`: link, wait for runsv to pick it up, then wait until it runs.
+pub fn enable_now(root: &Path, name: &str) -> Result<()> {
+    require_live_root(root)?;
+    enable(root, name)?;
+    if !wait_supervised(root, name, 10) {
+        bail!("`{name}` was enabled but runsvdir did not start supervising it within 10 s");
+    }
+    sv_run(root, "start", name)
+}
+
+/// `disable --now`: stop first (clean TERM + wait), then drop the link.
+pub fn disable_now(root: &Path, name: &str) -> Result<()> {
+    validate_name(name)?;
+    require_live_root(root)?;
+    if is_supervised(root, name) {
+        sv_run(root, "stop", name)?;
+    }
+    disable(root, name)
+}
+
+/// Live state from `sv status` for an enabled service.
+fn live_status(root: &Path, name: &str) -> String {
+    if !is_supervised(root, name) {
+        return "waiting for runsvdir (not supervised yet)".to_string();
+    }
+    match Command::new("sv").arg("status").arg(sv_path(root, name)).output() {
+        Ok(o) => {
+            let mut t = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if t.is_empty() {
+                t = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            }
+            if t.is_empty() { "unknown".to_string() } else { t }
+        }
+        Err(e) => format!("`sv` unavailable ({e})"),
+    }
 }
 
 pub fn print_list(root: &Path) -> Result<()> {
@@ -166,9 +294,11 @@ pub fn print_status(root: &Path, name: Option<&str>) -> Result<()> {
     for s in &chosen {
         let state = if s.enabled { "enabled" } else { "disabled" };
         let run = if s.has_run { "run-script present" } else { "NO run script" };
-        let live = live_status(&s.name)
-            .map(|l| format!("live: {l}"))
-            .unwrap_or_else(|| "live: down (not supervised here)".to_string());
+        let live = if s.enabled {
+            format!("live: {}", live_status(root, &s.name))
+        } else {
+            "not running (disabled)".to_string()
+        };
         println!("{:<24} {state}, {run}, {live}", s.name);
     }
     Ok(())
@@ -219,6 +349,11 @@ mod tests {
         assert!(link.symlink_metadata().is_err(), "link must be gone");
         assert!(disable(&root, "sshd").is_err(), "double disable refused");
 
+        // disabled on purpose: a package install must not recreate the link
+        assert!(keep_disabled(&root, &link));
+        enable(&root, "sshd").unwrap();
+        assert!(!keep_disabled(&root, &link), "enable clears the marker");
+
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -238,6 +373,19 @@ mod tests {
         let root = tmpdir("norun");
         std::fs::create_dir_all(sv_dir(&root).join("broken")).unwrap();
         assert!(enable(&root, "broken").is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn live_control_refuses_foreign_root_and_disabled_services() {
+        let root = tmpdir("live");
+        mk_service(&root, "sshd");
+        // a throwaway --root is never supervised by the running runsvdir
+        assert!(start(&root, "sshd").is_err());
+        assert!(stop(&root, "sshd").is_err());
+        assert!(restart(&root, "sshd").is_err());
+        assert!(enable_now(&root, "sshd").is_err());
+        assert!(!is_enabled(&root, "sshd").unwrap(), "failed --now must not enable");
         let _ = std::fs::remove_dir_all(&root);
     }
 

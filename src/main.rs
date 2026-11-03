@@ -279,22 +279,34 @@ fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         Cmd::Rollback { name } => install::rollback(&name, &ctx.root),
         Cmd::Service { action } => match action {
             ServiceCmd::List => service::print_list(&ctx.root),
-            ServiceCmd::Enable { name } => {
-                service::enable(&ctx.root, &name)?;
-                println!(
-                    "nawa: enabled {name} — runsvdir picks it up within seconds \
-                     (use `sv up {name}` to start it right now)"
-                );
+            ServiceCmd::Enable { name, now } => {
+                if now {
+                    service::enable_now(&ctx.root, &name)?;
+                } else {
+                    service::enable(&ctx.root, &name)?;
+                    println!(
+                        "nawa: enabled {name} — runsvdir picks it up within ~5 s \
+                         (or: `nawa service start {name}`)"
+                    );
+                }
                 Ok(())
             }
-            ServiceCmd::Disable { name } => {
-                service::disable(&ctx.root, &name)?;
-                println!(
-                    "nawa: disabled {name} — runsvdir stops it within seconds \
-                     (use `sv down {name}` to stop it right now)"
-                );
+            ServiceCmd::Disable { name, now } => {
+                if now {
+                    service::disable_now(&ctx.root, &name)?;
+                    println!("nawa: stopped and disabled {name}");
+                } else {
+                    service::disable(&ctx.root, &name)?;
+                    println!(
+                        "nawa: disabled {name} — runsvdir stops it within ~5 s \
+                         (or use `nawa service disable --now {name}`)"
+                    );
+                }
                 Ok(())
             }
+            ServiceCmd::Start { name } => service::start(&ctx.root, &name),
+            ServiceCmd::Stop { name } => service::stop(&ctx.root, &name),
+            ServiceCmd::Restart { name } => service::restart(&ctx.root, &name),
             ServiceCmd::Status { name } => service::print_status(&ctx.root, name.as_deref()),
         },
         Cmd::Config { action } => match action {

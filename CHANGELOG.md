@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased — fix: runit service control
+
+- `nawa service start|stop|restart <name>` control a running service through
+  `sv` using the full runsvdir path (a bare name resolves against `$SVDIR`,
+  which does not exist here, so the old `sv up <name>` hint never worked).
+- `enable --now` waits for runsv to pick the service up and starts it;
+  `disable --now` stops it first, then removes the link.
+- `disable` records the choice in `/etc/runit/disabled/<n>`; package installs
+  and upgrades no longer recreate a runsvdir link the admin disabled
+  (`enable` clears the marker).
+- `status` no longer reports "down" for services that are merely disabled or
+  not yet picked up by runsvdir, and shows `sv status` output as-is.
+
 ## Unreleased — feat: update from binary repositories
 
 - `nawa update` keeps building from source by default; choose `--from repo`

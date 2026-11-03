@@ -633,6 +633,10 @@ fn move_tree(
             let _ = std::fs::set_permissions(&to, md.permissions());
             move_tree(&from, &to, root, old_hashes, diverted, tx)?;
         } else {
+            // a runsvdir link the admin disabled stays disabled across upgrades
+            if crate::service::keep_disabled(root, &to) {
+                continue;
+            }
             if let Some(parent) = to.parent() {
                 std::fs::create_dir_all(parent)?;
             }
