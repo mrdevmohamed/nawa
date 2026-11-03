@@ -321,7 +321,15 @@ pub fn upgrade(
         if open.archive_auth == ArchiveAuth::SignedIndexSha256 {
             install::install_archive_from_index(&src, root, opts.force, &re.sha256, "keep")?;
         } else {
-            install::install_archive(&src, root, opts.force, opts.allow_unsigned, None, "keep")?;
+            install::install_archive_pinned(
+                &src,
+                root,
+                opts.force,
+                opts.allow_unsigned,
+                None,
+                "keep",
+                Some(&re.sha256),
+            )?;
         }
         done += 1;
     }
@@ -375,9 +383,16 @@ fn check_index_freshness(
             return Ok(());
         }
     };
-    if remote && gen > now {
-        bail!(
-            "repository index generated timestamp is in the future; check publisher and system clocks"
+    // A `generated` value ahead of this machine's clock is not an error: an
+    // unsynchronised clock (no RTC, fresh VM or chroot) must not make every
+    // freshly published index unusable. It only must never become the
+    // "newest seen" marker, or one bad publisher/system clock would block
+    // every later genuine index.
+    let future = gen > now;
+    if future {
+        eprintln!(
+            "nawa: warning: repository index timestamp is ahead of this system's clock; \
+             check the system clock (the index is used, but not recorded as newest seen)"
         );
     }
     if remote {
@@ -391,13 +406,15 @@ fn check_index_freshness(
                 }
             }
         }
-        // Never persist a future timestamp, even within tolerated clock skew.
-        if authenticated && gen <= now {
+        // Best effort, as before: failing to record the marker must not fail
+        // the upgrade. The write is atomic so a crash cannot leave a torn file.
+        if authenticated && !future {
             let part = seen_path.with_extension("seen.part");
-            std::fs::write(&part, gen.to_string())
-                .with_context(|| format!("write {}", part.display()))?;
-            std::fs::rename(&part, &seen_path)
-                .with_context(|| format!("activate {}", seen_path.display()))?;
+            let recorded = std::fs::write(&part, gen.to_string())
+                .and_then(|()| std::fs::rename(&part, &seen_path));
+            if recorded.is_err() {
+                let _ = std::fs::remove_file(&part);
+            }
         }
     }
     if let Some(exp) = index.expires {
@@ -790,15 +807,17 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let far_future = now + 60;
+        let ahead = now + 3600;
         let idx = repo::Index {
-            generated: Some(far_future),
-            expires: Some(far_future + 10_000),
+            generated: Some(ahead),
+            expires: Some(ahead + 10_000),
             repository: None,
             recipes: None,
             packages: vec![],
         };
-        assert!(check_index_freshness(&base, &idx, true, false, true).is_err());
+        // a clock that runs behind the publisher still gets a usable index ...
+        assert!(check_index_freshness(&base, &idx, true, false, true).is_ok());
+        // ... but the future value is never recorded as the newest seen
         assert!(!base.join("index.seen").exists());
 
         let current = repo::Index {

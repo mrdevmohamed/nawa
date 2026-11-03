@@ -82,9 +82,36 @@ impl Drop for VerifiedSnapshot {
 
 static SNAPSHOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-/// Copy into a mode-0600 O_EXCL snapshot and optionally authenticate the copied
-/// bytes against an expected SHA-256. Uses /tmp only when it is a real,
-/// non-symlink directory and sticky if world-writable.
+/// Remove `verified-<pid>-<n>.tmp` snapshots left behind by processes that
+/// died before their `Drop` ran (SIGKILL, power loss). Only acts when /proc is
+/// readable, so a missing /proc can never make a live process look dead.
+fn remove_stale_snapshots(dir: &Path) {
+    if !Path::new("/proc/self").exists() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let me = std::process::id();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let Some(rest) = name.strip_prefix("verified-").and_then(|r| r.strip_suffix(".tmp")) else {
+            continue;
+        };
+        let Some(pid) = rest.split('-').next().and_then(|p| p.parse::<u32>().ok()) else {
+            continue;
+        };
+        if pid != me && !Path::new(&format!("/proc/{pid}")).exists() {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Copy into a mode-0600 O_EXCL snapshot inside `snapshot_dir` (private nawa
+/// state, restricted to 0700) and optionally authenticate the copied bytes
+/// against an expected SHA-256. Callers must use the snapshot, not the source,
+/// for everything that follows.
 pub fn snapshot_file(
     source_path: &Path,
     expected_sha256: Option<&str>,
@@ -103,6 +130,7 @@ pub fn snapshot_file(
     permissions.set_mode(0o700);
     std::fs::set_permissions(snapshot_dir, permissions)
         .with_context(|| format!("secure snapshot directory {}", snapshot_dir.display()))?;
+    remove_stale_snapshots(snapshot_dir);
 
     let mut source = File::open(source_path)
         .with_context(|| format!("open {}", source_path.display()))?;
@@ -142,8 +170,8 @@ pub fn snapshot_file(
         snapshot_file.write_all(&buffer[..read])?;
         hasher.update(&buffer[..read]);
     }
+    // No fsync: the snapshot is a throwaway copy, durability is irrelevant.
     snapshot_file.flush()?;
-    snapshot_file.sync_all()?;
 
     if let Some(expected) = expected_sha256 {
         let actual = hex::encode(hasher.finalize());

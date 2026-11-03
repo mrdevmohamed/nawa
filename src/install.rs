@@ -34,8 +34,24 @@ pub fn install_archive(
     key: Option<&Path>,
     reason: &str,
 ) -> Result<Entry> {
+    install_archive_pinned(archive_path, root, force, allow_unsigned, key, reason, None)
+}
+
+/// [`install_archive`] for an archive that a repository index already
+/// described. With `expected_sha256` the snapshot must hash to the index
+/// digest, so the bytes whose detached signature is checked are provably the
+/// bytes the index entry (and `.PKGINFO` check) was validated against.
+pub fn install_archive_pinned(
+    archive_path: &Path,
+    root: &Path,
+    force: bool,
+    allow_unsigned: bool,
+    key: Option<&Path>,
+    reason: &str,
+    expected_sha256: Option<&str>,
+) -> Result<Entry> {
     let snapshot_dir = root.join(".nawa");
-    let snapshot = crate::fetch::snapshot_file(archive_path, None, &snapshot_dir)?;
+    let snapshot = crate::fetch::snapshot_file(archive_path, expected_sha256, &snapshot_dir)?;
     sign::verify_for_install_with_sig(
         snapshot.path(),
         &sign::sig_path_for(archive_path),
@@ -379,11 +395,11 @@ pub fn remove_with(name: &str, root: &Path, force: bool) -> Result<()> {
     Ok(())
 }
 
-/// Copy an archive into `<root>/var/cache/nawa` (hardlink when possible).
-/// Also keeps the detached signature next to it when one exists.
-/// Cache verified bytes under the original archive filename. A trusted v2
-/// index is itself the authenticator, so never import a stray detached
-/// signature into its rollback cache.
+/// Copy verified bytes into `<root>/var/cache/nawa` (atomically, as a full
+/// copy) under the original archive filename. For legacy archives the
+/// detached signature is kept next to it; a trusted v2 index is itself the
+/// authenticator, so a stray detached signature is never imported into its
+/// rollback cache.
 fn cache_archive_named(
     archive_path: &Path,
     name_source: &Path,
@@ -1220,6 +1236,50 @@ mod tests {
         let snapshot_path = snapshot.path().to_path_buf();
         drop(snapshot);
         assert!(!snapshot_path.exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn pinned_install_rejects_bytes_that_differ_from_the_index_digest() {
+        let base = tmpdir("pinned-install");
+        let root = base.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let archive = make_pkg(&base, "pinned-demo", "1.0", &[("/usr/share/pinned-demo", b"x")]);
+        let digest = crate::fetch::sha256_of_file(&archive).unwrap();
+
+        let wrong = "0".repeat(64);
+        let err = install_archive_pinned(&archive, &root, false, true, None, "explicit", Some(&wrong))
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("sha256 mismatch"), "{err:#}");
+        assert!(!root.join("usr/share/pinned-demo").exists());
+
+        install_archive_pinned(&archive, &root, false, true, None, "explicit", Some(&digest.to_uppercase()))
+            .unwrap();
+        assert!(root.join("usr/share/pinned-demo").exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn stale_snapshots_of_dead_processes_are_removed() {
+        if !Path::new("/proc/self").exists() {
+            return;
+        }
+        let base = tmpdir("stale-snapshots");
+        let archive = make_pkg(&base, "stale-demo", "1.0", &[("/usr/share/stale-demo", b"x")]);
+        let dir = base.join(".nawa");
+        std::fs::create_dir_all(&dir).unwrap();
+        // a pid above any kernel pid_max can never be alive
+        let dead = dir.join("verified-4294967290-0.tmp");
+        let mine = dir.join(format!("verified-{}-999999.tmp", std::process::id()));
+        let unrelated = dir.join("tmp-123");
+        std::fs::write(&dead, b"old").unwrap();
+        std::fs::write(&mine, b"live").unwrap();
+        std::fs::write(&unrelated, b"keep").unwrap();
+
+        let _snapshot = crate::fetch::snapshot_file(&archive, None, &dir).unwrap();
+        assert!(!dead.exists());
+        assert!(mine.exists());
+        assert!(unrelated.exists());
         let _ = std::fs::remove_dir_all(&base);
     }
 

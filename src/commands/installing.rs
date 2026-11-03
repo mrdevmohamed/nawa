@@ -203,7 +203,13 @@ struct InstallRequest<'a> {
     what: &'a str,
     number: usize,
     total: usize,
+    /// SHA-256 the repository index promised for this archive (repository
+    /// sources only). Always pinned, so the installed bytes are the bytes
+    /// that were validated against the index entry.
     index_sha256: Option<&'a str>,
+    /// The index was authenticated by a trusted key and replaces the
+    /// per-archive detached signature (schema v2).
+    signed_index: bool,
 }
 
 /// Install one ready archive. The library functions never lock; hold the db
@@ -219,23 +225,30 @@ fn install_one(
         request.number, request.total, request.what
     );
     let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
-    if let Some(expected) = request.index_sha256 {
-        install::install_archive_from_index(
-            archive, &ctx.root, flags.force, expected, request.reason
-        )
-        .with_context(|| format!(
+    let installed = match request.index_sha256 {
+        Some(expected) if request.signed_index => install::install_archive_from_index(
+            archive,
+            &ctx.root,
+            flags.force,
+            expected,
+            request.reason,
+        ),
+        pinned => install::install_archive_pinned(
+            archive,
+            &ctx.root,
+            flags.force,
+            flags.allow_unsigned,
+            None,
+            request.reason,
+            pinned,
+        ),
+    };
+    installed.with_context(|| {
+        format!(
             "[{}/{}] install of {} failed",
             request.number, request.total, request.what
-        ))?;
-    } else {
-        install::install_archive(
-            archive, &ctx.root, flags.force, flags.allow_unsigned, None, request.reason
         )
-        .with_context(|| format!(
-            "[{}/{}] install of {} failed",
-            request.number, request.total, request.what
-        ))?;
-    }
+    })?;
     Ok(())
 }
 
@@ -384,8 +397,8 @@ pub(crate) fn run_plan(
         let n = i + 1;
         let id = it.rec.id();
         let step = || -> Result<()> {
-            let (archive, index_sha256): (PathBuf, Option<String>) = match &sources[i] {
-                Source::Build => (build_one(ctx, it, flags, n, total)?, None),
+            let (archive, index_sha256, signed_index): (PathBuf, Option<String>, bool) = match &sources[i] {
+                Source::Build => (build_one(ctx, it, flags, n, total)?, None, false),
                 Source::Repo(re) => {
                     println!("nawa: [{n}/{total}] fetching {id} from the repository");
                     let open = sourcing
@@ -393,11 +406,11 @@ pub(crate) fn run_plan(
                         .as_ref()
                         .context("internal: repository source without an open repository")?;
                     match upgrade::fetch_entry(&ctx.root, open, re, flags.allow_unsigned) {
-                        Ok(a) => {
-                            let digest = (open.archive_auth == upgrade::ArchiveAuth::SignedIndexSha256)
-                                .then(|| re.sha256.clone());
-                            (a, digest)
-                        }
+                        Ok(a) => (
+                            a,
+                            Some(re.sha256.clone()),
+                            open.archive_auth == upgrade::ArchiveAuth::SignedIndexSha256,
+                        ),
                         // strict repo mode never builds behind the user's back
                         Err(e) if sourcing.mode == InstallMode::Repo => {
                             return Err(e)
@@ -408,7 +421,7 @@ pub(crate) fn run_plan(
                             eprintln!(
                                 "nawa: warning: cannot use the repository copy of {id} ({e:#}) — building from source"
                             );
-                            (build_one(ctx, it, flags, n, total)?, None)
+                            (build_one(ctx, it, flags, n, total)?, None, false)
                         }
                     }
                 }
@@ -423,6 +436,7 @@ pub(crate) fn run_plan(
                     number: n,
                     total,
                     index_sha256: index_sha256.as_deref(),
+                    signed_index,
                 },
             )
         };
@@ -447,11 +461,7 @@ pub(crate) fn run_plan(
                 .context("internal: repository package without an open repository")?;
             let archive = upgrade::fetch_entry(&ctx.root, open, re, flags.allow_unsigned)
                 .with_context(|| format!("[{n}/{total}] repository fetch of {what} failed"))?;
-            let index_sha256 = if open.archive_auth == upgrade::ArchiveAuth::SignedIndexSha256 {
-                Some(re.sha256.as_str())
-            } else {
-                None
-            };
+            let signed_index = open.archive_auth == upgrade::ArchiveAuth::SignedIndexSha256;
             install_one(
                 ctx,
                 &archive,
@@ -461,7 +471,8 @@ pub(crate) fn run_plan(
                     what: &what,
                     number: n,
                     total,
-                    index_sha256,
+                    index_sha256: Some(re.sha256.as_str()),
+                    signed_index,
                 },
             )
         };
