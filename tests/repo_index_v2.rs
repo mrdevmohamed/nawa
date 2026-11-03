@@ -285,7 +285,8 @@ fn missing_v2_index_signature_with_explicit_override_uses_legacy_archive_policy(
     assert!(!denied.status.success(), "unsigned index must not be accepted by default");
 
     let accepted = install_hello(&dir, &repo, &["--allow-unsigned"]);
-    let message = ok(accepted);
+    assert!(accepted.status.success(), "{}\\n{}", stdout(&accepted), stderr(&accepted));
+    let message = format!("{}{}", stdout(&accepted), stderr(&accepted));
     assert!(
         message.contains("legacy per-archive signature policy"),
         "explicit unsigned-index override must not activate v2 archive authentication: {message}"
