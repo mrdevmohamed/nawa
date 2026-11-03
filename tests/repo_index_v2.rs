@@ -50,10 +50,13 @@ fn ok(output: Output) -> String {
 }
 
 fn make_archive(repo: &Path) -> PathBuf {
+    make_archive_version(repo, "1", "from-v2-repository\\n")
+}
+
+fn make_archive_version(repo: &Path, version: &str, body: &str) -> PathBuf {
     fs::create_dir_all(repo).unwrap();
-    let path = repo.join("hello-1-1.nawa.tar.zst");
-    let pkginfo = "pkgname = hello\npkgver = 1\npkgrel = 1\narch = any\nrundeps = \nsize = 1\n";
-    let body = "from-v2-repository\n";
+    let path = repo.join(format!("hello-{version}-1.nawa.tar.zst"));
+    let pkginfo = format!("pkgname = hello\\npkgver = {version}\\npkgrel = 1\\narch = any\\nrundeps = \\nsize = 1\\n");
     let file = fs::File::create(&path).unwrap();
     let encoder = zstd::stream::write::Encoder::new(file, 3).unwrap();
     let mut tar = tar::Builder::new(encoder);
@@ -294,6 +297,45 @@ fn missing_v2_index_signature_with_explicit_override_uses_legacy_archive_policy(
     assert_eq!(
         fs::read_to_string(dir.join("root/usr/share/hello")).unwrap(),
         "from-v2-repository\\n"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+
+#[test]
+fn upgrade_uses_v2_index_hashes_without_package_sidecars() {
+    let dir = scratch("upgrade-v2");
+    let keys = make_keys(&dir);
+    trust_publisher(&dir, &keys);
+
+    // First install v1 through the unchanged direct-archive signature path.
+    let old_repo = dir.join("old");
+    let old_archive = make_archive_version(&old_repo, "1", "old-version\\n");
+    ok(run(
+        &dir,
+        &[
+            "sign",
+            old_archive.to_str().unwrap(),
+            "--key",
+            keys.secret.to_str().unwrap(),
+        ],
+    ));
+    ok(run(&dir, &["install", "--yes", old_archive.to_str().unwrap()]));
+    assert_eq!(
+        fs::read_to_string(dir.join("root/usr/share/hello")).unwrap(),
+        "old-version\\n"
+    );
+
+    // Publish v2 with only the signed index sidecar, not a package sidecar.
+    let repo = dir.join("repo");
+    let new_archive = make_archive_version(&repo, "2", "new-version\\n");
+    create_index(&dir, &repo, &keys, "2");
+    assert!(!new_archive.with_file_name("hello-2-1.nawa.tar.zst.sig").exists());
+
+    ok(run(&dir, &["upgrade", "--yes", "--repo", repo.to_str().unwrap()]));
+    assert_eq!(
+        fs::read_to_string(dir.join("root/usr/share/hello")).unwrap(),
+        "new-version\\n"
     );
     let _ = fs::remove_dir_all(&dir);
 }
