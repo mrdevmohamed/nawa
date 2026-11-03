@@ -208,7 +208,7 @@ struct InstallRequest<'a> {
 
 /// Install one ready archive. The library functions never lock; hold the db
 /// lock for this one install only, never through a build or a download.
-pub(crate) fn install_one(
+fn install_one(
     ctx: &Ctx,
     archive: &Path,
     flags: &PlanFlags,
