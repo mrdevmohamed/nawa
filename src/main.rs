@@ -215,7 +215,10 @@ fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
                 (Some(t), Some(r)) => Some((t.as_path(), r.as_str())),
                 _ => None,
             };
-            repo::create_index_with_locations(&dir, &out, tree, index_version, locations.as_deref())?;
+            match locations.as_deref() {
+                Some(path) => repo::create_index_with_locations(&dir, &out, tree, index_version, Some(path))?,
+                None => repo::create_index_with_version(&dir, &out, tree, index_version)?,
+            };
             if let Some(kp) = signing_key {
                 let sp = sign::sign(&out, &kp)?;
                 println!("nawa: signed index -> {}", sp.display());

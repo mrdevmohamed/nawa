@@ -199,6 +199,19 @@ pub fn fetch_entry(
     // writes plain file names, so nothing legitimate is excluded)
     validate_entry_filename(&re.file)?;
     let src = match base_url {
+        None if open.index.repository.as_ref().map(|m| m.archive_location.as_str())
+            == Some(repo::ARCHIVE_LOCATION_PER_PACKAGE_URL) =>
+        {
+            let source_url = archive_download_url(
+                "", &open.index, &re.file, re.download_url.as_deref()
+            )?;
+            let cache = fetch::remote_cache_dir(root, &source_url);
+            std::fs::create_dir_all(&cache)
+                .with_context(|| format!("create archive cache {}", cache.display()))?;
+            let dest = cache.join(&re.file);
+            fetch::download_cached(&source_url, &dest, Some(&re.sha256))?;
+            dest
+        }
         None => {
             let p = repo_dir.join(&re.file);
             if !p.exists() {

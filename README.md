@@ -442,10 +442,7 @@ schema = 1
 Create the index only after all referenced assets have been uploaded:
 
 ```sh
-nawa repo-create ./archives \
-  --index-version 3 --locations locations.toml \
-  --recipes ./recipes --recipes-rev <commit> \
-  --sign --key nawa.sec
+nawa repo-create ./archives --index-version 3 --locations locations.toml --recipes ./recipes --recipes-rev <commit> --sign --key nawa.sec
 ```
 
 Schema v3 requires a trusted index signing key. Nawa refuses per-archive
