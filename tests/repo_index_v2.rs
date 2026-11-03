@@ -98,7 +98,7 @@ fn trust_publisher(dir: &Path, keys: &SigningKeys) {
 }
 
 fn create_index(dir: &Path, repo: &Path, keys: &SigningKeys, version: &str) {
-    let mut args = vec![
+    let args = vec![
         "repo-create",
         repo.to_str().unwrap(),
         "--index-version",
@@ -110,7 +110,6 @@ fn create_index(dir: &Path, repo: &Path, keys: &SigningKeys, version: &str) {
     // Keep the command arguments owned for stable borrowing.
     let out = run(dir, &args);
     ok(out);
-    args.clear();
 }
 
 fn install_hello(dir: &Path, repo: &Path, extra: &[&str]) -> Output {
@@ -241,3 +240,60 @@ fn v2_present_but_invalid_index_signature_never_downgrades_to_unsigned() {
     assert!(!dir.join("root/usr/share/hello").exists());
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn v2_trusted_index_ignores_a_stray_package_signature_sidecar() {
+    let dir = scratch("stray-sidecar");
+    let repo = dir.join("repo");
+    make_archive(&repo);
+    let keys = make_keys(&dir);
+    trust_publisher(&dir, &keys);
+    create_index(&dir, &repo, &keys, "2");
+
+    // A stale or malformed package signature is not authoritative in v2
+    // repository mode; only the trusted index digest authenticates this file.
+    fs::write(repo.join("hello-1-1.nawa.tar.zst.sig"), "not a nawa signature").unwrap();
+    ok(install_hello(&dir, &repo, &[]));
+    assert_eq!(
+        fs::read_to_string(dir.join("root/usr/share/hello")).unwrap(),
+        "from-v2-repository\\n"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn missing_v2_index_signature_with_explicit_override_uses_legacy_archive_policy() {
+    let dir = scratch("v2-index-unsigned-fallback");
+    let repo = dir.join("repo");
+    let archive = make_archive(&repo);
+    let keys = make_keys(&dir);
+    trust_publisher(&dir, &keys);
+    create_index(&dir, &repo, &keys, "2");
+
+    ok(run(
+        &dir,
+        &[
+            "sign",
+            archive.to_str().unwrap(),
+            "--key",
+            keys.secret.to_str().unwrap(),
+        ],
+    ));
+    fs::remove_file(repo.join("index.toml.sig")).unwrap();
+
+    let denied = install_hello(&dir, &repo, &[]);
+    assert!(!denied.status.success(), "unsigned index must not be accepted by default");
+
+    let accepted = install_hello(&dir, &repo, &["--allow-unsigned"]);
+    let message = ok(accepted);
+    assert!(
+        message.contains("legacy per-archive signature policy"),
+        "explicit unsigned-index override must not activate v2 archive authentication: {message}"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("root/usr/share/hello")).unwrap(),
+        "from-v2-repository\\n"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
