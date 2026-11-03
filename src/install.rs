@@ -43,7 +43,7 @@ pub fn install_archive(
         key,
         allow_unsigned,
     )?;
-    install_archive_payload(snapshot.path(), archive_path, root, force, reason)
+    install_archive_payload(snapshot.path(), archive_path, root, force, reason, true)
 }
 
 /// Install an archive authenticated by a trusted v2 repository index.
@@ -61,7 +61,7 @@ pub fn install_archive_from_index(
 ) -> Result<Entry> {
     let snapshot_dir = root.join(".nawa");
     let snapshot = crate::fetch::snapshot_file(archive_path, Some(expected_sha256), &snapshot_dir)?;
-    install_archive_payload(snapshot.path(), archive_path, root, force, reason)
+    install_archive_payload(snapshot.path(), archive_path, root, force, reason, false)
 }
 
 fn install_archive_payload(
@@ -70,6 +70,7 @@ fn install_archive_payload(
     root: &Path,
     force: bool,
     reason: &str,
+    cache_detached_signature: bool,
 ) -> Result<Entry> {
     let db = Db::new(root);
     let stamp = std::time::SystemTime::now()
@@ -148,7 +149,7 @@ fn install_archive_payload(
     };
 
     // ---- keep a copy of the archive in the package cache --------------------
-    cache_archive_named(archive_path, cache_name_source, root)?;
+    cache_archive_named(archive_path, cache_name_source, root, cache_detached_signature)?;
     if is_upgrade {
         println!(
             "nawa: upgrading {} {} -> {}-{}-{}",
@@ -381,31 +382,68 @@ pub fn remove_with(name: &str, root: &Path, force: bool) -> Result<()> {
 /// Copy an archive into `<root>/var/cache/nawa` (hardlink when possible).
 /// Also keeps the detached signature next to it when one exists.
 pub fn cache_archive(archive_path: &Path, root: &Path) -> Result<PathBuf> {
-    cache_archive_named(archive_path, archive_path, root)
+    cache_archive_named(archive_path, archive_path, root, true)
 }
 
-/// Cache snapshot bytes under the original archive filename and retain its
-/// detached sidecar, if present, under the matching cache filename.
+/// Cache verified bytes under the original archive filename. A trusted v2
+/// index is itself the authenticator, so never import a stray detached
+/// signature into its rollback cache.
 fn cache_archive_named(
     archive_path: &Path,
     name_source: &Path,
     root: &Path,
+    copy_detached_signature: bool,
 ) -> Result<PathBuf> {
     let dir = root.join("var/cache/nawa");
     std::fs::create_dir_all(&dir)?;
     let dest = dir.join(name_source.file_name().unwrap_or_default());
-    if !dest.exists()
-        && std::fs::hard_link(archive_path, &dest).is_err() {
-            std::fs::copy(archive_path, &dest)
-                .with_context(|| format!("cache {}", archive_path.display()))?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = dir.join(format!(
+        ".archive-{}-{}-{stamp}.tmp",
+        std::process::id(),
+        dest.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    let cache_result = (|| -> Result<()> {
+        std::fs::copy(archive_path, &tmp)
+            .with_context(|| format!("cache {}", archive_path.display()))?;
+        std::fs::rename(&tmp, &dest)
+            .with_context(|| format!("activate cached archive {}", dest.display()))?;
+        Ok(())
+    })();
+    if cache_result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    cache_result?;
+
+    let sig_dest = sign::sig_path_for(&dest);
+    if copy_detached_signature {
+        let sig = sign::sig_path_for(name_source);
+        if sig.is_file() {
+            let sig_tmp = sig_dest.with_file_name(format!(
+                ".signature-{}-{stamp}.tmp",
+                std::process::id()
+            ));
+            let sig_result = (|| -> Result<()> {
+                std::fs::copy(&sig, &sig_tmp)
+                    .with_context(|| format!("cache detached signature {}", sig.display()))?;
+                std::fs::rename(&sig_tmp, &sig_dest)
+                    .with_context(|| format!("activate cached signature {}", sig_dest.display()))?;
+                Ok(())
+            })();
+            if sig_result.is_err() {
+                let _ = std::fs::remove_file(&sig_tmp);
+            }
+            sig_result?;
+        } else if sig_dest.exists() {
+            std::fs::remove_file(&sig_dest)
+                .with_context(|| format!("remove stale cached signature {}", sig_dest.display()))?;
         }
-    let sig = sign::sig_path_for(name_source);
-    if sig.exists() {
-        let sig_dest = sign::sig_path_for(&dest);
-        if !sig_dest.exists() {
-            let _ = std::fs::hard_link(&sig, &sig_dest)
-                .or_else(|_| std::fs::copy(&sig, &sig_dest).map(|_| ()));
-        }
+    } else if sig_dest.exists() {
+        std::fs::remove_file(&sig_dest)
+            .with_context(|| format!("remove untrusted cached signature {}", sig_dest.display()))?;
     }
     Ok(dest)
 }

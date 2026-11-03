@@ -335,8 +335,23 @@ fn upgrade_uses_v2_index_hashes_without_package_sidecars() {
     let new_archive = make_archive_version(&repo, "2", "new-version\n");
     create_index(&dir, &repo, &keys, "2");
     assert!(!new_archive.with_file_name("hello-2-1.nawa.tar.zst.sig").exists());
+    // A stale/rogue package sidecar is ignored by v2 and must not enter cache.
+    fs::write(new_archive.with_file_name("hello-2-1.nawa.tar.zst.sig"), "invalid stale sidecar").unwrap();
 
     ok(run(&dir, &["upgrade", "--yes", "--repo", repo.to_str().unwrap()]));
+    assert_eq!(
+        fs::read_to_string(dir.join("root/usr/share/hello")).unwrap(),
+        "new-version\n"
+    );
+    let cached_sig = dir.join("root/var/cache/nawa/hello-2-1.nawa.tar.zst.sig");
+    assert!(!cached_sig.exists());
+
+    ok(run(&dir, &["rollback", "hello"]));
+    assert_eq!(
+        fs::read_to_string(dir.join("root/usr/share/hello")).unwrap(),
+        "old-version\n"
+    );
+    ok(run(&dir, &["rollback", "hello"]));
     assert_eq!(
         fs::read_to_string(dir.join("root/usr/share/hello")).unwrap(),
         "new-version\n"
