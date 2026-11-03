@@ -197,26 +197,44 @@ pub(crate) fn installed_map(ctx: &Ctx) -> Result<std::collections::HashMap<Strin
         .collect())
 }
 
+/// Details for one staged archive installation.
+struct InstallRequest<'a> {
+    reason: &'a str,
+    what: &'a str,
+    number: usize,
+    total: usize,
+    index_sha256: Option<&'a str>,
+}
+
 /// Install one ready archive. The library functions never lock; hold the db
 /// lock for this one install only, never through a build or a download.
 pub(crate) fn install_one(
     ctx: &Ctx,
     archive: &Path,
     flags: &PlanFlags,
-    reason: &str,
-    what: &str,
-    n: usize,
-    total: usize,
-    index_sha256: Option<&str>,
+    request: InstallRequest<'_>,
 ) -> Result<()> {
-    println!("nawa: [{n}/{total}] installing {what}");
+    println!(
+        "nawa: [{}/{}] installing {}",
+        request.number, request.total, request.what
+    );
     let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
-    if let Some(expected) = index_sha256 {
-        install::install_archive_from_index(archive, &ctx.root, flags.force, expected, reason)
-            .with_context(|| format!("[{n}/{total}] install of {what} failed"))?;
+    if let Some(expected) = request.index_sha256 {
+        install::install_archive_from_index(
+            archive, &ctx.root, flags.force, expected, request.reason
+        )
+        .with_context(|| format!(
+            "[{}/{}] install of {} failed",
+            request.number, request.total, request.what
+        ))?;
     } else {
-        install::install_archive(archive, &ctx.root, flags.force, flags.allow_unsigned, None, reason)
-            .with_context(|| format!("[{n}/{total}] install of {what} failed"))?;
+        install::install_archive(
+            archive, &ctx.root, flags.force, flags.allow_unsigned, None, request.reason
+        )
+        .with_context(|| format!(
+            "[{}/{}] install of {} failed",
+            request.number, request.total, request.what
+        ))?;
     }
     Ok(())
 }
@@ -395,7 +413,18 @@ pub(crate) fn run_plan(
                     }
                 }
             };
-            install_one(ctx, &archive, flags, it.why.db_reason(), &id, n, total, index_sha256.as_deref())
+            install_one(
+                ctx,
+                &archive,
+                flags,
+                InstallRequest {
+                    reason: it.why.db_reason(),
+                    what: &id,
+                    number: n,
+                    total,
+                    index_sha256: index_sha256.as_deref(),
+                },
+            )
         };
         if let Err(e) = step() {
             if i > 0 {
@@ -423,7 +452,18 @@ pub(crate) fn run_plan(
             } else {
                 None
             };
-            install_one(ctx, &archive, flags, "explicit", &what, n, total, index_sha256)
+            install_one(
+                ctx,
+                &archive,
+                flags,
+                InstallRequest {
+                    reason: "explicit",
+                    what: &what,
+                    number: n,
+                    total,
+                    index_sha256,
+                },
+            )
         };
         if let Err(e) = step() {
             if n > 1 {
