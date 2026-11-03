@@ -304,7 +304,7 @@ pub fn verify_for_install_with_sig(
         return Ok(());
     }
 
-    let sf = read_sig_file(&sig_path)?;
+    let sf = read_sig_file(sig_path)?;
     if let Some(kp) = key {
         let vk = load_verify_key(kp)?;
         verify(archive, &vk, &sf.sig)?;
@@ -349,20 +349,6 @@ impl IndexTrust {
     pub fn is_trusted(&self) -> bool {
         matches!(self, Self::TrustedKey { .. })
     }
-}
-
-/// Verify an index and report whether its signature matched a configured key.
-///
-/// A present but invalid/unknown-key signature is always an error. The
-/// allow_unsigned flag only permits a missing signature; it never downgrades
-/// an invalid signature to an unsigned repository.
-pub fn verify_index(file: &Path, root: &Path, allow_unsigned: bool) -> Result<IndexTrust> {
-    if !file.is_file() {
-        bail!("repository index not found: {}", file.display());
-    }
-    let bytes = std::fs::read(file)
-        .with_context(|| format!("read repository index {}", file.display()))?;
-    verify_index_bytes(&bytes, file, root, allow_unsigned)
 }
 
 /// Verify a repository index using the same bytes that the caller will parse.

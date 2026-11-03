@@ -381,10 +381,6 @@ pub fn remove_with(name: &str, root: &Path, force: bool) -> Result<()> {
 
 /// Copy an archive into `<root>/var/cache/nawa` (hardlink when possible).
 /// Also keeps the detached signature next to it when one exists.
-pub fn cache_archive(archive_path: &Path, root: &Path) -> Result<PathBuf> {
-    cache_archive_named(archive_path, archive_path, root, true)
-}
-
 /// Cache verified bytes under the original archive filename. A trusted v2
 /// index is itself the authenticator, so never import a stray detached
 /// signature into its rollback cache.

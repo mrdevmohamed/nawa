@@ -84,6 +84,7 @@ pub struct Index {
 pub const INDEX_VALIDITY_SECS: u64 = 90 * 24 * 3600;
 
 /// Load and validate an index. An index without [repository] remains legacy v1.
+#[cfg(test)]
 pub fn load_index(path: &Path) -> Result<Index> {
     let raw = std::fs::read(path)
         .with_context(|| format!("read index {}", path.display()))?;
