@@ -34,11 +34,36 @@ pub fn install_archive(
     key: Option<&Path>,
     reason: &str,
 ) -> Result<Entry> {
-    let db = Db::new(root);
-
-    // ---- signature policy (before touching anything) ----------------------
+    // Standalone archives and legacy repository archives retain detached
+    // signature verification exactly as before.
     sign::verify_for_install(archive_path, root, key, allow_unsigned)?;
+    install_archive_payload(archive_path, root, force, reason)
+}
 
+/// Install an archive authenticated by a trusted v2 repository index.
+///
+/// The expected digest comes from the already-verified signed index. Recheck
+/// it immediately before extraction so the file cannot silently change
+/// between repository fetch/validation and the install operation. This path
+/// is intentionally separate from standalone archive installation.
+pub fn install_archive_from_index(
+    archive_path: &Path,
+    root: &Path,
+    force: bool,
+    expected_sha256: &str,
+    reason: &str,
+) -> Result<Entry> {
+    crate::fetch::verify_sha256(archive_path, expected_sha256)?;
+    install_archive_payload(archive_path, root, force, reason)
+}
+
+fn install_archive_payload(
+    archive_path: &Path,
+    root: &Path,
+    force: bool,
+    reason: &str,
+) -> Result<Entry> {
+    let db = Db::new(root);
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
