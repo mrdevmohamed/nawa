@@ -75,7 +75,8 @@ nawa files <name>                               # files owned by package
 nawa owner /usr/bin/foo                         # which package owns file
 nawa revdep [name...] [--unowned] [--json]      # broken shared-library links (exit 1 if any)
 nawa remove --yes <name>                        # remove package (--yes skips the confirmation)
-nawa repo-create <dir-of-archives> --out index.toml --sign  # signed repo index
+nawa repo-create <dir-of-archives> --out index.toml --sign  # legacy v1 index
+nawa repo-create <dir-of-archives> --index-version 2 --sign # signed-index v2
 nawa upgrade --yes --repo <dir-or-url>          # upgrade from a repo (repo also comes from nawa.toml)
 nawa rollback <name>                            # restore previous version
 nawa service list                               # runit services
@@ -272,31 +273,65 @@ On top of that:
 
 ### Signing & trust (nawa-sig-v1)
 
-Packages and repo indexes are signed with ed25519. The signed message is
-`nawa-v1:sha256:<hash>`, so one verification covers both integrity and
-authenticity. Signatures live in detached `<file>.sig` sidecars.
+Nawa uses Ed25519 signatures over the SHA-256 digest of the exact file bytes.
+The signed message is `nawa-v1:sha256:<hash>`; signatures are detached
+`.sig` sidecars. The cryptographic format is unchanged by repository index
+schema v2.
 
 ```
 nawa keygen --out /etc/nawa/keys              # nawa.sec (0600) + nawa.pub
 nawa sign <archive-or-index> --key nawa.sec   # writes <file>.sig
-nawa --root / trust /etc/nawa/keys/nawa.pub    # copy key into the trust store
-nawa verify <file>                           # trust store, else embedded key
+nawa --root / trust /etc/nawa/keys/nawa.pub  # add publisher key to trust store
+nawa verify <file>                           # standalone file: trust store, else embedded key
 ```
 
-Verification policy (`nawa install` / `nawa upgrade`):
+#### Repository index schemas
 
-| Trust store | Signature      | Result                                             |
-|-------------|----------------|----------------------------------------------------|
-| configured  | valid          | install                                            |
-| configured  | missing        | refuse (`--allow-unsigned` overrides)              |
-| configured  | bad / rogue    | refuse — always                                    |
-| empty       | present        | verify against embedded key + loud warning         |
-| empty       | missing        | pass (bootstrap mode)                              |
+**Legacy v1** is identified by the absence of a `[repository]` table. It keeps
+the original policy: a trusted index authenticates the package list, but every
+package archive also needs its own detached `.sig` when trusted keys are
+configured. This behavior remains supported.
 
-Remote repositories (`upgrade --repo http(s)://…`) are stricter: with an empty
-trust store nawa refuses them outright (before any network access) unless
-`--allow-unsigned` is passed, because bootstrap mode and embedded-key checks
-cannot authenticate a mirror. Add the distribution key first:
+**Signed index v2** adds explicit authentication metadata:
+
+```toml
+[repository]
+schema = 2
+archive_auth = "signed-index"
+hash_algorithm = "sha256"
+index_signature = "nawa-sig-v1"
+```
+
+Create it with:
+
+```sh
+nawa repo-create ./packages --index-version 2 --sign --key nawa.sec
+```
+
+V2 requires `--sign`. Nawa activates index-based archive authentication only
+when `index.toml.sig` verifies against a public key in the configured trust
+store. In that case each package's SHA-256 and size in the signed index
+authenticate the archive bytes; per-package `.sig` files are not fetched or
+required. Nawa still validates the archive's `.PKGINFO` against the signed
+entry and rechecks the digest immediately before extraction.
+
+A v2 declaration by itself is not a trust anchor. If the index is self-signed
+by an embedded, untrusted key, or if an unsigned index is explicitly accepted,
+Nawa falls back to the legacy detached-archive-signature policy. A present but
+invalid/unknown-key index signature is always rejected; `--allow-unsigned`
+does not turn an invalid signature into an unsigned success.
+
+Standalone archive installation (`nawa install ./file.nawa.tar.zst`) and
+`nawa verify` are unchanged: they still use the detached-signature policy.
+V1 repositories are unchanged as well.
+
+Old Nawa binaries do not understand v2's signed-index archive-authentication
+rule. During a mixed-client transition, publishers must continue publishing
+package sidecars alongside the v2 index. Remove them only after the supported
+client floor includes a v2-capable Nawa build.
+
+Remote repositories still require a configured trusted key unless
+`--allow-unsigned` is explicitly passed. Add the distribution key first:
 `nawa --root / trust /path/to/nawa.pub`.
 
 ### Atomic upgrades & rollback
