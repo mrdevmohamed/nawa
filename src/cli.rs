@@ -363,7 +363,7 @@ pub(crate) enum Cmd {
     /// Roll a package back to the version recorded in its undo log
     Rollback { name: String },
 
-    /// Manage runit services (enable/disable/list/status)
+    /// Manage runit services (enable/disable/start/stop/restart/list/status)
     Service {
         #[command(subcommand)]
         action: ServiceCmd,
@@ -443,10 +443,26 @@ pub(crate) struct PlanFlags {
 pub(crate) enum ServiceCmd {
     /// List services in /etc/sv and their enabled state
     List,
-    /// Enable a service (link into the default runsvdir)
-    Enable { name: String },
-    /// Disable a service (remove the runsvdir link)
-    Disable { name: String },
+    /// Enable a service (link into the default runsvdir); --now also starts it
+    Enable {
+        name: String,
+        /// start it immediately and wait until it is running
+        #[arg(long)]
+        now: bool,
+    },
+    /// Disable a service (remove the runsvdir link); --now stops it first
+    Disable {
+        name: String,
+        /// stop it first and wait until it is down
+        #[arg(long)]
+        now: bool,
+    },
+    /// Start an enabled service now
+    Start { name: String },
+    /// Stop a service now (stays enabled: it starts again at next boot)
+    Stop { name: String },
+    /// Restart an enabled service
+    Restart { name: String },
     /// Show service status (static state + live `sv status` when supervised)
     Status { name: Option<String> },
 }
@@ -531,7 +547,7 @@ _nawa() {
             COMPREPLY=( $(compgen -f -- "$cur") ) ;;
         service)
             if [ "$COMP_CWORD" -eq 2 ]; then
-                COMPREPLY=( $(compgen -W "list enable disable status" -- "$cur") )
+                COMPREPLY=( $(compgen -W "list enable disable start stop restart status" -- "$cur") )
             else
                 COMPREPLY=( $(compgen -W "$(nawa service list 2>/dev/null | awk '{print $1}' | grep -v '^SERVICE$')" -- "$cur") )
             fi ;;
@@ -592,7 +608,7 @@ _nawa() {
                 _files ;;
             service)
                 if (( CURRENT == 3 )); then
-                    _values 'action' list enable disable status
+                    _values 'action' list enable disable start stop restart status
                 else
                     _describe -t services 'service' \
                         services=($(nawa service list 2>/dev/null | awk 'NR>1{print $1}'))
@@ -626,7 +642,7 @@ complete -c nawa -n '__fish_use_subcommand' -a 'files owner repo-create keygen s
 set -l pkg_cmds build install update deps deps-all info files remove rollback why query list
 complete -c nawa -n "__fish_seen_subcommand_from $pkg_cmds" -a "(nawa __complete_pkgs 2>/dev/null)"
 # service actions
-complete -c nawa -n '__fish_seen_subcommand_from service; and not __fish_seen_subcommand_from list enable disable status' -a 'list enable disable status'
+complete -c nawa -n '__fish_seen_subcommand_from service; and not __fish_seen_subcommand_from list enable disable start stop restart status' -a 'list enable disable start stop restart status'
 # config actions
 complete -c nawa -n '__fish_seen_subcommand_from config' -a 'show'
 # completion shells

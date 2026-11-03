@@ -378,7 +378,10 @@ nawa --root / upgrade --repo https://mirror.example.com/mydistro/stable
 ```
 nawa service list                 # /etc/sv tree + enabled state
 nawa service enable sshd          # link into /etc/runit/runsvdir/default
-nawa service disable dhcpcd       # remove the link (runsvdir stops it live)
+nawa service enable --now sshd    # ... and wait until it is running
+nawa service disable dhcpcd       # remove the link (runsvdir stops it within ~5 s)
+nawa service disable --now dhcpcd # stop it first, then remove the link
+nawa service start|stop|restart sshd   # live control (service must be enabled)
 nawa service status [name]        # static state + live `sv status` when supervised
 ```
 
