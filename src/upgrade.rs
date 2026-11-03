@@ -133,6 +133,12 @@ pub fn open_repo(
     let index = repo::load_index_bytes(&index_bytes)?;
     let index_trust = sign::verify_index_bytes(&index_bytes, &index_path, root, allow_unsigned)
         .map_err(|e| anyhow::anyhow!("repository index signature is INVALID or untrusted: {e:#}"))?;
+    let distributed_locations = index.repository.as_ref()
+        .map(|meta| meta.archive_location == repo::ARCHIVE_LOCATION_PER_PACKAGE_URL)
+        .unwrap_or(false);
+    if distributed_locations && !index_trust.is_trusted() {
+        bail!("distributed schema-v3 repositories require a trusted signing key; refusing to use per-package URLs from an unauthenticated index");
+    }
     let archive_auth = if index.repository.is_some() && index_trust.is_trusted() {
         println!("nawa: repository schema v2: package SHA-256 values authenticated by trusted index");
         ArchiveAuth::SignedIndexSha256
@@ -182,7 +188,15 @@ pub fn fetch_entry(
         }
         Some(url) => {
             let dest = repo_dir.join(&re.file);
-            fetch::download_cached(&format!("{url}/{}", re.file), &dest, Some(&re.sha256))?;
+            let source_url = match open.index.repository.as_ref() {
+                Some(meta) if meta.archive_location == repo::ARCHIVE_LOCATION_PER_PACKAGE_URL => {
+                    re.download_url.as_deref()
+                        .context("schema-v3 package entry is missing download_url")?
+                        .to_string()
+                }
+                _ => format!("{url}/{}", re.file),
+            };
+            fetch::download_cached(&source_url, &dest, Some(&re.sha256))?;
             if open.archive_auth == ArchiveAuth::DetachedSignature {
                 // Legacy repositories still require the per-archive sidecar.
                 let sig_dest = sign::sig_path_for(&dest);
@@ -704,6 +718,7 @@ mod tests {
             arch: arch.into(),
             file: "demo-1.0-1.nawa.tar.zst".into(),
             sha256: String::new(),
+            download_url: None,
             size: 0,
             installed_size: 0,
         };

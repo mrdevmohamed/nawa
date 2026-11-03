@@ -51,7 +51,15 @@ pub fn sync(root: &Path, repo_ref: &RepoRef, dest: &Path, opts: &SyncOpts) -> Re
         None => open.dir.join(&rec.file),
         Some(url) => {
             let t = open.dir.join(&rec.file);
-            fetch::download_cached(&format!("{url}/{}", rec.file), &t, Some(&rec.sha256))?;
+            let source_url = match open.index.repository.as_ref() {
+                Some(meta) if meta.archive_location == repo::ARCHIVE_LOCATION_PER_PACKAGE_URL => {
+                    rec.download_url.as_deref()
+                        .context("schema-v3 recipes entry is missing download_url")?
+                        .to_string()
+                }
+                _ => format!("{url}/{}", rec.file),
+            };
+            fetch::download_cached(&source_url, &t, Some(&rec.sha256))?;
             t
         }
     };

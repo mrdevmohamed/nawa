@@ -14,6 +14,9 @@ pub struct RepoEntry {
     pub arch: String,
     pub file: String,
     pub sha256: String,
+    /// Absolute HTTPS URL for distributed repositories (schema v3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_url: Option<String>,
     /// archive size in bytes (download size); 0 = unknown in legacy indexes
     #[serde(default, skip_serializing_if = "is_zero")]
     pub size: u64,
@@ -26,6 +29,14 @@ fn is_zero(n: &u64) -> bool {
     *n == 0
 }
 
+fn default_archive_location() -> String {
+    ARCHIVE_LOCATION_BASE_URL.to_string()
+}
+
+fn is_base_url(value: &String) -> bool {
+    value == ARCHIVE_LOCATION_BASE_URL
+}
+
 /// Authentication metadata for a schema-v2 repository.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -34,6 +45,9 @@ pub struct RepositoryMeta {
     pub archive_auth: String,
     pub hash_algorithm: String,
     pub index_signature: String,
+    /// How clients locate package and recipe archives.
+    #[serde(default = "default_archive_location", skip_serializing_if = "is_base_url")]
+    pub archive_location: String,
 }
 
 impl RepositoryMeta {
@@ -43,11 +57,25 @@ impl RepositoryMeta {
             archive_auth: ARCHIVE_AUTH_SIGNED_INDEX.to_string(),
             hash_algorithm: HASH_ALGORITHM_SHA256.to_string(),
             index_signature: INDEX_SIGNATURE_NAWA_SIG_V1.to_string(),
+            archive_location: ARCHIVE_LOCATION_BASE_URL.to_string(),
+        }
+    }
+
+    pub fn v3_per_package_url() -> Self {
+        Self {
+            schema: INDEX_SCHEMA_V3,
+            archive_auth: ARCHIVE_AUTH_SIGNED_INDEX.to_string(),
+            hash_algorithm: HASH_ALGORITHM_SHA256.to_string(),
+            index_signature: INDEX_SIGNATURE_NAWA_SIG_V1.to_string(),
+            archive_location: ARCHIVE_LOCATION_PER_PACKAGE_URL.to_string(),
         }
     }
 }
 
 pub const INDEX_SCHEMA_V2: u32 = 2;
+pub const INDEX_SCHEMA_V3: u32 = 3;
+pub const ARCHIVE_LOCATION_BASE_URL: &str = "base-url";
+pub const ARCHIVE_LOCATION_PER_PACKAGE_URL: &str = "per-package-url";
 pub const ARCHIVE_AUTH_SIGNED_INDEX: &str = "signed-index";
 pub const HASH_ALGORITHM_SHA256: &str = "sha256";
 pub const INDEX_SIGNATURE_NAWA_SIG_V1: &str = "nawa-sig-v1";
@@ -59,6 +87,9 @@ pub struct RecipesEntry {
     pub rev: String,
     pub file: String,
     pub sha256: String,
+    /// Absolute HTTPS URL for distributed recipe storage (schema v3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_url: Option<String>,
 }
 
 pub const RECIPES_SUFFIX: &str = ".recipes.tar.zst";
@@ -110,8 +141,20 @@ impl Index {
             None => return Ok(()), // v1: retain the historical parser/policy
             Some(meta) => meta,
         };
-        if meta.schema != INDEX_SCHEMA_V2 {
-            bail!("unsupported repository index schema {}; this Nawa supports schema 2", meta.schema);
+        if !matches!(meta.schema, INDEX_SCHEMA_V2 | INDEX_SCHEMA_V3) {
+            bail!("unsupported repository index schema {}; this Nawa supports schemas 2 and 3", meta.schema);
+        }
+        let per_package_url = meta.schema == INDEX_SCHEMA_V3;
+        let expected_location = if per_package_url {
+            ARCHIVE_LOCATION_PER_PACKAGE_URL
+        } else {
+            ARCHIVE_LOCATION_BASE_URL
+        };
+        if meta.archive_location != expected_location {
+            bail!(
+                "schema-v{} archive_location {:?} is unsupported; expected {:?}",
+                meta.schema, meta.archive_location, expected_location
+            );
         }
         if meta.archive_auth != ARCHIVE_AUTH_SIGNED_INDEX {
             bail!("unsupported v2 archive_auth {:?}; expected {:?}", meta.archive_auth, ARCHIVE_AUTH_SIGNED_INDEX);
@@ -141,7 +184,15 @@ impl Index {
             validate_archive_filename(&p.file)?;
             validate_sha256(&p.sha256, &format!("package {}", p.name))?;
             if p.size == 0 {
-                bail!("schema-v2 package {} has no archive size", p.name);
+                bail!("schema-v{} package {} has no archive size", meta.schema, p.name);
+            }
+            if per_package_url {
+                let url = p.download_url.as_deref().with_context(|| {
+                    format!("schema-v3 package {} has no download_url", p.name)
+                })?;
+                validate_download_url(url, &format!("package {}", p.name))?;
+            } else if p.download_url.is_some() {
+                bail!("schema-v2 package {} unexpectedly has download_url", p.name);
             }
             if !names.insert(p.name.as_str()) {
                 bail!("schema-v2 index contains duplicate package name {:?}", p.name);
@@ -156,10 +207,30 @@ impl Index {
                 bail!("schema-v2 recipe archive has an unexpected filename {:?}", r.file);
             }
             validate_sha256(&r.sha256, "recipes archive")?;
+            if per_package_url {
+                let url = r.download_url.as_deref().context("schema-v3 recipes entry has no download_url")?;
+                validate_download_url(url, "recipes archive")?;
+            } else if r.download_url.is_some() {
+                bail!("schema-v2 recipes entry unexpectedly has download_url");
+            }
             validate_rev(&r.rev)?;
         }
         Ok(())
     }
+}
+
+fn validate_download_url(value: &str, what: &str) -> Result<()> {
+    let parsed = url::Url::parse(value)
+        .with_context(|| format!("{what} has an invalid download_url"))?;
+    if parsed.scheme() != "https"
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.fragment().is_some()
+    {
+        bail!("{what} download_url must be an absolute HTTPS URL without credentials or fragment");
+    }
+    Ok(())
 }
 
 pub fn validate_sha256(value: &str, what: &str) -> Result<()> {
@@ -205,21 +276,46 @@ pub fn create_index_with(
     create_index_with_version(dir, out, recipes, 1)
 }
 
-/// Build a repository index. Version 1 is the compatibility default; version 2
-/// adds explicit signed-index archive authentication and stricter metadata.
+/// Build a repository index. Version 1 remains the compatibility default;
+/// v2 uses signed-index hashes with base-URL archive lookup, while v3 adds
+/// authenticated per-archive HTTPS locations for distributed storage.
 pub fn create_index_with_version(
     dir: &Path,
     out: &Path,
     recipes: Option<(&Path, &str)>,
     index_version: u32,
 ) -> Result<Index> {
-    if !matches!(index_version, 1 | INDEX_SCHEMA_V2) {
-        bail!("unsupported repository index version {index_version} (supported: 1, 2)");
+    create_index_with_locations(dir, out, recipes, index_version, None)
+}
+
+/// Build an index using a publisher-generated archive location manifest.
+pub fn create_index_with_locations(
+    dir: &Path,
+    out: &Path,
+    recipes: Option<(&Path, &str)>,
+    index_version: u32,
+    locations_path: Option<&Path>,
+) -> Result<Index> {
+    if !matches!(index_version, 1 | INDEX_SCHEMA_V2 | INDEX_SCHEMA_V3) {
+        bail!("unsupported repository index version {index_version} (supported: 1, 2, 3)");
     }
-    let recipes_entry = match recipes {
+    if index_version == INDEX_SCHEMA_V3 && locations_path.is_none() {
+        bail!("schema-v3 requires --locations with package_urls and recipe_urls");
+    }
+    if index_version != INDEX_SCHEMA_V3 && locations_path.is_some() {
+        bail!("--locations is only valid with --index-version 3");
+    }
+    let locations = match locations_path {
+        Some(path) => Some(load_locations(path)?),
+        None => None,
+    };
+    let mut recipes_entry = match recipes {
         Some((tree, rev)) => Some(pack_recipes(tree, dir, rev)?),
         None => None,
     };
+    if let (Some(entry), Some(loc)) = (&mut recipes_entry, &locations) {
+        entry.download_url = loc.recipe_urls.get(&entry.file).cloned();
+    }
     let mut packages = Vec::new();
     let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
         .with_context(|| format!("read {}", dir.display()))?
@@ -239,7 +335,7 @@ pub fn create_index_with_version(
         let info = archive::parse_pkginfo(&raw)?;
         let name = info.get("pkgname").cloned().unwrap_or_default();
         let version = info.get("pkgver").cloned().unwrap_or_default();
-        let rel: u32 = if index_version == INDEX_SCHEMA_V2 {
+        let rel: u32 = if index_version >= INDEX_SCHEMA_V2 {
             let raw = info.get("pkgrel").with_context(|| {
                 format!("{} is missing pkgrel in .PKGINFO", path.display())
             })?;
@@ -260,13 +356,16 @@ pub fn create_index_with_version(
             .len();
         let installed_size: u64 = info.get("size").and_then(|v| v.parse().ok()).unwrap_or(0);
         println!("nawa: index -> {}-{}-{}", name, version, rel);
+        let file = path.file_name().unwrap().to_string_lossy().to_string();
+        let download_url = locations.as_ref().and_then(|loc| loc.package_urls.get(&file).cloned());
         packages.push(RepoEntry {
             name,
             version,
             rel,
             arch,
-            file: path.file_name().unwrap().to_string_lossy().to_string(),
+            file,
             sha256,
+            download_url,
             size,
             installed_size,
         });
@@ -295,7 +394,12 @@ pub fn create_index_with_version(
     let index = Index {
         generated: Some(now),
         expires: Some(now + INDEX_VALIDITY_SECS),
-        repository: (index_version == INDEX_SCHEMA_V2).then(RepositoryMeta::v2),
+        repository: match index_version {
+            1 => None,
+            INDEX_SCHEMA_V2 => Some(RepositoryMeta::v2()),
+            INDEX_SCHEMA_V3 => Some(RepositoryMeta::v3_per_package_url()),
+            _ => unreachable!("index version validated above"),
+        },
         recipes: recipes_entry,
         packages: newest.into_values().collect(),
     };
@@ -323,6 +427,31 @@ pub fn create_index_with_version(
     write_result?;
     println!("nawa: wrote index {} ({} packages, schema v{})", out.display(), index.packages.len(), index_version);
     Ok(index)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocationsFile {
+    schema: u32,
+    #[serde(default)]
+    package_urls: BTreeMap<String, String>,
+    #[serde(default)]
+    recipe_urls: BTreeMap<String, String>,
+}
+
+fn load_locations(path: &Path) -> Result<LocationsFile> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("read archive locations {}", path.display()))?;
+    let locations: LocationsFile = toml::from_str(&raw)
+        .with_context(|| format!("parse archive locations {}", path.display()))?;
+    if locations.schema != 1 {
+        bail!("unsupported archive locations schema {}; expected 1", locations.schema);
+    }
+    for (file, url) in locations.package_urls.iter().chain(locations.recipe_urls.iter()) {
+        validate_plain_filename(file)?;
+        validate_download_url(url, &format!("archive {file}"))?;
+    }
+    Ok(locations)
 }
 
 /// A revision is a commit sha or tag: it ends up in a file name, so keep it
@@ -383,7 +512,7 @@ pub fn pack_recipes(tree: &Path, out_dir: &Path, rev: &str) -> Result<RecipesEnt
     std::fs::rename(&part, &dest).with_context(|| format!("write {}", dest.display()))?;
     let sha256 = crate::fetch::sha256_of_file(&dest)?;
     println!("nawa: index -> recipes {rev} ({count} recipes)");
-    Ok(RecipesEntry { rev: rev.to_string(), file, sha256 })
+    Ok(RecipesEntry { rev: rev.to_string(), file, sha256, download_url: None })
 }
 
 #[cfg(test)]
@@ -436,6 +565,7 @@ mod tests {
                 arch: "x86_64".into(),
                 file: "bash-5.2-1.nawa.tar.zst".into(),
                 sha256: "a".repeat(64),
+                download_url: None,
                 size: 123,
                 installed_size: 456,
             }],
@@ -447,6 +577,49 @@ mod tests {
         let parsed: Index = toml::from_str(&serialized).unwrap();
         parsed.validate().unwrap();
         assert_eq!(parsed.repository.unwrap().schema, 2);
+    }
+
+    #[test]
+    fn v3_requires_authenticated_per_package_https_locations() {
+        let mut index = Index {
+            generated: Some(10),
+            expires: Some(20),
+            repository: Some(RepositoryMeta::v3_per_package_url()),
+            recipes: None,
+            packages: vec![RepoEntry {
+                name: "bash".into(),
+                version: "5.2".into(),
+                rel: 1,
+                arch: "x86_64".into(),
+                file: "bash-5.2-1.nawa.tar.zst".into(),
+                sha256: "a".repeat(64),
+                download_url: Some("https://github.com/example/repo/releases/download/packages-0001/sha256-a.nawa.tar.zst".into()),
+                size: 123,
+                installed_size: 456,
+            }],
+        };
+        index.validate().unwrap();
+
+        index.packages[0].download_url = Some("http://github.com/example/repo/file.nawa.tar.zst".into());
+        assert!(index.validate().unwrap_err().to_string().contains("HTTPS"));
+
+        index.packages[0].download_url = Some("https://user:password@github.com/example/repo/file.nawa.tar.zst".into());
+        assert!(index.validate().is_err());
+
+        index.packages[0].download_url = None;
+        assert!(index.validate().unwrap_err().to_string().contains("download_url"));
+    }
+
+    #[test]
+    fn v2_index_defaults_to_base_url_without_changing_legacy_shape() {
+        let meta = RepositoryMeta::v2();
+        assert_eq!(meta.archive_location, ARCHIVE_LOCATION_BASE_URL);
+        let serialized = toml::to_string(&meta).unwrap();
+        assert!(!serialized.contains("archive_location"));
+        let parsed: RepositoryMeta = toml::from_str(
+            "schema = 2\narchive_auth = \"signed-index\"\nhash_algorithm = \"sha256\"\nindex_signature = \"nawa-sig-v1\"\n"
+        ).unwrap();
+        assert_eq!(parsed.archive_location, ARCHIVE_LOCATION_BASE_URL);
     }
 
     #[test]
@@ -463,6 +636,7 @@ mod tests {
                 arch: "x86_64".into(),
                 file: "bash-5.2-1.nawa.tar.zst".into(),
                 sha256: "a".repeat(64),
+                download_url: None,
                 size: 123,
                 installed_size: 456,
             }],

@@ -189,9 +189,15 @@ fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         Cmd::Revdep { names, lib_dirs, ignore, no_symlinks, unowned, scan_dirs, json, no_suggest } => {
             cmd_revdep(ctx, &names, &lib_dirs, &ignore, no_symlinks, unowned, &scan_dirs, json, no_suggest)
         }
-        Cmd::RepoCreate { dir, out, sign, key, index_version, recipes, recipes_rev } => {
-            if index_version == repo::INDEX_SCHEMA_V2 && !sign {
-                bail!("repo-create --index-version 2 requires --sign; a v2 index must be authenticated");
+        Cmd::RepoCreate { dir, out, sign, key, index_version, locations, recipes, recipes_rev } => {
+            if index_version >= repo::INDEX_SCHEMA_V2 && !sign {
+                bail!("repo-create --index-version {index_version} requires --sign; repository indexes v2 and newer must be authenticated");
+            }
+            if index_version == repo::INDEX_SCHEMA_V3 && locations.is_none() {
+                bail!("repo-create --index-version 3 requires --locations");
+            }
+            if index_version != repo::INDEX_SCHEMA_V3 && locations.is_some() {
+                bail!("repo-create --locations is only valid with --index-version 3");
             }
             // Resolve the key before writing anything, so a missing signing
             // key cannot leave an unsigned v2 index in the repository.
@@ -209,7 +215,7 @@ fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
                 (Some(t), Some(r)) => Some((t.as_path(), r.as_str())),
                 _ => None,
             };
-            repo::create_index_with_version(&dir, &out, tree, index_version)?;
+            repo::create_index_with_locations(&dir, &out, tree, index_version, locations.as_deref())?;
             if let Some(kp) = signing_key {
                 let sp = sign::sign(&out, &kp)?;
                 println!("nawa: signed index -> {}", sp.display());
