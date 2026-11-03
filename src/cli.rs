@@ -286,9 +286,12 @@ pub(crate) enum Cmd {
         /// Signing key for --sign
         #[arg(long)]
         key: Option<PathBuf>,
-        /// Repository index schema (1 = legacy detached archive signatures, 2 = signed-index archive hashes)
-        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=2))]
+        /// Repository index schema (1 = legacy, 2 = signed-index hashes, 3 = distributed per-archive HTTPS URLs)
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=3))]
         index_version: u32,
+        /// TOML manifest containing package_urls and recipe_urls (required for schema 3)
+        #[arg(long)]
+        locations: Option<PathBuf>,
         /// Also pack this recipe tree into the repository (for `nawa sync`)
         #[arg(long, requires = "recipes_rev")]
         recipes: Option<PathBuf>,

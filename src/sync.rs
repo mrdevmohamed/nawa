@@ -48,11 +48,27 @@ pub fn sync(root: &Path, repo_ref: &RepoRef, dest: &Path, opts: &SyncOpts) -> Re
     // the tarball: located (local repo) or downloaded (remote), then checked
     // against the sha256 in the authenticated index
     let tarball = match &open.base_url {
+        None if open.index.repository.as_ref().map(|m| m.archive_location.as_str())
+            == Some(repo::ARCHIVE_LOCATION_PER_PACKAGE_URL) =>
+        {
+            let source_url = upgrade::archive_download_url(
+                "", &open.index, &rec.file, rec.download_url.as_deref()
+            )?;
+            let cache = fetch::remote_cache_dir(root, &source_url);
+            std::fs::create_dir_all(&cache)
+                .with_context(|| format!("create recipe archive cache {}", cache.display()))?;
+            let path = cache.join(&rec.file);
+            fetch::download_cached(&source_url, &path, Some(&rec.sha256))?;
+            path
+        }
         None => open.dir.join(&rec.file),
         Some(url) => {
-            let t = open.dir.join(&rec.file);
-            fetch::download_cached(&format!("{url}/{}", rec.file), &t, Some(&rec.sha256))?;
-            t
+            let path = open.dir.join(&rec.file);
+            let source_url = upgrade::archive_download_url(
+                url, &open.index, &rec.file, rec.download_url.as_deref()
+            )?;
+            fetch::download_cached(&source_url, &path, Some(&rec.sha256))?;
+            path
         }
     };
     if !tarball.is_file() {
