@@ -31,6 +31,14 @@ pub struct UpgradeOpts {
     pub yes: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchiveAuth {
+    /// Legacy v1 policy: each archive needs its own detached signature.
+    DetachedSignature,
+    /// V2 policy: a trusted signed index authenticates the archive SHA-256.
+    SignedIndexSha256,
+}
+
 /// A repository materialized on disk: for a local repo its own directory,
 /// for a remote one the per-URL cache holding the freshly fetched index.
 pub struct OpenRepo {
@@ -40,6 +48,8 @@ pub struct OpenRepo {
     pub base_url: Option<String>,
     /// the parsed, signature-checked, freshness-checked index
     pub index: repo::Index,
+    /// Authentication method selected only after validating the index signer.
+    pub archive_auth: ArchiveAuth,
 }
 
 /// Fetch (remote) or locate (local) a repository, then parse and
@@ -119,29 +129,30 @@ pub fn open_repo(
     let index_path = repo_dir.join("index.toml");
     let index = repo::load_index(&index_path)?;
 
-    // ---- verify the index signature when one is present --------------------
-    let sig_path = sign::sig_path_for(&index_path);
-    if sig_path.exists() {
-        match sign::verify_standalone(&index_path, root, None) {
-            Ok(()) => {}
-            Err(e) => bail!("repository index signature is INVALID: {e:#}"),
-        }
+    // A v2 declaration alone cannot authorize package hashes: the signature
+    // must match a key in this root's configured trust store.
+    let index_trust = sign::verify_index(&index_path, root, allow_unsigned)
+        .map_err(|e| anyhow::anyhow!("repository index signature is INVALID or untrusted: {e:#}"))?;
+    let archive_auth = if index.repository.is_some() && index_trust.is_trusted() {
+        println!("nawa: repository schema v2: package SHA-256 values authenticated by trusted index");
+        ArchiveAuth::SignedIndexSha256
     } else {
-        if !allow_unsigned && !sign::trusted_keys(root)?.is_empty() {
-            bail!(
-                "repository index {} is unsigned but trusted keys are configured\n(pass --allow-unsigned to override)",
-                index_path.display()
-            );
+        if index.repository.is_some() {
+            eprintln!("nawa: note: v2 index is not authenticated by a configured trusted key; using legacy per-archive signature policy");
         }
-        eprintln!("nawa: warning: repository index is unsigned ({})", index_path.display());
-    }
+        ArchiveAuth::DetachedSignature
+    };
 
-    // only an index verified against a configured trusted key may advance the
-    // "newest index seen" marker — otherwise one forged index with a huge
-    // timestamp would block every later (genuine) upgrade from this repo
-    let authenticated = sig_path.exists() && !sign::trusted_keys(root)?.is_empty();
-    check_index_freshness(&repo_dir, &index, base_url.is_some(), force, authenticated)?;
-    Ok(OpenRepo { dir: repo_dir, base_url, index })
+    // Only an index authenticated by a configured trusted key advances the
+    // newest-index marker used to prevent remote repository rollback.
+    check_index_freshness(
+        &repo_dir,
+        &index,
+        base_url.is_some(),
+        force,
+        index_trust.is_trusted(),
+    )?;
+    Ok(OpenRepo { dir: repo_dir, base_url, index, archive_auth })
 }
 
 /// Make one index entry's archive available locally and fully verified:
@@ -172,50 +183,57 @@ pub fn fetch_entry(
         Some(url) => {
             let dest = repo_dir.join(&re.file);
             fetch::download_cached(&format!("{url}/{}", re.file), &dest, Some(&re.sha256))?;
-            // the detached signature travels with the archive; it lands in
-            // a .part file first so an interrupted transfer cannot corrupt
-            // the cached copy (a truncated .sig would fail every future
-            // upgrade until removed by hand)
-            let sig_dest = sign::sig_path_for(&dest);
-            let sig_part = sig_dest.with_file_name(format!(
-                "{}.part",
-                sig_dest.file_name().unwrap_or_default().to_string_lossy()
-            ));
-            match fetch::download_opt(&format!("{url}/{}.sig", re.file), &sig_part) {
-                Ok(true) => {
-                    std::fs::rename(&sig_part, &sig_dest).with_context(|| {
-                        format!("activate {}", sig_dest.display())
-                    })?;
-                }
-                Ok(false) => {
-                    let _ = std::fs::remove_file(&sig_part);
-                    let _ = std::fs::remove_file(&sig_dest);
-                }
-                Err(e) => {
-                    let _ = std::fs::remove_file(&sig_part);
-                    if !sig_dest.exists() {
-                        // Do not turn a server/network failure into an
-                        // "unsigned" package. A genuine HTTP 404 is already
-                        // represented by Ok(false); every other failure must
-                        // remain visible when no previously verified sidecar
-                        // is cached.
-                        return Err(e).with_context(|| {
-                            format!("could not fetch signature for {}", re.file)
-                        });
+            if open.archive_auth == ArchiveAuth::DetachedSignature {
+                // Legacy repositories still require the per-archive sidecar.
+                let sig_dest = sign::sig_path_for(&dest);
+                let sig_part = sig_dest.with_file_name(format!(
+                    "{}.part",
+                    sig_dest.file_name().unwrap_or_default().to_string_lossy()
+                ));
+                match fetch::download_opt(&format!("{url}/{}.sig", re.file), &sig_part) {
+                    Ok(true) => {
+                        std::fs::rename(&sig_part, &sig_dest).with_context(|| {
+                            format!("activate {}", sig_dest.display())
+                        })?;
                     }
-                    eprintln!(
-                        "nawa: warning: could not refresh signature for {} ({e:#}); using cached signature",
-                        re.file
-                    );
+                    Ok(false) => {
+                        let _ = std::fs::remove_file(&sig_part);
+                        let _ = std::fs::remove_file(&sig_dest);
+                    }
+                    Err(e) => {
+                        let _ = std::fs::remove_file(&sig_part);
+                        if !sig_dest.exists() {
+                            return Err(e).with_context(|| {
+                                format!("could not fetch signature for {}", re.file)
+                            });
+                        }
+                        eprintln!(
+                            "nawa: warning: could not refresh signature for {} ({e:#}); using cached signature",
+                            re.file
+                        );
+                    }
                 }
             }
             dest
         }
     };
-    // integrity: sha256 recorded in the index
+    // Integrity is always checked against the index, regardless of schema.
     fetch::verify_sha256(&src, &re.sha256)?;
-    // authenticity: signature policy (trust store / embedded / allow-unsigned)
-    sign::verify_for_install(&src, root, None, allow_unsigned)?;
+    if re.size > 0 {
+        let actual = std::fs::metadata(&src)
+            .with_context(|| format!("stat repository archive {}", src.display()))?
+            .len();
+        if actual != re.size {
+            bail!(
+                "archive {} size mismatch: index says {} bytes, downloaded file has {} bytes",
+                re.file, re.size, actual
+            );
+        }
+    }
+    // Only a trusted v2 index can replace per-archive signatures.
+    if open.archive_auth == ArchiveAuth::DetachedSignature {
+        sign::verify_for_install(&src, root, None, allow_unsigned)?;
+    }
     // the archive must be the package/version the index promised
     // (blocks replaying an older signed archive as an "upgrade")
     check_archive_matches_index(&src, re)?;
@@ -300,7 +318,11 @@ pub fn upgrade(
             .find(|(r, _)| &r.name == name)
             .expect("ordered name came from the plan");
         let src = fetch_entry(root, &open, re, opts.allow_unsigned)?;
-        install::install_archive(&src, root, opts.force, opts.allow_unsigned, None, "keep")?;
+        if open.archive_auth == ArchiveAuth::SignedIndexSha256 {
+            install::install_archive_from_index(&src, root, opts.force, &re.sha256, "keep")?;
+        } else {
+            install::install_archive(&src, root, opts.force, opts.allow_unsigned, None, "keep")?;
+        }
         done += 1;
     }
     println!("nawa: upgraded {done} package(s)");
