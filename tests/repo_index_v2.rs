@@ -343,6 +343,8 @@ fn upgrade_uses_v2_index_hashes_without_package_sidecars() {
     );
     let _ = fs::remove_dir_all(&dir);
 
+}
+
 #[test]
 fn repo_create_validates_signing_key_before_writing_v2_index() {
     let dir = scratch("invalid-signing-key");
@@ -420,6 +422,4 @@ fn v2_repo_create_rejects_invalid_pkgrel_but_v1_keeps_legacy_fallback() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-
-}
 

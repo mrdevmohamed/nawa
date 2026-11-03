@@ -357,8 +357,6 @@ fn require_trust_for_remote(root: &Path, url: &str, allow_unsigned: bool) -> Res
 /// Rollback / freeze protection for the (signed) index timestamp.
 /// Remote repos remember the newest `generated` value seen in the cache dir
 /// and refuse anything older; a very old index only produces a warning.
-const MAX_INDEX_FUTURE_SKEW_SECS: u64 = 24 * 60 * 60;
-
 fn check_index_freshness(
     repo_dir: &Path,
     index: &repo::Index,
@@ -377,10 +375,9 @@ fn check_index_freshness(
             return Ok(());
         }
     };
-    if gen > now.saturating_add(MAX_INDEX_FUTURE_SKEW_SECS) {
+    if remote && gen > now {
         bail!(
-            "repository index generated timestamp is too far in the future (more than {} hours ahead; check the publisher clock)",
-            MAX_INDEX_FUTURE_SKEW_SECS / 3600
+            "repository index generated timestamp is in the future; check publisher and system clocks"
         );
     }
     if remote {
@@ -793,7 +790,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let far_future = now + MAX_INDEX_FUTURE_SKEW_SECS + 60;
+        let far_future = now + 60;
         let idx = repo::Index {
             generated: Some(far_future),
             expires: Some(far_future + 10_000),
@@ -804,15 +801,18 @@ mod tests {
         assert!(check_index_freshness(&base, &idx, true, false, true).is_err());
         assert!(!base.join("index.seen").exists());
 
-        let slightly_future = repo::Index {
-            generated: Some(now + 60),
-            expires: Some(now + 60 + 10_000),
+        let current = repo::Index {
+            generated: Some(now.saturating_sub(1)),
+            expires: Some(now + 10_000),
             repository: None,
             recipes: None,
             packages: vec![],
         };
-        assert!(check_index_freshness(&base, &slightly_future, true, false, true).is_ok());
-        assert!(!base.join("index.seen").exists());
+        assert!(check_index_freshness(&base, &current, true, false, true).is_ok());
+        assert_eq!(
+            std::fs::read_to_string(base.join("index.seen")).unwrap(),
+            now.saturating_sub(1).to_string()
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 

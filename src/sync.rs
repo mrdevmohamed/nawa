@@ -58,7 +58,8 @@ pub fn sync(root: &Path, repo_ref: &RepoRef, dest: &Path, opts: &SyncOpts) -> Re
     if !tarball.is_file() {
         bail!("recipe archive {} listed in the index is missing", tarball.display());
     }
-    let snapshot = fetch::snapshot_file(&tarball, Some(&rec.sha256))?;
+    let snapshot_dir = root.join(".nawa");
+    let snapshot = fetch::snapshot_file(&tarball, Some(&rec.sha256), &snapshot_dir)?;
     let verified_tarball = snapshot.path();
 
     let parent = dest.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));

@@ -85,25 +85,32 @@ static SNAPSHOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// Copy into a mode-0600 O_EXCL snapshot and optionally authenticate the copied
 /// bytes against an expected SHA-256. Uses /tmp only when it is a real,
 /// non-symlink directory and sticky if world-writable.
-pub fn snapshot_file(source_path: &Path, expected_sha256: Option<&str>) -> Result<VerifiedSnapshot> {
-    let temp_dir = Path::new("/tmp");
-    let dir_meta = std::fs::symlink_metadata(temp_dir)
-        .with_context(|| format!("inspect temporary directory {}", temp_dir.display()))?;
-    let dir_mode = dir_meta.permissions().mode();
-    if !dir_meta.is_dir()
-        || dir_meta.file_type().is_symlink()
-        || (dir_mode & 0o002 != 0 && dir_mode & 0o1000 == 0)
-    {
-        bail!("unsafe temporary directory {} (must be a real directory and sticky when world-writable)", temp_dir.display());
+pub fn snapshot_file(
+    source_path: &Path,
+    expected_sha256: Option<&str>,
+    snapshot_dir: &Path,
+) -> Result<VerifiedSnapshot> {
+    std::fs::create_dir_all(snapshot_dir)
+        .with_context(|| format!("create snapshot directory {}", snapshot_dir.display()))?;
+    let dir_meta = std::fs::symlink_metadata(snapshot_dir)
+        .with_context(|| format!("inspect snapshot directory {}", snapshot_dir.display()))?;
+    if !dir_meta.is_dir() || dir_meta.file_type().is_symlink() {
+        bail!("unsafe snapshot directory {}", snapshot_dir.display());
     }
+    // This directory is private Nawa state. Restrict it before creating the
+    // snapshot so other users cannot replace or modify the verified file.
+    let mut permissions = dir_meta.permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(snapshot_dir, permissions)
+        .with_context(|| format!("secure snapshot directory {}", snapshot_dir.display()))?;
 
     let mut source = File::open(source_path)
         .with_context(|| format!("open {}", source_path.display()))?;
     let mut created: Option<(File, PathBuf)> = None;
     for _ in 0..128 {
         let sequence = SNAPSHOT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let path = temp_dir.join(format!(
-            "nawa-verified-{}-{sequence}.tmp",
+        let path = snapshot_dir.join(format!(
+            "verified-{}-{sequence}.tmp",
             std::process::id()
         ));
         match OpenOptions::new()

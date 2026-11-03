@@ -34,7 +34,8 @@ pub fn install_archive(
     key: Option<&Path>,
     reason: &str,
 ) -> Result<Entry> {
-    let snapshot = crate::fetch::snapshot_file(archive_path, None)?;
+    let snapshot_dir = root.join(".nawa");
+    let snapshot = crate::fetch::snapshot_file(archive_path, None, &snapshot_dir)?;
     sign::verify_for_install_with_sig(
         snapshot.path(),
         &sign::sig_path_for(archive_path),
@@ -42,7 +43,7 @@ pub fn install_archive(
         key,
         allow_unsigned,
     )?;
-    install_archive_payload(snapshot.path(), root, force, reason)
+    install_archive_payload(snapshot.path(), archive_path, root, force, reason)
 }
 
 /// Install an archive authenticated by a trusted v2 repository index.
@@ -58,12 +59,14 @@ pub fn install_archive_from_index(
     expected_sha256: &str,
     reason: &str,
 ) -> Result<Entry> {
-    let snapshot = crate::fetch::snapshot_file(archive_path, Some(expected_sha256))?;
-    install_archive_payload(snapshot.path(), root, force, reason)
+    let snapshot_dir = root.join(".nawa");
+    let snapshot = crate::fetch::snapshot_file(archive_path, Some(expected_sha256), &snapshot_dir)?;
+    install_archive_payload(snapshot.path(), archive_path, root, force, reason)
 }
 
 fn install_archive_payload(
     archive_path: &Path,
+    cache_name_source: &Path,
     root: &Path,
     force: bool,
     reason: &str,
@@ -145,7 +148,7 @@ fn install_archive_payload(
     };
 
     // ---- keep a copy of the archive in the package cache --------------------
-    cache_archive(archive_path, root)?;
+    cache_archive_named(archive_path, cache_name_source, root)?;
     if is_upgrade {
         println!(
             "nawa: upgrading {} {} -> {}-{}-{}",
@@ -378,15 +381,25 @@ pub fn remove_with(name: &str, root: &Path, force: bool) -> Result<()> {
 /// Copy an archive into `<root>/var/cache/nawa` (hardlink when possible).
 /// Also keeps the detached signature next to it when one exists.
 pub fn cache_archive(archive_path: &Path, root: &Path) -> Result<PathBuf> {
+    cache_archive_named(archive_path, archive_path, root)
+}
+
+/// Cache snapshot bytes under the original archive filename and retain its
+/// detached sidecar, if present, under the matching cache filename.
+fn cache_archive_named(
+    archive_path: &Path,
+    name_source: &Path,
+    root: &Path,
+) -> Result<PathBuf> {
     let dir = root.join("var/cache/nawa");
     std::fs::create_dir_all(&dir)?;
-    let dest = dir.join(archive_path.file_name().unwrap_or_default());
+    let dest = dir.join(name_source.file_name().unwrap_or_default());
     if !dest.exists()
         && std::fs::hard_link(archive_path, &dest).is_err() {
             std::fs::copy(archive_path, &dest)
                 .with_context(|| format!("cache {}", archive_path.display()))?;
         }
-    let sig = sign::sig_path_for(archive_path);
+    let sig = sign::sig_path_for(name_source);
     if sig.exists() {
         let sig_dest = sign::sig_path_for(&dest);
         if !sig_dest.exists() {
@@ -1165,7 +1178,7 @@ mod tests {
         let original = std::fs::read(&archive).unwrap();
         let digest = crate::fetch::sha256_of_file(&archive).unwrap();
 
-        let snapshot = crate::fetch::snapshot_file(&archive, Some(&digest)).unwrap();
+        let snapshot = crate::fetch::snapshot_file(&archive, Some(&digest), &base.join(".nawa")).unwrap();
         assert_ne!(snapshot.path(), archive);
         assert_eq!(std::fs::read(snapshot.path()).unwrap(), original);
         std::fs::write(&archive, b"replaced after snapshot creation").unwrap();
