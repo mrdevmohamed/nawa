@@ -611,6 +611,50 @@ mod tests {
     }
 
     #[test]
+    fn repo_create_v3_applies_package_locations_manifest() {
+        let base = std::env::temp_dir().join(format!("nawa-repo-v3-locations-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("repo");
+        let staging = base.join("staging");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("bin"), b"bash").unwrap();
+        archive::create(
+            &staging,
+            "pkgname = demo\npkgver = 1.0\npkgrel = 1\narch = x86_64\nsize = 4\n",
+            &dir.join("demo-1.0-1.nawa.tar.zst"),
+        ).unwrap();
+
+        let locations = base.join("locations.toml");
+        std::fs::write(
+            &locations,
+            r#"schema = 1
+
+[package_urls]
+"demo-1.0-1.nawa.tar.zst" = "https://github.com/example/repo/releases/download/packages-0001/sha256-demo.nawa.tar.zst"
+
+[recipe_urls]
+"#,
+        ).unwrap();
+
+        let index_path = dir.join("index.toml");
+        let index = create_index_with_locations(
+            &dir, &index_path, None, INDEX_SCHEMA_V3, Some(&locations)
+        ).unwrap();
+        assert_eq!(
+            index.packages[0].download_url.as_deref(),
+            Some("https://github.com/example/repo/releases/download/packages-0001/sha256-demo.nawa.tar.zst")
+        );
+        assert_eq!(
+            load_index(&index_path).unwrap().repository.unwrap().archive_location,
+            ARCHIVE_LOCATION_PER_PACKAGE_URL
+        );
+        assert!(create_index_with_version(&dir, &index_path, None, INDEX_SCHEMA_V3).is_err());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn v2_index_defaults_to_base_url_without_changing_legacy_shape() {
         let meta = RepositoryMeta::v2();
         assert_eq!(meta.archive_location, ARCHIVE_LOCATION_BASE_URL);

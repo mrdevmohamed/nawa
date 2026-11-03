@@ -76,7 +76,8 @@ nawa owner /usr/bin/foo                         # which package owns file
 nawa revdep [name...] [--unowned] [--json]      # broken shared-library links (exit 1 if any)
 nawa remove --yes <name>                        # remove package (--yes skips the confirmation)
 nawa repo-create <dir-of-archives> --out index.toml --sign  # legacy v1 index
-nawa repo-create <dir-of-archives> --index-version 2 --sign # signed-index v2
+nawa repo-create <dir-of-archives> --index-version 2 --sign # signed-index v2 (base URL)
+nawa repo-create <dir-of-archives> --index-version 3 --locations locations.toml --sign # distributed storage
 nawa upgrade --yes --repo <dir-or-url>          # upgrade from a repo (repo also comes from nawa.toml)
 nawa rollback <name>                            # restore previous version
 nawa service list                               # runit services
@@ -419,3 +420,35 @@ post_remove  = ""    # runs after `nawa remove`
 
 Placeholders available in build sections: `%{name} %{version} %{rel} %{arch}
 %{jobs} %{pkgdir} %{srcdir}`.
+
+
+### Distributed binary repositories (schema v3)
+
+Schema v3 keeps the signed index at one stable repository URL while each
+package and recipe archive can live in a different HTTPS location. The
+publisher supplies a TOML locations manifest; the signed index binds every
+URL to the archive SHA-256 and size.
+
+```toml
+schema = 1
+
+[package_urls]
+"bash-5.2-1.nawa.tar.zst" = "https://github.com/owner/repo/releases/download/packages-0001/sha256-bash.tar.zst"
+
+[recipe_urls]
+"recipes-<commit>.recipes.tar.zst" = "https://github.com/owner/repo/releases/download/packages-0001/sha256-recipes.tar.zst"
+```
+
+Create the index only after all referenced assets have been uploaded:
+
+```sh
+nawa repo-create ./archives \\
+  --index-version 3 --locations locations.toml \\
+  --recipes ./recipes --recipes-rev <commit> \\
+  --sign --key nawa.sec
+```
+
+Schema v3 requires a trusted index signing key. Nawa refuses per-archive
+URLs from an unsigned or untrusted index. URLs must be absolute HTTPS URLs
+without embedded credentials or fragments. Schema v1 and v2 retain their
+existing base-URL behavior.

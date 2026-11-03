@@ -140,7 +140,8 @@ pub fn open_repo(
         bail!("distributed schema-v3 repositories require a trusted signing key; refusing to use per-package URLs from an unauthenticated index");
     }
     let archive_auth = if index.repository.is_some() && index_trust.is_trusted() {
-        println!("nawa: repository schema v2: package SHA-256 values authenticated by trusted index");
+        println!("nawa: repository schema v{}: package SHA-256 values authenticated by trusted index",
+            index.repository.as_ref().map(|meta| meta.schema).unwrap_or(1));
         ArchiveAuth::SignedIndexSha256
     } else {
         if index.repository.is_some() {
@@ -159,6 +160,25 @@ pub fn open_repo(
         index_trust.is_trusted(),
     )?;
     Ok(OpenRepo { dir: repo_dir, base_url, index, archive_auth })
+}
+
+/// Resolve an archive URL while keeping legacy base-URL repositories unchanged.
+pub(crate) fn archive_download_url(
+    base_url: &str,
+    index: &repo::Index,
+    file: &str,
+    download_url: Option<&str>,
+) -> Result<String> {
+    let distributed = index.repository.as_ref()
+        .map(|meta| meta.archive_location == repo::ARCHIVE_LOCATION_PER_PACKAGE_URL)
+        .unwrap_or(false);
+    if distributed {
+        Ok(download_url
+            .context("schema-v3 archive entry is missing download_url")?
+            .to_string())
+    } else {
+        Ok(format!("{base_url}/{file}"))
+    }
 }
 
 /// Make one index entry's archive available locally and fully verified:
@@ -188,14 +208,9 @@ pub fn fetch_entry(
         }
         Some(url) => {
             let dest = repo_dir.join(&re.file);
-            let source_url = match open.index.repository.as_ref() {
-                Some(meta) if meta.archive_location == repo::ARCHIVE_LOCATION_PER_PACKAGE_URL => {
-                    re.download_url.as_deref()
-                        .context("schema-v3 package entry is missing download_url")?
-                        .to_string()
-                }
-                _ => format!("{url}/{}", re.file),
-            };
+            let source_url = archive_download_url(
+                url, &open.index, &re.file, re.download_url.as_deref()
+            )?;
             fetch::download_cached(&source_url, &dest, Some(&re.sha256))?;
             if open.archive_auth == ArchiveAuth::DetachedSignature {
                 // Legacy repositories still require the per-archive sidecar.
@@ -581,6 +596,38 @@ mod tests {
         }
         repo::create_index(&repo, &repo.join("index.toml")).unwrap();
         repo
+    }
+
+    #[test]
+    fn archive_download_url_preserves_v2_and_selects_v3_locations() {
+        let mut index = repo::Index {
+            generated: Some(10),
+            expires: Some(20),
+            repository: Some(repo::RepositoryMeta::v2()),
+            recipes: None,
+            packages: Vec::new(),
+        };
+        assert_eq!(
+            archive_download_url(
+                "https://example.test/stable", &index,
+                "bash-5.2-1.nawa.tar.zst", None
+            ).unwrap(),
+            "https://example.test/stable/bash-5.2-1.nawa.tar.zst"
+        );
+
+        index.repository = Some(repo::RepositoryMeta::v3_per_package_url());
+        let url = "https://github.com/example/repo/releases/download/packages-0002/sha256-bash.nawa.tar.zst";
+        assert_eq!(
+            archive_download_url(
+                "https://example.test/stable", &index,
+                "bash-5.2-1.nawa.tar.zst", Some(url)
+            ).unwrap(),
+            url
+        );
+        assert!(archive_download_url(
+            "https://example.test/stable", &index,
+            "bash-5.2-1.nawa.tar.zst", None
+        ).is_err());
     }
 
     #[test]
