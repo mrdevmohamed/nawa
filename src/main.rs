@@ -189,16 +189,25 @@ fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         Cmd::Revdep { names, lib_dirs, ignore, no_symlinks, unowned, scan_dirs, json, no_suggest } => {
             cmd_revdep(ctx, &names, &lib_dirs, &ignore, no_symlinks, unowned, &scan_dirs, json, no_suggest)
         }
-        Cmd::RepoCreate { dir, out, sign, key, recipes, recipes_rev } => {
-            // a relative --out lands inside the repo dir, not in the CWD
+        Cmd::RepoCreate { dir, out, sign, key, index_version, recipes, recipes_rev } => {
+            if index_version == repo::INDEX_SCHEMA_V2 && !sign {
+                bail!("repo-create --index-version 2 requires --sign; a v2 index must be authenticated");
+            }
+            // Resolve the key before writing anything, so a missing signing
+            // key cannot leave an unsigned v2 index in the repository.
+            let signing_key = if sign {
+                Some(sign::resolve_signing_key(key.as_deref())?)
+            } else {
+                None
+            };
+            // A relative --out lands inside the repo dir, not in the CWD.
             let out = if out.is_absolute() { out } else { dir.join(out) };
             let tree = match (&recipes, &recipes_rev) {
                 (Some(t), Some(r)) => Some((t.as_path(), r.as_str())),
                 _ => None,
             };
-            repo::create_index_with(&dir, &out, tree)?;
-            if sign {
-                let kp = sign::resolve_signing_key(key.as_deref())?;
+            repo::create_index_with_version(&dir, &out, tree, index_version)?;
+            if let Some(kp) = signing_key {
                 let sp = sign::sign(&out, &kp)?;
                 println!("nawa: signed index -> {}", sp.display());
             }
