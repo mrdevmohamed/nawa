@@ -1,6 +1,6 @@
 # Nawa Signed Repository Index v2
 
-**Status:** Proposed — design review  
+**Status:** Implementation in progress — CI validation pending  
 **Project:** Nawa  
 **Scope:** Repository metadata, archive authentication, compatibility, and publisher migration  
 **Target format:** TOML  
