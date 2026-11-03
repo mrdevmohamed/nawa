@@ -290,6 +290,75 @@ pub fn verify_for_install(
     Ok(())
 }
 
+/// How the repository index was authenticated. Only TrustedKey is strong
+/// enough to authorize v2 package hashes in place of per-archive signatures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndexTrust {
+    TrustedKey { key_name: String },
+    EmbeddedKeyOnly,
+    UnsignedAllowed,
+}
+
+impl IndexTrust {
+    pub fn is_trusted(&self) -> bool {
+        matches!(self, Self::TrustedKey { .. })
+    }
+}
+
+/// Verify an index and report whether its signature matched a configured key.
+///
+/// A present but invalid/unknown-key signature is always an error. The
+/// allow_unsigned flag only permits a missing signature; it never downgrades
+/// an invalid signature to an unsigned repository.
+pub fn verify_index(file: &Path, root: &Path, allow_unsigned: bool) -> Result<IndexTrust> {
+    if !file.is_file() {
+        bail!("repository index not found: {}", file.display());
+    }
+    let sig_path = sig_path_for(file);
+    let trusted = trusted_keys(root)?;
+    if !sig_path.exists() {
+        if !trusted.is_empty() && !allow_unsigned {
+            bail!(
+                "repository index {} is unsigned but {} trusted key(s) are configured\\n(pass --allow-unsigned to override)",
+                file.display(),
+                trusted.len()
+            );
+        }
+        if !trusted.is_empty() {
+            eprintln!(
+                "nawa: warning: accepting unsigned repository index {} because --allow-unsigned was specified",
+                file.display()
+            );
+        } else {
+            eprintln!(
+                "nawa: warning: repository index is unsigned ({})",
+                file.display()
+            );
+        }
+        return Ok(IndexTrust::UnsignedAllowed);
+    }
+
+    let sf = read_sig_file(&sig_path)?;
+    if !trusted.is_empty() {
+        for (name, vk) in &trusted {
+            if verify(file, vk, &sf.sig).is_ok() {
+                println!("nawa: repository index signature OK (trusted key {name})");
+                return Ok(IndexTrust::TrustedKey { key_name: name.clone() });
+            }
+        }
+        bail!(
+            "repository index signature does not match any of the {} trusted key(s)",
+            trusted.len()
+        );
+    }
+
+    verify(file, &sf.embedded, &sf.sig)?;
+    eprintln!(
+        "nawa: warning: no trusted keys configured — repository index verified against its embedded key only"
+    );
+    Ok(IndexTrust::EmbeddedKeyOnly)
+}
+
 /// `nawa verify` standalone: explicit key > trust store > embedded key.
 pub fn verify_standalone(file: &Path, root: &Path, key: Option<&Path>) -> Result<()> {
     if !file.exists() {
