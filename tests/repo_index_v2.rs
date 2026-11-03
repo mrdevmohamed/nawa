@@ -54,9 +54,13 @@ fn make_archive(repo: &Path) -> PathBuf {
 }
 
 fn make_archive_version(repo: &Path, version: &str, body: &str) -> PathBuf {
+    make_archive_version_with_pkgrel(repo, version, body, "1")
+}
+
+fn make_archive_version_with_pkgrel(repo: &Path, version: &str, body: &str, pkgrel: &str) -> PathBuf {
     fs::create_dir_all(repo).unwrap();
     let path = repo.join(format!("hello-{version}-1.nawa.tar.zst"));
-    let pkginfo = format!("pkgname = hello\npkgver = {version}\npkgrel = 1\narch = any\nrundeps = \nsize = 1\n");
+    let pkginfo = format!("pkgname = hello\npkgver = {version}\npkgrel = {pkgrel}\narch = any\nrundeps = \nsize = 1\n");
     let file = fs::File::create(&path).unwrap();
     let encoder = zstd::stream::write::Encoder::new(file, 3).unwrap();
     let mut tar = tar::Builder::new(encoder);
@@ -338,5 +342,84 @@ fn upgrade_uses_v2_index_hashes_without_package_sidecars() {
         "new-version\n"
     );
     let _ = fs::remove_dir_all(&dir);
+
+#[test]
+fn repo_create_validates_signing_key_before_writing_v2_index() {
+    let dir = scratch("invalid-signing-key");
+    let repo = dir.join("repo");
+    make_archive(&repo);
+    let bad_key = dir.join("exists-but-invalid.sec");
+    fs::write(&bad_key, "not a valid ed25519 seed\n").unwrap();
+
+    let output = run(
+        &dir,
+        &[
+            "repo-create",
+            repo.to_str().unwrap(),
+            "--index-version",
+            "2",
+            "--sign",
+            "--key",
+            bad_key.to_str().unwrap(),
+        ],
+    );
+    assert!(!output.status.success());
+    assert!(
+        format!("{}{}", stdout(&output), stderr(&output)).contains("invalid repository signing key"),
+        "{}\n{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert!(!repo.join("index.toml").exists());
+    assert!(!repo.join("index.toml.sig").exists());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn v2_repo_create_rejects_invalid_pkgrel_but_v1_keeps_legacy_fallback() {
+    let dir = scratch("invalid-pkgrel");
+    let repo = dir.join("repo");
+    make_archive_version_with_pkgrel(&repo, "1", "bad-rel\n", "not-a-number");
+    let keys = make_keys(&dir);
+
+    let v2 = run(
+        &dir,
+        &[
+            "repo-create",
+            repo.to_str().unwrap(),
+            "--index-version",
+            "2",
+            "--sign",
+            "--key",
+            keys.secret.to_str().unwrap(),
+        ],
+    );
+    assert!(!v2.status.success());
+    assert!(
+        format!("{}{}", stdout(&v2), stderr(&v2)).contains("invalid pkgrel"),
+        "{}\n{}",
+        stdout(&v2),
+        stderr(&v2)
+    );
+    assert!(!repo.join("index.toml").exists());
+
+    ok(run(
+        &dir,
+        &[
+            "repo-create",
+            repo.to_str().unwrap(),
+            "--index-version",
+            "1",
+            "--sign",
+            "--key",
+            keys.secret.to_str().unwrap(),
+        ],
+    ));
+    let index = fs::read_to_string(repo.join("index.toml")).unwrap();
+    assert!(index.contains("rel = 1"));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+
 }
 

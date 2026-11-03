@@ -196,7 +196,10 @@ fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             // Resolve the key before writing anything, so a missing signing
             // key cannot leave an unsigned v2 index in the repository.
             let signing_key = if sign {
-                Some(sign::resolve_signing_key(key.as_deref())?)
+                let path = sign::resolve_signing_key(key.as_deref())?;
+                sign::load_signing_key(&path)
+                    .with_context(|| format!("invalid repository signing key {}", path.display()))?;
+                Some(path)
             } else {
                 None
             };

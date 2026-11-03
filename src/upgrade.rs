@@ -127,11 +127,11 @@ pub fn open_repo(
     }
 
     let index_path = repo_dir.join("index.toml");
-    let index = repo::load_index(&index_path)?;
-
-    // A v2 declaration alone cannot authorize package hashes: the signature
-    // must match a key in this root's configured trust store.
-    let index_trust = sign::verify_index(&index_path, root, allow_unsigned)
+    // Read once: parsing and signature verification must consume identical bytes.
+    let index_bytes = std::fs::read(&index_path)
+        .with_context(|| format!("read repository index {}", index_path.display()))?;
+    let index = repo::load_index_bytes(&index_bytes)?;
+    let index_trust = sign::verify_index_bytes(&index_bytes, &index_path, root, allow_unsigned)
         .map_err(|e| anyhow::anyhow!("repository index signature is INVALID or untrusted: {e:#}"))?;
     let archive_auth = if index.repository.is_some() && index_trust.is_trusted() {
         println!("nawa: repository schema v2: package SHA-256 values authenticated by trusted index");
@@ -236,7 +236,7 @@ pub fn fetch_entry(
     }
     // the archive must be the package/version the index promised
     // (blocks replaying an older signed archive as an "upgrade")
-    check_archive_matches_index(&src, re)?;
+    check_archive_matches_index(&src, re, open.index.repository.is_some())?;
     Ok(src)
 }
 
@@ -357,6 +357,8 @@ fn require_trust_for_remote(root: &Path, url: &str, allow_unsigned: bool) -> Res
 /// Rollback / freeze protection for the (signed) index timestamp.
 /// Remote repos remember the newest `generated` value seen in the cache dir
 /// and refuse anything older; a very old index only produces a warning.
+const MAX_INDEX_FUTURE_SKEW_SECS: u64 = 24 * 60 * 60;
+
 fn check_index_freshness(
     repo_dir: &Path,
     index: &repo::Index,
@@ -364,6 +366,10 @@ fn check_index_freshness(
     force: bool,
     authenticated: bool,
 ) -> Result<()> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let gen = match index.generated {
         Some(g) => g,
         None => {
@@ -371,6 +377,12 @@ fn check_index_freshness(
             return Ok(());
         }
     };
+    if gen > now.saturating_add(MAX_INDEX_FUTURE_SKEW_SECS) {
+        bail!(
+            "repository index generated timestamp is too far in the future (more than {} hours ahead; check the publisher clock)",
+            MAX_INDEX_FUTURE_SKEW_SECS / 3600
+        );
+    }
     if remote {
         let seen_path = repo_dir.join("index.seen");
         if let Ok(raw) = std::fs::read_to_string(&seen_path) {
@@ -382,14 +394,15 @@ fn check_index_freshness(
                 }
             }
         }
-        if authenticated {
-            let _ = std::fs::write(&seen_path, gen.to_string());
+        // Never persist a future timestamp, even within tolerated clock skew.
+        if authenticated && gen <= now {
+            let part = seen_path.with_extension("seen.part");
+            std::fs::write(&part, gen.to_string())
+                .with_context(|| format!("write {}", part.display()))?;
+            std::fs::rename(&part, &seen_path)
+                .with_context(|| format!("activate {}", seen_path.display()))?;
         }
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
     if let Some(exp) = index.expires {
         if now > exp {
             if remote && !force {
@@ -411,11 +424,24 @@ fn check_index_freshness(
 }
 
 /// The `.PKGINFO` inside the archive must agree with the index entry.
-fn check_archive_matches_index(archive: &Path, re: &repo::RepoEntry) -> Result<()> {
+fn check_archive_matches_index(
+    archive: &Path,
+    re: &repo::RepoEntry,
+    strict_v2: bool,
+) -> Result<()> {
     let raw = crate::archive::read_pkginfo(archive)?;
     let info = crate::archive::parse_pkginfo(&raw)?;
     let get = |k: &str| info.get(k).cloned().unwrap_or_default();
-    let rel: u32 = info.get("pkgrel").and_then(|v| v.parse().ok()).unwrap_or(1);
+    let rel: u32 = match info.get("pkgrel") {
+        Some(raw) => match raw.parse::<u32>() {
+            Ok(value) if !strict_v2 || value > 0 => value,
+            Ok(_) => bail!("archive {} has invalid pkgrel 0 in .PKGINFO", re.file),
+            Err(_) if !strict_v2 => 1,
+            Err(_) => bail!("archive {} has invalid pkgrel {:?} in .PKGINFO", re.file, raw),
+        },
+        None if strict_v2 => bail!("archive {} is missing pkgrel in .PKGINFO", re.file),
+        None => 1,
+    };
     let arch = get("arch");
     let host = std::env::var("NAWA_ARCH").unwrap_or_else(|_| std::env::consts::ARCH.to_string());
     if !arch.is_empty() && !matches!(arch.as_str(), "any" | "noarch" | "all") && arch != host {
@@ -667,9 +693,9 @@ mod tests {
             size: 0,
             installed_size: 0,
         };
-        assert!(check_archive_matches_index(&a, &ok).is_ok());
+        assert!(check_archive_matches_index(&a, &ok, false).is_ok());
         let newer = repo::RepoEntry { version: "2.0".into(), ..ok.clone() };
-        assert!(check_archive_matches_index(&a, &newer).is_err());
+        assert!(check_archive_matches_index(&a, &newer, false).is_err());
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -760,4 +786,34 @@ mod tests {
         assert!(check_index_freshness(&base, &idx, false, false, true).is_ok());
         let _ = std::fs::remove_dir_all(&base);
     }
+    #[test]
+    fn future_index_timestamp_cannot_poison_seen_marker() {
+        let base = tmpdir("future-index");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let far_future = now + MAX_INDEX_FUTURE_SKEW_SECS + 60;
+        let idx = repo::Index {
+            generated: Some(far_future),
+            expires: Some(far_future + 10_000),
+            repository: None,
+            recipes: None,
+            packages: vec![],
+        };
+        assert!(check_index_freshness(&base, &idx, true, false, true).is_err());
+        assert!(!base.join("index.seen").exists());
+
+        let slightly_future = repo::Index {
+            generated: Some(now + 60),
+            expires: Some(now + 60 + 10_000),
+            repository: None,
+            recipes: None,
+            packages: vec![],
+        };
+        assert!(check_index_freshness(&base, &slightly_future, true, false, true).is_ok());
+        assert!(!base.join("index.seen").exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
 }

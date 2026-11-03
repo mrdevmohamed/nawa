@@ -85,10 +85,15 @@ pub const INDEX_VALIDITY_SECS: u64 = 90 * 24 * 3600;
 
 /// Load and validate an index. An index without [repository] remains legacy v1.
 pub fn load_index(path: &Path) -> Result<Index> {
-    let raw = std::fs::read_to_string(path)
+    let raw = std::fs::read(path)
         .with_context(|| format!("read index {}", path.display()))?;
-    let idx: Index = toml::from_str(&raw)
-        .with_context(|| format!("parse index {}", path.display()))?;
+    load_index_bytes(&raw).with_context(|| format!("parse index {}", path.display()))
+}
+
+/// Parse and validate exactly the byte sequence whose signature was checked.
+pub fn load_index_bytes(raw: &[u8]) -> Result<Index> {
+    let text = std::str::from_utf8(raw).context("repository index is not valid UTF-8")?;
+    let idx: Index = toml::from_str(text).context("parse repository index TOML")?;
     idx.validate()?;
     Ok(idx)
 }
@@ -233,7 +238,20 @@ pub fn create_index_with_version(
         let info = archive::parse_pkginfo(&raw)?;
         let name = info.get("pkgname").cloned().unwrap_or_default();
         let version = info.get("pkgver").cloned().unwrap_or_default();
-        let rel: u32 = info.get("pkgrel").and_then(|v| v.parse().ok()).unwrap_or(1);
+        let rel: u32 = if index_version == INDEX_SCHEMA_V2 {
+            let raw = info.get("pkgrel").with_context(|| {
+                format!("{} is missing pkgrel in .PKGINFO", path.display())
+            })?;
+            let parsed = raw.parse::<u32>().with_context(|| {
+                format!("{} has an invalid pkgrel {:?} in .PKGINFO", path.display(), raw)
+            })?;
+            if parsed == 0 {
+                bail!("{} has invalid pkgrel 0 in .PKGINFO", path.display());
+            }
+            parsed
+        } else {
+            info.get("pkgrel").and_then(|v| v.parse().ok()).unwrap_or(1)
+        };
         let arch = info.get("arch").cloned().unwrap_or_default();
         let sha256 = crate::fetch::sha256_of_file(&path)?;
         let size = std::fs::metadata(&path)
@@ -282,7 +300,26 @@ pub fn create_index_with_version(
     };
     index.validate()?;
     let raw = toml::to_string_pretty(&index)?;
-    std::fs::write(out, raw).with_context(|| format!("write index {}", out.display()))?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = out.with_file_name(format!(
+        ".{}.tmp-{}-{stamp}",
+        out.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id()
+    ));
+    let write_result = (|| -> Result<()> {
+        std::fs::write(&tmp, raw.as_bytes())
+            .with_context(|| format!("write temporary index {}", tmp.display()))?;
+        std::fs::rename(&tmp, out)
+            .with_context(|| format!("activate index {}", out.display()))?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    write_result?;
     println!("nawa: wrote index {} ({} packages, schema v{})", out.display(), index.packages.len(), index_version);
     Ok(index)
 }

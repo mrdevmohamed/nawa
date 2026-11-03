@@ -34,10 +34,15 @@ pub fn install_archive(
     key: Option<&Path>,
     reason: &str,
 ) -> Result<Entry> {
-    // Standalone archives and legacy repository archives retain detached
-    // signature verification exactly as before.
-    sign::verify_for_install(archive_path, root, key, allow_unsigned)?;
-    install_archive_payload(archive_path, root, force, reason)
+    let snapshot = crate::fetch::snapshot_file(archive_path, None)?;
+    sign::verify_for_install_with_sig(
+        snapshot.path(),
+        &sign::sig_path_for(archive_path),
+        root,
+        key,
+        allow_unsigned,
+    )?;
+    install_archive_payload(snapshot.path(), root, force, reason)
 }
 
 /// Install an archive authenticated by a trusted v2 repository index.
@@ -53,8 +58,8 @@ pub fn install_archive_from_index(
     expected_sha256: &str,
     reason: &str,
 ) -> Result<Entry> {
-    crate::fetch::verify_sha256(archive_path, expected_sha256)?;
-    install_archive_payload(archive_path, root, force, reason)
+    let snapshot = crate::fetch::snapshot_file(archive_path, Some(expected_sha256))?;
+    install_archive_payload(snapshot.path(), root, force, reason)
 }
 
 fn install_archive_payload(
@@ -1153,4 +1158,22 @@ mod tests {
         assert_eq!(std::fs::read(other.join("ld-linux.so.2")).unwrap(), b"REAL LOADER");
         let _ = std::fs::remove_dir_all(&base);
     }
+    #[test]
+    fn verified_snapshot_is_independent_of_the_source_path() {
+        let base = tmpdir("verified-snapshot");
+        let archive = make_pkg(&base, "snapshot-demo", "1.0", &[("/usr/share/snapshot-demo", b"original")]);
+        let original = std::fs::read(&archive).unwrap();
+        let digest = crate::fetch::sha256_of_file(&archive).unwrap();
+
+        let snapshot = crate::fetch::snapshot_file(&archive, Some(&digest)).unwrap();
+        assert_ne!(snapshot.path(), archive);
+        assert_eq!(std::fs::read(snapshot.path()).unwrap(), original);
+        std::fs::write(&archive, b"replaced after snapshot creation").unwrap();
+        assert_eq!(std::fs::read(snapshot.path()).unwrap(), original);
+        let snapshot_path = snapshot.path().to_path_buf();
+        drop(snapshot);
+        assert!(!snapshot_path.exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
 }
