@@ -319,7 +319,7 @@ pub fn verify_index(file: &Path, root: &Path, allow_unsigned: bool) -> Result<In
     if !sig_path.exists() {
         if !trusted.is_empty() && !allow_unsigned {
             bail!(
-                "repository index {} is unsigned but {} trusted key(s) are configured\\n(pass --allow-unsigned to override)",
+                "repository index {} is unsigned but {} trusted key(s) are configured\n(pass --allow-unsigned to override)",
                 file.display(),
                 trusted.len()
             );
