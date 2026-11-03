@@ -225,9 +225,12 @@ fn v2_present_but_invalid_index_signature_never_downgrades_to_unsigned() {
     create_index(&dir, &repo, &keys, "2");
 
     let signature = repo.join("index.toml.sig");
-    let mut raw = fs::read_to_string(&signature).unwrap();
-    raw.push_str("# corrupted\n");
-    fs::write(signature, raw).unwrap();
+    let raw = fs::read_to_string(&signature).unwrap();
+    let mut lines: Vec<String> = raw.lines().map(str::to_string).collect();
+    assert!(lines.len() >= 3, "expected a three-line nawa signature");
+    let first = lines[1].as_bytes()[0] as char;
+    lines[1].replace_range(0..1, if first == '0' { "1" } else { "0" });
+    fs::write(signature, lines.join("\n") + "\n").unwrap();
 
     let output = install_hello(&dir, &repo, &["--allow-unsigned"]);
     assert!(!output.status.success());
