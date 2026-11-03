@@ -207,11 +207,17 @@ pub(crate) fn install_one(
     what: &str,
     n: usize,
     total: usize,
+    index_sha256: Option<&str>,
 ) -> Result<()> {
     println!("nawa: [{n}/{total}] installing {what}");
     let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
-    install::install_archive(archive, &ctx.root, flags.force, flags.allow_unsigned, None, reason)
-        .with_context(|| format!("[{n}/{total}] install of {what} failed"))?;
+    if let Some(expected) = index_sha256 {
+        install::install_archive_from_index(archive, &ctx.root, flags.force, expected, reason)
+            .with_context(|| format!("[{n}/{total}] install of {what} failed"))?;
+    } else {
+        install::install_archive(archive, &ctx.root, flags.force, flags.allow_unsigned, None, reason)
+            .with_context(|| format!("[{n}/{total}] install of {what} failed"))?;
+    }
     Ok(())
 }
 
@@ -360,8 +366,8 @@ pub(crate) fn run_plan(
         let n = i + 1;
         let id = it.rec.id();
         let step = || -> Result<()> {
-            let archive: PathBuf = match &sources[i] {
-                Source::Build => build_one(ctx, it, flags, n, total)?,
+            let (archive, index_sha256): (PathBuf, Option<String>) = match &sources[i] {
+                Source::Build => (build_one(ctx, it, flags, n, total)?, None),
                 Source::Repo(re) => {
                     println!("nawa: [{n}/{total}] fetching {id} from the repository");
                     let open = sourcing
@@ -369,7 +375,11 @@ pub(crate) fn run_plan(
                         .as_ref()
                         .context("internal: repository source without an open repository")?;
                     match upgrade::fetch_entry(&ctx.root, open, re, flags.allow_unsigned) {
-                        Ok(a) => a,
+                        Ok(a) => {
+                            let digest = (open.archive_auth == upgrade::ArchiveAuth::SignedIndexSha256)
+                                .then(|| re.sha256.clone());
+                            (a, digest)
+                        }
                         // strict repo mode never builds behind the user's back
                         Err(e) if sourcing.mode == InstallMode::Repo => {
                             return Err(e)
@@ -380,12 +390,12 @@ pub(crate) fn run_plan(
                             eprintln!(
                                 "nawa: warning: cannot use the repository copy of {id} ({e:#}) — building from source"
                             );
-                            build_one(ctx, it, flags, n, total)?
+                            (build_one(ctx, it, flags, n, total)?, None)
                         }
                     }
                 }
             };
-            install_one(ctx, &archive, flags, it.why.db_reason(), &id, n, total)
+            install_one(ctx, &archive, flags, it.why.db_reason(), &id, n, total, index_sha256.as_deref())
         };
         if let Err(e) = step() {
             if i > 0 {
@@ -408,7 +418,12 @@ pub(crate) fn run_plan(
                 .context("internal: repository package without an open repository")?;
             let archive = upgrade::fetch_entry(&ctx.root, open, re, flags.allow_unsigned)
                 .with_context(|| format!("[{n}/{total}] repository fetch of {what} failed"))?;
-            install_one(ctx, &archive, flags, "explicit", &what, n, total)
+            let index_sha256 = if open.archive_auth == upgrade::ArchiveAuth::SignedIndexSha256 {
+                Some(re.sha256.as_str())
+            } else {
+                None
+            };
+            install_one(ctx, &archive, flags, "explicit", &what, n, total, index_sha256)
         };
         if let Err(e) = step() {
             if n > 1 {
