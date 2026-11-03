@@ -189,7 +189,8 @@ pub fn create_index(dir: &Path, out: &Path) -> Result<Index> {
     create_index_with(dir, out, None)
 }
 
-/// Backward-compatible v1 index generator.
+/// Backward-compatible v1 index generator used by repository unit tests.
+#[cfg(test)]
 pub fn create_index_with(
     dir: &Path,
     out: &Path,
