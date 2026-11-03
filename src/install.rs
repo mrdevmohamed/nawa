@@ -34,11 +34,61 @@ pub fn install_archive(
     key: Option<&Path>,
     reason: &str,
 ) -> Result<Entry> {
+    install_archive_pinned(archive_path, root, force, allow_unsigned, key, reason, None)
+}
+
+/// [`install_archive`] for an archive that a repository index already
+/// described. With `expected_sha256` the snapshot must hash to the index
+/// digest, so the bytes whose detached signature is checked are provably the
+/// bytes the index entry (and `.PKGINFO` check) was validated against.
+pub fn install_archive_pinned(
+    archive_path: &Path,
+    root: &Path,
+    force: bool,
+    allow_unsigned: bool,
+    key: Option<&Path>,
+    reason: &str,
+    expected_sha256: Option<&str>,
+) -> Result<Entry> {
+    let snapshot_dir = root.join(".nawa");
+    let snapshot = crate::fetch::snapshot_file(archive_path, expected_sha256, &snapshot_dir)?;
+    sign::verify_for_install_with_sig(
+        snapshot.path(),
+        &sign::sig_path_for(archive_path),
+        root,
+        key,
+        allow_unsigned,
+    )?;
+    install_archive_payload(snapshot.path(), archive_path, root, force, reason, true)
+}
+
+/// Install an archive authenticated by a trusted v2 repository index.
+///
+/// The expected digest comes from the already-verified signed index. Recheck
+/// it immediately before extraction so the file cannot silently change
+/// between repository fetch/validation and the install operation. This path
+/// is intentionally separate from standalone archive installation.
+pub fn install_archive_from_index(
+    archive_path: &Path,
+    root: &Path,
+    force: bool,
+    expected_sha256: &str,
+    reason: &str,
+) -> Result<Entry> {
+    let snapshot_dir = root.join(".nawa");
+    let snapshot = crate::fetch::snapshot_file(archive_path, Some(expected_sha256), &snapshot_dir)?;
+    install_archive_payload(snapshot.path(), archive_path, root, force, reason, false)
+}
+
+fn install_archive_payload(
+    archive_path: &Path,
+    cache_name_source: &Path,
+    root: &Path,
+    force: bool,
+    reason: &str,
+    cache_detached_signature: bool,
+) -> Result<Entry> {
     let db = Db::new(root);
-
-    // ---- signature policy (before touching anything) ----------------------
-    sign::verify_for_install(archive_path, root, key, allow_unsigned)?;
-
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -115,7 +165,7 @@ pub fn install_archive(
     };
 
     // ---- keep a copy of the archive in the package cache --------------------
-    cache_archive(archive_path, root)?;
+    cache_archive_named(archive_path, cache_name_source, root, cache_detached_signature)?;
     if is_upgrade {
         println!(
             "nawa: upgrading {} {} -> {}-{}-{}",
@@ -345,24 +395,67 @@ pub fn remove_with(name: &str, root: &Path, force: bool) -> Result<()> {
     Ok(())
 }
 
-/// Copy an archive into `<root>/var/cache/nawa` (hardlink when possible).
-/// Also keeps the detached signature next to it when one exists.
-pub fn cache_archive(archive_path: &Path, root: &Path) -> Result<PathBuf> {
+/// Copy verified bytes into `<root>/var/cache/nawa` (atomically, as a full
+/// copy) under the original archive filename. For legacy archives the
+/// detached signature is kept next to it; a trusted v2 index is itself the
+/// authenticator, so a stray detached signature is never imported into its
+/// rollback cache.
+fn cache_archive_named(
+    archive_path: &Path,
+    name_source: &Path,
+    root: &Path,
+    copy_detached_signature: bool,
+) -> Result<PathBuf> {
     let dir = root.join("var/cache/nawa");
     std::fs::create_dir_all(&dir)?;
-    let dest = dir.join(archive_path.file_name().unwrap_or_default());
-    if !dest.exists()
-        && std::fs::hard_link(archive_path, &dest).is_err() {
-            std::fs::copy(archive_path, &dest)
-                .with_context(|| format!("cache {}", archive_path.display()))?;
+    let dest = dir.join(name_source.file_name().unwrap_or_default());
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = dir.join(format!(
+        ".archive-{}-{}-{stamp}.tmp",
+        std::process::id(),
+        dest.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    let cache_result = (|| -> Result<()> {
+        std::fs::copy(archive_path, &tmp)
+            .with_context(|| format!("cache {}", archive_path.display()))?;
+        std::fs::rename(&tmp, &dest)
+            .with_context(|| format!("activate cached archive {}", dest.display()))?;
+        Ok(())
+    })();
+    if cache_result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    cache_result?;
+
+    let sig_dest = sign::sig_path_for(&dest);
+    if copy_detached_signature {
+        let sig = sign::sig_path_for(name_source);
+        if sig.is_file() {
+            let sig_tmp = sig_dest.with_file_name(format!(
+                ".signature-{}-{stamp}.tmp",
+                std::process::id()
+            ));
+            let sig_result = (|| -> Result<()> {
+                std::fs::copy(&sig, &sig_tmp)
+                    .with_context(|| format!("cache detached signature {}", sig.display()))?;
+                std::fs::rename(&sig_tmp, &sig_dest)
+                    .with_context(|| format!("activate cached signature {}", sig_dest.display()))?;
+                Ok(())
+            })();
+            if sig_result.is_err() {
+                let _ = std::fs::remove_file(&sig_tmp);
+            }
+            sig_result?;
+        } else if sig_dest.exists() {
+            std::fs::remove_file(&sig_dest)
+                .with_context(|| format!("remove stale cached signature {}", sig_dest.display()))?;
         }
-    let sig = sign::sig_path_for(archive_path);
-    if sig.exists() {
-        let sig_dest = sign::sig_path_for(&dest);
-        if !sig_dest.exists() {
-            let _ = std::fs::hard_link(&sig, &sig_dest)
-                .or_else(|_| std::fs::copy(&sig, &sig_dest).map(|_| ()));
-        }
+    } else if sig_dest.exists() {
+        std::fs::remove_file(&sig_dest)
+            .with_context(|| format!("remove untrusted cached signature {}", sig_dest.display()))?;
     }
     Ok(dest)
 }
@@ -1128,4 +1221,66 @@ mod tests {
         assert_eq!(std::fs::read(other.join("ld-linux.so.2")).unwrap(), b"REAL LOADER");
         let _ = std::fs::remove_dir_all(&base);
     }
+    #[test]
+    fn verified_snapshot_is_independent_of_the_source_path() {
+        let base = tmpdir("verified-snapshot");
+        let archive = make_pkg(&base, "snapshot-demo", "1.0", &[("/usr/share/snapshot-demo", b"original")]);
+        let original = std::fs::read(&archive).unwrap();
+        let digest = crate::fetch::sha256_of_file(&archive).unwrap();
+
+        let snapshot = crate::fetch::snapshot_file(&archive, Some(&digest), &base.join(".nawa")).unwrap();
+        assert_ne!(snapshot.path(), archive);
+        assert_eq!(std::fs::read(snapshot.path()).unwrap(), original);
+        std::fs::write(&archive, b"replaced after snapshot creation").unwrap();
+        assert_eq!(std::fs::read(snapshot.path()).unwrap(), original);
+        let snapshot_path = snapshot.path().to_path_buf();
+        drop(snapshot);
+        assert!(!snapshot_path.exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn pinned_install_rejects_bytes_that_differ_from_the_index_digest() {
+        let base = tmpdir("pinned-install");
+        let root = base.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let archive = make_pkg(&base, "pinned-demo", "1.0", &[("/usr/share/pinned-demo", b"x")]);
+        let digest = crate::fetch::sha256_of_file(&archive).unwrap();
+
+        let wrong = "0".repeat(64);
+        let err = install_archive_pinned(&archive, &root, false, true, None, "explicit", Some(&wrong))
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("sha256 mismatch"), "{err:#}");
+        assert!(!root.join("usr/share/pinned-demo").exists());
+
+        install_archive_pinned(&archive, &root, false, true, None, "explicit", Some(&digest.to_uppercase()))
+            .unwrap();
+        assert!(root.join("usr/share/pinned-demo").exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn stale_snapshots_of_dead_processes_are_removed() {
+        if !Path::new("/proc/self").exists() {
+            return;
+        }
+        let base = tmpdir("stale-snapshots");
+        let archive = make_pkg(&base, "stale-demo", "1.0", &[("/usr/share/stale-demo", b"x")]);
+        let dir = base.join(".nawa");
+        std::fs::create_dir_all(&dir).unwrap();
+        // a pid above any kernel pid_max can never be alive
+        let dead = dir.join("verified-4294967290-0.tmp");
+        let mine = dir.join(format!("verified-{}-999999.tmp", std::process::id()));
+        let unrelated = dir.join("tmp-123");
+        std::fs::write(&dead, b"old").unwrap();
+        std::fs::write(&mine, b"live").unwrap();
+        std::fs::write(&unrelated, b"keep").unwrap();
+
+        let _snapshot = crate::fetch::snapshot_file(&archive, None, &dir).unwrap();
+        assert!(!dead.exists());
+        assert!(mine.exists());
+        assert!(unrelated.exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
 }

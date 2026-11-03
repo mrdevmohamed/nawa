@@ -23,7 +23,8 @@
 
 use anyhow::{bail, Context, Result};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
-use std::io::Read;
+use sha2::{Digest, Sha256};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 pub const SEC_NAME: &str = "nawa.sec";
@@ -134,8 +135,32 @@ pub fn sign(file: &Path, key_path: &Path) -> Result<PathBuf> {
         hex::encode(sig.to_bytes()),
         hex::encode(sk.verifying_key().to_bytes()),
     );
-    std::fs::write(&sig_path, &body)
-        .with_context(|| format!("write {}", sig_path.display()))?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = sig_path.with_file_name(format!(
+        ".{}.tmp-{}-{stamp}",
+        sig_path.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id()
+    ));
+    let result = (|| -> Result<()> {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .with_context(|| format!("create temporary signature {}", tmp.display()))?;
+        f.write_all(body.as_bytes())?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, &sig_path)
+            .with_context(|| format!("activate signature {}", sig_path.display()))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result?;
     Ok(sig_path)
 }
 
@@ -179,6 +204,16 @@ pub fn read_sig_file(path: &Path) -> Result<SigFile> {
 /// Verify `file` against one key. Recomputes sha256 (integrity + authenticity).
 pub fn verify(file: &Path, key: &VerifyingKey, sig: &Signature) -> Result<()> {
     let hash = crate::fetch::sha256_of_file(file)?;
+    verify_hash(&hash, key, sig)
+}
+
+/// Verify a signature over an already-read byte buffer.
+pub fn verify_bytes(data: &[u8], key: &VerifyingKey, sig: &Signature) -> Result<()> {
+    let hash = hex::encode(Sha256::digest(data));
+    verify_hash(&hash, key, sig)
+}
+
+fn verify_hash(hash: &str, key: &VerifyingKey, sig: &Signature) -> Result<()> {
     let msg = format!("{DOMAIN}{hash}");
     key.verify_strict(msg.as_bytes(), sig)
         .map_err(|_| anyhow::anyhow!("signature mismatch"))
@@ -239,6 +274,17 @@ pub fn verify_for_install(
     allow_unsigned: bool,
 ) -> Result<()> {
     let sig_path = sig_path_for(archive);
+    verify_for_install_with_sig(archive, &sig_path, root, key, allow_unsigned)
+}
+
+/// Verify bytes using a detached signature stored at an explicit path.
+pub fn verify_for_install_with_sig(
+    archive: &Path,
+    sig_path: &Path,
+    root: &Path,
+    key: Option<&Path>,
+    allow_unsigned: bool,
+) -> Result<()> {
     if !sig_path.exists() {
         let trusted = trusted_keys(root)?;
         if !trusted.is_empty() && !allow_unsigned {
@@ -258,7 +304,7 @@ pub fn verify_for_install(
         return Ok(());
     }
 
-    let sf = read_sig_file(&sig_path)?;
+    let sf = read_sig_file(sig_path)?;
     if let Some(kp) = key {
         let vk = load_verify_key(kp)?;
         verify(archive, &vk, &sf.sig)?;
@@ -288,6 +334,73 @@ pub fn verify_for_install(
         sig_path.file_name().unwrap_or_default().to_string_lossy()
     );
     Ok(())
+}
+
+/// How the repository index was authenticated. Only TrustedKey is strong
+/// enough to authorize v2 package hashes in place of per-archive signatures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndexTrust {
+    TrustedKey { key_name: String },
+    EmbeddedKeyOnly,
+    UnsignedAllowed,
+}
+
+impl IndexTrust {
+    pub fn is_trusted(&self) -> bool {
+        matches!(self, Self::TrustedKey { .. })
+    }
+}
+
+/// Verify a repository index using the same bytes that the caller will parse.
+pub fn verify_index_bytes(
+    bytes: &[u8],
+    file: &Path,
+    root: &Path,
+    allow_unsigned: bool,
+) -> Result<IndexTrust> {
+    let sig_path = sig_path_for(file);
+    let trusted = trusted_keys(root)?;
+    if !sig_path.exists() {
+        if !trusted.is_empty() && !allow_unsigned {
+            bail!(
+                "repository index {} is unsigned but {} trusted key(s) are configured\n(pass --allow-unsigned to override)",
+                file.display(),
+                trusted.len()
+            );
+        }
+        if !trusted.is_empty() {
+            eprintln!(
+                "nawa: warning: accepting unsigned repository index {} because --allow-unsigned was specified",
+                file.display()
+            );
+        } else {
+            eprintln!(
+                "nawa: warning: repository index is unsigned ({})",
+                file.display()
+            );
+        }
+        return Ok(IndexTrust::UnsignedAllowed);
+    }
+
+    let sf = read_sig_file(&sig_path)?;
+    if !trusted.is_empty() {
+        for (name, vk) in &trusted {
+            if verify_bytes(bytes, vk, &sf.sig).is_ok() {
+                println!("nawa: repository index signature OK (trusted key {name})");
+                return Ok(IndexTrust::TrustedKey { key_name: name.clone() });
+            }
+        }
+        bail!(
+            "repository index signature does not match any of the {} trusted key(s)",
+            trusted.len()
+        );
+    }
+
+    verify_bytes(bytes, &sf.embedded, &sf.sig)?;
+    eprintln!(
+        "nawa: warning: no trusted keys configured — repository index verified against its embedded key only"
+    );
+    Ok(IndexTrust::EmbeddedKeyOnly)
 }
 
 /// `nawa verify` standalone: explicit key > trust store > embedded key.
@@ -469,4 +582,24 @@ mod tests {
         assert!(keygen(&base).is_err());
         let _ = std::fs::remove_dir_all(&base);
     }
+    #[test]
+    fn index_verification_uses_the_exact_supplied_bytes() {
+        let base = tmpdir("index-bytes");
+        let (sec, pub_) = keygen(&base.join("keys")).unwrap();
+        trust(&pub_, &base).unwrap();
+        let index_path = base.join("index.toml");
+        let signed = b"generated = 10\nexpires = 20\npackage = []\n";
+        std::fs::write(&index_path, signed).unwrap();
+        sign(&index_path, &sec).unwrap();
+
+        let bytes = std::fs::read(&index_path).unwrap();
+        let verified = verify_index_bytes(&bytes, &index_path, &base, false).unwrap();
+        assert!(verified.is_trusted());
+
+        let mut changed = bytes.clone();
+        changed.extend_from_slice(b"# changed after read\n");
+        assert!(verify_index_bytes(&changed, &index_path, &base, false).is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
 }

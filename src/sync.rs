@@ -58,7 +58,9 @@ pub fn sync(root: &Path, repo_ref: &RepoRef, dest: &Path, opts: &SyncOpts) -> Re
     if !tarball.is_file() {
         bail!("recipe archive {} listed in the index is missing", tarball.display());
     }
-    fetch::verify_sha256(&tarball, &rec.sha256)?;
+    let snapshot_dir = root.join(".nawa");
+    let snapshot = fetch::snapshot_file(&tarball, Some(&rec.sha256), &snapshot_dir)?;
+    let verified_tarball = snapshot.path();
 
     let parent = dest.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
     std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
@@ -70,7 +72,7 @@ pub fn sync(root: &Path, repo_ref: &RepoRef, dest: &Path, opts: &SyncOpts) -> Re
     let _ = std::fs::remove_dir_all(&old);
 
     let result = (|| -> Result<usize> {
-        fetch::extract_source_archive(&tarball, &staging)?;
+        fetch::extract_source_archive(verified_tarball, &staging)?;
         // an archive without a single recipe must never replace a working tree
         let n = walkdir::WalkDir::new(&staging)
             .into_iter()
@@ -228,4 +230,38 @@ mod tests {
         }
         assert!(repo::validate_rev("16fbe42d940a55b21d15ff03406b359af0e1bbcc").is_ok());
     }
+    #[test]
+    fn trusted_v2_index_authenticates_recipe_tree() {
+        let e = env("trusted-v2");
+        let (secret, public) = crate::sign::keygen(&e.base.join("publisher-keys")).unwrap();
+        crate::sign::trust(&public, &e.root).unwrap();
+
+        let first_tree = tree(&e.base, "v2-one", "v2-one");
+        let index_path = e.repo.join("index.toml");
+        repo::create_index_with_version(&e.repo, &index_path, Some((&first_tree, "aaa111")), 2).unwrap();
+        crate::sign::sign(&index_path, &secret).unwrap();
+        run(&e).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(e.dest.join("base/hello/recipe.toml")).unwrap(),
+            "# v2-one\n"
+        );
+
+        let second_tree = tree(&e.base, "v2-two", "v2-two");
+        repo::create_index_with_version(&e.repo, &index_path, Some((&second_tree, "bbb222")), 2).unwrap();
+        crate::sign::sign(&index_path, &secret).unwrap();
+        let archive = e.repo.join("recipes-bbb222.recipes.tar.zst");
+        let mut bytes = std::fs::read(&archive).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0x40;
+        std::fs::write(&archive, bytes).unwrap();
+
+        let err = run(&e).unwrap_err();
+        assert!(format!("{err:#}").contains("sha256 mismatch"), "{err:#}");
+        assert_eq!(
+            std::fs::read_to_string(e.dest.join("base/hello/recipe.toml")).unwrap(),
+            "# v2-one\n"
+        );
+        let _ = std::fs::remove_dir_all(&e.base);
+    }
+
 }

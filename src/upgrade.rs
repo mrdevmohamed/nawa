@@ -31,6 +31,14 @@ pub struct UpgradeOpts {
     pub yes: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchiveAuth {
+    /// Legacy v1 policy: each archive needs its own detached signature.
+    DetachedSignature,
+    /// V2 policy: a trusted signed index authenticates the archive SHA-256.
+    SignedIndexSha256,
+}
+
 /// A repository materialized on disk: for a local repo its own directory,
 /// for a remote one the per-URL cache holding the freshly fetched index.
 pub struct OpenRepo {
@@ -40,6 +48,8 @@ pub struct OpenRepo {
     pub base_url: Option<String>,
     /// the parsed, signature-checked, freshness-checked index
     pub index: repo::Index,
+    /// Authentication method selected only after validating the index signer.
+    pub archive_auth: ArchiveAuth,
 }
 
 /// Fetch (remote) or locate (local) a repository, then parse and
@@ -117,31 +127,32 @@ pub fn open_repo(
     }
 
     let index_path = repo_dir.join("index.toml");
-    let index = repo::load_index(&index_path)?;
-
-    // ---- verify the index signature when one is present --------------------
-    let sig_path = sign::sig_path_for(&index_path);
-    if sig_path.exists() {
-        match sign::verify_standalone(&index_path, root, None) {
-            Ok(()) => {}
-            Err(e) => bail!("repository index signature is INVALID: {e:#}"),
-        }
+    // Read once: parsing and signature verification must consume identical bytes.
+    let index_bytes = std::fs::read(&index_path)
+        .with_context(|| format!("read repository index {}", index_path.display()))?;
+    let index = repo::load_index_bytes(&index_bytes)?;
+    let index_trust = sign::verify_index_bytes(&index_bytes, &index_path, root, allow_unsigned)
+        .map_err(|e| anyhow::anyhow!("repository index signature is INVALID or untrusted: {e:#}"))?;
+    let archive_auth = if index.repository.is_some() && index_trust.is_trusted() {
+        println!("nawa: repository schema v2: package SHA-256 values authenticated by trusted index");
+        ArchiveAuth::SignedIndexSha256
     } else {
-        if !allow_unsigned && !sign::trusted_keys(root)?.is_empty() {
-            bail!(
-                "repository index {} is unsigned but trusted keys are configured\n(pass --allow-unsigned to override)",
-                index_path.display()
-            );
+        if index.repository.is_some() {
+            eprintln!("nawa: note: v2 index is not authenticated by a configured trusted key; using legacy per-archive signature policy");
         }
-        eprintln!("nawa: warning: repository index is unsigned ({})", index_path.display());
-    }
+        ArchiveAuth::DetachedSignature
+    };
 
-    // only an index verified against a configured trusted key may advance the
-    // "newest index seen" marker — otherwise one forged index with a huge
-    // timestamp would block every later (genuine) upgrade from this repo
-    let authenticated = sig_path.exists() && !sign::trusted_keys(root)?.is_empty();
-    check_index_freshness(&repo_dir, &index, base_url.is_some(), force, authenticated)?;
-    Ok(OpenRepo { dir: repo_dir, base_url, index })
+    // Only an index authenticated by a configured trusted key advances the
+    // newest-index marker used to prevent remote repository rollback.
+    check_index_freshness(
+        &repo_dir,
+        &index,
+        base_url.is_some(),
+        force,
+        index_trust.is_trusted(),
+    )?;
+    Ok(OpenRepo { dir: repo_dir, base_url, index, archive_auth })
 }
 
 /// Make one index entry's archive available locally and fully verified:
@@ -172,53 +183,60 @@ pub fn fetch_entry(
         Some(url) => {
             let dest = repo_dir.join(&re.file);
             fetch::download_cached(&format!("{url}/{}", re.file), &dest, Some(&re.sha256))?;
-            // the detached signature travels with the archive; it lands in
-            // a .part file first so an interrupted transfer cannot corrupt
-            // the cached copy (a truncated .sig would fail every future
-            // upgrade until removed by hand)
-            let sig_dest = sign::sig_path_for(&dest);
-            let sig_part = sig_dest.with_file_name(format!(
-                "{}.part",
-                sig_dest.file_name().unwrap_or_default().to_string_lossy()
-            ));
-            match fetch::download_opt(&format!("{url}/{}.sig", re.file), &sig_part) {
-                Ok(true) => {
-                    std::fs::rename(&sig_part, &sig_dest).with_context(|| {
-                        format!("activate {}", sig_dest.display())
-                    })?;
-                }
-                Ok(false) => {
-                    let _ = std::fs::remove_file(&sig_part);
-                    let _ = std::fs::remove_file(&sig_dest);
-                }
-                Err(e) => {
-                    let _ = std::fs::remove_file(&sig_part);
-                    if !sig_dest.exists() {
-                        // Do not turn a server/network failure into an
-                        // "unsigned" package. A genuine HTTP 404 is already
-                        // represented by Ok(false); every other failure must
-                        // remain visible when no previously verified sidecar
-                        // is cached.
-                        return Err(e).with_context(|| {
-                            format!("could not fetch signature for {}", re.file)
-                        });
+            if open.archive_auth == ArchiveAuth::DetachedSignature {
+                // Legacy repositories still require the per-archive sidecar.
+                let sig_dest = sign::sig_path_for(&dest);
+                let sig_part = sig_dest.with_file_name(format!(
+                    "{}.part",
+                    sig_dest.file_name().unwrap_or_default().to_string_lossy()
+                ));
+                match fetch::download_opt(&format!("{url}/{}.sig", re.file), &sig_part) {
+                    Ok(true) => {
+                        std::fs::rename(&sig_part, &sig_dest).with_context(|| {
+                            format!("activate {}", sig_dest.display())
+                        })?;
                     }
-                    eprintln!(
-                        "nawa: warning: could not refresh signature for {} ({e:#}); using cached signature",
-                        re.file
-                    );
+                    Ok(false) => {
+                        let _ = std::fs::remove_file(&sig_part);
+                        let _ = std::fs::remove_file(&sig_dest);
+                    }
+                    Err(e) => {
+                        let _ = std::fs::remove_file(&sig_part);
+                        if !sig_dest.exists() {
+                            return Err(e).with_context(|| {
+                                format!("could not fetch signature for {}", re.file)
+                            });
+                        }
+                        eprintln!(
+                            "nawa: warning: could not refresh signature for {} ({e:#}); using cached signature",
+                            re.file
+                        );
+                    }
                 }
             }
             dest
         }
     };
-    // integrity: sha256 recorded in the index
+    // Integrity is always checked against the index, regardless of schema.
     fetch::verify_sha256(&src, &re.sha256)?;
-    // authenticity: signature policy (trust store / embedded / allow-unsigned)
-    sign::verify_for_install(&src, root, None, allow_unsigned)?;
+    if re.size > 0 {
+        let actual = std::fs::metadata(&src)
+            .with_context(|| format!("stat repository archive {}", src.display()))?
+            .len();
+        if actual != re.size {
+            bail!(
+                "archive {} size mismatch: index says {} bytes, downloaded file has {} bytes",
+                re.file, re.size, actual
+            );
+        }
+    }
+    // Only a trusted v2 index can replace per-archive signatures.
+    if open.archive_auth == ArchiveAuth::DetachedSignature {
+        sign::verify_for_install(&src, root, None, allow_unsigned)?;
+    }
     // the archive must be the package/version the index promised
     // (blocks replaying an older signed archive as an "upgrade")
-    check_archive_matches_index(&src, re)?;
+    check_archive_matches_index(&src, re, open.index.repository.is_some())?;
     Ok(src)
 }
 
@@ -300,7 +318,19 @@ pub fn upgrade(
             .find(|(r, _)| &r.name == name)
             .expect("ordered name came from the plan");
         let src = fetch_entry(root, &open, re, opts.allow_unsigned)?;
-        install::install_archive(&src, root, opts.force, opts.allow_unsigned, None, "keep")?;
+        if open.archive_auth == ArchiveAuth::SignedIndexSha256 {
+            install::install_archive_from_index(&src, root, opts.force, &re.sha256, "keep")?;
+        } else {
+            install::install_archive_pinned(
+                &src,
+                root,
+                opts.force,
+                opts.allow_unsigned,
+                None,
+                "keep",
+                Some(&re.sha256),
+            )?;
+        }
         done += 1;
     }
     println!("nawa: upgraded {done} package(s)");
@@ -342,6 +372,10 @@ fn check_index_freshness(
     force: bool,
     authenticated: bool,
 ) -> Result<()> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let gen = match index.generated {
         Some(g) => g,
         None => {
@@ -349,6 +383,18 @@ fn check_index_freshness(
             return Ok(());
         }
     };
+    // A `generated` value ahead of this machine's clock is not an error: an
+    // unsynchronised clock (no RTC, fresh VM or chroot) must not make every
+    // freshly published index unusable. It only must never become the
+    // "newest seen" marker, or one bad publisher/system clock would block
+    // every later genuine index.
+    let future = gen > now;
+    if future {
+        eprintln!(
+            "nawa: warning: repository index timestamp is ahead of this system's clock; \
+             check the system clock (the index is used, but not recorded as newest seen)"
+        );
+    }
     if remote {
         let seen_path = repo_dir.join("index.seen");
         if let Ok(raw) = std::fs::read_to_string(&seen_path) {
@@ -360,14 +406,17 @@ fn check_index_freshness(
                 }
             }
         }
-        if authenticated {
-            let _ = std::fs::write(&seen_path, gen.to_string());
+        // Best effort, as before: failing to record the marker must not fail
+        // the upgrade. The write is atomic so a crash cannot leave a torn file.
+        if authenticated && !future {
+            let part = seen_path.with_extension("seen.part");
+            let recorded = std::fs::write(&part, gen.to_string())
+                .and_then(|()| std::fs::rename(&part, &seen_path));
+            if recorded.is_err() {
+                let _ = std::fs::remove_file(&part);
+            }
         }
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
     if let Some(exp) = index.expires {
         if now > exp {
             if remote && !force {
@@ -389,26 +438,41 @@ fn check_index_freshness(
 }
 
 /// The `.PKGINFO` inside the archive must agree with the index entry.
-fn check_archive_matches_index(archive: &Path, re: &repo::RepoEntry) -> Result<()> {
+fn check_archive_matches_index(
+    archive: &Path,
+    re: &repo::RepoEntry,
+    strict_v2: bool,
+) -> Result<()> {
     let raw = crate::archive::read_pkginfo(archive)?;
     let info = crate::archive::parse_pkginfo(&raw)?;
     let get = |k: &str| info.get(k).cloned().unwrap_or_default();
-    let rel: u32 = info.get("pkgrel").and_then(|v| v.parse().ok()).unwrap_or(1);
+    let rel: u32 = match info.get("pkgrel") {
+        Some(raw) => match raw.parse::<u32>() {
+            Ok(value) if !strict_v2 || value > 0 => value,
+            Ok(_) => bail!("archive {} has invalid pkgrel 0 in .PKGINFO", re.file),
+            Err(_) if !strict_v2 => 1,
+            Err(_) => bail!("archive {} has invalid pkgrel {:?} in .PKGINFO", re.file, raw),
+        },
+        None if strict_v2 => bail!("archive {} is missing pkgrel in .PKGINFO", re.file),
+        None => 1,
+    };
     let arch = get("arch");
     let host = std::env::var("NAWA_ARCH").unwrap_or_else(|_| std::env::consts::ARCH.to_string());
     if !arch.is_empty() && !matches!(arch.as_str(), "any" | "noarch" | "all") && arch != host {
         bail!("archive {} is built for {arch}, this system is {host}", re.file);
     }
-    if get("pkgname") != re.name || get("pkgver") != re.version || rel != re.rel {
+    if get("pkgname") != re.name || get("pkgver") != re.version || rel != re.rel || arch != re.arch {
         bail!(
-            "archive {} contains {}-{}-{} but the index promised {}-{}-{}",
+            "archive {} metadata does not match the index (archive: {}-{}-{} arch {}; index: {}-{}-{} arch {})",
             re.file,
             get("pkgname"),
             get("pkgver"),
             rel,
+            arch,
             re.name,
             re.version,
-            re.rel
+            re.rel,
+            re.arch
         );
     }
     Ok(())
@@ -643,9 +707,9 @@ mod tests {
             size: 0,
             installed_size: 0,
         };
-        assert!(check_archive_matches_index(&a, &ok).is_ok());
+        assert!(check_archive_matches_index(&a, &ok, false).is_ok());
         let newer = repo::RepoEntry { version: "2.0".into(), ..ok.clone() };
-        assert!(check_archive_matches_index(&a, &newer).is_err());
+        assert!(check_archive_matches_index(&a, &newer, false).is_err());
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -687,7 +751,7 @@ mod tests {
     fn index_older_than_seen_is_rejected() {
         let base = tmpdir("freshness");
         std::fs::write(base.join("index.seen"), "200").unwrap();
-        let idx = |g| repo::Index { generated: Some(g), expires: None, recipes: None, packages: vec![] };
+        let idx = |g| repo::Index { generated: Some(g), expires: None, repository: None, recipes: None, packages: vec![] };
         assert!(check_index_freshness(&base, &idx(100), true, false, true).is_err());
         assert!(check_index_freshness(&base, &idx(300), true, false, true).is_ok());
         assert_eq!(std::fs::read_to_string(base.join("index.seen")).unwrap(), "300");
@@ -729,11 +793,46 @@ mod tests {
     #[test]
     fn expired_remote_index_is_refused_unless_forced() {
         let base = tmpdir("expiry");
-        let idx = repo::Index { generated: Some(1000), expires: Some(2000), recipes: None, packages: vec![] };
+        let idx = repo::Index { generated: Some(1000), expires: Some(2000), repository: None, recipes: None, packages: vec![] };
         assert!(check_index_freshness(&base, &idx, true, false, true).is_err());
         assert!(check_index_freshness(&base, &idx, true, true, true).is_ok());
         // local repos only warn
         assert!(check_index_freshness(&base, &idx, false, false, true).is_ok());
         let _ = std::fs::remove_dir_all(&base);
     }
+    #[test]
+    fn future_index_timestamp_cannot_poison_seen_marker() {
+        let base = tmpdir("future-index");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let ahead = now + 3600;
+        let idx = repo::Index {
+            generated: Some(ahead),
+            expires: Some(ahead + 10_000),
+            repository: None,
+            recipes: None,
+            packages: vec![],
+        };
+        // a clock that runs behind the publisher still gets a usable index ...
+        assert!(check_index_freshness(&base, &idx, true, false, true).is_ok());
+        // ... but the future value is never recorded as the newest seen
+        assert!(!base.join("index.seen").exists());
+
+        let current = repo::Index {
+            generated: Some(now.saturating_sub(1)),
+            expires: Some(now + 10_000),
+            repository: None,
+            recipes: None,
+            packages: vec![],
+        };
+        assert!(check_index_freshness(&base, &current, true, false, true).is_ok());
+        assert_eq!(
+            std::fs::read_to_string(base.join("index.seen")).unwrap(),
+            now.saturating_sub(1).to_string()
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
 }

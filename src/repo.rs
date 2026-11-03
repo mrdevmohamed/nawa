@@ -1,8 +1,7 @@
-//! Repository index creation: scan a directory of archives and write
-//! `index.toml` with name/version/path/sha256 for each package.
-
-use anyhow::{Context, Result};
+//! Repository index creation and validation.
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::archive;
@@ -13,12 +12,12 @@ pub struct RepoEntry {
     pub version: String,
     pub rel: u32,
     pub arch: String,
-    pub file: String, // file name inside the repo dir
+    pub file: String,
     pub sha256: String,
-    /// archive size in bytes (download size); 0 = unknown (index written by an older nawa)
+    /// archive size in bytes (download size); 0 = unknown in legacy indexes
     #[serde(default, skip_serializing_if = "is_zero")]
     pub size: u64,
-    /// installed size in bytes, from the archive's `size` field; 0 = unknown
+    /// installed size in bytes, from the archive's size field; 0 = unknown
     #[serde(default, skip_serializing_if = "is_zero")]
     pub installed_size: u64,
 }
@@ -27,48 +26,76 @@ fn is_zero(n: &u64) -> bool {
     *n == 0
 }
 
-/// The recipe tree published next to the packages (`nawa sync`). It lives in
-/// the signed index, so the signature covers the revision and the tarball's
-/// sha256: a client that verified the index trusts exactly these bytes.
+/// Authentication metadata for a schema-v2 repository.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryMeta {
+    pub schema: u32,
+    pub archive_auth: String,
+    pub hash_algorithm: String,
+    pub index_signature: String,
+}
+
+impl RepositoryMeta {
+    pub fn v2() -> Self {
+        Self {
+            schema: INDEX_SCHEMA_V2,
+            archive_auth: ARCHIVE_AUTH_SIGNED_INDEX.to_string(),
+            hash_algorithm: HASH_ALGORITHM_SHA256.to_string(),
+            index_signature: INDEX_SIGNATURE_NAWA_SIG_V1.to_string(),
+        }
+    }
+}
+
+pub const INDEX_SCHEMA_V2: u32 = 2;
+pub const ARCHIVE_AUTH_SIGNED_INDEX: &str = "signed-index";
+pub const HASH_ALGORITHM_SHA256: &str = "sha256";
+pub const INDEX_SIGNATURE_NAWA_SIG_V1: &str = "nawa-sig-v1";
+
+/// The recipe tree published next to the packages (nawa sync). It lives in
+/// the signed index, so the signature covers the revision and the tarball hash.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecipesEntry {
-    /// source revision the tree was cut from (commit sha or tag)
     pub rev: String,
-    /// file name inside the repo dir (`recipes-<rev>.recipes.tar.zst`)
     pub file: String,
     pub sha256: String,
 }
 
-/// Suffix of the recipe-tree archive; `create_index` never mistakes it for a
-/// package archive.
 pub const RECIPES_SUFFIX: &str = ".recipes.tar.zst";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Index {
-    /// unix time the index was generated; part of the signed file, lets
-    /// clients refuse an older index than one they have already seen
+    /// Unix time the index was generated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generated: Option<u64>,
-    /// unix time after which clients must not trust this index (freeze
-    /// protection); `repo-create` sets it 90 days after `generated`
+    /// Unix time after which clients must not trust this index.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires: Option<u64>,
-    /// recipe tree for `nawa sync` (absent in repositories that predate it)
+    /// Present only for schema-v2 repositories. Absence means legacy v1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<RepositoryMeta>,
+    /// Recipe tree for nawa sync.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipes: Option<RecipesEntry>,
     #[serde(rename = "package")]
     pub packages: Vec<RepoEntry>,
 }
 
-/// How long a freshly created index stays valid (90 days).
 pub const INDEX_VALIDITY_SECS: u64 = 90 * 24 * 3600;
 
-/// Load a repository index from `index.toml`.
+/// Load and validate an index. An index without [repository] remains legacy v1.
+#[cfg(test)]
 pub fn load_index(path: &Path) -> Result<Index> {
-    let raw = std::fs::read_to_string(path)
+    let raw = std::fs::read(path)
         .with_context(|| format!("read index {}", path.display()))?;
-    let idx: Index = toml::from_str(&raw)
-        .with_context(|| format!("parse index {}", path.display()))?;
+    load_index_bytes(&raw).with_context(|| format!("parse index {}", path.display()))
+}
+
+/// Parse and validate exactly the byte sequence whose signature was checked.
+pub fn load_index_bytes(raw: &[u8]) -> Result<Index> {
+    let text = std::str::from_utf8(raw).context("repository index is not valid UTF-8")?;
+    let idx: Index = toml::from_str(text).context("parse repository index TOML")?;
+    idx.validate()?;
     Ok(idx)
 }
 
@@ -76,21 +103,119 @@ impl Index {
     pub fn find(&self, name: &str) -> Option<&RepoEntry> {
         self.packages.iter().find(|p| p.name == name)
     }
+
+    /// Validate schema and the stronger invariants required by v2.
+    pub fn validate(&self) -> Result<()> {
+        let meta = match &self.repository {
+            None => return Ok(()), // v1: retain the historical parser/policy
+            Some(meta) => meta,
+        };
+        if meta.schema != INDEX_SCHEMA_V2 {
+            bail!("unsupported repository index schema {}; this Nawa supports schema 2", meta.schema);
+        }
+        if meta.archive_auth != ARCHIVE_AUTH_SIGNED_INDEX {
+            bail!("unsupported v2 archive_auth {:?}; expected {:?}", meta.archive_auth, ARCHIVE_AUTH_SIGNED_INDEX);
+        }
+        if meta.hash_algorithm != HASH_ALGORITHM_SHA256 {
+            bail!("unsupported v2 hash_algorithm {:?}; expected sha256", meta.hash_algorithm);
+        }
+        if meta.index_signature != INDEX_SIGNATURE_NAWA_SIG_V1 {
+            bail!("unsupported v2 index_signature {:?}; expected nawa-sig-v1", meta.index_signature);
+        }
+
+        let generated = self.generated.context("schema-v2 index is missing generated")?;
+        let expires = self.expires.context("schema-v2 index is missing expires")?;
+        if generated == 0 || expires <= generated {
+            bail!("schema-v2 index has invalid generated/expires timestamps");
+        }
+
+        let mut names = HashSet::new();
+        let mut files = HashSet::new();
+        for p in &self.packages {
+            if p.name.trim().is_empty() || p.version.trim().is_empty() || p.arch.trim().is_empty() {
+                bail!("schema-v2 package entry has an empty name, version, or arch");
+            }
+            if p.rel == 0 {
+                bail!("schema-v2 package {} has invalid rel 0", p.name);
+            }
+            validate_archive_filename(&p.file)?;
+            validate_sha256(&p.sha256, &format!("package {}", p.name))?;
+            if p.size == 0 {
+                bail!("schema-v2 package {} has no archive size", p.name);
+            }
+            if !names.insert(p.name.as_str()) {
+                bail!("schema-v2 index contains duplicate package name {:?}", p.name);
+            }
+            if !files.insert(p.file.as_str()) {
+                bail!("schema-v2 index contains duplicate archive filename {:?}", p.file);
+            }
+        }
+        if let Some(r) = &self.recipes {
+            validate_plain_filename(&r.file)?;
+            if !r.file.ends_with(RECIPES_SUFFIX) {
+                bail!("schema-v2 recipe archive has an unexpected filename {:?}", r.file);
+            }
+            validate_sha256(&r.sha256, "recipes archive")?;
+            validate_rev(&r.rev)?;
+        }
+        Ok(())
+    }
 }
 
-/// Build an index from a directory containing `*.nawa.tar.zst` archives.
+pub fn validate_sha256(value: &str, what: &str) -> Result<()> {
+    if value.len() != 64 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
+        bail!("{what} has an invalid SHA-256 digest (expected 64 hexadecimal characters)");
+    }
+    Ok(())
+}
+
+fn validate_plain_filename(file: &str) -> Result<()> {
+    if file.is_empty()
+        || file.starts_with('.')
+        || file.contains('/')
+        || file.contains('\\')
+        || file.contains("..")
+    {
+        bail!("index entry has an unsafe filename: {file:?}");
+    }
+    Ok(())
+}
+
+fn validate_archive_filename(file: &str) -> Result<()> {
+    validate_plain_filename(file)?;
+    if !file.ends_with(".nawa.tar.zst") {
+        bail!("schema-v2 package archive has an unexpected filename: {file:?}");
+    }
+    Ok(())
+}
+
+/// Build a legacy v1 index from a directory containing package archives.
 #[cfg(test)]
 pub fn create_index(dir: &Path, out: &Path) -> Result<Index> {
     create_index_with(dir, out, None)
 }
 
-/// Like [`create_index`]; with `recipes = Some((tree, rev))` the recipe tree
-/// is packed into `dir` and recorded in the index.
+/// Backward-compatible v1 index generator used by repository unit tests.
+#[cfg(test)]
 pub fn create_index_with(
     dir: &Path,
     out: &Path,
     recipes: Option<(&Path, &str)>,
 ) -> Result<Index> {
+    create_index_with_version(dir, out, recipes, 1)
+}
+
+/// Build a repository index. Version 1 is the compatibility default; version 2
+/// adds explicit signed-index archive authentication and stricter metadata.
+pub fn create_index_with_version(
+    dir: &Path,
+    out: &Path,
+    recipes: Option<(&Path, &str)>,
+    index_version: u32,
+) -> Result<Index> {
+    if !matches!(index_version, 1 | INDEX_SCHEMA_V2) {
+        bail!("unsupported repository index version {index_version} (supported: 1, 2)");
+    }
     let recipes_entry = match recipes {
         Some((tree, rev)) => Some(pack_recipes(tree, dir, rev)?),
         None => None,
@@ -114,10 +239,25 @@ pub fn create_index_with(
         let info = archive::parse_pkginfo(&raw)?;
         let name = info.get("pkgname").cloned().unwrap_or_default();
         let version = info.get("pkgver").cloned().unwrap_or_default();
-        let rel: u32 = info.get("pkgrel").and_then(|v| v.parse().ok()).unwrap_or(1);
+        let rel: u32 = if index_version == INDEX_SCHEMA_V2 {
+            let raw = info.get("pkgrel").with_context(|| {
+                format!("{} is missing pkgrel in .PKGINFO", path.display())
+            })?;
+            let parsed = raw.parse::<u32>().with_context(|| {
+                format!("{} has an invalid pkgrel {:?} in .PKGINFO", path.display(), raw)
+            })?;
+            if parsed == 0 {
+                bail!("{} has invalid pkgrel 0 in .PKGINFO", path.display());
+            }
+            parsed
+        } else {
+            info.get("pkgrel").and_then(|v| v.parse().ok()).unwrap_or(1)
+        };
         let arch = info.get("arch").cloned().unwrap_or_default();
         let sha256 = crate::fetch::sha256_of_file(&path)?;
-        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let size = std::fs::metadata(&path)
+            .with_context(|| format!("stat package archive {}", path.display()))?
+            .len();
         let installed_size: u64 = info.get("size").and_then(|v| v.parse().ok()).unwrap_or(0);
         println!("nawa: index -> {}-{}-{}", name, version, rel);
         packages.push(RepoEntry {
@@ -132,11 +272,9 @@ pub fn create_index_with(
         });
     }
 
-    let idx = Index { generated: None, expires: None, recipes: None, packages };
-    // a repo exposes ONE entry per package — the newest archive
-    // (older archives may sit in the dir but never enter the index)
-    let mut newest: std::collections::BTreeMap<String, RepoEntry> = std::collections::BTreeMap::new();
-    for p in idx.packages {
+    // A repository exposes one entry per package — the newest archive.
+    let mut newest: BTreeMap<String, RepoEntry> = BTreeMap::new();
+    for p in packages {
         let full = format!("{}-{}", p.version, p.rel);
         match newest.get(&p.name) {
             Some(cur) => {
@@ -154,15 +292,37 @@ pub fn create_index_with(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let idx = Index {
+    let index = Index {
         generated: Some(now),
         expires: Some(now + INDEX_VALIDITY_SECS),
+        repository: (index_version == INDEX_SCHEMA_V2).then(RepositoryMeta::v2),
         recipes: recipes_entry,
         packages: newest.into_values().collect(),
     };
-    std::fs::write(out, toml::to_string_pretty(&idx)?)?;
-    println!("nawa: wrote index {} ({} packages)", out.display(), idx.packages.len());
-    Ok(idx)
+    index.validate()?;
+    let raw = toml::to_string_pretty(&index)?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = out.with_file_name(format!(
+        ".{}.tmp-{}-{stamp}",
+        out.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id()
+    ));
+    let write_result = (|| -> Result<()> {
+        std::fs::write(&tmp, raw.as_bytes())
+            .with_context(|| format!("write temporary index {}", tmp.display()))?;
+        std::fs::rename(&tmp, out)
+            .with_context(|| format!("activate index {}", out.display()))?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    write_result?;
+    println!("nawa: wrote index {} ({} packages, schema v{})", out.display(), index.packages.len(), index_version);
+    Ok(index)
 }
 
 /// A revision is a commit sha or tag: it ends up in a file name, so keep it
@@ -180,10 +340,8 @@ pub fn validate_rev(rev: &str) -> Result<()> {
     Ok(())
 }
 
-/// Pack the recipe tree `tree` into `<out_dir>/recipes-<rev>.recipes.tar.zst`
-/// (deterministic headers: same tree, same bytes) and describe it.
-/// `.git` is skipped; symlinks and special files are refused — a recipe tree
-/// is plain data.
+/// Pack the recipe tree into recipes-<rev>.recipes.tar.zst and describe it.
+/// .git is skipped; symlinks and special files are refused — a recipe tree is plain data.
 pub fn pack_recipes(tree: &Path, out_dir: &Path, rev: &str) -> Result<RecipesEntry> {
     validate_rev(rev)?;
     if !tree.is_dir() {
@@ -250,17 +408,69 @@ mod tests {
 
         let out = base.join("index.toml");
         let idx = create_index(&dir, &out).unwrap();
-        assert_eq!(idx.packages.len(), 1, "index must expose one entry per package");
+        assert_eq!(idx.packages.len(), 1);
         assert_eq!(idx.packages[0].version, "2.0");
         assert_eq!(idx.packages[0].rel, 1);
         assert_eq!(idx.find("demo").unwrap().version, "2.0");
         let e = idx.find("demo").unwrap();
-        assert!(e.size > 0, "the index records the archive size");
-        assert_eq!(e.installed_size, 1, "and the installed size from the pkginfo");
-        // an index written before these fields existed still parses (sizes 0 = unknown)
+        assert!(e.size > 0);
+        assert_eq!(e.installed_size, 1);
         let old = "[[package]]\nname = \"a\"\nversion = \"1\"\nrel = 1\narch = \"x86_64\"\nfile = \"a.nawa.tar.zst\"\nsha256 = \"00\"\n";
         let parsed: Index = toml::from_str(old).unwrap();
         assert_eq!((parsed.packages[0].size, parsed.packages[0].installed_size), (0, 0));
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn v2_index_has_explicit_archive_authentication_metadata() {
+        let meta = RepositoryMeta::v2();
+        let index = Index {
+            generated: Some(10),
+            expires: Some(20),
+            repository: Some(meta),
+            recipes: None,
+            packages: vec![RepoEntry {
+                name: "bash".into(),
+                version: "5.2".into(),
+                rel: 1,
+                arch: "x86_64".into(),
+                file: "bash-5.2-1.nawa.tar.zst".into(),
+                sha256: "a".repeat(64),
+                size: 123,
+                installed_size: 456,
+            }],
+        };
+        index.validate().unwrap();
+        let serialized = toml::to_string(&index).unwrap();
+        assert!(serialized.contains("schema = 2"));
+        assert!(serialized.contains("archive_auth = \"signed-index\""));
+        let parsed: Index = toml::from_str(&serialized).unwrap();
+        parsed.validate().unwrap();
+        assert_eq!(parsed.repository.unwrap().schema, 2);
+    }
+
+    #[test]
+    fn v2_rejects_unknown_authentication_and_malformed_entries() {
+        let mut index = Index {
+            generated: Some(10),
+            expires: Some(20),
+            repository: Some(RepositoryMeta::v2()),
+            recipes: None,
+            packages: vec![RepoEntry {
+                name: "bash".into(),
+                version: "5.2".into(),
+                rel: 1,
+                arch: "x86_64".into(),
+                file: "bash-5.2-1.nawa.tar.zst".into(),
+                sha256: "a".repeat(64),
+                size: 123,
+                installed_size: 456,
+            }],
+        };
+        index.repository.as_mut().unwrap().archive_auth = "detached".into();
+        assert!(index.validate().unwrap_err().to_string().contains("archive_auth"));
+        index.repository.as_mut().unwrap().archive_auth = ARCHIVE_AUTH_SIGNED_INDEX.into();
+        index.packages[0].sha256 = "xyz".into();
+        assert!(index.validate().unwrap_err().to_string().contains("SHA-256"));
     }
 }
