@@ -157,13 +157,13 @@ impl Index {
             );
         }
         if meta.archive_auth != ARCHIVE_AUTH_SIGNED_INDEX {
-            bail!("unsupported v2 archive_auth {:?}; expected {:?}", meta.archive_auth, ARCHIVE_AUTH_SIGNED_INDEX);
+            bail!("unsupported repository archive_auth {:?}; expected {:?}", meta.archive_auth, ARCHIVE_AUTH_SIGNED_INDEX);
         }
         if meta.hash_algorithm != HASH_ALGORITHM_SHA256 {
-            bail!("unsupported v2 hash_algorithm {:?}; expected sha256", meta.hash_algorithm);
+            bail!("unsupported repository hash_algorithm {:?}; expected sha256", meta.hash_algorithm);
         }
         if meta.index_signature != INDEX_SIGNATURE_NAWA_SIG_V1 {
-            bail!("unsupported v2 index_signature {:?}; expected nawa-sig-v1", meta.index_signature);
+            bail!("unsupported repository index_signature {:?}; expected nawa-sig-v1", meta.index_signature);
         }
 
         let generated = self.generated.context("schema-v2 index is missing generated")?;
@@ -176,7 +176,7 @@ impl Index {
         let mut files = HashSet::new();
         for p in &self.packages {
             if p.name.trim().is_empty() || p.version.trim().is_empty() || p.arch.trim().is_empty() {
-                bail!("schema-v2 package entry has an empty name, version, or arch");
+                bail!("schema-v2/v3 package entry has an empty name, version, or arch");
             }
             if p.rel == 0 {
                 bail!("schema-v2 package {} has invalid rel 0", p.name);
@@ -195,23 +195,23 @@ impl Index {
                 bail!("schema-v2 package {} unexpectedly has download_url", p.name);
             }
             if !names.insert(p.name.as_str()) {
-                bail!("schema-v2 index contains duplicate package name {:?}", p.name);
+                bail!("schema-v2/v3 index contains duplicate package name {:?}", p.name);
             }
             if !files.insert(p.file.as_str()) {
-                bail!("schema-v2 index contains duplicate archive filename {:?}", p.file);
+                bail!("schema-v2/v3 index contains duplicate archive filename {:?}", p.file);
             }
         }
         if let Some(r) = &self.recipes {
             validate_plain_filename(&r.file)?;
             if !r.file.ends_with(RECIPES_SUFFIX) {
-                bail!("schema-v2 recipe archive has an unexpected filename {:?}", r.file);
+                bail!("schema-v2/v3 recipe archive has an unexpected filename {:?}", r.file);
             }
             validate_sha256(&r.sha256, "recipes archive")?;
             if per_package_url {
                 let url = r.download_url.as_deref().context("schema-v3 recipes entry has no download_url")?;
                 validate_download_url(url, "recipes archive")?;
             } else if r.download_url.is_some() {
-                bail!("schema-v2 recipes entry unexpectedly has download_url");
+                bail!("schema-v2/v3 recipes entry unexpectedly has download_url");
             }
             validate_rev(&r.rev)?;
         }
@@ -616,8 +616,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         let dir = base.join("repo");
         let staging = base.join("staging");
+        let recipes = base.join("recipes");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::create_dir_all(&staging).unwrap();
+        std::fs::create_dir_all(recipes.join("base/demo")).unwrap();
+        std::fs::write(recipes.join("base/demo/recipe.toml"), "[package]\nname = \"demo\"\nversion = \"1.0\"\n").unwrap();
         std::fs::write(staging.join("bin"), b"bash").unwrap();
         archive::create(
             &staging,
@@ -634,20 +637,30 @@ mod tests {
 "demo-1.0-1.nawa.tar.zst" = "https://github.com/example/repo/releases/download/packages-0001/sha256-demo.nawa.tar.zst"
 
 [recipe_urls]
+"recipes-abc123.recipes.tar.zst" = "https://github.com/example/repo/releases/download/packages-0001/sha256-recipes.tar.zst"
 "#,
         ).unwrap();
 
         let index_path = dir.join("index.toml");
         let index = create_index_with_locations(
-            &dir, &index_path, None, INDEX_SCHEMA_V3, Some(&locations)
+            &dir, &index_path, Some((&recipes, "abc123")), INDEX_SCHEMA_V3, Some(&locations)
         ).unwrap();
         assert_eq!(
             index.packages[0].download_url.as_deref(),
             Some("https://github.com/example/repo/releases/download/packages-0001/sha256-demo.nawa.tar.zst")
         );
         assert_eq!(
-            load_index(&index_path).unwrap().repository.unwrap().archive_location,
+            index.recipes.as_ref().unwrap().download_url.as_deref(),
+            Some("https://github.com/example/repo/releases/download/packages-0001/sha256-recipes.tar.zst")
+        );
+        let loaded = load_index(&index_path).unwrap();
+        assert_eq!(
+            loaded.repository.unwrap().archive_location,
             ARCHIVE_LOCATION_PER_PACKAGE_URL
+        );
+        assert_eq!(
+            loaded.recipes.unwrap().download_url.as_deref(),
+            Some("https://github.com/example/repo/releases/download/packages-0001/sha256-recipes.tar.zst")
         );
         assert!(create_index_with_version(&dir, &index_path, None, INDEX_SCHEMA_V3).is_err());
 

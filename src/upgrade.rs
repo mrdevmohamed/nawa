@@ -631,6 +631,30 @@ mod tests {
     }
 
     #[test]
+    fn distributed_index_requires_trusted_signer_even_with_allow_unsigned() {
+        let base = tmpdir("v3-untrusted");
+        let root = base.join("root");
+        let repo_dir = base.join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        let locations = base.join("locations.toml");
+        std::fs::write(&locations, "schema = 1\n").unwrap();
+        let index_path = repo_dir.join("index.toml");
+        repo::create_index_with_locations(
+            &repo_dir, &index_path, None, repo::INDEX_SCHEMA_V3, Some(&locations)
+        ).unwrap();
+
+        let (secret, _public) = crate::sign::keygen(&base.join("publisher")).unwrap();
+        crate::sign::sign(&index_path, &secret).unwrap();
+
+        let err = match open_repo(&root, &RepoRef::Local(repo_dir), true, false) {
+            Ok(_) => panic!("untrusted distributed index must be rejected"),
+            Err(err) => err,
+        };
+        assert!(format!("{err:#}").contains("trusted signing key"), "{err:#}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn upgrade_installs_newer_version_from_repo() {
         let base = tmpdir("e2e");
         let root = base.join("root");
