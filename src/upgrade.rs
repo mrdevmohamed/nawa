@@ -421,16 +421,18 @@ fn check_archive_matches_index(archive: &Path, re: &repo::RepoEntry) -> Result<(
     if !arch.is_empty() && !matches!(arch.as_str(), "any" | "noarch" | "all") && arch != host {
         bail!("archive {} is built for {arch}, this system is {host}", re.file);
     }
-    if get("pkgname") != re.name || get("pkgver") != re.version || rel != re.rel {
+    if get("pkgname") != re.name || get("pkgver") != re.version || rel != re.rel || arch != re.arch {
         bail!(
-            "archive {} contains {}-{}-{} but the index promised {}-{}-{}",
+            "archive {} metadata does not match the index (archive: {}-{}-{} arch {}; index: {}-{}-{} arch {})",
             re.file,
             get("pkgname"),
             get("pkgver"),
             rel,
+            arch,
             re.name,
             re.version,
-            re.rel
+            re.rel,
+            re.arch
         );
     }
     Ok(())
