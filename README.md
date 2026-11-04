@@ -44,7 +44,7 @@ src/        the package manager
 tests/      integration tests (build engine, isolation, end to end)
 examples/   mkfake (test archive builder), dump
 scripts/    smoke tests and the isolation matrix (used by CI)
-docs/       design notes (build-isolation.md; future proposals are explicitly marked)
+docs/       design notes: [build isolation](docs/build-isolation.md), [future dependency-aware rebuild proposal](docs/future-dependency-aware-rebuild.md)
 vendor/     vendored crates (offline builds)
 ```
 
