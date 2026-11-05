@@ -42,6 +42,11 @@ pub(crate) fn cmd_install(
             println!("nawa: retrying incomplete post-install hook for {t}");
             let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
             install::retry_pending_hook(t, &ctx.root)?;
+            // Recipe-backed targets still go through normal source/version
+            // selection after the hook is repaired.
+            if known.contains_key(t) {
+                remaining_targets.push(t.clone());
+            }
         } else {
             remaining_targets.push(t.clone());
         }
