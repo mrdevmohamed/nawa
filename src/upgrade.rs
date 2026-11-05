@@ -355,6 +355,9 @@ pub fn upgrade(
     // ---- apply ----------------------------------------------------------------
     let mut done = 0usize;
     for name in &ordered {
+        // a Ctrl+C that arrived during the previous package was deferred
+        // until it was complete; stop before starting the next one
+        crate::interrupt::check()?;
         let (re, _) = plan
             .iter()
             .find(|(r, _)| &r.name == name)

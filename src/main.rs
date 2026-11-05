@@ -15,6 +15,7 @@ mod deps;
 mod fetch;
 mod humanize;
 mod install;
+mod interrupt;
 mod lint;
 mod lock;
 mod plan;
@@ -94,6 +95,12 @@ fn main() {
     };
     let ctx = Ctx::from_config(&cfg);
     if let Err(e) = run(&ctx, cmd) {
+        // Ctrl+C: the current step was rolled back or finished, never left
+        // half-done. Not an error to shout about; exit like a shell would.
+        if e.downcast_ref::<interrupt::Interrupted>().is_some() {
+            eprintln!("nawa: interrupted - the system was left consistent");
+            std::process::exit(130);
+        }
         print_error(e);
         std::process::exit(1);
     }
@@ -112,6 +119,12 @@ fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         Some(mode) => lock::acquire(&ctx.root, mode)?,
         None => None,
     };
+    // any command that writes under the root first repairs what a killed
+    // nawa left behind; holding the exclusive lock guarantees no live
+    // transaction is mistaken for a dead one
+    if matches!(lock_mode(&cmd), Some(lock::Mode::Exclusive)) {
+        install::recover_and_report(&ctx.root);
+    }
     match cmd {
         Cmd::Build {
             name,
