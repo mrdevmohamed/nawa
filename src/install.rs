@@ -600,7 +600,7 @@ fn enc(p: &Path) -> String {
         }
     }
     if out.is_empty() {
-        out.push_str("%");
+        out.push('%');
     }
     out
 }
