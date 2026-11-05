@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased — fix: Ctrl+C and crashes can no longer corrupt an install
+
+- SIGINT / SIGTERM / SIGHUP are deferred while an install or removal changes
+  the system instead of killing nawa on the spot. Before the db entry is
+  written the step is rolled back (files and db, nothing half-installed);
+  after it, the current package is simply finished. Between packages nawa
+  stops and exits with status 130. Pressing Ctrl+C three times forces an
+  immediate exit, which is safe because of the next point.
+- Every file move is written to an on-disk journal first
+  (`<root>/.nawa/bak-*.journal`). The next nawa that takes the exclusive
+  database lock replays it: an unfinished transaction is rolled back
+  (including a db entry that was only partly written), a finished one is
+  cleaned up, and leftover staging directories are removed. This also covers
+  SIGKILL, an OOM kill and power loss (the journal is fsynced every 32
+  entries and before the db is touched).
+- A `Tx` that is dropped without commit (early return, panic) rolls back.
+
 ## Unreleased — fix: runit service control
 
 - `nawa service start|stop|restart <name>` control a running service through

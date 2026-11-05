@@ -18,6 +18,7 @@ use std::process::Command;
 
 use crate::archive;
 use crate::db::{Db, Entry};
+use crate::interrupt;
 use crate::sign;
 
 /// Install a `.nawa.tar.zst` archive into `root`.
@@ -89,6 +90,13 @@ fn install_archive_payload(
     cache_detached_signature: bool,
 ) -> Result<Entry> {
     let db = Db::new(root);
+    // Ctrl+C / SIGTERM / SIGHUP are deferred from here to the end of the
+    // function: before the commit point they roll the install back, after it
+    // the install simply finishes (see `interrupt`).
+    let _interrupts = interrupt::Guard::new();
+    // a previous nawa killed mid-install (SIGKILL, power cut) is repaired
+    // before anything else looks at the files or the db
+    recover_and_report(root);
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -105,6 +113,7 @@ fn install_archive_payload(
     let _tmp_guard = TmpGuard(tmp.clone());
 
     let extracted = archive::extract(archive_path, &tmp)?;
+    interrupt::check()?;
     let info = archive::parse_pkginfo(&extracted.pkginfo)?;
     let name = info.get("pkgname").cloned().unwrap_or_default();
     let version = info.get("pkgver").cloned().unwrap_or_default();
@@ -180,6 +189,8 @@ fn install_archive_payload(
     // ---- move staged tree into the root -------------------------------------
     let mut diverted: Vec<(String, String)> = Vec::new(); // (orig, diverted)
     let mut tx = Tx::new(root, root.join(".nawa").join(format!("bak-{stamp}")));
+    // last clean exit before any file is touched
+    interrupt::check()?;
     if let Err(e) = move_tree(&tmp, root, root, &old_hashes, &mut diverted, &mut tx) {
         tx.rollback();
         return Err(e);
@@ -213,6 +224,13 @@ fn install_archive_payload(
         }
     }
 
+    // last point where backing out is safe: the files are in place but the
+    // db does not know them yet, and the journal can still undo all of it
+    if let Err(e) = interrupt::check() {
+        tx.rollback();
+        return Err(e.into());
+    }
+
     // ---- register in db (atomic: temp file + rename) -------------------------
     let reason = match reason {
         "keep" => old.as_ref().map(|o| o.reason.clone()).unwrap_or_else(|| "explicit".into()),
@@ -235,12 +253,19 @@ fn install_archive_payload(
             return Err(e);
         }
     };
+    // the db entry is three files; keep a copy so a crash between them is
+    // repaired together with the files
+    if let Err(e) = tx.snapshot_db(&db.entry_dir(&name)?) {
+        tx.rollback();
+        return Err(e);
+    }
     if let Err(e) = db.add(&entry, &staged_files, &staged_hashes) {
         // files and db must agree: put the previous state back
         tx.rollback();
         return Err(e);
     }
-    // point of no return: drop the undo journal, then tidy empty old dirs
+    // point of no return: drop the undo journal, then tidy empty old dirs.
+    // From here on interrupts no longer abort the install.
     tx.commit();
     for d in &obsolete_dirs {
         let _ = std::fs::remove_dir(d);
@@ -322,6 +347,8 @@ pub fn remove(name: &str, root: &Path) -> Result<()> {
 /// leaving a half-removed package behind.
 pub fn remove_with(name: &str, root: &Path, force: bool) -> Result<()> {
     let db = Db::new(root);
+    let _interrupts = interrupt::Guard::new();
+    recover_and_report(root);
     let entry = match db.entry(name)? {
         Some(e) => e,
         None => bail!("`{name}` is not installed"),
@@ -358,6 +385,10 @@ pub fn remove_with(name: &str, root: &Path, force: bool) -> Result<()> {
     let mut dirs: Vec<PathBuf> = Vec::new();
     let mut move_err: Option<anyhow::Error> = None;
     for f in &files {
+        if let Err(e) = interrupt::check() {
+            move_err = Some(e.into());
+            break;
+        }
         let p = root.join(f.trim_start_matches('/'));
         match std::fs::symlink_metadata(&p) {
             // directories are removed after the commit (only if empty)
@@ -373,6 +404,14 @@ pub fn remove_with(name: &str, root: &Path, force: bool) -> Result<()> {
         }
     }
     if let Some(e) = move_err {
+        tx.rollback();
+        return Err(e);
+    }
+    if let Err(e) = interrupt::check() {
+        tx.rollback();
+        return Err(e.into());
+    }
+    if let Err(e) = tx.snapshot_db(&db.entry_dir(name)?) {
         tx.rollback();
         return Err(e);
     }
@@ -531,20 +570,252 @@ fn ensure_inside_root(root: &Path, path: &Path) -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// transaction journal
+// ---------------------------------------------------------------------------
+
+/// One step of an in-flight transaction, in the order it was journaled.
+#[derive(Debug, Clone, PartialEq)]
+enum Step {
+    /// `path` did not exist and is about to be created.
+    Created(PathBuf),
+    /// `dest` is about to be moved to `bak` (and replaced, or deleted).
+    Replaced { dest: PathBuf, bak: PathBuf },
+    /// The package's db directory. `backup` holds a complete copy of its
+    /// previous contents (`None`: it did not exist before).
+    Db { dir: PathBuf, backup: Option<PathBuf> },
+}
+
+/// Percent-encode a path for one journal field: bytes outside printable
+/// ASCII, plus `%`, tab and newline, become `%XX` (file names are arbitrary
+/// bytes on Linux).
+fn enc(p: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    let mut out = String::new();
+    for &b in p.as_os_str().as_bytes() {
+        if (0x21..=0x7e).contains(&b) && b != b'%' {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02x}"));
+        }
+    }
+    if out.is_empty() {
+        out.push('%');
+    }
+    out
+}
+
+fn dec(s: &str) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    if s == "%" {
+        return Some(PathBuf::new());
+    }
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' {
+            let hex = s.get(i + 1..i + 3)?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    Some(PathBuf::from(std::ffi::OsString::from_vec(out)))
+}
+
+/// Append-only on-disk record of what a transaction has done so far. Each
+/// line is one `write(2)`, so it survives the process being killed; it is
+/// fsynced every few entries, before the db is touched and at commit, which
+/// bounds what a power cut can lose.
+struct Journal {
+    path: PathBuf,
+    file: std::fs::File,
+    unsynced: u32,
+}
+
+impl Journal {
+    fn create(path: PathBuf, bak_root: &Path) -> Result<Self> {
+        use std::io::Write;
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .with_context(|| format!("create journal {}", path.display()))?;
+        file.write_all(format!("H\t{}\n", enc(bak_root)).as_bytes())?;
+        file.sync_data()?;
+        if let Some(dir) = path.parent() {
+            if let Ok(d) = std::fs::File::open(dir) {
+                let _ = d.sync_all();
+            }
+        }
+        Ok(Journal { path, file, unsynced: 0 })
+    }
+
+    fn record(&mut self, step: &Step) -> Result<()> {
+        use std::io::Write;
+        let line = match step {
+            Step::Created(p) => format!("C\t{}\n", enc(p)),
+            Step::Replaced { dest, bak } => format!("R\t{}\t{}\n", enc(dest), enc(bak)),
+            Step::Db { dir, backup } => format!(
+                "D\t{}\t{}\n",
+                enc(dir),
+                backup.as_deref().map(enc).unwrap_or_else(|| "-".to_string())
+            ),
+        };
+        self.file
+            .write_all(line.as_bytes())
+            .with_context(|| format!("write journal {}", self.path.display()))?;
+        self.unsynced += 1;
+        // the db is about to change: everything before it must be durable
+        if self.unsynced >= 32 || matches!(step, Step::Db { .. }) {
+            self.sync()?;
+        }
+        Ok(())
+    }
+
+    fn sync(&mut self) -> Result<()> {
+        self.file.sync_data()?;
+        self.unsynced = 0;
+        Ok(())
+    }
+
+    fn mark_committed(&mut self) -> Result<()> {
+        use std::io::Write;
+        self.file.write_all(b"COMMIT\n")?;
+        self.sync()
+    }
+}
+
+/// Parsed journal: the bak dir, the steps, and whether it was committed.
+struct Parsed {
+    bak_root: PathBuf,
+    steps: Vec<Step>,
+    committed: bool,
+}
+
+fn parse_journal(text: &str, fallback_bak: PathBuf) -> Parsed {
+    let mut bak_root = fallback_bak;
+    let mut steps = Vec::new();
+    let mut committed = false;
+    for line in text.lines() {
+        let f: Vec<&str> = line.split('\t').collect();
+        match f.as_slice() {
+            ["H", b] => {
+                if let Some(p) = dec(b) {
+                    bak_root = p;
+                }
+            }
+            ["C", p] => {
+                if let Some(p) = dec(p) {
+                    steps.push(Step::Created(p));
+                }
+            }
+            ["R", d, b] => {
+                if let (Some(dest), Some(bak)) = (dec(d), dec(b)) {
+                    steps.push(Step::Replaced { dest, bak });
+                }
+            }
+            ["D", d, b] => {
+                if let Some(dir) = dec(d) {
+                    let backup = if *b == "-" { None } else { dec(b) };
+                    steps.push(Step::Db { dir, backup });
+                }
+            }
+            ["COMMIT"] => committed = true,
+            // a torn last line (power cut) or an unknown record is ignored:
+            // the steps before it are all that was ever acted on
+            _ => {}
+        }
+    }
+    Parsed { bak_root, steps, committed }
+}
+
+/// Copy a (flat or nested) directory of small files.
+fn copy_dir(from: &Path, to: &Path) -> Result<()> {
+    std::fs::create_dir_all(to)?;
+    for e in std::fs::read_dir(from)? {
+        let e = e?;
+        let src = e.path();
+        let dst = to.join(e.file_name());
+        if e.file_type()?.is_dir() {
+            copy_dir(&src, &dst)?;
+        } else {
+            std::fs::copy(&src, &dst)?;
+        }
+    }
+    Ok(())
+}
+
+/// Put everything a transaction changed back, newest step first. Idempotent:
+/// it can be run again after being interrupted itself, and it never deletes
+/// a file whose backup is missing (nothing was moved yet in that case).
+fn undo_steps(steps: &[Step], bak_root: &Path) {
+    for step in steps.iter().rev() {
+        match step {
+            Step::Created(p) => {
+                let _ = std::fs::remove_file(p);
+            }
+            Step::Replaced { dest, bak } => {
+                if std::fs::symlink_metadata(bak).is_ok() {
+                    let _ = std::fs::remove_file(dest);
+                    let _ = std::fs::rename(bak, dest);
+                }
+            }
+            Step::Db { dir, backup } => {
+                let _ = std::fs::remove_dir_all(dir);
+                if let Some(b) = backup {
+                    let _ = copy_dir(b, dir);
+                }
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(bak_root);
+}
+
 /// Undo journal for `move_tree`: every file that replaces an existing one is
 /// first moved to a backup dir, every newly created file is remembered, so a
 /// failure half-way through can restore the previous state (all-or-nothing
 /// file placement).
+///
+/// Every step is also written to an on-disk journal *before* it happens, so
+/// the same undo works after a SIGKILL or power cut: [`recover`] replays it
+/// the next time nawa takes the database lock. Dropping a `Tx` that was
+/// neither committed nor rolled back (an early return, a panic) rolls back.
 struct Tx {
     root: PathBuf,
     bak_root: PathBuf,
-    created: Vec<PathBuf>,
-    replaced: Vec<(PathBuf, PathBuf)>, // (destination, backup)
+    journal: Option<Journal>,
+    steps: Vec<Step>,
+    done: bool,
+}
+
+fn journal_path(root: &Path, bak_root: &Path) -> PathBuf {
+    let name = bak_root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    root.join(".nawa").join(format!("{name}.journal"))
 }
 
 impl Tx {
     fn new(root: &Path, bak_root: PathBuf) -> Self {
-        Tx { root: root.to_path_buf(), bak_root, created: Vec::new(), replaced: Vec::new() }
+        Tx { root: root.to_path_buf(), bak_root, journal: None, steps: Vec::new(), done: false }
+    }
+
+    /// Journal `step` (creating the journal on first use), then remember it.
+    fn log(&mut self, step: Step) -> Result<()> {
+        if self.journal.is_none() {
+            self.journal = Some(Journal::create(journal_path(&self.root, &self.bak_root), &self.bak_root)?);
+        }
+        if let Some(j) = self.journal.as_mut() {
+            j.record(&step)?;
+        }
+        self.steps.push(step);
+        Ok(())
     }
 
     /// Move `from` to `to`, backing up whatever `to` currently is.
@@ -557,14 +828,14 @@ impl Tx {
         if std::fs::symlink_metadata(to).is_ok() {
             let rel = to.strip_prefix(&self.root)?;
             let bak = self.bak_root.join(rel);
+            self.log(Step::Replaced { dest: to.to_path_buf(), bak: bak.clone() })?;
             if let Some(parent) = bak.parent() {
                 std::fs::create_dir_all(parent)?;
             }
             std::fs::rename(to, &bak)
                 .with_context(|| format!("back up {}", to.display()))?;
-            self.replaced.push((to.to_path_buf(), bak));
         } else {
-            self.created.push(to.to_path_buf());
+            self.log(Step::Created(to.to_path_buf()))?;
         }
         std::fs::rename(from, to)
             .with_context(|| format!("move {} -> {}", from.display(), to.display()))
@@ -577,28 +848,127 @@ impl Tx {
         }
         let rel = path.strip_prefix(&self.root)?;
         let bak = self.bak_root.join(rel);
+        self.log(Step::Replaced { dest: path.to_path_buf(), bak: bak.clone() })?;
         if let Some(parent) = bak.parent() {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::rename(path, &bak).with_context(|| format!("remove {}", path.display()))?;
-        self.replaced.push((path.to_path_buf(), bak));
         Ok(())
     }
 
-    /// Best-effort restore of the pre-install state.
-    fn rollback(&mut self) {
-        for p in self.created.iter().rev() {
-            let _ = std::fs::remove_file(p);
-        }
-        for (dest, bak) in self.replaced.iter().rev() {
-            let _ = std::fs::remove_file(dest);
-            let _ = std::fs::rename(bak, dest);
-        }
-        let _ = std::fs::remove_dir_all(&self.bak_root);
+    /// Copy the package's db directory aside and journal it. Call this right
+    /// before the db is modified: a rollback (or crash recovery) then puts
+    /// the db entry back together with the files.
+    fn snapshot_db(&mut self, dir: &Path) -> Result<()> {
+        let backup = if dir.exists() {
+            let name = dir.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+            let b = self.bak_root.join(".db").join(name);
+            let _ = std::fs::remove_dir_all(&b);
+            // complete the copy BEFORE journaling it: a crash mid-copy then
+            // leaves no record, and the db has not been touched yet
+            copy_dir(dir, &b)?;
+            Some(b)
+        } else {
+            None
+        };
+        self.log(Step::Db { dir: dir.to_path_buf(), backup })
     }
 
-    fn commit(self) {
+    /// Restore the pre-install state (best effort, idempotent).
+    fn rollback(&mut self) {
+        if self.done {
+            return;
+        }
+        undo_steps(&self.steps, &self.bak_root);
+        self.steps.clear();
+        if let Some(j) = self.journal.take() {
+            let _ = std::fs::remove_file(&j.path);
+        }
+        self.done = true;
+    }
+
+    fn commit(mut self) {
+        if let Some(j) = self.journal.as_mut() {
+            // once COMMIT is durable the transaction counts as done: a crash
+            // from here on only has bak leftovers to tidy, never to restore
+            let _ = j.mark_committed();
+        }
         let _ = std::fs::remove_dir_all(&self.bak_root);
+        if let Some(j) = self.journal.take() {
+            let _ = std::fs::remove_file(&j.path);
+        }
+        self.done = true;
+    }
+}
+
+impl Drop for Tx {
+    fn drop(&mut self) {
+        self.rollback();
+    }
+}
+
+/// Repair what an interrupted nawa left behind. Call it while holding the
+/// exclusive database lock (nothing else can be mid-transaction then):
+///
+/// * a journal without `COMMIT` is rolled back (files and db entry),
+/// * a journal with `COMMIT` is just cleaned up (the install had finished),
+/// * leftover staging directories of dead installs are removed.
+///
+/// Returns one line per repair for the caller to show.
+pub fn recover(root: &Path) -> Result<Vec<String>> {
+    let dir = root.join(".nawa");
+    let mut notes = Vec::new();
+    let rd = match std::fs::read_dir(&dir) {
+        Ok(rd) => rd,
+        Err(_) => return Ok(notes),
+    };
+    let mut journals = Vec::new();
+    let mut stale_dirs = Vec::new();
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        let path = e.path();
+        if name.ends_with(".journal") && (name.starts_with("bak-") || name.starts_with("rm-")) {
+            journals.push((name, path));
+        } else if name.starts_with("tmp-") && path.is_dir() {
+            stale_dirs.push(path);
+        }
+    }
+    journals.sort();
+    for (name, path) in journals {
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let fallback = dir.join(name.trim_end_matches(".journal"));
+        let parsed = parse_journal(&text, fallback);
+        if parsed.committed {
+            let _ = std::fs::remove_dir_all(&parsed.bak_root);
+            notes.push(format!("finished cleaning up a completed transaction ({name})"));
+        } else if parsed.steps.is_empty() {
+            let _ = std::fs::remove_dir_all(&parsed.bak_root);
+        } else {
+            undo_steps(&parsed.steps, &parsed.bak_root);
+            notes.push(format!(
+                "rolled back an interrupted transaction ({name}, {} step(s)): \
+                 the system is back to its state before it started",
+                parsed.steps.len()
+            ));
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+    for d in stale_dirs {
+        let _ = std::fs::remove_dir_all(&d);
+    }
+    Ok(notes)
+}
+
+/// [`recover`], reporting on stderr. Failures to repair are warnings: the
+/// command at hand should still be able to run.
+pub fn recover_and_report(root: &Path) {
+    match recover(root) {
+        Ok(notes) => {
+            for n in notes {
+                eprintln!("nawa: recovered: {n}");
+            }
+        }
+        Err(e) => eprintln!("nawa: warning: could not check for an interrupted transaction: {e:#}"),
     }
 }
 
@@ -619,6 +989,9 @@ fn move_tree(
 ) -> Result<()> {
     for entry in std::fs::read_dir(src).with_context(|| format!("read {}", src.display()))? {
         let entry = entry?;
+        // between two files the transaction is consistent and journaled, so
+        // this is a safe place to give up (the caller rolls back)
+        interrupt::check()?;
         let from = entry.path();
         let to = dst.join(entry.file_name());
         let is_dir = from.is_dir() && !std::fs::symlink_metadata(&from)?.is_symlink();
@@ -829,6 +1202,20 @@ pub(crate) fn exists_in_root(root: &Path, path: &str) -> bool {
 /// else is skipped: executing a package's script on the host while
 /// installing into another root would run it on the wrong filesystem.
 /// (No /proc or /dev is mounted in the chroot.)
+/// A hook that exited non-zero. When the user pressed Ctrl+C the hook was
+/// almost certainly killed with us (same terminal process group): say so,
+/// because by then the package itself is already completely installed.
+fn hook_failed(label: &str) -> anyhow::Error {
+    if interrupt::is_interrupted() {
+        anyhow::anyhow!(
+            "{label} hook interrupted - the package files are installed and registered, \
+             but the hook did not finish; install the package again to re-run it"
+        )
+    } else {
+        anyhow::anyhow!("{label} hook failed")
+    }
+}
+
 fn run_hook(label: &str, script: &str, root: &Path) -> Result<()> {
     if script.trim().is_empty() {
         return Ok(());
@@ -866,7 +1253,7 @@ fn run_hook(label: &str, script: &str, root: &Path) -> Result<()> {
                 println!("nawa: running {label} hook in chroot {}", root.display());
                 let status = chroot_command(root, sh, script)?;
                 if !status.success() {
-                    bail!("{label} hook failed");
+                    return Err(hook_failed(label));
                 }
                 return Ok(());
             }
@@ -877,7 +1264,7 @@ fn run_hook(label: &str, script: &str, root: &Path) -> Result<()> {
         }
     };
     if !status.success() {
-        bail!("{label} hook failed");
+        return Err(hook_failed(label));
     }
     Ok(())
 }
@@ -1287,4 +1674,234 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    // ---- interruption / crash safety ---------------------------------------
+
+    fn leftovers(root: &Path) -> Vec<String> {
+        // anything in .nawa other than the (empty or absent) bookkeeping dirs
+        match std::fs::read_dir(root.join(".nawa")) {
+            Ok(rd) => rd.flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn journal_path_encoding_roundtrips_arbitrary_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+        for raw in [
+            &b"/usr/bin/plain"[..],
+            b"/usr/share/with space/and\ttab",
+            b"/usr/share/new\nline",
+            b"/usr/share/100%/\xff\xfe-bytes",
+            b"",
+        ] {
+            let p = PathBuf::from(std::ffi::OsStr::from_bytes(raw));
+            let e = enc(&p);
+            assert!(!e.contains('\t') && !e.contains('\n') && !e.contains(' '), "{e:?}");
+            assert_eq!(dec(&e).unwrap(), p, "{e}");
+        }
+    }
+
+    #[test]
+    fn interrupt_before_install_changes_nothing() {
+        let base = tmpdir("intr-fresh");
+        let root = base.join("root");
+        let pkg = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1")]);
+
+        interrupt::simulate_interrupt();
+        let err = install_archive(&pkg, &root, false, true, None, "explicit").unwrap_err();
+        interrupt::clear_simulated_interrupt();
+
+        assert!(err.downcast_ref::<interrupt::Interrupted>().is_some(), "{err:#}");
+        assert!(!root.join("usr/bin/demo").exists());
+        assert!(Db::new(&root).entry("demo").unwrap().is_none());
+        assert!(leftovers(&root).is_empty(), "{:?}", leftovers(&root));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn interrupt_during_upgrade_keeps_the_old_version_intact() {
+        let base = tmpdir("intr-upgrade");
+        let root = base.join("root");
+        let v1 = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1")]);
+        let v2 = make_pkg(&base, "demo", "2.0", &[("/usr/bin/demo", b"v2"), ("/usr/bin/extra", b"x")]);
+        install_archive(&v1, &root, false, true, None, "explicit").unwrap();
+
+        interrupt::simulate_interrupt();
+        let err = install_archive(&v2, &root, false, true, None, "explicit").unwrap_err();
+        interrupt::clear_simulated_interrupt();
+
+        assert!(err.downcast_ref::<interrupt::Interrupted>().is_some());
+        assert_eq!(std::fs::read(root.join("usr/bin/demo")).unwrap(), b"v1");
+        assert!(!root.join("usr/bin/extra").exists());
+        assert_eq!(Db::new(&root).entry("demo").unwrap().unwrap().version, "1.0");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn interrupt_stops_a_removal_without_removing_anything() {
+        let base = tmpdir("intr-remove");
+        let root = base.join("root");
+        let v1 = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1"), ("/usr/bin/two", b"2")]);
+        install_archive(&v1, &root, false, true, None, "explicit").unwrap();
+
+        interrupt::simulate_interrupt();
+        let err = remove_with("demo", &root, false).unwrap_err();
+        interrupt::clear_simulated_interrupt();
+
+        assert!(err.downcast_ref::<interrupt::Interrupted>().is_some());
+        assert!(root.join("usr/bin/demo").exists() && root.join("usr/bin/two").exists());
+        assert!(Db::new(&root).entry("demo").unwrap().is_some());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn dropping_an_uncommitted_tx_rolls_back() {
+        let base = tmpdir("tx-drop");
+        let root = base.join("root");
+        std::fs::create_dir_all(root.join("usr/bin")).unwrap();
+        std::fs::write(root.join("usr/bin/old"), b"orig").unwrap();
+        let stage = base.join("stage");
+        std::fs::create_dir_all(&stage).unwrap();
+        std::fs::write(stage.join("n"), b"new").unwrap();
+        {
+            let mut tx = Tx::new(&root, root.join(".nawa/bak-1"));
+            tx.place(&stage.join("n"), &root.join("usr/bin/old")).unwrap();
+            // early return / panic path: no commit, no explicit rollback
+        }
+        assert_eq!(std::fs::read(root.join("usr/bin/old")).unwrap(), b"orig");
+        assert!(leftovers(&root).is_empty(), "{:?}", leftovers(&root));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A process killed with SIGKILL never runs Drop: the journal and the
+    /// backup dir stay on disk and `recover` must put everything back,
+    /// including the three-file db entry written halfway.
+    #[test]
+    fn recover_rolls_back_a_killed_upgrade_files_and_db() {
+        let base = tmpdir("recover-kill");
+        let root = base.join("root");
+        let v1 = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1"), ("/etc/demo.conf", b"c1")]);
+        install_archive(&v1, &root, false, true, None, "explicit").unwrap();
+        let db = Db::new(&root);
+        let before_desc = std::fs::read(db.entry_dir("demo").unwrap().join("desc")).unwrap();
+        let before_files = std::fs::read(db.entry_dir("demo").unwrap().join("files")).unwrap();
+
+        // --- "install v2", die after the db's desc file was replaced -------
+        let stage = base.join("stage");
+        std::fs::create_dir_all(&stage).unwrap();
+        std::fs::write(stage.join("demo"), b"v2").unwrap();
+        std::fs::write(stage.join("newfile"), b"n").unwrap();
+        let mut tx = Tx::new(&root, root.join(".nawa/bak-777"));
+        tx.place(&stage.join("demo"), &root.join("usr/bin/demo")).unwrap();
+        tx.place(&stage.join("newfile"), &root.join("usr/bin/newfile")).unwrap();
+        tx.remove(&root.join("etc/demo.conf")).unwrap();
+        tx.snapshot_db(&db.entry_dir("demo").unwrap()).unwrap();
+        std::fs::write(db.entry_dir("demo").unwrap().join("desc"), b"garbage = half written").unwrap();
+        std::mem::forget(tx); // SIGKILL: no Drop, no rollback
+
+        assert_eq!(std::fs::read(root.join("usr/bin/demo")).unwrap(), b"v2");
+        assert!(db.entry("demo").is_err(), "db is corrupt before recovery");
+
+        let notes = recover(&root).unwrap();
+        assert_eq!(notes.len(), 1, "{notes:?}");
+
+        assert_eq!(std::fs::read(root.join("usr/bin/demo")).unwrap(), b"v1");
+        assert_eq!(std::fs::read(root.join("etc/demo.conf")).unwrap(), b"c1");
+        assert!(!root.join("usr/bin/newfile").exists());
+        assert_eq!(std::fs::read(db.entry_dir("demo").unwrap().join("desc")).unwrap(), before_desc);
+        assert_eq!(std::fs::read(db.entry_dir("demo").unwrap().join("files")).unwrap(), before_files);
+        assert_eq!(db.entry("demo").unwrap().unwrap().version, "1.0");
+        assert!(leftovers(&root).is_empty(), "{:?}", leftovers(&root));
+        // running it again is a no-op
+        assert!(recover(&root).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn recover_removes_a_killed_fresh_install_completely() {
+        let base = tmpdir("recover-fresh");
+        let root = base.join("root");
+        let db = Db::new(&root);
+        let stage = base.join("stage");
+        std::fs::create_dir_all(&stage).unwrap();
+        std::fs::write(stage.join("chrome"), b"bin").unwrap();
+        let mut tx = Tx::new(&root, root.join(".nawa/bak-5"));
+        std::fs::create_dir_all(root.join("usr/bin")).unwrap();
+        tx.place(&stage.join("chrome"), &root.join("usr/bin/chrome")).unwrap();
+        tx.snapshot_db(&db.entry_dir("chrome").unwrap()).unwrap(); // did not exist
+        std::fs::create_dir_all(db.entry_dir("chrome").unwrap()).unwrap();
+        std::fs::write(db.entry_dir("chrome").unwrap().join("desc"), b"partial").unwrap();
+        std::mem::forget(tx);
+
+        recover(&root).unwrap();
+        assert!(!root.join("usr/bin/chrome").exists());
+        assert!(!db.entry_dir("chrome").unwrap().exists());
+        assert!(leftovers(&root).is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn recover_keeps_a_committed_install_and_only_cleans_up() {
+        let base = tmpdir("recover-commit");
+        let root = base.join("root");
+        let stage = base.join("stage");
+        std::fs::create_dir_all(&stage).unwrap();
+        std::fs::create_dir_all(root.join("usr/bin")).unwrap();
+        std::fs::write(root.join("usr/bin/tool"), b"old").unwrap();
+        std::fs::write(stage.join("tool"), b"new").unwrap();
+        let mut tx = Tx::new(&root, root.join(".nawa/bak-9"));
+        tx.place(&stage.join("tool"), &root.join("usr/bin/tool")).unwrap();
+        // killed right after COMMIT became durable, before the cleanup
+        tx.journal.as_mut().unwrap().mark_committed().unwrap();
+        std::mem::forget(tx);
+
+        let notes = recover(&root).unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(std::fs::read(root.join("usr/bin/tool")).unwrap(), b"new");
+        assert!(leftovers(&root).is_empty(), "{:?}", leftovers(&root));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn recover_survives_a_torn_journal_and_clears_stale_staging() {
+        let base = tmpdir("recover-torn");
+        let root = base.join("root");
+        std::fs::create_dir_all(root.join("usr/bin")).unwrap();
+        std::fs::write(root.join("usr/bin/keep"), b"orig").unwrap();
+        let nawa = root.join(".nawa");
+        std::fs::create_dir_all(nawa.join("tmp-123/usr")).unwrap(); // dead staging dir
+        // a journal that stops mid-line, as after a power cut
+        let bak = nawa.join("bak-1");
+        let bak_enc = enc(&bak);
+        std::fs::write(nawa.join("bak-1.journal"), format!("H\t{bak_enc}\nC\t%2fno/such/file\nR\t%2fusr/bi")).unwrap();
+
+        recover(&root).unwrap();
+        assert_eq!(std::fs::read(root.join("usr/bin/keep")).unwrap(), b"orig");
+        assert!(leftovers(&root).is_empty(), "{:?}", leftovers(&root));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_replaced_entry_without_a_backup_is_never_deleted_by_recovery() {
+        // crash after the journal line but before the backup rename: the
+        // original is still at `dest` and must survive the replay
+        let base = tmpdir("recover-nobak");
+        let root = base.join("root");
+        std::fs::create_dir_all(root.join("usr/bin")).unwrap();
+        std::fs::write(root.join("usr/bin/precious"), b"orig").unwrap();
+        let nawa = root.join(".nawa");
+        std::fs::create_dir_all(&nawa).unwrap();
+        let bak = nawa.join("bak-3");
+        let line = format!(
+            "H\t{}\nR\t{}\t{}\n",
+            enc(&bak),
+            enc(&root.join("usr/bin/precious")),
+            enc(&bak.join("usr/bin/precious"))
+        );
+        std::fs::write(nawa.join("bak-3.journal"), line).unwrap();
+
+        recover(&root).unwrap();
+        assert_eq!(std::fs::read(root.join("usr/bin/precious")).unwrap(), b"orig");
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }
