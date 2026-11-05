@@ -77,6 +77,11 @@ impl Db {
         self.local_dir().join(name)
     }
 
+    /// The (validated) db directory of `name`, for transaction snapshots.
+    pub fn entry_dir(&self, name: &str) -> Result<PathBuf> {
+        self.checked_dir(name)
+    }
+
     /// `pkg_dir` for names that come from outside (archives, CLI): validated.
     fn checked_dir(&self, name: &str) -> Result<PathBuf> {
         check_name(name)?;

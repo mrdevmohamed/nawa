@@ -217,6 +217,9 @@ pub fn extract(archive: &Path, root: &Path) -> Result<Extracted> {
     let mut pkginfo = String::new();
 
     for entry in ar.entries()? {
+        // extraction only fills a private staging dir: abandoning it midway
+        // when Ctrl+C arrives is always safe
+        crate::interrupt::check()?;
         let mut entry = entry?;
         let p = entry.path()?.to_path_buf();
         let name = p.to_string_lossy().to_string();

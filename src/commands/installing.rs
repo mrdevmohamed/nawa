@@ -394,6 +394,9 @@ pub(crate) fn run_plan(
 
     let started = std::time::Instant::now();
     for (i, it) in plan.items.iter().enumerate() {
+        // Ctrl+C during the previous install was deferred until that package
+        // was complete; now that the system is consistent, stop here
+        crate::interrupt::check()?;
         let n = i + 1;
         let id = it.rec.id();
         let step = || -> Result<()> {
@@ -451,6 +454,7 @@ pub(crate) fn run_plan(
         }
     }
     for (j, re) in extras.iter().enumerate() {
+        crate::interrupt::check()?;
         let n = plan.items.len() + j + 1;
         let what = format!("{}-{}-{}", re.name, re.version, re.rel);
         let step = || -> Result<()> {
@@ -604,6 +608,7 @@ pub(crate) fn cmd_autoremove(ctx: &Ctx, dry_run: bool, yes: bool, build_deps: bo
     }
     confirm::confirm(&format!("nawa: remove {} package(s)?", order.len()), yes)?;
     for (i, n) in order.iter().enumerate() {
+        crate::interrupt::check()?;
         println!("nawa: [{}/{}] removing {n}", i + 1, order.len());
         install::remove_with(n, &ctx.root, false)?;
     }
