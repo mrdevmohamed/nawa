@@ -264,6 +264,12 @@ fn install_archive_payload(
         tx.rollback();
         return Err(e);
     }
+    // Hooks are part of the package's recoverable db state. Persist them
+    // before commit so a failure rolls the payload and db back together.
+    if let Err(e) = save_hooks(&db, &name, &hooks) {
+        tx.rollback();
+        return Err(e).context(format!("could not persist hooks for {name}"));
+    }
     // point of no return: drop the undo journal, then tidy empty old dirs.
     // From here on interrupts no longer abort the install.
     tx.commit();
@@ -272,8 +278,6 @@ fn install_archive_payload(
     }
 
     // ---- hooks ---------------------------------------------------------------
-    save_hooks(&db, &name, &hooks)
-        .with_context(|| format!("could not persist hooks for {name}"))?;
     let (label, script) = if is_upgrade {
         ("post_upgrade", hooks.post_install.as_str())
     } else {
