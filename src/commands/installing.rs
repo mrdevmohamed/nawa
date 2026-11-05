@@ -30,19 +30,36 @@ pub(crate) fn cmd_install(
         bail!("--key only applies to archive files (package names come from the repository or are built locally)");
     }
 
+    let known = recipe::load_all(&ctx.recipes)?;
+    let installed = installed_map(ctx)?;
+
+    // Complete interrupted (or legacy, untracked) hooks before consulting the
+    // repository. A retry must work for binary-only packages even if the
+    // repository is temporarily unavailable, and must not reinstall payloads.
+    let mut remaining_targets = Vec::new();
+    for t in targets {
+        if installed.contains_key(t) && install::hook_needs_retry(&ctx.root, t)? {
+            println!("nawa: retrying incomplete post-install hook for {t}");
+            let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
+            install::retry_pending_hook(t, &ctx.root)?;
+        } else {
+            remaining_targets.push(t.clone());
+        }
+    }
+    if remaining_targets.is_empty() {
+        return Ok(());
+    }
+
     // where packages come from: flag > install_mode (env / nawa.toml / default)
     let mode = mode.unwrap_or(ctx.install_mode);
     let repo_url = repo.or_else(|| ctx.repo.clone());
     let sourcing = open_sourcing(ctx, mode, repo_url.as_deref(), flags)?;
 
-    let known = recipe::load_all(&ctx.recipes)?;
-    let installed = installed_map(ctx)?;
-
     // a name without a recipe can still be installed when the repository has
     // it (a binary-only package: no dependency resolution, no build)
     let mut recipe_targets: Vec<String> = Vec::new();
     let mut extras: Vec<repo::RepoEntry> = Vec::new();
-    for t in targets {
+    for t in &remaining_targets {
         if known.contains_key(t) {
             recipe_targets.push(t.clone());
             continue;
