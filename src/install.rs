@@ -1196,11 +1196,12 @@ fn run_tracked_hook(db: &Db, entry: &Entry, label: &str, script: &str, root: &Pa
             Ok(())
         }
         Err(error) => {
-            state.status = if crate::interrupt::is_interrupted() {
+            let failure_status = if crate::interrupt::is_interrupted() {
                 "interrupted"
             } else {
                 "failed"
-            }.to_string();
+            };
+            state.status = failure_status.to_string();
             if let Err(status_error) = save_hook_status(db, &entry.name, &state) {
                 return Err(error.context(format!(
                     "also failed to persist hook failure state: {status_error:#}"
@@ -1436,7 +1437,7 @@ mod tests {
             install_date: 1,
             size: 1,
         };
-        db.add(&entry, &[], &HashMap::new()).unwrap();
+        db.add(&entry, &[], &std::collections::HashMap::new()).unwrap();
         save_hooks(&db, "demo", &archive::Hooks {
             post_install: "true".into(),
             ..Default::default()
