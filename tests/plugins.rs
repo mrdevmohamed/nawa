@@ -11,7 +11,15 @@ fn nawa_bin() -> PathBuf {
 }
 
 fn scratch(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("nawa-plugins-{tag}-{}", std::process::id()));
+    // Root discovery deliberately rejects plugin fixtures beneath /tmp,
+    // which is world-writable. Keep root-run tests under /root so they
+    // exercise the privileged discovery path without weakening that check.
+    let base = if rustix::process::geteuid().is_root() {
+        PathBuf::from("/root")
+    } else {
+        std::env::temp_dir()
+    };
+    let dir = base.join(format!("nawa-plugins-{tag}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(dir.join("plugins")).unwrap();
     dir
