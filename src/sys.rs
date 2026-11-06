@@ -63,14 +63,20 @@ pub fn exit_now(code: i32) -> ! {
     unsafe { libc::_exit(code) }
 }
 
-/// Drop supplementary groups and switch to an already-mapped unprivileged
-/// identity inside the plugin user namespace. Called only in its PID 1.
-pub fn drop_to_ids(uid: u32, gid: u32) -> Result<()> {
-    // SAFETY: this is a single-purpose child before exec, with a valid
-    // zero-length supplementary group list.
+/// Clear supplementary groups while the sandbox helper still has host-root
+/// credentials, before the user namespace installs setgroups=deny.
+pub fn clear_supplementary_groups() -> Result<()> {
+    // SAFETY: a zero-length list with a null pointer is the documented
+    // setgroups(2) form for clearing all supplementary groups.
     if unsafe { libc::setgroups(0, std::ptr::null()) } != 0 {
-        return Err(std::io::Error::last_os_error()).context("clear plugin supplementary groups");
+        return Err(std::io::Error::last_os_error()).context("clear sandbox supplementary groups");
     }
+    Ok(())
+}
+
+/// Switch to an already-mapped unprivileged identity inside the plugin
+/// user namespace. Supplementary groups were cleared before unshare.
+pub fn drop_to_ids(uid: u32, gid: u32) -> Result<()> {
     if unsafe { libc::setgid(gid as libc::gid_t) } != 0 {
         return Err(std::io::Error::last_os_error()).context("drop plugin gid");
     }
