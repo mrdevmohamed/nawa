@@ -10,6 +10,7 @@
 //! a plugin discovered in a user's home directory.
 
 pub mod discovery;
+pub mod events;
 pub mod manifest;
 pub mod protocol;
 pub mod runner;
