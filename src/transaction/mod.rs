@@ -11,6 +11,7 @@
 //! the installer uses) — no second lock, no lock-ordering cycle. Builds and
 //! downloads stay outside the lock, exactly as before.
 
+pub mod atomic;
 pub mod context;
 pub mod history;
 pub mod journal;
