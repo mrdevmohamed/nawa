@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+use super::atomic;
 use super::history::{PackageState, SCHEMA_VERSION};
 
 /// `<root>/var/lib/nawa/history/journal/<id>/`
@@ -77,20 +78,8 @@ pub fn write_intent(root: &Path, intent: &StepIntent) -> Result<()> {
         anyhow::bail!("unsupported step-intent schema {}", intent.schema);
     }
     crate::db::check_name(&intent.package)?;
-    let dir = journal_dir(root, intent.tx);
-    std::fs::create_dir_all(dir.join("steps"))
-        .with_context(|| format!("create journal {}", dir.display()))?;
     let path = intent_path(root, intent.tx, intent.step);
-    let tmp = dir.join(format!(".intent-{}.{}.tmp", intent.step, std::process::id()));
-    let write = (|| -> Result<()> {
-        std::fs::write(&tmp, toml::to_string_pretty(intent)?)?;
-        std::fs::rename(&tmp, &path)?;
-        Ok(())
-    })();
-    if write.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    write
+    atomic::write_atomic(&path, toml::to_string_pretty(intent)?.as_bytes(), 0o600)
 }
 
 /// Record the observed outcome of one step.
@@ -99,37 +88,15 @@ pub fn write_result(root: &Path, result: &StepResult) -> Result<()> {
         anyhow::bail!("unsupported step-result schema {}", result.schema);
     }
     crate::db::check_name(&result.package)?;
-    let dir = journal_dir(root, result.tx);
-    std::fs::create_dir_all(dir.join("steps"))?;
     let path = result_path(root, result.tx, result.step);
-    let tmp = dir.join(format!(".result-{}.{}.tmp", result.step, std::process::id()));
-    let write = (|| -> Result<()> {
-        std::fs::write(&tmp, toml::to_string_pretty(result)?)?;
-        std::fs::rename(&tmp, &path)?;
-        Ok(())
-    })();
-    if write.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    write
+    atomic::write_atomic(&path, toml::to_string_pretty(result)?.as_bytes(), 0o600)
 }
 
 /// Write the transaction-level running marker.
 pub fn write_tx_state(root: &Path, state: &TxState) -> Result<()> {
     let dir = journal_dir(root, state.tx);
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("create journal {}", dir.display()))?;
     let path = dir.join("state.toml");
-    let tmp = dir.join(".state.tmp");
-    let write = (|| -> Result<()> {
-        std::fs::write(&tmp, toml::to_string_pretty(state)?)?;
-        std::fs::rename(&tmp, &path)?;
-        Ok(())
-    })();
-    if write.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    write
+    atomic::write_atomic(&path, toml::to_string_pretty(state)?.as_bytes(), 0o600)
 }
 
 /// Read one step's intent, if it was written.
@@ -222,6 +189,7 @@ pub fn clear_journal(root: &Path, tx: u64) -> Result<()> {
     let dir = journal_dir(root, tx);
     if dir.exists() {
         std::fs::remove_dir_all(&dir).with_context(|| format!("remove journal {}", dir.display()))?;
+        if let Some(parent) = dir.parent() { atomic::sync_directory(parent)?; }
     }
     Ok(())
 }
