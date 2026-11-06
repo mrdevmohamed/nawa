@@ -245,6 +245,8 @@ fn transaction_events(record: &TransactionRecord) -> Vec<(String, Option<usize>)
         let event_type = match change.action.as_str() {
             "install" => "package.installed",
             "upgrade" | "reinstall" => "package.upgraded",
+            "restore" if change.before.is_none() => "package.installed",
+            "restore" => "package.upgraded",
             "remove" => "package.removed",
             _ => continue,
         };
