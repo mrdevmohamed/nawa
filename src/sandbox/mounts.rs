@@ -128,6 +128,7 @@ pub(crate) fn setup_live_root(spec: &SandboxSpec) -> Result<()> {
 
     overlay_scratch(spec)?;
     remount_spec_paths_ro(spec)?;
+    remount_mount_tree_ro(spec)?;
     remount_ro("/", spec, "the build root (/)")?;
     Ok(())
 }
@@ -182,6 +183,7 @@ pub(crate) fn setup_dir_root(spec: &SandboxSpec) -> Result<()> {
     // hide the old root entirely (pivot moved the live system to /old)
     tmpfs_mask("/old")?;
     remount_spec_paths_ro(spec)?;
+    remount_mount_tree_ro(spec)?;
     // now that we live inside it, the build root becomes read-only
     remount_ro("/", spec, "the build root (/)")?;
     Ok(())
@@ -195,6 +197,48 @@ fn remount_spec_paths_ro(spec: &SandboxSpec) -> Result<()> {
         remount_ro(path, spec, path)?;
     }
     Ok(())
+}
+
+/// In strict plugin mode remount every existing mount read-only, including
+/// separate host filesystems beneath / (for example /var or /home). Only
+/// private tmpfs and the explicit scratch HOME remain writable.
+fn remount_mount_tree_ro(spec: &SandboxSpec) -> Result<()> {
+    if !spec.strict_readonly_root {
+        return Ok(());
+    }
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")
+        .context("read mountinfo for strict plugin sandbox")?;
+    let mut mounts = Vec::new();
+    for line in mountinfo.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let Some(raw_path) = fields.get(4) else { continue };
+        let path = unescape_mountinfo(raw_path);
+        let mount = Path::new(&path);
+        if !mount.is_absolute() || path == "/" {
+            continue;
+        }
+        let writable = spec.writable_paths.iter().any(|allowed| {
+            mount == Path::new(allowed) || mount.starts_with(allowed)
+        });
+        if !writable {
+            mounts.push(path);
+        }
+    }
+    // Children first: a read-only parent must not interfere with remounting
+    // a nested bind or host filesystem.
+    mounts.sort_by_key(|path| std::cmp::Reverse(path.matches('/').count()));
+    mounts.dedup();
+    for path in mounts {
+        remount_ro(&path, spec, &path)?;
+    }
+    Ok(())
+}
+
+fn unescape_mountinfo(path: &str) -> String {
+    path.replace("\\040", " ")
+        .replace("\\011", "\t")
+        .replace("\\012", "\n")
+        .replace("\\134", "\\")
 }
 
 /// Mount the build root as an overlayfs over the extracted layers (§5.3 v2).
@@ -522,6 +566,8 @@ mod tests {
             file_size_limit_bytes: 0,
             open_files_limit: 0,
             readonly_paths: Vec::new(),
+        strict_readonly_root: false,
+        writable_paths: Vec::new(),
         };
         let lower: Vec<String> = spec
             .root
