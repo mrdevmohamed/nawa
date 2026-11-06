@@ -48,6 +48,23 @@ pub struct SandboxSpec {
     /// unpacked source dir (e.g. `/build/src/m4-1.4.19`). Empty = `<build_inside>/src`.
     #[serde(default)]
     pub workdir: String,
+    /// Optional uid/gid to drop to after the filesystem has been assembled.
+    #[serde(default)]
+    pub run_uid: Option<u32>,
+    #[serde(default)]
+    pub run_gid: Option<u32>,
+    /// Optional hard limits; zero keeps the existing build behavior.
+    #[serde(default)]
+    pub memory_limit_bytes: u64,
+    #[serde(default)]
+    pub process_limit: u64,
+    #[serde(default)]
+    pub file_size_limit_bytes: u64,
+    #[serde(default)]
+    pub open_files_limit: u64,
+    /// Existing bind mounts to mark read-only before the root is locked down.
+    #[serde(default)]
+    pub readonly_paths: Vec<String>,
 }
 
 fn default_build_inside() -> String {
@@ -101,6 +118,17 @@ impl SandboxSpec {
         let spec: SandboxSpec = toml::from_str(text).context("bad sandbox spec")?;
         if spec.version != 1 {
             bail!("unsupported sandbox spec version {}", spec.version);
+        }
+        if spec.run_uid.is_some() != spec.run_gid.is_some() {
+            bail!("sandbox run_uid and run_gid must be specified together");
+        }
+        for path in &spec.readonly_paths {
+            let parsed = Path::new(path);
+            if !parsed.is_absolute()
+                || parsed.components().any(|part| matches!(part, std::path::Component::ParentDir))
+            {
+                bail!("sandbox readonly path must be absolute and must not contain '..': {path:?}");
+            }
         }
         match spec.root.mode.as_str() {
             "live" => {}
