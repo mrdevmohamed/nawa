@@ -683,11 +683,16 @@ mod tests {
     #[test]
     fn missing_or_stale_id_marker_never_reuses_a_persisted_id() {
         let base = tmpdir("ids-recover");
-        let root = base.join("root");
-        write_record(&root, &sample(7)).unwrap();
-        assert_eq!(allocate_id(&root).unwrap(), 8);
-        std::fs::write(history_dir(&root).join("last-id"), "2").unwrap();
-        assert_eq!(allocate_id(&root).unwrap(), 9);
+
+        let stale_root = base.join("stale");
+        write_record(&stale_root, &sample(7)).unwrap();
+        std::fs::write(history_dir(&stale_root).join("last-id"), "2").unwrap();
+        assert_eq!(allocate_id(&stale_root).unwrap(), 8);
+
+        let missing_root = base.join("missing");
+        write_record(&missing_root, &sample(7)).unwrap();
+        assert_eq!(allocate_id(&missing_root).unwrap(), 8);
+
         let _ = std::fs::remove_dir_all(&base);
     }
 
