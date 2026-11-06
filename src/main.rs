@@ -60,7 +60,6 @@ struct Ctx {
     jobs: Option<u32>,
     repo: Option<String>,
     install_mode: InstallMode,
-    downloads: u32,
     /// the resolved configuration, kept for `config show` (sources + file)
     cfg: Config,
 }
@@ -75,7 +74,6 @@ impl Ctx {
             jobs: cfg.jobs,
             repo: cfg.repo.clone(),
             install_mode: cfg.install_mode,
-            downloads: cfg.downloads,
             cfg: cfg.clone(),
         }
     }
