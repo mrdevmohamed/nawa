@@ -289,6 +289,14 @@ fn install_one(
     let db = db::Db::new(&ctx.root);
     let before = db.entry(&package)?;
     let target = install::inspect_archive_state(archive, request.reason, before.as_ref())?;
+    if let Some(expected) = request.index_sha256 {
+        if expected != target.artifact_sha256 {
+            bail!(
+                "archive {} changed after repository verification: index expected {}, inspected {}",
+                archive.display(), expected, target.artifact_sha256
+            );
+        }
+    }
     let action = match &before {
         None => transaction::history::StepAction::Install,
         Some(old) if old.version != target.version.clone().unwrap_or_default()
@@ -311,9 +319,13 @@ fn install_one(
                 archive, &ctx.root, flags.force, expected, request.reason, proof,
             )
         }
-        pinned => install::install_archive_pinned(
-            archive, &ctx.root, flags.force, flags.allow_unsigned, None, request.reason, pinned,
-        ),
+        pinned => {
+            let expected = pinned.unwrap_or(target.artifact_sha256.as_str());
+            install::install_archive_pinned(
+                archive, &ctx.root, flags.force, flags.allow_unsigned, None,
+                request.reason, Some(expected),
+            )
+        },
     };
     match &installed {
         Ok(entry) => {
@@ -856,7 +868,9 @@ pub(crate) fn install_archive_file(
     let step_no = recorder.step_intent_state(
         &pkg_name, action, before.as_ref(), Some(&target), &digest,
     )?;
-    let result = install::install_archive(file, &ctx.root, force, allow_unsigned, key.as_deref(), "explicit");
+    let result = install::install_archive_pinned(
+        file, &ctx.root, force, allow_unsigned, key.as_deref(), "explicit", Some(&digest),
+    );
     match &result {
         Ok(entry) => {
             recorder.step_result(

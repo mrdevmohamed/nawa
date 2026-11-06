@@ -71,3 +71,8 @@ The upgrade path discarded the result of `OperationHandle::finish()`.
 The plugin subsystem has good foundations: manifests reject unknown fields, requested capabilities are intersected with administrator grants, privileged plugin paths are validated, the protocol is bounded, and plugin execution has no unsandboxed fallback. These are positive design properties, not a formal security proof.
 
 Do not merge until all high-severity transaction findings are resolved and CI passes on the final head.
+
+
+### Additional integrity hardening
+
+Install/update WAL target metadata is now tied to the exact archive digest passed into the installer. Local archive, source-build, and repository paths pin the snapshot by SHA-256 so the bytes installed cannot diverge from the identity recorded before mutation.
