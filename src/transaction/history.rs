@@ -365,12 +365,39 @@ pub fn rewrite_record(root: &Path, record: &TransactionRecord) -> Result<()> {
     write_record(root, record)
 }
 
-/// Mark the original transaction undone only after its compensating
-/// transaction is durably recorded as completed. This operation is idempotent.
-pub fn mark_undone_by(root: &Path, original_id: u64, undo_id: u64) -> Result<()> {
+/// Return whether a durable compensating transaction has restored every
+/// committed package in the original transaction to its recorded before-state.
+/// A Partial undo may still be complete at the package level when a post-operation
+/// hook failed after the package state had already been committed.
+pub fn undo_restored_original(root: &Path, original_id: u64, undo_id: u64) -> Result<bool> {
     let undo = load_record(root, undo_id)?;
-    if undo.undoes != Some(original_id) || undo.status()? != TxStatus::Completed {
-        bail!("transaction {undo_id} is not a completed undo of transaction {original_id}");
+    if undo.undoes != Some(original_id)
+        || !matches!(undo.status()?, TxStatus::Completed | TxStatus::Partial)
+    {
+        return Ok(false);
+    }
+    let original = load_record(root, original_id)?;
+    let db = crate::db::Db::new(root);
+    for change in original.package_changes.iter().filter(|change| {
+        change.status == "committed" || change.status == "committed-hook-failed"
+    }) {
+        let current = db.entry(&change.name)?;
+        let desired = change.before.clone().unwrap_or_else(PackageState::absent);
+        let restored = if desired.is_installed() {
+            current.as_ref().is_some_and(|entry| desired.matches_entry(entry))
+        } else {
+            current.is_none()
+        };
+        if !restored { return Ok(false); }
+    }
+    Ok(true)
+}
+
+/// Mark the original transaction undone only after its compensating transaction
+/// is durable and the live package database matches the original before-state.
+pub fn mark_undone_by(root: &Path, original_id: u64, undo_id: u64) -> Result<()> {
+    if !undo_restored_original(root, original_id, undo_id)? {
+        bail!("transaction {undo_id} has not fully restored transaction {original_id}");
     }
     let mut original = load_record(root, original_id)?;
     match original.undone_by {
@@ -553,6 +580,40 @@ mod tests {
         // referenced artifacts across before/after states
         let refs = referenced_artifacts(&root).unwrap();
         assert!(refs.contains(&"a".repeat(64)) && refs.contains(&"b".repeat(64)));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn partial_undo_marks_original_only_after_all_packages_are_restored() {
+        let base = tmpdir("partial-undo-mark");
+        let root = base.join("root");
+        let original = sample(1);
+        write_record(&root, &original).unwrap();
+        let before = original.package_changes[0].before.clone().unwrap();
+        let mut undo = sample(2);
+        undo.command = "history-undo".into();
+        undo.status = "partial".into();
+        undo.undoes = Some(1);
+        undo.package_changes = vec![PackageChange {
+            name: "openssl".into(), action: "restore".into(),
+            status: "committed-hook-failed".into(),
+            before: original.package_changes[0].after.clone(),
+            after: Some(before.clone()),
+            source: "history-undo".into(),
+            failure: Some("post-install hook failed".into()),
+            hook: Some("failed".into()),
+        }];
+        write_record(&root, &undo).unwrap();
+        let current = Entry {
+            name: "openssl".into(), version: before.version.clone().unwrap(),
+            rel: before.rel.unwrap(), arch: before.arch.clone(),
+            reason: before.reason.clone(), run: vec![], install_date: 0, size: 0,
+            artifact_sha256: before.artifact_sha256.clone(),
+        };
+        db::Db::new(&root).add(&current, &[], &Default::default()).unwrap();
+        assert!(undo_restored_original(&root, 1, 2).unwrap());
+        mark_undone_by(&root, 1, 2).unwrap();
+        assert_eq!(load_record(&root, 1).unwrap().undone_by, Some(2));
         let _ = std::fs::remove_dir_all(&base);
     }
 

@@ -57,6 +57,8 @@ The upgrade path discarded the result of `OperationHandle::finish()`.
 - [x] R5 — undo ordering respects dependency direction; partial undo can resume without replaying committed steps.
 - [x] R8 — remove nested exclusive-lock acquisition.
 - [x] Classify post-remove hook failures as committed package removals rather than failed mutations.
+- [x] Resume partial undo without replaying committed compensations, and recognize package-complete partial records after hook failures.
+- [x] Restore the original package install reason when reinstalling archived packages during history undo.
 - [x] R2 — install, archive, build-install and repository-upgrade paths persist validated target snapshots and propagate WAL errors.
 - [x] R6 — group removal records every package change as a WAL step and preserves membership for retries.
 - [x] R7 — upgrade propagates transaction finalization errors.
