@@ -215,10 +215,13 @@ impl PluginState {
         } else {
             Self::default()
         };
-        let enabled = if project.enabled.is_empty() {
-            system.enabled.clone()
-        } else {
-            project.enabled
+        let enabled = match (system.enabled.is_empty(), project.enabled.is_empty()) {
+            (true, _) => project.enabled,
+            (false, true) => system.enabled.clone(),
+            (false, false) => project.enabled
+                .into_iter()
+                .filter(|id| system.enabled.iter().any(|allowed| allowed == id))
+                .collect(),
         };
         let mut disabled = system.disabled.clone();
         for id in project.disabled {
