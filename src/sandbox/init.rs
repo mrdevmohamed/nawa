@@ -139,10 +139,10 @@ fn common_prep(spec: &SandboxSpec) -> Result<()> {
     if let (Some(uid), Some(gid)) = (spec.run_uid, spec.run_gid) {
         sys::drop_to_ids(uid, gid)?;
     }
-    set_optional_limit(libc::RLIMIT_AS, spec.memory_limit_bytes)?;
-    set_optional_limit(libc::RLIMIT_NPROC, spec.process_limit)?;
-    set_optional_limit(libc::RLIMIT_FSIZE, spec.file_size_limit_bytes)?;
-    set_optional_limit(libc::RLIMIT_NOFILE, spec.open_files_limit)?;
+    set_optional_limit(libc::RLIMIT_AS as libc::c_int, spec.memory_limit_bytes)?;
+    set_optional_limit(libc::RLIMIT_NPROC as libc::c_int, spec.process_limit)?;
+    set_optional_limit(libc::RLIMIT_FSIZE as libc::c_int, spec.file_size_limit_bytes)?;
+    set_optional_limit(libc::RLIMIT_NOFILE as libc::c_int, spec.open_files_limit)?;
 
     // umask 022 (§6): environment variables cannot carry it
     umask(rustix::fs::Mode::from_raw_mode(0o022));
@@ -165,7 +165,7 @@ fn set_optional_limit(resource: libc::c_uint, value: u64) -> Result<()> {
     };
     // SAFETY: resource is a fixed RLIMIT constant and value comes from the
     // trusted sandbox specification.
-    if unsafe { libc::setrlimit(resource, &limit) } != 0 {
+    if unsafe { libc::setrlimit(resource as _, &limit) } != 0 {
         return Err(std::io::Error::last_os_error())
             .with_context(|| format!("set sandbox resource limit {resource}={value}"));
     }
