@@ -3,6 +3,7 @@
 
 use crate::*;
 use clap::{Parser, Subcommand, ValueEnum};
+use std::ffi::OsString;
 
 #[derive(Parser)]
 #[command(
@@ -467,6 +468,10 @@ pub(crate) enum Cmd {
     /// completion — one bare name per line (internal, used by completions)
     #[command(name = "__complete_pkgs", hide = true)]
     CompletePkgs,
+
+    /// Unknown commands are offered to explicitly registered plugins.
+    #[command(external_subcommand)]
+    External(Vec<OsString>),
 }
 
 /// Built-in command names: a plugin can never shadow any of these
@@ -533,6 +538,10 @@ pub(crate) enum PluginCmd {
     Enable { id: String },
     /// Disable a plugin
     Disable { id: String },
+    /// Grant a requested capability using system administrator policy
+    Grant { id: String, capability: String },
+    /// Revoke an administrator capability grant
+    Revoke { id: String, capability: String },
     /// Run one of a plugin's commands with the given arguments
     Run {
         id: String,
@@ -645,7 +654,8 @@ pub(crate) fn lock_mode(cmd: &Cmd) -> Option<lock::Mode> {
                 GroupCmd::Install { .. } | GroupCmd::Remove { .. } => Some(Exclusive),
             },
         Cmd::Repolist { .. } | Cmd::Repoquery { .. } | Cmd::Makecache { .. } | Cmd::Clean { .. }
-        | Cmd::Plugin { .. } | Cmd::SandboxInit { .. } | Cmd::SandboxProbe { .. } => None,
+        | Cmd::Plugin { .. } | Cmd::SandboxInit { .. } | Cmd::SandboxProbe { .. }
+        | Cmd::External(_) => None,
     }
 }
 
@@ -671,7 +681,7 @@ _nawa() {
                 COMPREPLY=( $(compgen -W "list info undo" -- "$cur") ) ;;
         plugin)
             if [ "$COMP_CWORD" -eq 2 ]; then
-                COMPREPLY=( $(compgen -W "list info enable disable run" -- "$cur") ) ;;
+                COMPREPLY=( $(compgen -W "list info enable disable grant revoke run" -- "$cur") ) ;;
         service)
             if [ "$COMP_CWORD" -eq 2 ]; then
                 COMPREPLY=( $(compgen -W "list enable disable start stop restart status" -- "$cur") )
