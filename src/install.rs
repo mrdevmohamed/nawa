@@ -526,82 +526,149 @@ fn install_archive_payload(
 pub fn rollback(name: &str, root: &Path) -> Result<()> {
     let db = Db::new(root);
     crate::db::check_name(name)?;
-    let undo_dir = root.join("var/lib/nawa/undo").join(name);
-    let desc_path = undo_dir.join("desc");
+    let desc_path = root.join("var/lib/nawa/undo").join(name).join("desc");
     if !desc_path.exists() {
         bail!("no undo record for `{name}` — nothing to roll back");
     }
     let prev: Entry = toml::from_str(&std::fs::read_to_string(&desc_path)?)
         .context("corrupt undo record")?;
-
-    match db.entry(name)? {
-        Some(cur) if cur.version_full() == prev.version_full() => {
+    let before = db.entry(name)?;
+    if let Some(cur) = &before {
+        if cur.version_full() == prev.version_full() {
             bail!("`{name}` is already at {} — nothing to roll back", cur.version_full());
         }
-        _ => {}
     }
-
     println!(
         "nawa: rolling back {} -> {}",
-        db.entry(name)?.map(|e| e.version_full()).unwrap_or_else(|| "(removed)".into()),
+        before.as_ref().map(|e| e.version_full()).unwrap_or_else(|| "(removed)".into()),
         prev.version_full()
     );
 
-    // New path: an artifact reference resolves to an immutable object whose
-    // bytes are re-verified (digest + retained proof) before restoration.
-    if !prev.artifact_sha256.is_empty() {
+    enum RestoreSource {
+        SignedIndex { object: PathBuf, digest: String },
+        Detached { object: PathBuf, digest: String },
+        Pinned { object: PathBuf, digest: String, proof: String },
+        Legacy { archive: PathBuf },
+    }
+
+    // Verify exact archived bytes and retained authentication evidence before
+    // opening a transaction or touching the installed package.
+    let source = if !prev.artifact_sha256.is_empty() {
         let digest = prev.artifact_sha256.clone();
         let object = artifact::verify_stored(root, &digest)
             .map_err(|e| e.context(format!(
                 "cannot verify the archived original of {name} — rollback refused"
             )))?;
-        let prov = artifact::load_provenance(root, &digest)?;
-        match prov.as_ref().map(|p| p.authentication.as_str()) {
+        let provenance = artifact::load_provenance(root, &digest)?;
+        match provenance.as_ref().map(|p| p.authentication.as_str()) {
             Some("signed-index") => {
                 verify_retained_index_proof(root, &digest)?;
-                let entry = install_archive_from_index_proof(
-                    &object, root, false, &digest, "keep", None,
-                )?;
-                report_restored(&entry, "signed-index proof re-verified");
-                return Ok(());
+                RestoreSource::SignedIndex { object, digest }
             }
             Some("detached-signature") => {
                 verify_retained_detached_proof(root, &digest)?;
-                let entry = install_archive_pinned(
-                    &object, root, false, true, None, "keep", Some(&digest),
-                )?;
-                report_restored(&entry, "detached signature re-verified");
-                return Ok(());
+                RestoreSource::Detached { object, digest }
             }
             Some("local-build") | Some("unsigned-bootstrap") | None => {
-                // Local builds are trusted because this machine built them;
-                // bootstrap artifacts keep their explicitly weaker status.
-                let entry = install_archive_pinned(
-                    &object, root, false, true, None, "keep", Some(&digest),
-                )?;
-                let how = prov.as_ref().map(|p| p.authentication.as_str()).unwrap_or("no provenance record");
-                report_restored(&entry, how);
-                return Ok(());
+                let proof = provenance.as_ref()
+                    .map(|p| p.authentication.clone())
+                    .unwrap_or_else(|| "no provenance record".to_string());
+                RestoreSource::Pinned { object, digest, proof }
             }
             Some(other) => bail!("unsupported provenance authentication {other:?}"),
         }
-    }
+    } else {
+        let archive = root.join("var/cache/nawa")
+            .join(format!("{}.nawa.tar.zst", prev.version_full()));
+        if !archive.exists() {
+            bail!("cached archive {} is missing — cannot roll back", archive.display());
+        }
+        let _ = artifact::import_legacy(root, &archive);
+        RestoreSource::Legacy { archive }
+    };
 
-    // Legacy path (pre-roadmap undo records): version-named cache entry.
-    let archive_path = root
-        .join("var/cache/nawa")
-        .join(format!("{}.nawa.tar.zst", prev.version_full()));
-    if !archive_path.exists() {
-        bail!(
-            "cached archive {} is missing — cannot roll back",
-            archive_path.display()
-        );
-    }
-    // import into the object store after verifying it, so future rollbacks
-    // take the strong path; the legacy file stays where it was
-    let _ = artifact::import_legacy(root, &archive_path);
-    install_archive(&archive_path, root, false, true, None, "keep")?;
-    println!("nawa: rollback restored from a legacy cached archive (no recorded authentication proof)");
+    let archive_for_snapshot = match &source {
+        RestoreSource::SignedIndex { object, .. }
+        | RestoreSource::Detached { object, .. }
+        | RestoreSource::Pinned { object, .. } => object,
+        RestoreSource::Legacy { archive } => archive,
+    };
+    // Preserve an installed package's current reason; reinstalls after removal
+    // become explicit, matching the established "keep" behavior.
+    let target = inspect_archive_state(archive_for_snapshot, "keep", before.as_ref())?;
+    let digest = target.artifact_sha256.clone();
+    let mut operation = crate::transaction::begin_operation(
+        root,
+        crate::transaction::OperationCommand::Rollback,
+        &[name.to_string()],
+        &[],
+    )?;
+    let mut recorder = operation.recorder();
+    let step_no = recorder.step_intent_state(
+        name,
+        crate::transaction::history::StepAction::Restore,
+        before.as_ref(),
+        Some(&target),
+        &digest,
+    )?;
+
+    let (result, proof) = match source {
+        RestoreSource::SignedIndex { object, digest } => (
+            install_archive_from_index_proof(&object, root, false, &digest, "keep", None),
+            "signed-index proof re-verified".to_string(),
+        ),
+        RestoreSource::Detached { object, digest } => (
+            install_archive_pinned(&object, root, false, true, None, "keep", Some(&digest)),
+            "detached signature re-verified".to_string(),
+        ),
+        RestoreSource::Pinned { object, digest, proof } => (
+            install_archive_pinned(&object, root, false, true, None, "keep", Some(&digest)),
+            proof,
+        ),
+        RestoreSource::Legacy { archive } => (
+            install_archive(&archive, root, false, true, None, "keep"),
+            "legacy cached archive (no recorded authentication proof)".to_string(),
+        ),
+    };
+
+    let current_after = match &result {
+        Ok(entry) => Some(entry.clone()),
+        Err(_) => db.entry(name)?,
+    };
+    let target_is_current = current_after.as_ref()
+        .is_some_and(|entry| target.matches_entry(entry));
+    let retry_hook = hook_needs_retry(root, name).unwrap_or(false);
+    let committed_hook_failed = result.is_err()
+        && target_is_current
+        && (before.as_ref().is_none_or(|old| !target.matches_entry(old)) || retry_hook);
+    let step_status = if result.is_ok() {
+        crate::transaction::history::StepStatus::Committed
+    } else if committed_hook_failed {
+        crate::transaction::history::StepStatus::CommittedHookFailed
+    } else {
+        crate::transaction::history::StepStatus::Failed
+    };
+    let after = if result.is_ok() || committed_hook_failed {
+        current_after.as_ref()
+    } else {
+        None
+    };
+    recorder.step_result(
+        step_no,
+        name,
+        crate::transaction::history::StepAction::Restore,
+        step_status,
+        before.as_ref(),
+        after,
+        "rollback",
+        result.as_ref().err().map(|error| format!("{error:#}")),
+        committed_hook_failed.then(|| "failed".to_string()),
+    )?;
+    drop(recorder);
+    operation.finish(result.as_ref().err())?;
+
+    let entry = result?;
+    report_restored(&entry, &proof);
     Ok(())
 }
 
@@ -2472,6 +2539,33 @@ mod tests {
         // ping-pong still works through the object store
         rollback("demo", &root).unwrap();
         assert_eq!(std::fs::read(root.join("usr/bin/demo")).unwrap(), b"v2");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn rollback_is_recorded_and_can_be_undone() {
+        let base = tmpdir("rollback-history");
+        let root = base.join("root");
+        let v1 = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1")]);
+        let v2 = make_pkg(&base, "demo", "2.0", &[("/usr/bin/demo", b"v2")]);
+        install_archive(&v1, &root, false, true, None, "explicit").unwrap();
+        install_archive(&v2, &root, false, true, None, "explicit").unwrap();
+
+        rollback("demo", &root).unwrap();
+        let records = crate::transaction::history::list_records(&root).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].command, "rollback");
+        assert_eq!(records[0].status, "completed");
+        assert_eq!(records[0].package_changes.len(), 1);
+        assert_eq!(records[0].package_changes[0].action, "restore");
+        assert_eq!(records[0].package_changes[0].source, "rollback");
+
+        let plan = crate::transaction::undo::plan_undo(&root, records[0].id).unwrap();
+        assert_eq!(plan.steps.len(), 1);
+        assert!(matches!(
+            &plan.steps[0].action,
+            crate::transaction::undo::UndoAction::RestorePrevious { .. }
+        ));
         let _ = std::fs::remove_dir_all(&base);
     }
 
