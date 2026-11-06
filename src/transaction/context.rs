@@ -457,8 +457,22 @@ mod tests {
         let mut op2 = begin_operation(&root, OperationCommand::HistoryUndo, &[], &[]).unwrap();
         op2.link_undo(1).unwrap();
         let undo_id = op2.tx().unwrap();
+        {
+            let before = Db::new(&root).entry("demo").unwrap();
+            let mut rec = op2.recorder();
+            let undo_step = rec.step_intent(
+                "demo", StepAction::Remove, before.as_ref(), None,
+                before.as_ref().map(|entry| entry.artifact_sha256.as_str()).unwrap_or(""),
+            ).unwrap();
+            Db::new(&root).remove("demo").unwrap();
+            rec.step_result(
+                undo_step, "demo", StepAction::Remove, StepStatus::Committed,
+                before.as_ref(), None, "history-undo", None, None,
+            ).unwrap();
+        }
         op2.finish(None).unwrap();
         crate::transaction::history::mark_undone_by(&root, 1, undo_id).unwrap();
+        assert!(Db::new(&root).entry("demo").unwrap().is_none());
         let original = crate::transaction::history::load_record(&root, 1).unwrap();
         assert_eq!(original.undone_by, Some(2));
         let _ = std::fs::remove_dir_all(&base);

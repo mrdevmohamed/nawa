@@ -340,7 +340,7 @@ fn install_one(
             let target_is_current = current.as_ref().is_some_and(|entry| target.matches_entry(entry));
             let retry_hook = install::hook_needs_retry(&ctx.root, &package).unwrap_or(false);
             let committed_hook_failed = target_is_current
-                && (before.as_ref().map_or(true, |old| !target.matches_entry(old)) || retry_hook);
+                && (before.as_ref().is_none_or(|old| !target.matches_entry(old)) || retry_hook);
             recorder.step_result(
                 step_no, &package, action,
                 if committed_hook_failed {
@@ -861,7 +861,7 @@ pub(crate) fn install_archive_file(
     let mut op = transaction::begin_operation(
         &ctx.root,
         transaction::OperationCommand::ArchiveInstall,
-        &[pkg_name.clone()],
+        std::slice::from_ref(&pkg_name),
         &[],
     )?;
     let mut recorder = op.recorder();

@@ -76,3 +76,8 @@ Do not merge until all high-severity transaction findings are resolved and CI pa
 ### Additional integrity hardening
 
 Install/update WAL target metadata is now tied to the exact archive digest passed into the installer. Local archive, source-build, and repository paths pin the snapshot by SHA-256 so the bytes installed cannot diverge from the identity recorded before mutation.
+
+
+### CI follow-up
+
+The first run after the implementation changes exposed Clippy-as-error findings and a unit test that marked a transaction undone without applying a compensating package step. Both were corrected; the updated PR head must still pass a fresh CI run before merge.
