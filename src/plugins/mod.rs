@@ -13,6 +13,7 @@ pub mod discovery;
 pub mod manifest;
 pub mod protocol;
 pub mod runner;
+pub mod sandbox;
 
 // Public surface re-export (used by the command layer and tests).
 #[allow(unused_imports)]
