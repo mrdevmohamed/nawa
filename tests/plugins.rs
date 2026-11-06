@@ -156,7 +156,9 @@ fn wrong_request_id_is_an_error() {
     let out = run(&dir, &["plugin", "run", "wrongid", "x"]);
     assert!(!out.status.success(), "a mismatched request id must fail the run");
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("answered request") || err.contains("request"), "{err}");
+    assert!(err.contains("answered request"), "{err}");
+    assert!(err.contains("someone-else"), "{err}");
+    assert!(err.contains("run-"), "{err}");
     let _ = fs::remove_dir_all(&dir);
 }
 
