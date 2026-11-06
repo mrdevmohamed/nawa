@@ -35,7 +35,8 @@ fn acquire_dispatch_lock(dir: &Path) -> Result<Option<File>> {
     let file = OpenOptions::new()
         .read(true)
         .write(true)
-        .create(true)
+.create(true)
+        .truncate(false)
         .mode(0o600)
         .open(&path)
         .with_context(|| format!("open plugin dispatch lock {}", path.display()))?;
