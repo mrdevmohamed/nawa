@@ -220,7 +220,14 @@ fn remount_mount_tree_ro(spec: &SandboxSpec) -> Result<()> {
         let writable = spec.writable_paths.iter().any(|allowed| {
             mount == Path::new(allowed) || mount.starts_with(allowed)
         });
-        if !writable {
+        // Masked parents are covered by fresh tmpfs mounts. Their former
+        // child mounts remain listed in mountinfo but are no longer reachable
+        // by path; attempting to remount them would target the covering tmpfs
+        // or fail. The covering tmpfs itself is already empty/unsearchable.
+        let hidden = spec.mask.iter().any(|masked| {
+            mount == Path::new(masked) || mount.starts_with(masked)
+        });
+        if !writable && !hidden {
             mounts.push(path);
         }
     }
