@@ -123,3 +123,6 @@ The first follow-up CI run ([42269118543](https://github.com/mrdevmohamed/nawa/a
 - Clippy rejected an explicit `drop(recorder)`, an `.ok()` pattern, and test-only fault-point naming/initialization. These were corrected by scoping the recorder, matching `Ok(id)`, and making the fault-point variants and thread-local initialization Clippy-clean.
 
 The rollback recorder now leaves scope before finalizing the operation. The latest code fixes are committed through `8d0fbfc411d4740fc8b02fd96c566c1e9a682266`. A fresh CI run on the new head is required; the failed run above is retained as evidence of the issues found and is not counted as passing.
+
+
+The next run ([42269835662](https://github.com/mrdevmohamed/nawa/actions/runs/42269835662)) confirmed that the Clippy and transaction-finalization corrections compiled; its remaining test-build error was three test references still using the pre-rename fault-point variants. Those references now use `Wrote`, `Synced`, and `Published` in code revision `6c4e922f42196dad7b98e41ef8650b48657efda7`. This correction has not yet been verified by a new CI run.
