@@ -116,7 +116,14 @@ pub fn spawn(executable: &Path, protected_paths: &[PathBuf]) -> Result<Sandboxed
         open_files_limit: 64,
         readonly_paths: vec!["/build/src".to_string()],
         strict_readonly_root: true,
-        writable_paths: vec!["/tmp".to_string(), "/build/home".to_string()],
+        // /dev is a private tmpfs populated by setup_dev; leave its mount
+        // writable for normal device-node opens while directory permissions
+        // still prevent the unprivileged plugin from creating nodes.
+        writable_paths: vec![
+            "/tmp".to_string(),
+            "/build/home".to_string(),
+            "/dev".to_string(),
+        ],
     };
     let spec_path = workdir.join("plugin-sandbox.toml");
     std::fs::write(&spec_path, toml::to_string(&spec)?)?;
