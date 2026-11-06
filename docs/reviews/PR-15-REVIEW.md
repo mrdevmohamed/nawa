@@ -113,3 +113,13 @@ The atomic writer now has test-only fault points after the write, after file syn
 
 ### Verification status
 The implementation changes above are committed to the PR branch. GitHub Actions verification for the updated branch is pending at the time this log entry was written; no new passing result is claimed here. The prior 10-job result cited above belongs to the earlier head and must not be treated as verification of this follow-up.
+
+
+### CI-driven corrections after the first follow-up run
+
+The first follow-up CI run ([42269118543](https://github.com/mrdevmohamed/nawa/actions/runs/42269118543)) correctly exposed two implementation issues before merge:
+
+- The transaction store rejected the intentional `preparing` → terminal record transition. `write_record()` now permits only that transition after verifying the transaction's immutable identity fields; writes over an existing terminal record remain rejected.
+- Clippy rejected an explicit `drop(recorder)`, an `.ok()` pattern, and test-only fault-point naming/initialization. These were corrected by scoping the recorder, matching `Ok(id)`, and making the fault-point variants and thread-local initialization Clippy-clean.
+
+The rollback recorder now leaves scope before finalizing the operation. The latest code fixes are committed through `8d0fbfc411d4740fc8b02fd96c566c1e9a682266`. A fresh CI run on the new head is required; the failed run above is retained as evidence of the issues found and is not counted as passing.
