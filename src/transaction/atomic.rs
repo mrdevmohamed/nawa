@@ -151,7 +151,7 @@ mod tests {
         let dir = temp_dir();
         let target = dir.join("record.toml");
         fs::write(&target, b"old").unwrap();
-        FAILPOINT.with(|slot| slot.set(Some(FailPoint::AfterFileSync)));
+        FAILPOINT.with(|slot| slot.set(Some(FailPoint::Synced)));
         assert!(write_atomic(&target, b"new", 0o600).is_err());
         assert_eq!(fs::read(&target).unwrap(), b"old");
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
@@ -163,7 +163,7 @@ mod tests {
         let dir = temp_dir();
         let target = dir.join("record.toml");
         fs::write(&target, b"old").unwrap();
-        FAILPOINT.with(|slot| slot.set(Some(FailPoint::AfterWrite)));
+        FAILPOINT.with(|slot| slot.set(Some(FailPoint::Wrote)));
         assert!(write_atomic(&target, b"new", 0o600).is_err());
         assert_eq!(fs::read(&target).unwrap(), b"old");
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
@@ -184,7 +184,7 @@ mod tests {
         let dir = temp_dir();
         let target = dir.join("record.toml");
         fs::write(&target, b"old").unwrap();
-        FAILPOINT.with(|slot| slot.set(Some(FailPoint::AfterRename)));
+        FAILPOINT.with(|slot| slot.set(Some(FailPoint::Published)));
         assert!(write_atomic(&target, b"new-complete-record", 0o600).is_err());
         assert_eq!(fs::read(&target).unwrap(), b"new-complete-record");
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
