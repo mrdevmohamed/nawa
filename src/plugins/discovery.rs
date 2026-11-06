@@ -443,6 +443,29 @@ mod tests {
     }
 
     #[test]
+    fn project_configuration_cannot_grant_capabilities() {
+        let base = tmpdir("policy");
+        let project = base.join("project.toml");
+        let system = base.join("system.toml");
+        std::fs::write(
+            &project,
+            "[plugins]\nenabled = [\"audit\"]\n\n[plugins.grants]\naudit = [\"command.register\"]\n",
+        ).unwrap();
+        // A temp directory is not an administrator-owned path. This remains
+        // true for root and unprivileged CI jobs alike.
+        std::fs::write(
+            &system,
+            "[plugins]\nenabled = [\"audit\"]\n\n[plugins.grants]\naudit = [\"transaction.observe\"]\n",
+        ).unwrap();
+
+        let effective = PluginState::load_effective(Some(&project), Some(&system));
+        assert!(effective.is_enabled("audit"));
+        assert!(!effective.has_grant("audit", super::super::manifest::Capability::CommandRegister));
+        assert!(!effective.has_grant("audit", super::super::manifest::Capability::TransactionObserve));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn plugins_table_replacement_preserves_the_rest() {
         let raw = "jobs = 4\n\n[plugins]\nenabled = [\"old\"]\n\n[other]\nkey = 1\n";
         let mut st = PluginState { enabled: vec!["a".into()], disabled: vec![], grants: BTreeMap::new() };
