@@ -480,7 +480,8 @@ pub(crate) const RESERVED_COMMANDS: &[&str] = &[
     "build", "install", "outdated", "update", "autoremove", "search", "info",
     "why", "deps", "deps-all", "remove", "query", "list", "files", "owner",
     "revdep", "repo-create", "sync", "keygen", "sign", "verify", "trust",
-    "upgrade", "rollback", "history", "plugin", "service", "config", "init",
+    "upgrade", "rollback", "repolist", "makecache", "repoquery", "clean",
+    "group", "history", "plugin", "service", "config", "init",
     "completions", "sandbox-init", "sandbox-probe", "__complete_pkgs",
 ];
 
@@ -663,7 +664,7 @@ pub(crate) const COMPLETION_BASH: &str = r#"# bash completion for nawa (generate
 _nawa() {
     local cur prev commands pkgs
     cur="${COMP_WORDS[COMP_CWORD]}"
-    commands="build install outdated update autoremove deps deps-all search info why query list remove files owner repo-create keygen sign verify trust upgrade rollback history plugin service config init completions"
+    commands="build install outdated update autoremove deps deps-all search info why query list remove files owner revdep repo-create sync keygen sign verify trust upgrade rollback repolist makecache repoquery clean group history plugin service config init completions"
     pkgs="$(nawa __complete_pkgs 2>/dev/null)"
     if [ "$COMP_CWORD" -eq 1 ]; then
         COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
@@ -677,11 +678,17 @@ _nawa() {
         sign|verify|trust|repo-create)
             COMPREPLY=( $(compgen -f -- "$cur") ) ;;
         history)
-            if [ "$COMPCWORD" -eq 2 ]; then
-                COMPREPLY=( $(compgen -W "list info undo" -- "$cur") ) ;;
+            if [ "$COMP_CWORD" -eq 2 ]; then
+                COMPREPLY=( $(compgen -W "list info undo" -- "$cur") )
+            fi ;;
         plugin)
             if [ "$COMP_CWORD" -eq 2 ]; then
-                COMPREPLY=( $(compgen -W "list info enable disable grant revoke run" -- "$cur") ) ;;
+                COMPREPLY=( $(compgen -W "list info enable disable grant revoke run" -- "$cur") )
+            fi ;;
+        group)
+            if [ "$COMP_CWORD" -eq 2 ]; then
+                COMPREPLY=( $(compgen -W "list info install remove" -- "$cur") )
+            fi ;;
         service)
             if [ "$COMP_CWORD" -eq 2 ]; then
                 COMPREPLY=( $(compgen -W "list enable disable start stop restart status" -- "$cur") )
@@ -793,5 +800,36 @@ pub(crate) fn completions_script(shell: Shell) -> &'static str {
         Shell::Bash => COMPLETION_BASH,
         Shell::Zsh => COMPLETION_ZSH,
         Shell::Fish => COMPLETION_FISH,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn reserved_commands_cover_every_builtin_cli_command() {
+        let command = Cmd::command();
+        for subcommand in command.get_subcommands() {
+            let name = subcommand.get_name();
+            assert!(
+                RESERVED_COMMANDS.contains(&name),
+                "built-in command {name:?} is missing from RESERVED_COMMANDS"
+            );
+        }
+    }
+
+    #[test]
+    fn bash_completion_script_passes_bash_syntax_check() {
+        let output = std::process::Command::new("bash")
+            .args(["-n", "-c", COMPLETION_BASH])
+            .output()
+            .expect("bash must be available to validate the generated completion script");
+        assert!(
+            output.status.success(),
+            "generated Bash completion syntax is invalid: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }

@@ -141,6 +141,7 @@ pub struct PluginManifest {
 /// The plugin API version this host implements (roadmap §6.12). Independent
 /// of the Nawa application version.
 pub const HOST_API_VERSION: u32 = 1;
+const MANIFEST_NAME: &str = "nawa-plugin.toml";
 
 impl PluginManifest {
     /// Parse and fully validate a manifest. `approved_dir` is the discovery
@@ -201,19 +202,9 @@ impl PluginManifest {
                 p.executable
             );
         }
-        let meta = std::fs::symlink_metadata(&exe)
-            .with_context(|| format!("plugin {} executable {} is missing", p.id, exe.display()))?;
-        if meta.file_type().is_symlink() {
-            bail!(
-                "plugin {} executable {} is a symlink — refusing (an approved plugin \
-                 directory cannot point outside itself)",
-                p.id,
-                exe.display()
-            );
-        }
-        if !meta.is_file() {
-            bail!("plugin {} executable {} is not a regular file", p.id, exe.display());
-        }
+        let manifest_path = approved_dir.join(MANIFEST_NAME);
+        validate_plugin_file(&manifest_path, &p.id, "manifest")?;
+        validate_plugin_file(&exe, &p.id, "executable")?;
         // canonicalize both and require containment
         let real_exe = std::fs::canonicalize(&exe)
             .with_context(|| format!("resolve plugin executable {}", exe.display()))?;
@@ -226,20 +217,6 @@ impl PluginManifest {
                 exe.display(),
                 approved_dir.display()
             );
-        }
-        // unprivileged-writable check (roadmap §6.4): a plugin approved for
-        // privileged use must not be modifiable by non-root users
-        if running_as_root() {
-            use std::os::unix::fs::MetadataExt;
-            let mode = meta.mode();
-            if mode & 0o022 != 0 {
-                bail!(
-                    "plugin {} executable {} is group- or world-writable (mode {:o}) — refusing",
-                    p.id,
-                    exe.display(),
-                    mode & 0o777
-                );
-            }
         }
         let mut commands = m.commands.names;
         commands.sort();
@@ -322,6 +299,39 @@ fn plugin_directory_is_root_safe(dir: &Path) -> bool {
     true
 }
 
+/// Validate a plugin-owned input file before trusting it. Privileged Nawa
+/// accepts only root-owned files that cannot be replaced by group/other users.
+/// Manifests are rejected when symlinked even for unprivileged discovery.
+fn validate_plugin_file(path: &Path, plugin_id: &str, kind: &str) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let meta = std::fs::symlink_metadata(path)
+        .with_context(|| format!("plugin {plugin_id} {kind} {} is missing", path.display()))?;
+    if meta.file_type().is_symlink() {
+        bail!("plugin {plugin_id} {kind} {} is a symlink — refusing", path.display());
+    }
+    if !meta.is_file() {
+        bail!("plugin {plugin_id} {kind} {} is not a regular file", path.display());
+    }
+    if running_as_root() {
+        if meta.uid() != 0 {
+            bail!(
+                "plugin {plugin_id} {kind} {} is not owned by root (uid {}) — refusing",
+                path.display(),
+                meta.uid()
+            );
+        }
+        if meta.mode() & 0o022 != 0 {
+            bail!(
+                "plugin {plugin_id} {kind} {} is group- or world-writable (mode {:o}) — refusing",
+                path.display(),
+                meta.mode() & 0o777
+            );
+        }
+    }
+    Ok(())
+}
+
 fn running_as_root() -> bool {
     rustix::process::geteuid().is_root()
 }
@@ -353,7 +363,7 @@ mod tests {
 
     fn manifest(plugins: &Path, id: &str) -> String {
         let exe = write_exe(plugins, "nawa-plugin-demo");
-        format!(
+        let raw = format!(
             r#"[plugin]
 id = "{id}"
 name = "Demo Plugin"
@@ -372,7 +382,9 @@ requested = ["history.read", "transaction.observe"]
 subscribe = ["transaction.completed"]
 "#,
             exe.display()
-        )
+        );
+        std::fs::write(plugins.join(MANIFEST_NAME), &raw).unwrap();
+        raw
     }
 
     #[test]
@@ -442,6 +454,53 @@ subscribe = ["transaction.completed"]
             &format!("{}", outside.display()),
         );
         assert!(PluginManifest::parse(&raw, &plugins).is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn manifest_symlinks_are_rejected() {
+        let (base, plugins) = dir("manifest-symlink");
+        let raw = manifest(&plugins, "demo");
+        let manifest_path = plugins.join(MANIFEST_NAME);
+        let outside = base.join("manifest.outside");
+        std::fs::rename(&manifest_path, &outside).unwrap();
+        std::os::unix::fs::symlink(&outside, &manifest_path).unwrap();
+
+        let error = PluginManifest::parse(&raw, &plugins).unwrap_err();
+        assert!(format!("{error:#}").contains("manifest"), "{error:#}");
+        assert!(format!("{error:#}").contains("symlink"), "{error:#}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn root_rejects_non_root_owned_plugin_executables_and_manifests() {
+        use std::os::unix::ffi::OsStrExt;
+
+        if !running_as_root() {
+            return;
+        }
+
+        let (base, plugins) = dir("unowned-executable");
+        let raw = manifest(&plugins, "demo");
+        let executable = plugins.join("nawa-plugin-demo");
+        let executable_c = std::ffi::CString::new(executable.as_os_str().as_bytes()).unwrap();
+        // SAFETY: the path is a valid NUL-terminated CString; this test runs
+        // only as root and changes ownership of its private fixture.
+        assert_eq!(unsafe { libc::chown(executable_c.as_ptr(), 65534, 65534) }, 0);
+        let error = PluginManifest::parse(&raw, &plugins).unwrap_err();
+        assert!(format!("{error:#}").contains("executable"), "{error:#}");
+        assert!(format!("{error:#}").contains("not owned by root"), "{error:#}");
+        let _ = std::fs::remove_dir_all(&base);
+
+        let (base, plugins) = dir("unowned-manifest");
+        let raw = manifest(&plugins, "demo");
+        let manifest_path = plugins.join(MANIFEST_NAME);
+        let manifest_c = std::ffi::CString::new(manifest_path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: as above, this path belongs to this test's private fixture.
+        assert_eq!(unsafe { libc::chown(manifest_c.as_ptr(), 65534, 65534) }, 0);
+        let error = PluginManifest::parse(&raw, &plugins).unwrap_err();
+        assert!(format!("{error:#}").contains("manifest"), "{error:#}");
+        assert!(format!("{error:#}").contains("not owned by root"), "{error:#}");
         let _ = std::fs::remove_dir_all(&base);
     }
 

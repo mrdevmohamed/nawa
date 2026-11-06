@@ -150,7 +150,12 @@ pub fn reconcile_incomplete(root: &Path) -> Result<Vec<String>> {
         // A preparing/running record still needs reconstruction even with no
         // pending intents: its step results may exist, but finish() did not run.
         if final_record && pending.is_empty() {
-            journal::clear_journal(root, tx)?;
+            let needs_manual_recovery = existing.as_ref().is_some_and(|record| {
+                record.status().ok() == Some(TxStatus::NeedsRecovery)
+            });
+            if !needs_manual_recovery {
+                journal::clear_journal(root, tx)?;
+            }
             continue;
         }
         if let Some(record) = reconcile(root, tx)? {
@@ -318,6 +323,59 @@ mod tests {
         let record = crate::transaction::history::load_record(&root, 2).unwrap();
         assert_eq!(record.status().unwrap(), TxStatus::Partial);
         assert_eq!(record.package_changes[0].status, "committed");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn needs_recovery_journal_is_retained_after_repeated_reconciliation() {
+        let base = tmpdir("retain-needs-recovery");
+        let root = base.join("root");
+        let digest = "a".repeat(64);
+        let before = PackageState {
+            version: Some("1.0".into()),
+            rel: Some(1),
+            arch: String::new(),
+            reason: "explicit".into(),
+            artifact_sha256: digest.clone(),
+        };
+        add_entry(&root, "demo", "1.0", &digest);
+        journal::write_tx_state(&root, &journal::TxState {
+            schema: 1, tx: 7, command: "install".into(), started_at: 10,
+        }).unwrap();
+        journal::write_intent(&root, &journal::StepIntent {
+            schema: SCHEMA_VERSION,
+            tx: 7,
+            step: 1,
+            package: "demo".into(),
+            action: "install".into(),
+            precondition: Some(before.clone()),
+            target: Some(before),
+            artifact_sha256: digest,
+        }).unwrap();
+        // This legacy result matches both before and target states. There are
+        // no pending intents, but the transaction still needs manual recovery.
+        journal::write_result(&root, &journal::StepResult {
+            schema: SCHEMA_VERSION,
+            tx: 7,
+            step: 1,
+            package: "demo".into(),
+            outcome: "failed".into(),
+            failure: Some("legacy result".into()),
+            hook: None,
+        }).unwrap();
+
+        reconcile_incomplete(&root).unwrap();
+        let record = crate::transaction::history::load_record(&root, 7).unwrap();
+        assert_eq!(record.status().unwrap(), TxStatus::NeedsRecovery);
+        let journal_dir = super::super::history::history_dir(&root)
+            .join("journal")
+            .join("0000000007");
+        assert!(journal_dir.is_dir(), "manual-recovery journal must remain");
+
+        reconcile_incomplete(&root).unwrap();
+        assert!(journal_dir.is_dir(), "subsequent recovery must not delete it");
+        let record = crate::transaction::history::load_record(&root, 7).unwrap();
+        assert_eq!(record.status().unwrap(), TxStatus::NeedsRecovery);
         let _ = std::fs::remove_dir_all(&base);
     }
 

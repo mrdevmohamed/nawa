@@ -315,7 +315,7 @@ fn restore_object(root: &Path, object: &Path, digest: &str, reason: &str) -> Res
         }
         _ => {
             super::super::install::install_archive_pinned(
-                object, root, false, true, None, "keep", Some(digest),
+                object, root, false, true, None, reason, Some(digest),
             )?;
             Ok(())
         }
@@ -651,6 +651,43 @@ mod tests {
         assert!(Db::new(&root).entry("demo").unwrap().is_none(), "package removed");
         let original = crate::transaction::history::load_record(&root, tx).unwrap();
         assert_eq!(original.undone_by, Some(tx + 1));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn undo_of_removed_dependency_preserves_original_install_reason() {
+        let base = tmpdir("removed-dependency-reason");
+        let root = base.join("root");
+        let archive = make_pkg(&base, "demo", "1.0", b"dependency package");
+        crate::install::install_archive(&archive, &root, false, true, None, "dependency").unwrap();
+        let before = Db::new(&root).entry("demo").unwrap().unwrap();
+        assert_eq!(before.reason, "dependency");
+        crate::install::remove_with("demo", &root, false).unwrap();
+
+        let original = crate::transaction::history::TransactionRecord {
+            schema: SCHEMA_VERSION, id: 1, command: "remove".into(), status: "completed".into(),
+            started_at: 1, finished_at: Some(2), duration_seconds: Some(1),
+            initiated_by: "uid:0".into(), requested_packages: vec!["demo".into()],
+            repository_ids: vec![],
+            package_changes: vec![PackageChange {
+                name: "demo".into(), action: "remove".into(), status: "committed".into(),
+                before: Some(PackageState::from_entry(&before)), after: None,
+                source: "remove".into(), failure: None, hook: None,
+            }],
+            undone_by: None, undoes: None, groups: vec![],
+        };
+        crate::transaction::history::write_record(&root, &original).unwrap();
+
+        let plan = plan_undo(&root, 1).unwrap();
+        assert!(matches!(plan.steps[0].action, UndoAction::Reinstall { .. }));
+        let mut op = begin_operation(&root, OperationCommand::HistoryUndo, &[], &[]).unwrap();
+        {
+            let mut recorder = op.recorder();
+            apply_undo(&root, &plan, &mut recorder, false).unwrap();
+        }
+        op.finish(None).unwrap();
+        let restored = Db::new(&root).entry("demo").unwrap().unwrap();
+        assert_eq!(restored.reason, "dependency");
         let _ = std::fs::remove_dir_all(&base);
     }
 
