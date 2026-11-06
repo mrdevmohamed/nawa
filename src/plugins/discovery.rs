@@ -474,6 +474,11 @@ mod tests {
             &system,
             "[plugins]\nenabled = [\"audit\"]\n\n[plugins.grants]\naudit = [\"transaction.observe\"]\n",
         ).unwrap();
+        // Even if a root-run test creates this file under /root with uid 0,
+        // group/world-writable mode makes it ineligible as administrator
+        // policy. This keeps the assertion independent of CI privilege.
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&system, std::fs::Permissions::from_mode(0o666)).unwrap();
 
         let effective = PluginState::load_effective(Some(&project), Some(&system));
         assert!(effective.is_enabled("audit"));
