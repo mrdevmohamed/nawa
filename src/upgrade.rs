@@ -395,7 +395,7 @@ pub fn upgrade(
         // a Ctrl+C that arrived during the previous package was deferred
         // until it was complete; stop before starting the next one
         if let Err(error) = crate::interrupt::check() {
-            first_err = Some(error);
+            first_err = Some(error.into());
             break;
         }
         let (re, _) = plan

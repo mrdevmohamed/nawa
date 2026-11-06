@@ -70,10 +70,12 @@ pub fn plan_undo(root: &Path, id: u64) -> Result<UndoPlan> {
     if let Some(by) = record.undone_by {
         bail!("transaction {id} was already undone by transaction {by}");
     }
-    if let Some(undo) = crate::transaction::history::list_records(root)?.into_iter().find(|candidate| {
-        candidate.undoes == Some(id) && candidate.status().ok() == Some(TxStatus::Completed)
-    }) {
-        bail!("transaction {id} was already undone by transaction {}", undo.id);
+    for undo in crate::transaction::history::list_records(root)? {
+        if undo.undoes == Some(id)
+            && crate::transaction::history::undo_restored_original(root, id, undo.id)?
+        {
+            bail!("transaction {id} was already undone by transaction {}", undo.id);
+        }
     }
     let committed: Vec<&super::history::PackageChange> = record
         .package_changes
@@ -294,20 +296,20 @@ pub fn apply_undo(
 
 /// Restore one object through the ordinary installer, honouring the recorded
 /// authentication kind (roadmap §4.7 rules apply here too).
-fn restore_object(root: &Path, object: &Path, digest: &str, _reason: &str) -> Result<()> {
+fn restore_object(root: &Path, object: &Path, digest: &str, reason: &str) -> Result<()> {
     let prov = crate::artifact::load_provenance(root, digest)?;
     match prov.as_ref().map(|p| p.authentication.as_str()) {
         Some("signed-index") => {
             super::super::install::verify_retained_index_proof(root, digest)?;
             super::super::install::install_archive_from_index_proof(
-                object, root, false, digest, "keep", None,
+                object, root, false, digest, reason, None,
             )?;
             Ok(())
         }
         Some("detached-signature") => {
             super::super::install::verify_retained_detached_proof(root, digest)?;
             super::super::install::install_archive_pinned(
-                object, root, false, true, None, "keep", Some(digest),
+                object, root, false, true, None, reason, Some(digest),
             )?;
             Ok(())
         }

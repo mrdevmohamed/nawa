@@ -80,4 +80,4 @@ Install/update WAL target metadata is now tied to the exact archive digest passe
 
 ### CI follow-up
 
-The first run after the implementation changes exposed Clippy-as-error findings and a unit test that marked a transaction undone without applying a compensating package step. Both were corrected; the updated PR head must still pass a fresh CI run before merge.
+The first run after the implementation changes exposed Clippy-as-error findings, an undo-link test that did not apply the compensating package step, and an interrupt error conversion missed by an intermediate commit. The follow-up changes correct these issues. The latest PR head must still pass a fresh CI run before merge.
