@@ -363,6 +363,21 @@ subscribe = ["transaction.completed"]
     }
 
     #[test]
+    fn event_subscriptions_require_transaction_observe_and_known_events() {
+        let (_base, plugins) = dir("events");
+        let raw = manifest(&plugins, "demo")
+            .replace("requested = [\"history.read\", \"transaction.observe\"]", "requested = [\"history.read\"]");
+        let error = PluginManifest::parse(&raw, &plugins).unwrap_err();
+        assert!(format!("{error:#}").contains("transaction.observe"), "{error:#}");
+
+        let raw = manifest(&plugins, "demo")
+            .replace("transaction.completed", "transaction.unknown");
+        let error = PluginManifest::parse(&raw, &plugins).unwrap_err();
+        assert!(format!("{error:#}").contains("unsupported event"), "{error:#}");
+        let _ = std::fs::remove_dir_all(&_base);
+    }
+
+    #[test]
     fn incompatible_api_version_is_refused() {
         let (_base, plugins) = dir("api");
         let raw = manifest(&plugins, "demo").replace("api_version = \"1\"", "api_version = \"2\"");
