@@ -180,6 +180,18 @@ impl PluginManifest {
                 p.id
             );
         }
+        // A privileged host trusts neither the plugin directory nor the
+        // executable unless every lexical parent is root-owned, non-symlinked,
+        // and not writable by group/other users. Checking only the file mode
+        // would allow replacement through a writable parent directory.
+        if running_as_root() && !plugin_directory_is_root_safe(approved_dir) {
+            bail!(
+                "plugin {} directory {} is not root-owned and protected from unprivileged writes",
+                p.id,
+                approved_dir.display()
+            );
+        }
+
         // executable: absolute, a regular file, inside the approved dir
         let exe = PathBuf::from(&p.executable);
         if !exe.is_absolute() {
@@ -291,6 +303,23 @@ fn valid_semver_ish(v: &str) -> bool {
     !v.trim().is_empty() && v.len() <= 32
 }
 
+fn plugin_directory_is_root_safe(dir: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let start = if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        let Ok(cwd) = std::env::current_dir() else { return false };
+        cwd.join(dir)
+    };
+    for ancestor in start.ancestors() {
+        let Ok(meta) = std::fs::symlink_metadata(ancestor) else { return false };
+        if meta.file_type().is_symlink() || meta.uid() != 0 || meta.mode() & 0o022 != 0 {
+            return false;
+        }
+    }
+    true
+}
+
 fn running_as_root() -> bool {
     rustix::process::geteuid().is_root()
 }
@@ -300,7 +329,12 @@ mod tests {
     use super::*;
 
     fn dir(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
-        let base = std::env::temp_dir().join(format!("nawa-plugin-manifest-{}-{tag}", std::process::id()));
+        let parent = if running_as_root() {
+            PathBuf::from("/root")
+        } else {
+            std::env::temp_dir()
+        };
+        let base = parent.join(format!("nawa-plugin-manifest-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let plugins = base.join("plugins");
         std::fs::create_dir_all(&plugins).unwrap();
@@ -428,6 +462,19 @@ subscribe = ["transaction.completed"]
         let raw = manifest(&plugins, "demo").replace("version = \"1.2.0\"", "version = \"one\"");
         assert!(PluginManifest::parse(&raw, &plugins).is_err());
         let _ = std::fs::remove_dir_all(&_base);
+    }
+
+    #[test]
+    fn writable_plugin_directory_is_refused_when_root() {
+        let (base, plugins) = dir("writable-dir");
+        let raw = manifest(&plugins, "demo");
+        if running_as_root() {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&plugins, std::fs::Permissions::from_mode(0o777)).unwrap();
+            let error = PluginManifest::parse(&raw, &plugins).unwrap_err();
+            assert!(format!("{error:#}").contains("directory"), "{error:#}");
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
