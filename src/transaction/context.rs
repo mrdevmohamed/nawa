@@ -201,6 +201,12 @@ impl OperationHandle {
             groups: self.groups.clone(),
         };
         crate::transaction::history::write_record(&self.root, &record)?;
+        // Publish a durable observer outbox record while the transaction id
+        // and result are known. Actual plugin execution happens after the DB
+        // lock is released by main(); observer errors never undo the commit.
+        if let Err(error) = crate::plugins::events::enqueue_transaction(&self.root, &record) {
+            eprintln!("nawa: warning: could not queue plugin observer events: {error:#}");
+        }
         // the journal has served its purpose once the record is complete
         let _ = journal::clear_journal(&self.root, tx);
         Ok(())
