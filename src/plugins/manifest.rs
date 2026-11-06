@@ -22,12 +22,12 @@
 //! a wish, not a permission.
 
 use anyhow::{bail, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Named, narrow permissions a plugin may request (roadmap §6.8). Broad
 /// capabilities (root, filesystem.write, package.install) do not exist.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Capability {
     #[serde(rename = "history.read")]
     HistoryRead,
@@ -54,7 +54,29 @@ impl Capability {
             Capability::PackagePlanInspect => "package.plan.inspect",
         }
     }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "history.read" => Self::HistoryRead,
+            "repository.metadata.read" => Self::RepositoryMetadataRead,
+            "transaction.observe" => Self::TransactionObserve,
+            "command.register" => Self::CommandRegister,
+            "notification.send" => Self::NotificationSend,
+            "package.plan.inspect" => Self::PackagePlanInspect,
+            _ => return None,
+        })
+    }
 }
+
+/// Event names supported by plugin API v1.
+pub const SUPPORTED_EVENTS: &[&str] = &[
+    "transaction.completed",
+    "transaction.failed",
+    "transaction.partial",
+    "package.installed",
+    "package.upgraded",
+    "package.removed",
+];
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -64,6 +86,8 @@ struct RawManifest {
     commands: RawCommands,
     #[serde(default)]
     capabilities: RawCapabilities,
+    #[serde(default)]
+    events: RawEvents,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -92,6 +116,13 @@ struct RawCapabilities {
     requested: Vec<Capability>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawEvents {
+    #[serde(default)]
+    subscribe: Vec<String>,
+}
+
 /// A validated plugin manifest.
 #[derive(Debug, Clone)]
 pub struct PluginManifest {
@@ -103,6 +134,8 @@ pub struct PluginManifest {
     pub description: String,
     pub commands: Vec<String>,
     pub requested_capabilities: Vec<Capability>,
+    /// Events requested by this plugin; delivery also requires an admin grant.
+    pub events: Vec<String>,
 }
 
 /// The plugin API version this host implements (roadmap §6.12). Independent
@@ -220,6 +253,19 @@ impl PluginManifest {
         let mut caps = m.capabilities.requested;
         caps.sort();
         caps.dedup();
+
+        let mut events = m.events.subscribe;
+        events.sort();
+        events.dedup();
+        for event in &events {
+            if !SUPPORTED_EVENTS.contains(&event.as_str()) {
+                bail!("plugin {} subscribes to unsupported event {event:?}", p.id);
+            }
+        }
+        if !events.is_empty() && !caps.contains(&Capability::TransactionObserve) {
+            bail!("plugin {} subscribes to events but did not request transaction.observe", p.id);
+        }
+
         Ok(PluginManifest {
             id: p.id,
             name: p.name,
@@ -229,6 +275,7 @@ impl PluginManifest {
             description: p.description,
             commands,
             requested_capabilities: caps,
+            events,
         })
     }
 }
@@ -292,6 +339,9 @@ names = ["demo-test"]
 
 [capabilities]
 requested = ["history.read", "transaction.observe"]
+
+[events]
+subscribe = ["transaction.completed"]
 "#,
             exe.display()
         )
@@ -306,6 +356,7 @@ requested = ["history.read", "transaction.observe"]
         assert_eq!(m.commands, vec!["demo-test".to_string()]);
         assert_eq!(m.requested_capabilities.len(), 2);
         assert!(m.requested_capabilities.contains(&Capability::HistoryRead));
+        assert_eq!(m.events, vec!["transaction.completed".to_string()]);
         let _ = std::fs::remove_dir_all(&_base);
     }
 
