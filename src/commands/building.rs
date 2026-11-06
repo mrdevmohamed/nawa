@@ -55,7 +55,46 @@ pub(crate) fn cmd_build(
     // the library functions never lock; this command-level lock covers just
     // the install step (upgrade calls install_archive the same way)
     let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
-    install::install_built_archive(&archive, &ctx.root, install_force, false, None, "explicit")?;
+    let mut op = transaction::begin_operation(
+        &ctx.root,
+        transaction::OperationCommand::BuildInstall,
+        &[name.to_string()],
+        &[],
+    )?;
+    let db = db::Db::new(&ctx.root);
+    let before = db.entry(name).ok().flatten();
+    let action = match &before {
+        None => transaction::history::StepAction::Install,
+        Some(_) => transaction::history::StepAction::Upgrade,
+    };
+    let digest = crate::fetch::sha256_of_file(&archive).unwrap_or_default();
+    let mut recorder = op.recorder();
+    let step_no = recorder
+        .step_intent(name, action, before.as_ref(), None, &digest)
+        .unwrap_or(0);
+    let result = install::install_archive(&archive, &ctx.root, install_force, false, None, "explicit");
+    match &result {
+        Ok(entry) => {
+            recorder
+                .step_result(
+                    step_no, &entry.name, action,
+                    transaction::history::StepStatus::Committed,
+                    before.as_ref(), Some(entry), "local-build", None, None,
+                )
+                .ok();
+        }
+        Err(e) => {
+            recorder
+                .step_result(
+                    step_no, name, action,
+                    transaction::history::StepStatus::Failed,
+                    before.as_ref(), None, "local-build", Some(format!("{e:#}")), None,
+                )
+                .ok();
+        }
+    }
+    op.finish(result.as_ref().err())?;
+    result?;
     Ok(())
 }
 

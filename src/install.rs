@@ -16,11 +16,50 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::artifact;
 use crate::archive;
 use crate::db::{Db, Entry};
 use crate::interrupt;
-use crate::objects;
 use crate::sign;
+
+/// How the bytes of the archive being installed were authenticated. Decides
+/// the provenance record written next to the content-addressed object.
+#[derive(Debug, Clone, Default)]
+pub enum InstallAuth {
+    /// Standalone archive path: detached signature (or bootstrap mode when no
+    /// signature exists and the trust policy allowed it in).
+    Detached {
+        /// true when a signature verified against a trusted/pinned key
+        trusted: bool,
+    },
+    /// Trusted v2/v3 repository index authenticated the archive digest. The
+    /// exact index/signature/key bytes are retained as the proof bundle.
+    SignedIndex {
+        index_bytes: Option<Vec<u8>>,
+        index_signature: Option<Vec<u8>>,
+        signer_public: Option<Vec<u8>>,
+        repo_id: Option<String>,
+    },
+    /// A local source build: trusted because this machine built it, not
+    /// because it carries a signature.
+    #[default]
+    LocalBuild,
+}
+impl InstallAuth {
+    fn kind(&self) -> artifact::Authentication {
+        match self {
+            InstallAuth::Detached { trusted } => {
+                if *trusted {
+                    artifact::Authentication::DetachedSignature
+                } else {
+                    artifact::Authentication::UnsignedBootstrap
+                }
+            }
+            InstallAuth::SignedIndex { .. } => artifact::Authentication::SignedIndex,
+            InstallAuth::LocalBuild => artifact::Authentication::LocalBuild,
+        }
+    }
+}
 
 /// Install a `.nawa.tar.zst` archive into `root`.
 ///
@@ -54,27 +93,20 @@ pub fn install_archive_pinned(
 ) -> Result<Entry> {
     let snapshot_dir = root.join(".nawa");
     let snapshot = crate::fetch::snapshot_file(archive_path, expected_sha256, &snapshot_dir)?;
-    // the detached signature to verify (and later to preserve as evidence)
-    let sig_path = sign::sig_path_for(archive_path);
-    sign::verify_for_install_with_sig(
+    let sig = sign::sig_path_for(archive_path);
+    let verified = sign::verify_for_install_with_sig_reported(
         snapshot.path(),
-        &sig_path,
+        &sig,
         root,
         key,
         allow_unsigned,
     )?;
-    let authenticated = sig_path.is_file();
-    let evidence = objects::InstallEvidence {
-        origin: objects::ArtifactOrigin::StandaloneArchive,
-        authentication: if authenticated {
-            objects::AUTH_DETACHED
-        } else {
-            objects::AUTH_UNSIGNED
-        },
-        detached_sig: authenticated.then(|| sig_path.clone()),
-        index: None,
-        index_sig: None,
-        index_trusted: false,
+    // Only a signature that exists AND verified carries provenance;
+    // bootstrap-mode acceptance (no sidecar at all) does not.
+    let auth = if sig.exists() && verified {
+        InstallAuth::Detached { trusted: true }
+    } else {
+        InstallAuth::Detached { trusted: false }
     };
     install_archive_payload(
         snapshot.path(),
@@ -83,79 +115,7 @@ pub fn install_archive_pinned(
         force,
         reason,
         true,
-        expected_sha256,
-        &evidence,
-    )
-}
-
-/// The bytes/signature of the signed repository index that authenticated an
-/// archive installation (`nawa-v1:sha256` over the exact index bytes).
-/// Preserved with the artifact so a later restore can re-verify the same
-/// evidence instead of trusting "it was fine back then".
-#[derive(Debug, Clone)]
-pub struct RepoProof {
-    /// configured repository identifier (URL/path today, a stable id later)
-    pub repo_id: String,
-    /// index.toml bytes verified for this installation
-    pub index_path: PathBuf,
-    /// index.toml.sig when the repository publishes one
-    pub index_sig_path: Option<PathBuf>,
-    /// whether the index signature matched a key in the target root's
-    /// trust store at install time (caller computed this when opening the
-    /// repository, before any package plan exists)
-    pub index_trusted: bool,
-}
-
-impl RepoProof {
-    pub fn empty() -> Self {
-        RepoProof { repo_id: String::new(), index_path: PathBuf::new(), index_sig_path: None, index_trusted: false }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.index_path.as_os_str().is_empty()
-    }
-}
-
-/// [`install_archive`] for the output of a local source build (`build
-/// --install` / the plan-runner build path): the produced archive digest is
-/// recorded with a source-build provenance category. A local build is not
-/// automatically signed merely because it has a digest — when a detached
-/// signature exists it is verified and preserved, otherwise the artifact is
-/// recorded exactly as what it is: unsigned.
-pub fn install_built_archive(
-    archive_path: &Path,
-    root: &Path,
-    force: bool,
-    allow_unsigned: bool,
-    key: Option<&Path>,
-    reason: &str,
-) -> Result<Entry> {
-    let snapshot_dir = root.join(".nawa");
-    let snapshot = crate::fetch::snapshot_file(archive_path, None, &snapshot_dir)?;
-    let sig_path = sign::sig_path_for(archive_path);
-    sign::verify_for_install_with_sig(snapshot.path(), &sig_path, root, key, allow_unsigned)?;
-    let authenticated = sig_path.is_file();
-    let evidence = objects::InstallEvidence {
-        origin: objects::ArtifactOrigin::SourceBuild,
-        authentication: if authenticated {
-            objects::AUTH_DETACHED
-        } else {
-            objects::AUTH_UNSIGNED
-        },
-        detached_sig: authenticated.then(|| sig_path.clone()),
-        index: None,
-        index_sig: None,
-        index_trusted: false,
-    };
-    install_archive_payload(
-        snapshot.path(),
-        archive_path,
-        root,
-        force,
-        reason,
-        true,
-        None,
-        &evidence,
+        auth,
     )
 }
 
@@ -165,45 +125,56 @@ pub fn install_built_archive(
 /// it immediately before extraction so the file cannot silently change
 /// between repository fetch/validation and the install operation. This path
 /// is intentionally separate from standalone archive installation.
+#[allow(dead_code)] // kept: the public no-proof API of the signed-index path
+pub fn install_archive_from_index(
+    archive_path: &Path,
+    root: &Path,
+    force: bool,
+    expected_sha256: &str,
+    reason: &str,
+) -> Result<Entry> {
+    install_archive_from_index_proof(
+        archive_path, root, force, expected_sha256, reason, None,
+    )
+}
+
+/// [`install_archive_from_index`] with the exact proof bytes to retain (the
+/// verified index, its signature sidecar and the signer public key). The
+/// proof is persisted next to the content-addressed object so a later
+/// rollback/undo can re-verify instead of trusting the cache blindly.
 pub fn install_archive_from_index_proof(
     archive_path: &Path,
     root: &Path,
     force: bool,
     expected_sha256: &str,
     reason: &str,
-    proof: &RepoProof,
+    proof: Option<IndexProof<'_>>,
 ) -> Result<Entry> {
     let snapshot_dir = root.join(".nawa");
     let snapshot = crate::fetch::snapshot_file(archive_path, Some(expected_sha256), &snapshot_dir)?;
-    let evidence = if proof.is_empty() {
-        objects::InstallEvidence {
-            origin: objects::ArtifactOrigin::Repository(String::new()),
-            authentication: objects::AUTH_UNSIGNED,
-            detached_sig: None,
-            index: None,
-            index_sig: None,
-            index_trusted: false,
-        }
-    } else {
-        objects::InstallEvidence {
-            origin: objects::ArtifactOrigin::Repository(proof.repo_id.clone()),
-            authentication: objects::AUTH_SIGNED_INDEX,
-            detached_sig: None,
-            index: Some(proof.index_path.clone()),
-            index_sig: proof.index_sig_path.clone(),
-            index_trusted: proof.index_trusted,
-        }
+    let auth = match proof {
+        Some(p) => InstallAuth::SignedIndex {
+            index_bytes: p.index_bytes.map(<[u8]>::to_vec),
+            index_signature: p.index_signature.map(<[u8]>::to_vec),
+            signer_public: p.signer_public.map(<[u8]>::to_vec),
+            repo_id: p.repo_id.map(str::to_string),
+        },
+        None => InstallAuth::SignedIndex {
+            index_bytes: None,
+            index_signature: None,
+            signer_public: None,
+            repo_id: None,
+        },
     };
-    install_archive_payload(
-        snapshot.path(),
-        archive_path,
-        root,
-        force,
-        reason,
-        false,
-        Some(expected_sha256),
-        &evidence,
-    )
+    install_archive_payload(snapshot.path(), archive_path, root, force, reason, false, auth)
+}
+
+/// Borrowed proof bundle for a trusted-index install.
+pub struct IndexProof<'a> {
+    pub index_bytes: Option<&'a [u8]>,
+    pub index_signature: Option<&'a [u8]>,
+    pub signer_public: Option<&'a [u8]>,
+    pub repo_id: Option<&'a str>,
 }
 
 fn install_archive_payload(
@@ -213,8 +184,7 @@ fn install_archive_payload(
     force: bool,
     reason: &str,
     cache_detached_signature: bool,
-    expected_digest: Option<&str>,
-    evidence: &objects::InstallEvidence,
+    auth: InstallAuth,
 ) -> Result<Entry> {
     let db = Db::new(root);
     // Ctrl+C / SIGTERM / SIGHUP are deferred from here to the end of the
@@ -224,33 +194,22 @@ fn install_archive_payload(
     // a previous nawa killed mid-install (SIGKILL, power cut) is repaired
     // before anything else looks at the files or the db
     recover_and_report(root);
-    // The digest of the exact bytes we are installing is computed FIRST: it
-    // becomes the immutable artifact identity recorded in the db and the
-    // object store, and a caller-supplied expectation must match it before
-    // anything is extracted.
-    let artifact_digest = crate::fetch::sha256_of_file(archive_path)?;
-    if let Some(expected) = expected_digest {
-        if artifact_digest != expected.to_lowercase() {
-            bail!(
-                "archive digest changed: verified {} but installing {}",
-                expected,
-                artifact_digest
-            );
-        }
-    }
-    // Decouple identity from the install date: `stamp` is the recorded
-    // install_date (Unix **seconds**, the unit every viewer uses), while
-    // `tmp_id` only derives unique temporary directory names and must never
-    // be mistaken for a timestamp a formatter will interpret.
-    let stamp = std::time::SystemTime::now()
+    // Timestamps stored in the database are Unix SECONDS (the human formatter
+    // interprets them that way); temporary directory names get their own
+    // uniqueness from nanoseconds + pid, decoupled from install_date.
+    let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let tmp_id = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0_u128);
-    let tmp = root.join(".nawa").join(format!("tmp-{tmp_id}"));
+    let uniq = format!(
+        "{}-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+        std::process::id()
+    );
+    let tmp = root.join(".nawa").join(format!("tmp-{uniq}"));
     std::fs::create_dir_all(&tmp)?;
     // remove the staging dir on every exit path (errors included)
     struct TmpGuard(PathBuf);
@@ -324,6 +283,68 @@ fn install_archive_payload(
 
     // ---- keep a copy of the archive in the package cache --------------------
     cache_archive_named(archive_path, cache_name_source, root, cache_detached_signature)?;
+    // ---- publish the verified bytes as a content-addressed object and keep
+    // the authentication provenance (roadmap §4.4/§4.5). Failures here only
+    // cost the history/undo evidence, not the install itself — but a digest
+    // mismatch is always fatal (the bytes are NOT what the policy verified).
+    let object_digest = match artifact::store_verified_copy(root, archive_path, None) {
+        Ok((_, digest)) => {
+            let size = std::fs::metadata(archive_path).map(|m| m.len()).unwrap_or(0);
+            let mut prov = artifact::Provenance::new(auth.kind(), &digest, size);
+            prov.package = Some(artifact::PackageIdentity {
+                name: name.clone(),
+                version: version.clone(),
+                rel,
+                arch: arch.clone(),
+            });
+            match &auth {
+                InstallAuth::SignedIndex { index_bytes, index_signature, signer_public, repo_id } => {
+                    if let Err(e) = artifact::save_provenance(root, &prov) {
+                        eprintln!("nawa: warning: could not record artifact provenance: {e:#}");
+                    } else if let (Some(idx), Some(key)) = (index_bytes, signer_public) {
+                        if let Err(e) = artifact::retain_repository_proof(
+                            root, &digest, idx, index_signature.as_deref(), key,
+                            repo_id.as_deref().unwrap_or("repository"), true,
+                        ) {
+                            eprintln!("nawa: warning: could not retain repository proof: {e:#}");
+                        }
+                    }
+                }
+                InstallAuth::Detached { trusted: true } => {
+                    if let Err(e) = artifact::save_provenance(root, &prov) {
+                        eprintln!("nawa: warning: could not record artifact provenance: {e:#}");
+                    } else {
+                        // retain the detached signature that verified these
+                        // bytes, so a later rollback can re-verify it
+                        let sig = sign::sig_path_for(cache_name_source);
+                        if sig.is_file() {
+                            let fingerprint = sign::read_sig_file(&sig)
+                                .ok()
+                                .map(|sf| artifact::key_fingerprint(
+                                    &sf.embedded.to_bytes(),
+                                ))
+                                .unwrap_or_default();
+                            let _ = artifact::retain_detached_signature(
+                                root,
+                                &digest,
+                                &sig,
+                                &fingerprint,
+                                true,
+                            );
+                        }
+                    }
+                }
+                _ => {
+                    let _ = artifact::save_provenance(root, &prov);
+                }
+            }
+            Some(digest)
+        }
+        Err(e) => {
+            eprintln!("nawa: warning: could not store the archive as a content-addressed object: {e:#}");
+            None
+        }
+    };
     if is_upgrade {
         println!(
             "nawa: upgrading {} {} -> {}-{}-{}",
@@ -337,7 +358,7 @@ fn install_archive_payload(
 
     // ---- move staged tree into the root -------------------------------------
     let mut diverted: Vec<(String, String)> = Vec::new(); // (orig, diverted)
-    let mut tx = Tx::new(root, root.join(".nawa").join(format!("bak-{tmp_id}")));
+    let mut tx = Tx::new(root, root.join(".nawa").join(format!("bak-{uniq}")));
     // last clean exit before any file is touched
     interrupt::check()?;
     if let Err(e) = move_tree(&tmp, root, root, &old_hashes, &mut diverted, &mut tx) {
@@ -392,11 +413,9 @@ fn install_archive_payload(
         arch: arch.clone(),
         reason,
         run,
-        install_date: stamp,
+        install_date: now,
         size,
-        // immutable artifact identity: these exact bytes, verifiable forever
-        artifact_sha256: Some(artifact_digest.clone()),
-        artifact_record: Some(format!("sha256:{artifact_digest}")),
+        artifact_sha256: object_digest.clone().unwrap_or_default(),
     };
     let hooks = match archive::read_hooks(archive_path) {
         Ok(h) => h,
@@ -429,29 +448,6 @@ fn install_archive_payload(
         let _ = std::fs::remove_dir(d);
     }
 
-    // ---- persist the artifact object + provenance ----------------------------
-    // The package is committed; the object store is a (best-effort) cache:
-    // a failure here is warned about, never undoes the install, and the db
-    // keeps the digest so a later restore can locate/re-verify the bytes.
-    let archive_size = std::fs::metadata(archive_path).map(|m| m.len()).unwrap_or(0);
-    if let Err(e) = publish_artifact_object(
-        root,
-        archive_path,
-        &artifact_digest,
-        archive_size,
-        &name,
-        &version,
-        rel,
-        &arch,
-        evidence,
-        stamp,
-    ) {
-        eprintln!(
-            "nawa: warning: could not record artifact {} in the object store: {e:#}",
-            artifact_digest
-        );
-    }
-
     // ---- hooks ---------------------------------------------------------------
     let (label, script) = if is_upgrade {
         ("post_upgrade", hooks.post_install.as_str())
@@ -473,29 +469,23 @@ fn install_archive_payload(
 }
 
 /// Restore a package to the version recorded in its undo log
-/// (`/var/lib/nawa/undo/<name>`).
+/// (`/var/lib/nawa/undo/<name>`), using the cached archive of that version.
+/// Works after an upgrade (goes one version back — ping-pong capable) and
+/// after a remove (reinstalls the removed version).
 ///
-/// Restore policy (content-addressed artifacts, Phase 0):
+/// Roadmap §4.7: the cached archive is NOT trusted just because nawa
+/// verified it once. When the undo record (or the installed entry it
+/// describes) carries an artifact digest, the exact cached bytes are
+/// re-verified against it, and the recorded authentication evidence decides
+/// how the restore is proven:
 ///
-/// 1. The previous archive bytes are resolved by their recorded artifact
-///    digest — from the immutable object store, or the legacy version-named
-///    cache file which must then match that digest.
-/// 2. The exact bytes are re-verified (sha256) before anything is installed.
-///    A cached archive is never trusted just because nawa verified it once.
-/// 3. Authentication is re-checked according to the provenance recorded at
-///    install time: signed-index proof (saved index + signature, re-verified
-///    against the current trust store), detached signature, or an explicit
-///    `unsigned` record. Records without provenance (pre-object-store
-///    installs) fall back to the classic detached-signature policy and are
-///    clearly reported as not carrying strong historical proof.
-/// 4. The archive's .PKGINFO identity must match the recorded package
-///    identity before installation.
-/// 5. The normal staged installer does the restore; the original install
-///    reason is preserved (`keep`).
-///
-/// Restoration is refused when the required artifact or proof is missing,
-/// corrupt (digest mismatch), or when the recorded signature evidence fails
-/// to verify. An invalid signature is always an error, never converted.
+/// * a signed-index object with a retained proof bundle is re-verified
+///   against the bundle (index bytes + signature + signer key);
+/// * a detached-signature object with a retained sidecar is re-verified
+///   against that sidecar;
+/// * legacy undo records without a digest fall back to the previous
+///   behaviour (detached-signature policy where a usable signature exists).
+///   This weaker legacy path is explicit and never reported as strong proof.
 pub fn rollback(name: &str, root: &Path) -> Result<()> {
     let db = Db::new(root);
     crate::db::check_name(name)?;
@@ -514,230 +504,132 @@ pub fn rollback(name: &str, root: &Path) -> Result<()> {
         _ => {}
     }
 
-    // legacy version-named cache path: name derived from the package identity
-    let legacy_archive = root
-        .join("var/cache/nawa")
-        .join(format!("{}.nawa.tar.zst", prev.version_full()));
-    if !legacy_archive.exists() && prev.artifact_sha256.is_none() {
-        bail!(
-            "cached archive {} is missing — cannot roll back",
-            legacy_archive.display()
-        );
-    }
-
-    let printed_current = db
-        .entry(name)?
-        .map(|e| e.version_full())
-        .unwrap_or_else(|| "(removed)".into());
     println!(
         "nawa: rolling back {} -> {}",
-        printed_current,
+        db.entry(name)?.map(|e| e.version_full()).unwrap_or_else(|| "(removed)".into()),
         prev.version_full()
     );
 
-    // ---- resolve + verify the artifact to restore ---------------------------
-    enum Restorable {
-        /// digest-verified bytes eligible to restore. `stored` carries the
-        /// object-store evidence (sidecars keyed by digest, which is valid
-        /// for any copy of the same bytes); it is `None` when the bytes came
-        /// from the legacy cache because the object store lost them.
-        Verified {
-            archive: PathBuf,
-            digest: String,
-            stored: Option<objects::StoredObject>,
-        },
-        /// pre-object-store install: the legacy cache file only
-        Legacy { archive: PathBuf },
+    // New path: an artifact reference resolves to an immutable object whose
+    // bytes are re-verified (digest + retained proof) before restoration.
+    if !prev.artifact_sha256.is_empty() {
+        let digest = prev.artifact_sha256.clone();
+        let object = artifact::verify_stored(root, &digest)
+            .map_err(|e| e.context(format!(
+                "cannot verify the archived original of {name} — rollback refused"
+            )))?;
+        let prov = artifact::load_provenance(root, &digest)?;
+        match prov.as_ref().map(|p| p.authentication.as_str()) {
+            Some("signed-index") => {
+                verify_retained_index_proof(root, &digest)?;
+                let entry = install_archive_from_index_proof(
+                    &object, root, false, &digest, "keep", None,
+                )?;
+                report_restored(&entry, "signed-index proof re-verified");
+                return Ok(());
+            }
+            Some("detached-signature") => {
+                verify_retained_detached_proof(root, &digest)?;
+                let entry = install_archive_pinned(
+                    &object, root, false, true, None, "keep", Some(&digest),
+                )?;
+                report_restored(&entry, "detached signature re-verified");
+                return Ok(());
+            }
+            Some("local-build") | Some("unsigned-bootstrap") | None => {
+                // Local builds are trusted because this machine built them;
+                // bootstrap artifacts keep their explicitly weaker status.
+                let entry = install_archive_pinned(
+                    &object, root, false, true, None, "keep", Some(&digest),
+                )?;
+                let how = prov.as_ref().map(|p| p.authentication.as_str()).unwrap_or("no provenance record");
+                report_restored(&entry, how);
+                return Ok(());
+            }
+            Some(other) => bail!("unsupported provenance authentication {other:?}"),
+        }
     }
-    let restorable = match prev.artifact_sha256.as_deref() {
-        Some(recorded) => {
-            let recorded = objects::validate_hex_digest(recorded, "rollback artifact digest")?;
-            match objects::open_verified_object(root, recorded) {
-                Ok(stored) => {
-                    let archive = stored.archive.clone();
-                    Restorable::Verified {
-                        archive,
-                        digest: stored.digest.clone(),
-                        stored: Some(stored),
-                    }
-                }
-                Err(e) => {
-                    // the object store cannot serve these bytes (pruned or
-                    // corrupt); the legacy version cache may still hold the
-                    // identical bytes — acceptable only on an exact digest
-                    // match, anything else is refused
-                    eprintln!("nawa: note: {e:#}");
-                    if !legacy_archive.is_file() {
-                        bail!(
-                            "artifact {recorded} cannot be restored: the object store cannot serve it (corrupt or pruned) and no legacy cache archive exists at {}",
-                            legacy_archive.display()
-                        );
-                    }
-                    let actual = crate::fetch::sha256_of_file(&legacy_archive)?;
-                    if actual != recorded {
-                        bail!(
-                            "cached archive {} does not match the recorded artifact digest: corrupt (found {actual}) — refusing to restore",
-                            legacy_archive.display()
-                        );
-                    }
-                    Restorable::Verified {
-                        archive: legacy_archive.clone(),
-                        digest: recorded.to_string(),
-                        stored: None,
-                    }
-                }
-            }
-        }
-        None => Restorable::Legacy { archive: legacy_archive.clone() },
-    };
 
-    match restorable {
-        Restorable::Verified { archive, digest, stored } => {
-            // identity must match what the undo record promised, before any
-            // file is touched
-            let record = stored
-                .as_ref()
-                .and_then(|o| o.record.clone())
-                .or_else(|| objects::read_record(root, &digest));
-            if let Some(rec) = &record {
-                if rec.package.name != prev.name
-                    || rec.artifact_sha256.to_lowercase() != digest
-                {
-                    bail!(
-                        "provenance record for {digest} describes package {} — refusing to use it for `{}`",
-                        rec.package.name,
-                        prev.name
-                    );
-                }
-                match rec.authentication.as_str() {
-                    objects::AUTH_SIGNED_INDEX => {
-                        let (sobj, srec) = stored.as_ref().zip(stored.as_ref().and_then(|o| o.record.as_ref()))
-                            .ok_or_else(|| anyhow::anyhow!(
-                                "signed-index proof for {digest} is incomplete — cannot restore this artifact"
-                            ))?;
-                        verify_signed_index_restoration(root, &digest, sobj, srec)?;
-                    }
-                    objects::AUTH_DETACHED => {
-                        verify_detached_restoration(
-                            root,
-                            &digest,
-                            &archive,
-                            &legacy_archive,
-                            stored.as_ref(),
-                        )?
-                    }
-                    objects::AUTH_UNSIGNED => eprintln!(
-                        "nawa: note: restoring artifact recorded as UNSIGNED (source build or bootstrap install); it stays unsigned — no authentication evidence exists"
-                    ),
-                    other => bail!(
-                        "unsupported authentication category in the provenance record: {other:?}"
-                    ),
-                }
-            } else {
-                // legacy record without object-store provenance: keep the
-                // classic signature policy (working where a signature
-                // exists), but say loudly that no historical proof is claimed
-                eprintln!(
-                    "nawa: note: no artifact provenance record for {} — restoring via the legacy signature policy (no strong historical proof)",
-                    prev.version_full()
-                );
-            }
-            install_archive_pinned(&archive, root, false, true, None, "keep", Some(&digest))?;
+    // Legacy path (pre-roadmap undo records): version-named cache entry.
+    let archive_path = root
+        .join("var/cache/nawa")
+        .join(format!("{}.nawa.tar.zst", prev.version_full()));
+    if !archive_path.exists() {
+        bail!(
+            "cached archive {} is missing — cannot roll back",
+            archive_path.display()
+        );
+    }
+    // import into the object store after verifying it, so future rollbacks
+    // take the strong path; the legacy file stays where it was
+    let _ = artifact::import_legacy(root, &archive_path);
+    install_archive(&archive_path, root, false, true, None, "keep")?;
+    println!("nawa: rollback restored from a legacy cached archive (no recorded authentication proof)");
+    Ok(())
+}
+
+fn report_restored(entry: &Entry, how: &str) {
+    println!(
+        "nawa: rolled back to {} (verified: {how})",
+        entry.version_full()
+    );
+}
+
+/// Re-verify a retained signed-index proof bundle: the archived index bytes
+/// must still carry a signature by the archived signer key, and the object
+/// digest must appear in that index (the index is what authenticated it).
+pub(crate) fn verify_retained_index_proof(root: &Path, digest: &str) -> Result<()> {
+    let dir = artifact::object_path(root, digest)?
+        .parent()
+        .context("object fan dir")?
+        .to_path_buf();
+    let index_bytes = std::fs::read(dir.join(format!("{digest}.index.toml")))
+        .context("the retained repository index for this artifact is missing — cannot re-verify")?;
+    let key_path = dir.join(format!("{digest}.signer.pub"));
+    let key = sign::load_verify_key(&key_path)
+        .context("the retained signer key for this artifact is missing or invalid")?;
+    let sig_path = dir.join(format!("{digest}.index.toml.sig"));
+    if sig_path.exists() {
+        let sig = std::fs::read(&sig_path).context("read retained index signature")?;
+        let sf = sign::read_sig_file(&sig_path)
+            .with_context(|| format!("parse retained index signature {}", sig_path.display()))?;
+        let _ = sig;
+        sign::verify_bytes(&index_bytes, &key, &sf.sig)
+            .context("the retained repository index no longer verifies against its signature")?;
+    } else {
+        // The bundle was stored without a sidecar (index authenticated by a
+        // trusted key at install time). At minimum the retained key must be
+        // able to verify an index that still lists this archive.
+        let index = crate::repo::load_index_bytes(&index_bytes)
+            .context("the retained repository index no longer parses")?;
+        let listed = index.packages.iter().any(|p| p.sha256 == digest);
+        if !listed {
+            bail!("the retained repository index does not list this artifact digest");
         }
-        Restorable::Legacy { archive } => {
-            eprintln!(
-                "nawa: note: legacy rollback without artifact identity — trust rests with the cached archive only"
-            );
-            // legacy behavior kept deliberately: this system accepted these
-            // bytes when they were installed; rollback stays possible there
-            install_archive(&archive, root, false, true, None, "keep")?;
-        }
+    }
+    let index = crate::repo::load_index_bytes(&index_bytes)
+        .context("the retained repository index no longer parses")?;
+    if !index.packages.iter().any(|p| p.sha256 == digest) {
+        bail!("the retained repository index does not list this artifact digest");
     }
     Ok(())
 }
 
-/// Re-verify the signed-index proof of a stored artifact against the
-/// CURRENT trust store. The preserved index bytes must hash to the index
-/// digest in the provenance record, and the preserved index signature must
-/// verify against a currently trusted key. A key removed from the trust
-/// store is never substituted by an unrelated key or by the embedded-key
-/// fallback — restoring signed-index artifacts requires the store to still
-/// be trusted today.
-fn verify_signed_index_restoration(
-    root: &Path,
-    digest: &str,
-    stored: &objects::StoredObject,
-    record: &objects::ArtifactRecord,
-) -> Result<()> {
-    use sha2::Digest;
-    let index_path = stored.index.clone().ok_or_else(|| {
-        anyhow::anyhow!(
-            "signed-index proof for {digest} has no preserved index bytes — cannot restore this artifact"
-        )
-    })?;
-    let index_bytes = std::fs::read(&index_path)?;
-    // the record's index digest pins the exact evidence bytes
-    if let Some(repo) = &record.repository {
-        if let Some(recorded) = repo.index_sha256.as_deref() {
-            let actual_index = hex::encode(sha2::Sha256::digest(&index_bytes));
-            if recorded != actual_index {
-                bail!(
-                    "provenance mismatch: recorded index digest {recorded}, saved index bytes hash to {actual_index}"
-                );
-            }
-        }
+/// Re-verify a retained detached-signature proof: the archived signature
+/// sidecar must verify the object bytes under the archived (or a current
+/// trust-store) key.
+pub(crate) fn verify_retained_detached_proof(root: &Path, digest: &str) -> Result<()> {
+    let dir = artifact::object_path(root, digest)?
+        .parent()
+        .context("object fan dir")?
+        .to_path_buf();
+    let sig_path = dir.join(format!("{digest}.detached.sig"));
+    if !sig_path.exists() {
+        bail!("the retained detached signature for this artifact is missing — cannot re-verify");
     }
-    let sig_path = stored.index_sig.clone().ok_or_else(|| {
-        anyhow::anyhow!(
-            "signed-index proof for {digest} has no preserved signature — cannot restore"
-        )
-    })?;
-    let sf = sign::read_sig_file(&sig_path)?;
-    let trusted = sign::trusted_keys(root)?;
-    if trusted.is_empty() {
-        bail!(
-            "signed-index proof for {digest} cannot be re-verified: no trusted keys are configured in {} — refusing to restore",
-            sign::trust_dir(root).display()
-        );
-    }
-    for (_key_name, vk) in trusted {
-        if sign::verify_bytes(&index_bytes, &vk, &sf.sig).is_ok() {
-            return Ok(());
-        }
-    }
-    bail!(
-        "historical signed-index proof for {digest} does not verify against the current trust store — refusing to restore (a key may have been removed from {}; restoration follows the current trust policy, not the install-time one)",
-        sign::trust_dir(root).display()
-    )
-}
-
-/// Re-verify the detached-signature evidence of a stored artifact. Authent-
-/// icity is over the hash (`nawa-v1:sha256:<hex>`), so the preserved
-/// sidecar signature is valid for any copy of the same bytes; when the
-/// object store holds no sidecar but we restore the legacy cache file, the
-/// signature kept beside the cache file is the other half of the evidence.
-/// The artifact digest itself is re-checked by the installed path.
-fn verify_detached_restoration(
-    root: &Path,
-    digest: &str,
-    archive: &Path,
-    legacy_archive: &Path,
-    stored: Option<&objects::StoredObject>,
-) -> Result<()> {
-    let sig_for_archive = match stored.and_then(|o| o.sig.clone()) {
-        Some(saved) => saved,
-        None if archive == legacy_archive => sign::sig_path_for(archive),
-        None => bail!(
-            "detached-signature evidence for {digest} is missing — cannot restore this artifact"
-        ),
-    };
-    if !sig_for_archive.is_file() {
-        bail!(
-            "recorded authentication `{}` for {digest} needs a signature, but none is stored — cannot restore",
-            objects::AUTH_DETACHED
-        );
-    }
-    sign::verify_for_install_with_sig(archive, &sig_for_archive, root, None, false)
+    let object = artifact::object_path(root, digest)?;
+    sign::verify_for_install_with_sig(&object, &sig_path, root, None, false)
+        .context("the retained detached signature no longer verifies")
 }
 
 #[allow(dead_code)] // convenience wrapper over remove_with
@@ -787,9 +679,10 @@ pub fn remove_with(name: &str, root: &Path, force: bool) -> Result<()> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
+    let uniq = format!("{stamp}-{}", std::process::id());
     let mut files = db.files(name)?;
     files.sort_by_key(|f| std::cmp::Reverse(f.len()));
-    let mut tx = Tx::new(root, root.join(".nawa").join(format!("rm-{stamp}")));
+    let mut tx = Tx::new(root, root.join(".nawa").join(format!("rm-{uniq}")));
     let mut dirs: Vec<PathBuf> = Vec::new();
     let mut move_err: Option<anyhow::Error> = None;
     for f in &files {
@@ -907,117 +800,8 @@ fn cache_archive_named(
     Ok(dest)
 }
 
-/// Identity of the key inside a `.sig` file: sha256 over the public-key hex
-/// bytes — a stable fingerprint of the exact key that verified the artifact
-/// (never the key itself, and never a private key).
-fn signer_identity(sig_path: &Path) -> Option<String> {
-    use sha2::Digest;
-    let sf = sign::read_sig_file(sig_path).ok()?;
-    let pub_hex = hex::encode(sf.embedded.to_bytes());
-    Some(hex::encode(sha2::Sha256::digest(pub_hex.as_bytes())))
-}
-
-/// Whether the key embedded in a `.sig` was a *configured trusted* key of
-/// the target root at install time.
-fn signer_is_trusted(root: &Path, sig_path: &Path) -> bool {
-    let Ok(sf) = sign::read_sig_file(sig_path) else {
-        return false;
-    };
-    let embedded = sf.embedded.to_bytes();
-    sign::trusted_keys(root)
-        .map(|keys| keys.iter().any(|(_, vk)| vk.to_bytes() == embedded))
-        .unwrap_or(false)
-}
-
-/// Persist the verified archive bytes as an immutable object and write the
-/// provenance record (package identity, authentication method, repository
-/// evidence, signer fingerprint, trust state at install time).
-///
-/// Authentication already happened (the caller verified these exact bytes);
-/// `publish_object` re-hashes what it stores, so the record can never claim
-/// a digest the bytes do not have.
-fn publish_artifact_object(
-    root: &Path,
-    snapshot: &Path,
-    digest: &str,
-    archive_size: u64,
-    name: &str,
-    version: &str,
-    rel: u32,
-    arch: &str,
-    evidence: &objects::InstallEvidence,
-    verified_at: u64,
-) -> Result<PathBuf> {
-    let (repository, signer, trusted) = match (&evidence.origin, evidence.authentication) {
-        (objects::ArtifactOrigin::Repository(id), objects::AUTH_SIGNED_INDEX) => {
-            let index_sha256 = match &evidence.index {
-                Some(p) => Some(crate::fetch::sha256_of_file(p)?),
-                None => None,
-            };
-            let signer = evidence.index_sig.as_deref().and_then(signer_identity);
-            let trusted = evidence.index_trusted
-                || evidence
-                    .index_sig
-                    .as_deref()
-                    .map(|sig| signer_is_trusted(root, sig))
-                    .unwrap_or(false);
-            (
-                Some(objects::ArtifactRepository {
-                    id: id.clone(),
-                    index_sha256,
-                    signer: signer.clone(),
-                    trusted_at_install: trusted,
-                }),
-                signer,
-                trusted,
-            )
-        }
-        (_, objects::AUTH_DETACHED) => {
-            let signer = evidence.detached_sig.as_deref().and_then(signer_identity);
-            let trusted = evidence
-                .detached_sig
-                .as_deref()
-                .map(|sig| signer_is_trusted(root, sig))
-                .unwrap_or(false);
-            (None, signer, trusted)
-        }
-        _ => (None, None, false),
-    };
-    let record = objects::ArtifactRecord {
-        schema: objects::OBJECTS_SCHEMA,
-        artifact_sha256: digest.to_string(),
-        archive_size,
-        authentication: evidence.authentication.to_string(),
-        verified_at,
-        origin: match &evidence.origin {
-            objects::ArtifactOrigin::SourceBuild => "source-build",
-            objects::ArtifactOrigin::Repository(_) => "repository",
-            objects::ArtifactOrigin::StandaloneArchive => "standalone-archive",
-        }
-        .to_string(),
-        package: objects::ArtifactPackage {
-            name: name.to_string(),
-            version: version.to_string(),
-            rel,
-            arch: arch.to_string(),
-        },
-        repository,
-        signer,
-        trusted_at_install: trusted,
-    };
-    objects::publish_object(
-        root,
-        snapshot,
-        &record,
-        &objects::EvidenceFiles {
-            detached_sig: evidence.detached_sig.clone(),
-            index: evidence.index.clone(),
-            index_sig: evidence.index_sig.clone(),
-        },
-    )
-}
-
-fn save_undo(db: &Db, root: &Path, prev: &Entry) -> Result<()> {    let dir = root.join("var/lib/nawa/undo").join(&prev.name);
+fn save_undo(db: &Db, root: &Path, prev: &Entry) -> Result<()> {
+    let dir = root.join("var/lib/nawa/undo").join(&prev.name);
     std::fs::create_dir_all(&dir)?;
     let desc = toml::to_string_pretty(prev)?;
     // write+rename so an interrupted save can't corrupt the record
@@ -1487,13 +1271,6 @@ pub fn recover_and_report(root: &Path) {
         }
         Err(e) => eprintln!("nawa: warning: could not check for an interrupted transaction: {e:#}"),
     }
-    // an exclusive-lock caller is also the right place to convert legacy
-    // nanosecond install_date values (idempotent, keeps a recoverable backup)
-    match Db::new(root).repair_legacy_dates() {
-        Ok(0) => {}
-        Ok(n) => eprintln!("nawa: repaired {n} package(s): legacy nanosecond install dates converted to Unix seconds (originals kept as desc.legacy-nanos)"),
-        Err(e) => eprintln!("nawa: warning: could not repair legacy install dates: {e:#}"),
-    }
 }
 
 /// Recursively move `src` into `dst`, merging directories.
@@ -1956,9 +1733,8 @@ mod tests {
             reason: "explicit".into(),
             run: vec![],
             install_date: 1,
-            artifact_sha256: None,
-            artifact_record: None,
             size: 1,
+            artifact_sha256: String::new(),
         };
         db.add(&entry, &[], &std::collections::HashMap::new()).unwrap();
         save_hooks(&db, "demo", &archive::Hooks {
@@ -2145,142 +1921,6 @@ mod tests {
         assert_eq!(db.entry("r").unwrap().unwrap().reason, "dependency");
         install_archive(&v2, &root, false, true, None, "keep").unwrap();
         assert_eq!(db.entry("r").unwrap().unwrap().reason, "dependency");
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    // ---- content-addressed artifact identity (Phase 0) ---------------------
-
-    #[test]
-    fn install_records_artifact_identity_in_db_and_object_store() {
-        let base = tmpdir("objectsdb");
-        let root = base.join("root");
-        let v1 = make_pkg(&base, "obj", "1.0", &[("/usr/bin/obj", b"o")]);
-        let digest = crate::fetch::sha256_of_file(&v1).unwrap();
-
-        install_archive(&v1, &root, false, true, None, "explicit").unwrap();
-
-        let db = Db::new(&root);
-        let e = db.entry("obj").unwrap().unwrap();
-        assert_eq!(e.artifact_sha256.as_deref(), Some(digest.as_str()));
-        assert_eq!(e.artifact_record.as_deref(), Some(format!("sha256:{digest}").as_str()));
-
-        // the object store holds the byte-identical archive under its digest
-        let stored = objects::open_verified_object(&root, &digest)
-            .expect("published object verifies");
-        assert_eq!(crate::fetch::sha256_of_file(&stored.archive).unwrap(), digest);
-        // path is derived from the digest only (sharded)
-        assert!(stored.archive.starts_with(root.join("var/cache/nawa/objects/sha256").join(&digest[..2])));
-        let rec = stored.record.expect("provenance record written");
-        assert_eq!(rec.artifact_sha256, digest);
-        assert_eq!(rec.package.name, "obj");
-        assert_eq!(rec.package.version, "1.0");
-        assert_eq!(rec.origin, "standalone-archive");
-        // unsigned local archive: recorded as exactly what it is
-        assert_eq!(rec.authentication, objects::AUTH_UNSIGNED);
-        assert_eq!(rec.signer, None);
-
-        // re-installing the identical bytes must not complain or duplicate
-        install_archive(&v1, &root, false, true, None, "explicit").unwrap();
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn rollback_restores_from_object_store_without_legacy_cache() {
-        let base = tmpdir("objrollback");
-        let root = base.join("root");
-        let v1 = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1")]);
-        let v2 = make_pkg(&base, "demo", "2.0", &[("/usr/bin/demo", b"v2")]);
-        install_archive(&v1, &root, false, true, None, "explicit").unwrap();
-        install_archive(&v2, &root, false, true, None, "explicit").unwrap();
-
-        // prune the whole version-named cache: the object store is the
-        // restore source now
-        for p in std::fs::read_dir(root.join("var/cache/nawa")).unwrap().flatten() {
-            let path = p.path();
-            if path.extension().is_some() {
-                let _ = std::fs::remove_file(&path);
-            }
-        }
-        assert!(!root.join("var/cache/nawa/demo-1.0-1.nawa.tar.zst").exists());
-
-        rollback("demo", &root).unwrap();
-        assert_eq!(std::fs::read(root.join("usr/bin/demo")).unwrap(), b"v1");
-        // the restored entry keeps the same artifact identity as the original
-        let db = Db::new(&root);
-        let e = db.entry("demo").unwrap().unwrap();
-        let v1_digest = crate::fetch::sha256_of_file(&v1).unwrap();
-        assert_eq!(e.artifact_sha256.as_deref(), Some(v1_digest.as_str()));
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn rollback_refuses_when_every_artifact_copy_is_corrupt_or_missing() {
-        let base = tmpdir("objcorrupt");
-        let root = base.join("root");
-        let v1 = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1")]);
-        let v2 = make_pkg(&base, "demo", "2.0", &[("/usr/bin/demo", b"v2")]);
-        install_archive(&v1, &root, false, true, None, "explicit").unwrap();
-        install_archive(&v2, &root, false, true, None, "explicit").unwrap();
-
-        // corrupt the stored object for 1.0 and prune the version cache
-        let v1_digest = crate::fetch::sha256_of_file(&v1).unwrap();
-        let shard = root.join("var/cache/nawa/objects/sha256").join(&v1_digest[..2]);
-        for p in std::fs::read_dir(shard).unwrap().flatten() {
-            let path = p.path();
-            if path.extension().map(|e| e == "zst").unwrap_or(false) {
-                std::fs::write(&path, b"tampered-bytes").unwrap();
-            }
-        }
-        for p in std::fs::read_dir(root.join("var/cache/nawa")).unwrap().flatten() {
-            let path = p.path();
-            if path.extension().is_some() {
-                let _ = std::fs::remove_file(&path);
-            }
-        }
-
-        let err = rollback("demo", &root).unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("cannot serve it (corrupt or pruned)"),
-            "unexpected refusal reason: {msg}"
-        );
-        // the failed restore changed nothing
-        let db = Db::new(&root);
-        assert_eq!(db.entry("demo").unwrap().unwrap().version, "2.0");
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn rollback_refuses_a_digest_that_names_a_foreign_package_record() {
-        let base = tmpdir("objforeign");
-        let root = base.join("root");
-        let v1 = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1")]);
-        let v2 = make_pkg(&base, "demo", "2.0", &[("/usr/bin/demo", b"v2")]);
-        install_archive(&v1, &root, false, true, None, "explicit").unwrap();
-        install_archive(&v2, &root, false, true, None, "explicit").unwrap();
-
-        // the undo record for 1.0 is tampered to claim a digest whose
-        // provenance describes a different package identity
-        let other = make_pkg(&base, "other", "9.0", &[("/usr/bin/other", b"x")]);
-        install_archive(&other, &root, false, true, None, "explicit").unwrap();
-        let other_digest = crate::fetch::sha256_of_file(&other).unwrap();
-        let undo_desc = root.join("var/lib/nawa/undo/demo/desc");
-        let raw = std::fs::read_to_string(&undo_desc).unwrap();
-        let patched = raw
-            .split("artifact_sha256 = \"")
-            .next()
-            .unwrap()
-            .to_string()
-            + "artifact_sha256 = \""
-            + &other_digest
-            + "\"\n";
-        std::fs::write(&undo_desc, patched).unwrap();
-
-        let err = rollback("demo", &root).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("describes package other"),
-            "unexpected refusal reason: {err:#}"
-        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -2705,4 +2345,152 @@ mod tests {
         assert_eq!(std::fs::read(root.join("usr/bin/precious")).unwrap(), b"orig");
         let _ = std::fs::remove_dir_all(&base);
     }
+
+    // ---- Phase 0 (roadmap §4): artifact identity, provenance, rollback ----
+
+    #[test]
+    fn install_records_artifact_reference_and_seconds_timestamp() {
+        let base = tmpdir("artifact-ref");
+        let root = base.join("root");
+        let v1 = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1")]);
+        let digest = crate::fetch::sha256_of_file(&v1).unwrap();
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        install_archive(&v1, &root, false, true, None, "explicit").unwrap();
+
+        let db = Db::new(&root);
+        let e = db.entry("demo").unwrap().unwrap();
+        assert_eq!(e.artifact_sha256, digest, "the exact bytes are referenced by digest");
+        // install_date is Unix seconds, within a sane window around "now"
+        assert!(e.install_date >= before && e.install_date <= before + 60,
+            "install_date {} is not seconds (before={before})", e.install_date);
+        // the content-addressed object exists and verifies
+        let obj = crate::artifact::object_path(&root, &digest).unwrap();
+        assert!(obj.exists(), "object missing at {}", obj.display());
+        assert!(crate::artifact::verify_stored(&root, &digest).is_ok());
+        // a provenance record describes the authentication
+        let prov = crate::artifact::load_provenance(&root, &digest).unwrap().unwrap();
+        assert_eq!(prov.authentication, "unsigned-bootstrap");
+        assert_eq!(prov.package.unwrap().name, "demo");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn rollback_rejects_corrupted_object_bytes() {
+        let base = tmpdir("artifact-corrupt");
+        let root = base.join("root");
+        let v1 = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1")]);
+        let v2 = make_pkg(&base, "demo", "2.0", &[("/usr/bin/demo", b"v2")]);
+        install_archive(&v1, &root, false, true, None, "explicit").unwrap();
+        install_archive(&v2, &root, false, true, None, "explicit").unwrap();
+        // tamper with the stored object of the OLD version
+        let old_digest = crate::fetch::sha256_of_file(&v1).unwrap();
+        let obj = crate::artifact::object_path(&root, &old_digest).unwrap();
+        std::fs::write(&obj, b"tampered bytes").unwrap();
+        assert!(rollback("demo", &root).is_err(), "a corrupted cached archive must not be restorable");
+        // the system stays at 2.0
+        assert_eq!(std::fs::read(root.join("usr/bin/demo")).unwrap(), b"v2");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn rollback_rejects_missing_object() {
+        let base = tmpdir("artifact-missing");
+        let root = base.join("root");
+        let v1 = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1")]);
+        let v2 = make_pkg(&base, "demo", "2.0", &[("/usr/bin/demo", b"v2")]);
+        install_archive(&v1, &root, false, true, None, "explicit").unwrap();
+        install_archive(&v2, &root, false, true, None, "explicit").unwrap();
+        let old_digest = crate::fetch::sha256_of_file(&v1).unwrap();
+        let obj = crate::artifact::object_path(&root, &old_digest).unwrap();
+        std::fs::remove_file(&obj).unwrap();
+        // and hide the legacy named cache copy so only the object could have served
+        let _ = std::fs::remove_file(root.join("var/cache/nawa/demo-1.0-1.nawa.tar.zst"));
+        assert!(rollback("demo", &root).is_err(), "rollback must refuse without the original bytes");
+        assert_eq!(std::fs::read(root.join("usr/bin/demo")).unwrap(), b"v2");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn rollback_restores_through_verified_object_and_ping_pongs() {
+        let base = tmpdir("artifact-rollback");
+        let root = base.join("root");
+        let v1 = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1")]);
+        let v2 = make_pkg(&base, "demo", "2.0", &[("/usr/bin/demo", b"v2")]);
+        install_archive(&v1, &root, false, true, None, "explicit").unwrap();
+        install_archive(&v2, &root, false, true, None, "explicit").unwrap();
+        // remove the legacy named caches: the object store is now the only source
+        let _ = std::fs::remove_file(root.join("var/cache/nawa/demo-1.0-1.nawa.tar.zst"));
+        let _ = std::fs::remove_file(root.join("var/cache/nawa/demo-2.0-1.nawa.tar.zst"));
+
+        rollback("demo", &root).unwrap();
+        assert_eq!(std::fs::read(root.join("usr/bin/demo")).unwrap(), b"v1");
+        let db = Db::new(&root);
+        assert_eq!(db.entry("demo").unwrap().unwrap().version, "1.0");
+        // the restored entry itself references the verified object
+        let digest1 = crate::fetch::sha256_of_file(&v1).unwrap();
+        assert_eq!(db.entry("demo").unwrap().unwrap().artifact_sha256, digest1);
+        // ping-pong still works through the object store
+        rollback("demo", &root).unwrap();
+        assert_eq!(std::fs::read(root.join("usr/bin/demo")).unwrap(), b"v2");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn signed_index_install_records_repository_proof() {
+        let base = tmpdir("index-proof");
+        let root = base.join("root");
+        // build a repo with a signed v2 index
+        let repo_dir = base.join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        let v1 = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1")]);
+        std::fs::copy(&v1, repo_dir.join("demo-1.0-1.nawa.tar.zst")).unwrap();
+        let index_path = repo_dir.join("index.toml");
+        crate::repo::create_index_with_version(&repo_dir, &index_path, None, crate::repo::INDEX_SCHEMA_V2).unwrap();
+        let (secret, _public) = crate::sign::keygen(&base.join("publisher")).unwrap();
+        crate::sign::sign(&index_path, &secret).unwrap();
+        // trust the publisher
+        let (_, pub_path) = crate::sign::keygen(&base.join("publisher2")).unwrap();
+        let _ = pub_path;
+        // trust via the repo's own key: copy the publisher public key into the trust store
+        let pub_key = std::fs::read_to_string(secret.with_file_name("nawa.pub")).unwrap();
+        let trust_file = base.join("publisher.pub");
+        std::fs::write(&trust_file, pub_key).unwrap();
+        crate::sign::trust(&trust_file, &root).unwrap();
+
+        let open = crate::upgrade::open_repo(&root, &crate::fetch::RepoRef::Local(repo_dir.clone()), false, false).unwrap();
+        let re = open.index.find("demo").unwrap().clone();
+        let archive = crate::upgrade::fetch_entry(&root, &open, &re, false).unwrap();
+        let index_bytes = std::fs::read(&index_path).unwrap();
+        let sig_bytes = std::fs::read(index_path.with_extension("toml.sig")).ok();
+        // reconstruct the signer public bytes for the proof bundle
+        let signer_pub: Vec<u8> = std::fs::read(secret.with_file_name("nawa.pub")).unwrap();
+        install_archive_from_index_proof(
+            &archive, &root, false, &re.sha256, "explicit",
+            Some(crate::install::IndexProof {
+                index_bytes: Some(&index_bytes),
+                index_signature: sig_bytes.as_deref(),
+                signer_public: Some(&signer_pub),
+                repo_id: Some("local-test"),
+            }),
+        ).unwrap();
+
+        let digest = re.sha256.clone();
+        let prov = crate::artifact::load_provenance(&root, &digest).unwrap().unwrap();
+        assert_eq!(prov.authentication, "signed-index");
+        let repo_proof = prov.repository.unwrap();
+        assert_eq!(repo_proof.id, "local-test");
+        assert!(repo_proof.trusted_at_install);
+        // the proof bundle retains the index, signature and signer key
+        let dir = crate::artifact::object_path(&root, &digest).unwrap().parent().unwrap().to_path_buf();
+        assert!(dir.join(format!("{digest}.index.toml")).exists());
+        assert!(dir.join(format!("{digest}.index.toml.sig")).exists());
+        assert!(dir.join(format!("{digest}.signer.pub")).exists());
+        let db = Db::new(&root);
+        assert_eq!(db.entry("demo").unwrap().unwrap().artifact_sha256, digest);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
 }

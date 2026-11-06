@@ -363,6 +363,63 @@ pub(crate) enum Cmd {
     /// Roll a package back to the version recorded in its undo log
     Rollback { name: String },
 
+    /// List configured repositories and their state (no downloads)
+    Repolist {
+        /// include disabled repositories
+        #[arg(long)]
+        all: bool,
+    },
+
+    /// Refresh repository metadata caches (signature + freshness checked)
+    Makecache {
+        /// accept unsigned indexes when no trusted keys exist
+        #[arg(long)]
+        allow_unsigned: bool,
+        /// accept an expired repository index
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Query repository metadata without downloading any archive
+    Repoquery {
+        name: String,
+        /// restrict the query to this repository id
+        #[arg(long)]
+        repo_id: Option<String>,
+        /// full package info instead of a one-line result
+        #[arg(long)]
+        info: bool,
+    },
+
+    /// Garbage-collect caches, keeping everything referenced
+    Clean {
+        category: String,
+        /// show what would be removed, remove nothing
+        #[arg(short = 'n', long)]
+        dry_run: bool,
+    },
+
+    /// Install/remove groups of packages (metadata resolves to names)
+    Group {
+        #[command(subcommand)]
+        action: GroupCmd,
+    },
+
+    /// Manage and run plugins (list / info / enable / disable / run)
+    Plugin {
+        #[command(subcommand)]
+        action: PluginCmd,
+    },
+
+    /// Show the package transaction history (newest first)
+    History {
+        #[command(subcommand)]
+        action: Option<HistoryCmd>,
+        /// show at most this many transactions (default 20)
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+
     /// Manage runit services (enable/disable/start/stop/restart/list/status)
     Service {
         #[command(subcommand)]
@@ -412,6 +469,16 @@ pub(crate) enum Cmd {
     CompletePkgs,
 }
 
+/// Built-in command names: a plugin can never shadow any of these
+/// (roadmap §6.6). Keep in sync with the Cmd enum.
+pub(crate) const RESERVED_COMMANDS: &[&str] = &[
+    "build", "install", "outdated", "update", "autoremove", "search", "info",
+    "why", "deps", "deps-all", "remove", "query", "list", "files", "owner",
+    "revdep", "repo-create", "sync", "keygen", "sign", "verify", "trust",
+    "upgrade", "rollback", "history", "plugin", "service", "config", "init",
+    "completions", "sandbox-init", "sandbox-probe", "__complete_pkgs",
+];
+
 /// Flags shared by the commands that build and install by name.
 #[derive(clap::Args, Clone)]
 pub(crate) struct PlanFlags {
@@ -440,8 +507,58 @@ pub(crate) struct PlanFlags {
 }
 
 #[derive(Subcommand)]
-pub(crate) enum ServiceCmd {
-    /// List services in /etc/sv and their enabled state
+pub(crate) enum GroupCmd {
+    /// List installed groups
+    List,
+    /// Show a group's recorded membership
+    Info { id: String },
+    /// Install a group's packages through the normal planner
+    Install { id: String },
+    /// Remove a group's membership and its now-unneeded packages
+    Remove {
+        id: String,
+        /// do not ask for confirmation (non-interactive runs REQUIRE this)
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum PluginCmd {
+    /// List discovered plugins and their state
+    List,
+    /// Show one plugin's manifest details
+    Info { id: String },
+    /// Enable a plugin (stored in the [plugins] table of nawa.toml)
+    Enable { id: String },
+    /// Disable a plugin
+    Disable { id: String },
+    /// Run one of a plugin's commands with the given arguments
+    Run {
+        id: String,
+        command: String,
+        /// arguments passed through to the plugin (argv-preserving)
+        args: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum HistoryCmd {
+    /// List transactions (the default `nawa history` view)
+    List,
+    /// Show the full story of one transaction
+    Info { id: u64 },
+    /// Compensate a previous transaction with a new one
+    Undo {
+        id: u64,
+        /// do not ask for confirmation (non-interactive runs REQUIRE this)
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum ServiceCmd {    /// List services in /etc/sv and their enabled state
     List,
     /// Enable a service (link into the default runsvdir); --now also starts it
     Enable {
@@ -496,7 +613,7 @@ pub(crate) fn lock_mode(cmd: &Cmd) -> Option<lock::Mode> {
                 None
             }
         }
-        Cmd::Remove { .. } | Cmd::Rollback { .. } | Cmd::Autoremove { .. } => Some(Exclusive),
+        Cmd::Remove { .. } | Cmd::Rollback { .. } | Cmd::Autoremove { .. } | Cmd::History { .. } => Some(Exclusive),
         Cmd::Upgrade { dry_run, .. } => Some(if *dry_run { Shared } else { Exclusive }),
         // `build --install` / `update` lock themselves around the install
         // step only (holding the db lock through a full build would starve
@@ -510,8 +627,7 @@ pub(crate) fn lock_mode(cmd: &Cmd) -> Option<lock::Mode> {
         | Cmd::Owner { .. }
         | Cmd::Revdep { .. }
         | Cmd::Deps { .. }
-        | Cmd::DepsAll { .. } => Some(Shared),
-        // repo/sign tooling and everything below touches no package database
+        | Cmd::DepsAll { .. } => Some(Shared),        // repo/sign tooling and everything below touches no package database
         Cmd::RepoCreate { .. }
         | Cmd::Keygen { .. }
         | Cmd::Sign { .. }
@@ -524,7 +640,12 @@ pub(crate) fn lock_mode(cmd: &Cmd) -> Option<lock::Mode> {
         | Cmd::Init { .. }
         | Cmd::Service { .. }
         | Cmd::CompletePkgs => None,
-        Cmd::SandboxInit { .. } | Cmd::SandboxProbe { .. } => None,
+        Cmd::Group { action } => match action {
+                GroupCmd::List | GroupCmd::Info { .. } => None,
+                GroupCmd::Install { .. } | GroupCmd::Remove { .. } => Some(Exclusive),
+            },
+        Cmd::Repolist { .. } | Cmd::Repoquery { .. } | Cmd::Makecache { .. } | Cmd::Clean { .. }
+        | Cmd::Plugin { .. } | Cmd::SandboxInit { .. } | Cmd::SandboxProbe { .. } => None,
     }
 }
 
@@ -532,7 +653,7 @@ pub(crate) const COMPLETION_BASH: &str = r#"# bash completion for nawa (generate
 _nawa() {
     local cur prev commands pkgs
     cur="${COMP_WORDS[COMP_CWORD]}"
-    commands="build install outdated update autoremove deps deps-all search info why query list remove files owner repo-create keygen sign verify trust upgrade rollback service config init completions"
+    commands="build install outdated update autoremove deps deps-all search info why query list remove files owner repo-create keygen sign verify trust upgrade rollback history plugin service config init completions"
     pkgs="$(nawa __complete_pkgs 2>/dev/null)"
     if [ "$COMP_CWORD" -eq 1 ]; then
         COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
@@ -545,6 +666,12 @@ _nawa() {
             COMPREPLY=( $(compgen -W "$pkgs" -- "$cur") $(compgen -f -- "$cur") ) ;;
         sign|verify|trust|repo-create)
             COMPREPLY=( $(compgen -f -- "$cur") ) ;;
+        history)
+            if [ "$COMPCWORD" -eq 2 ]; then
+                COMPREPLY=( $(compgen -W "list info undo" -- "$cur") ) ;;
+        plugin)
+            if [ "$COMP_CWORD" -eq 2 ]; then
+                COMPREPLY=( $(compgen -W "list info enable disable run" -- "$cur") ) ;;
         service)
             if [ "$COMP_CWORD" -eq 2 ]; then
                 COMPREPLY=( $(compgen -W "list enable disable start stop restart status" -- "$cur") )
@@ -590,6 +717,8 @@ _nawa() {
         'trust:Add a public key to the trust store'
         'upgrade:Upgrade installed packages from a repository'
         'rollback:Roll a package back to the previous version'
+        'history:Show the package transaction history'
+        'plugin:Manage and run plugins'
         'service:Manage runit services'
         'config:Show the effective configuration'
         'init:Write a nawa.toml template'

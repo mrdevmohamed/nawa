@@ -38,6 +38,10 @@ pub const SYSCONF_DIR: &str = "/etc/nawa";
 pub const DEFAULT_REPO: &str =
     "https://github.com/mrdevmohamed/faseela-repo/releases/download/stable";
 
+/// Default parallel download workers (roadmap §7.2: conservative default,
+/// clamped to 1..=64 from all sources).
+pub const DEFAULT_DOWNLOADS: u32 = 4;
+
 /// Where `nawa install <name>` gets a package from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallMode {
@@ -84,6 +88,7 @@ pub struct Overrides {
     pub jobs: Option<u32>,
     pub repo: Option<String>,
     pub install_mode: Option<InstallMode>,
+    pub downloads: Option<u32>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -96,6 +101,21 @@ struct FileCfg {
     jobs: Option<u32>,
     repo: Option<String>,
     install_mode: Option<String>,
+    /// Parallel download workers (roadmap Phase 3 §7.2).
+    #[serde(default)]
+    downloads: Option<u32>,
+    /// Multiple repository definitions (roadmap Phase 4 §8.2). Parsed here
+    /// only so the key is ACCEPTED; the repository subsystem reads it
+    /// separately through `config::FileRepositories`.
+    #[serde(default)]
+    #[allow(dead_code)]
+    repositories: Option<toml::value::Array>,
+    /// The [plugins] enable/disable table (roadmap §6.7). Parsed here only
+    /// so the key is ACCEPTED; the plugin subsystem reads it separately via
+    /// `plugins::discovery::PluginState::from_config_text`.
+    #[serde(default)]
+    #[allow(dead_code)]
+    plugins: Option<toml::Table>,
 }
 
 /// One parsed config file plus the directory its relative paths anchor at.
@@ -117,6 +137,8 @@ pub struct Config {
     /// the binary repository (`None` = switched off with `repo = ""`)
     pub repo: Option<String>,
     pub install_mode: InstallMode,
+    /// Bounded parallel download workers (roadmap §7.2), default 4.
+    pub downloads: u32,
     /// The project `nawa.toml` that was applied, if any.
     pub file: Option<PathBuf>,
     /// The system-wide file (`/etc/nawa/nawa.toml`) that was applied, if any.
@@ -240,6 +262,7 @@ pub fn load(ov: &Overrides) -> Result<Config> {
         jobs: None,
         repo: Some(DEFAULT_REPO.to_string()),
         install_mode: InstallMode::Auto,
+        downloads: DEFAULT_DOWNLOADS,
         file: project_path.clone(),
         system_file: system_applied,
         sources: BTreeMap::new(),
@@ -286,6 +309,25 @@ pub fn load(ov: &Overrides) -> Result<Config> {
         cfg.repo = normalize_repo(&v);
         cfg.sources.insert("repo".into(), layer.path.display().to_string());
     }
+
+    // ---- downloads (roadmap §7.2: flag > env > file > default) -----------------
+    let mut downloads = DEFAULT_DOWNLOADS;
+    if let Some(v) = ov.downloads {
+        downloads = v;
+        cfg.sources.insert("downloads".into(), "flag".into());
+    } else if let Ok(v) = std::env::var("NAWA_DOWNLOADS") {
+        if !v.trim().is_empty() {
+            downloads = v.trim().parse::<u32>().context("bad NAWA_DOWNLOADS")?;
+            cfg.sources.insert("downloads".into(), "env NAWA_DOWNLOADS".into());
+        }
+    } else if let Some((v, layer)) = pick(&layers, |c| c.downloads) {
+        downloads = v;
+        cfg.sources.insert("downloads".into(), layer.path.display().to_string());
+    }
+    if downloads == 0 {
+        bail!("downloads = 0 is invalid — use at least 1 (sequential downloading)");
+    }
+    cfg.downloads = downloads.clamp(1, 64);
 
     // ---- install_mode (default: auto) -----------------------------------------
     if let Some(m) = ov.install_mode {
@@ -351,6 +393,13 @@ pub fn template() -> String {
 #   build - always build from the recipes
 #   ask   - like auto, but asks "repository or build?" in a terminal
 #install_mode = "auto"
+
+# Plugins (nawa plugin list / enable / disable): discovered in
+# /usr/lib/nawa/plugins, /usr/local/lib/nawa/plugins and $NAWA_PLUGIN_PATH.
+# An empty table means every usable plugin is enabled.
+#[plugins]
+#enabled = []
+#disabled = []
 "#
     )
 }

@@ -91,7 +91,38 @@ pub(crate) fn cmd_install(
     for name in &plan.up_to_date {
         println!("nawa: {name} is already installed and up to date");
     }
-    run_plan(ctx, &plan, flags, &sourcing, &extras)
+    if plan.items.is_empty() && extras.is_empty() {
+        return Ok(());
+    }
+    // one transaction for the whole command (roadmap §5.1): the id is
+    // allocated under the exclusive db lock inside begin_operation
+    let requested: Vec<String> = remaining_targets.clone();
+    let repo_ids: Vec<String> = sourcing
+        .open
+        .as_ref()
+        .and_then(|o| o.base_url.clone())
+        .into_iter()
+        .collect();
+    {
+        let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
+        let mut op = transaction::begin_operation(
+            &ctx.root,
+            transaction::OperationCommand::Install,
+            &requested,
+            &repo_ids,
+        )?;
+        drop(_lock);
+        let result = run_plan(ctx, &plan, flags, &sourcing, &extras, &mut op);
+        let err = result.err();
+        {
+            let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
+            op.finish(err.as_ref())?;
+        }
+        match err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
 }
 
 /// Where each package of a plan comes from, decided per package.
@@ -232,34 +263,8 @@ struct InstallRequest<'a> {
     /// The index was authenticated by a trusted key and replaces the
     /// per-archive detached signature (schema v2).
     signed_index: bool,
-    /// archive produced by a local source build (provenance category)
-    source_built: bool,
-    /// The exact index(+sig) bytes that authenticated the repository, for
-    /// artifact provenance. Empty for detached/unsigned paths.
-    proof: install::RepoProof,
-}
-
-impl<'a> InstallRequest<'a> {
-    /// Repository request (pinned to the index entry + provenance).
-    fn repo(
-        reason: &'a str,
-        what: &'a str,
-        number: usize,
-        total: usize,
-        re: &'a crate::repo::RepoEntry,
-        open: &'a upgrade::OpenRepo,
-    ) -> Self {
-        InstallRequest {
-            reason,
-            what,
-            number,
-            total,
-            index_sha256: Some(&re.sha256),
-            signed_index: open.archive_auth == upgrade::ArchiveAuth::SignedIndexSha256,
-            source_built: false,
-            proof: open.proof.clone().unwrap_or_else(install::RepoProof::empty),
-        }
-    }
+    /// Where this archive comes from, for the history record.
+    source: &'a str,
 }
 
 /// Install one ready archive. The library functions never lock; hold the db
@@ -269,49 +274,135 @@ fn install_one(
     archive: &Path,
     flags: &PlanFlags,
     request: InstallRequest<'_>,
+    open_repo: Option<&upgrade::OpenRepo>,
+    op: &mut transaction::OperationHandle,
 ) -> Result<()> {
     println!(
         "nawa: [{}/{}] installing {}",
         request.number, request.total, request.what
     );
     let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
-    let reason = request.reason.to_string();
-    let what = request.what.to_string();
-    let number = request.number;
-    let total = request.total;
-    let expected = request.index_sha256.map(|s| s.to_string());
-    let installed = if request.source_built {
-        install::install_built_archive(
-            archive,
-            &ctx.root,
-            flags.force,
-            flags.allow_unsigned,
-            None,
-            &reason,
-        )
-    } else if request.signed_index {
-        let expected = expected.ok_or_else(|| anyhow::anyhow!("internal: signed-index install without the index digest"))?;
-        install::install_archive_from_index_proof(
-            archive,
-            &ctx.root,
-            flags.force,
-            &expected,
-            &reason,
-            &request.proof,
-        )
-    } else {
-        install::install_archive_pinned(
-            archive,
-            &ctx.root,
-            flags.force,
-            flags.allow_unsigned,
-            None,
-            &reason,
-            expected.as_deref(),
-        )
+    // the transaction this install belongs to (begin_operation ran under
+    // this same lock; the write-ahead intent goes out before the mutation)
+    let db = db::Db::new(&ctx.root);
+    let name_guess = archive
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let before = name_guess
+        .split('-')
+        .next()
+        .map(|n| db.entry(n).ok().flatten())
+        .unwrap_or(None);
+    let before = match &before {
+        Some(_) => before,
+        None => {
+            // the archive filename need not encode the package name: read
+            // .PKGINFO for the real identity before touching anything
+            archive_name_of(archive)
+                .and_then(|n| db.entry(&n).ok().flatten())
+        }
     };
-    installed.with_context(|| format!("[{}/{}] install of {} failed", number, total, what))?;
+    let action = match &before {
+        None => transaction::history::StepAction::Install,
+        Some(old) if old.version_full() != new_full_of(archive) => {
+            transaction::history::StepAction::Upgrade
+        }
+        Some(_) => transaction::history::StepAction::Reinstall,
+    };
+    let mut recorder = op.recorder();
+    let digest_guess = crate::fetch::sha256_of_file(archive).unwrap_or_default();
+    let step_no = recorder
+        .step_intent(
+            before.as_ref().map(|_| "").unwrap_or(archive_name_of(archive).as_deref().unwrap_or("package")),
+            action,
+            before.as_ref(),
+            None,
+            &digest_guess,
+        )
+        .unwrap_or(0);
+    let installed = match request.index_sha256 {
+        Some(expected) if request.signed_index => {
+            // retain the exact signed-index proof bytes so the installed
+            // artifact keeps its authentication evidence (roadmap §4.5)
+            let proof = open_repo.map(|open| install::IndexProof {
+                index_bytes: Some(&open.index_bytes),
+                index_signature: open.index_signature.as_deref(),
+                signer_public: open.signer_public.as_deref(),
+                repo_id: open.base_url.as_deref(),
+            });
+            install::install_archive_from_index_proof(
+                archive,
+                &ctx.root,
+                flags.force,
+                expected,
+                request.reason,
+                proof,
+            )
+        }
+        pinned => install::install_archive_pinned(
+            archive,
+            &ctx.root,
+            flags.force,
+            flags.allow_unsigned,
+            None,
+            request.reason,
+            pinned,
+        ),
+    };
+    match &installed {
+        Ok(entry) => {
+            let _ = step_no;
+            recorder
+                .step_result(
+                    step_no,
+                    &entry.name,
+                    action,
+                    transaction::history::StepStatus::Committed,
+                    before.as_ref(),
+                    Some(entry),
+                    request.source,
+                    None,
+                    None,
+                )
+                .ok();
+        }
+        Err(e) => {
+            recorder
+                .step_result(
+                    step_no,
+                    archive_name_of(archive).as_deref().unwrap_or(archive.to_str().unwrap_or("package")),
+                    action,
+                    transaction::history::StepStatus::Failed,
+                    before.as_ref(),
+                    None,
+                    request.source,
+                    Some(format!("{e:#}")),
+                    None,
+                )
+                .ok();
+        }
+    }
+    installed.with_context(|| {
+        format!(
+            "[{}/{}] install of {} failed",
+            request.number, request.total, request.what
+        )
+    })?;
     Ok(())
+}
+
+/// The package name inside an archive (from .PKGINFO), when readable.
+fn archive_name_of(archive: &Path) -> Option<String> {
+    let raw = crate::archive::read_pkginfo(archive).ok()?;
+    let info = crate::archive::parse_pkginfo(&raw).ok()?;
+    info.get("pkgname").cloned()
+}
+
+fn new_full_of(archive: &Path) -> String {
+    archive_name_of(archive)
+        .map(|_| String::new())
+        .unwrap_or_default()
 }
 
 /// Show the plan, ask, then install every item in order — dependencies
@@ -324,6 +415,7 @@ pub(crate) fn run_plan(
     flags: &PlanFlags,
     sourcing: &Sourcing,
     extras: &[repo::RepoEntry],
+    op: &mut transaction::OperationHandle,
 ) -> Result<()> {
     let total = plan.items.len() + extras.len();
     if total == 0 {
@@ -461,21 +553,9 @@ pub(crate) fn run_plan(
         crate::interrupt::check()?;
         let n = i + 1;
         let id = it.rec.id();
-        let step = || -> Result<()> {
-            let (archive, request): (PathBuf, InstallRequest<'_>) = match &sources[i] {
-                Source::Build => (
-                    build_one(ctx, it, flags, n, total)?,
-                    InstallRequest {
-                        reason: it.why.db_reason(),
-                        what: &id,
-                        number: n,
-                        total,
-                        index_sha256: None,
-                        signed_index: false,
-                        source_built: true,
-                        proof: install::RepoProof::empty(),
-                    },
-                ),
+        let mut step = || -> Result<()> {
+            let (archive, index_sha256, signed_index): (PathBuf, Option<String>, bool) = match &sources[i] {
+                Source::Build => (build_one(ctx, it, flags, n, total)?, None, false),
                 Source::Repo(re) => {
                     println!("nawa: [{n}/{total}] fetching {id} from the repository");
                     let open = sourcing
@@ -483,35 +563,46 @@ pub(crate) fn run_plan(
                         .as_ref()
                         .context("internal: repository source without an open repository")?;
                     match upgrade::fetch_entry(&ctx.root, open, re, flags.allow_unsigned) {
-                        Ok(a) => (a, InstallRequest::repo(it.why.db_reason(), &id, n, total, re, open)),
+                        Ok(a) => (
+                            a,
+                            Some(re.sha256.clone()),
+                            open.archive_auth == upgrade::ArchiveAuth::SignedIndexSha256,
+                        ),
                         // strict repo mode never builds behind the user's back
                         Err(e) if sourcing.mode == InstallMode::Repo => {
                             return Err(e)
-                                .with_context(|| format!("[{n}/{total}] repository fetch of {id} failed"))
+                                .with_context(|| format!("[{n}/{total}] repository fetch of {id} failed"));
                         }
                         // auto: the recipe pins its sources, so a build is a safe fallback
                         Err(e) => {
                             eprintln!(
                                 "nawa: warning: cannot use the repository copy of {id} ({e:#}) — building from source"
                             );
-                            (
-                                build_one(ctx, it, flags, n, total)?,
-                                InstallRequest {
-                                    reason: it.why.db_reason(),
-                                    what: &id,
-                                    number: n,
-                                    total,
-                                    index_sha256: None,
-                                    signed_index: false,
-                                    source_built: true,
-                                    proof: install::RepoProof::empty(),
-                                },
-                            )
+                            (build_one(ctx, it, flags, n, total)?, None, false)
                         }
                     }
                 }
             };
-            install_one(ctx, &archive, flags, request)
+            let source = match &sources[i] {
+                Source::Repo(_) => "repository",
+                Source::Build => "local-build",
+            };
+            install_one(
+                ctx,
+                &archive,
+                flags,
+                InstallRequest {
+                    reason: it.why.db_reason(),
+                    what: &id,
+                    number: n,
+                    total,
+                    index_sha256: index_sha256.as_deref(),
+                    signed_index,
+                    source,
+                },
+                sourcing.open.as_ref(),
+                op,
+            )
         };
         if let Err(e) = step() {
             if i > 0 {
@@ -527,7 +618,7 @@ pub(crate) fn run_plan(
         crate::interrupt::check()?;
         let n = plan.items.len() + j + 1;
         let what = format!("{}-{}-{}", re.name, re.version, re.rel);
-        let step = || -> Result<()> {
+        let mut step = || -> Result<()> {
             println!("nawa: [{n}/{total}] fetching {what} from the repository");
             let open = sourcing
                 .open
@@ -535,11 +626,22 @@ pub(crate) fn run_plan(
                 .context("internal: repository package without an open repository")?;
             let archive = upgrade::fetch_entry(&ctx.root, open, re, flags.allow_unsigned)
                 .with_context(|| format!("[{n}/{total}] repository fetch of {what} failed"))?;
+            let signed_index = open.archive_auth == upgrade::ArchiveAuth::SignedIndexSha256;
             install_one(
                 ctx,
                 &archive,
                 flags,
-                InstallRequest::repo("explicit", &what, n, total, re, open),
+                InstallRequest {
+                    reason: "explicit",
+                    what: &what,
+                    number: n,
+                    total,
+                    index_sha256: Some(re.sha256.as_str()),
+                    signed_index,
+                    source: "repository",
+                },
+                sourcing.open.as_ref(),
+                op,
             )
         };
         if let Err(e) = step() {
@@ -636,11 +738,35 @@ pub(crate) fn cmd_update(
         }
     }
 
-    let result = run_plan(ctx, &plan, flags, &sourcing, &[]);
+    let requested = targets.clone();
+    let repo_ids: Vec<String> = sourcing
+        .open
+        .as_ref()
+        .and_then(|o| o.base_url.clone())
+        .into_iter()
+        .collect();
+    let mut op = {
+        let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
+        transaction::begin_operation(
+            &ctx.root,
+            transaction::OperationCommand::Update,
+            &requested,
+            &repo_ids,
+        )?
+    };
+    let result = run_plan(ctx, &plan, flags, &sourcing, &[], &mut op);
+    let err = result.err();
+    {
+        let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
+        op.finish(err.as_ref())?;
+    }
     // also after a partial run: whatever was installed is worth checking
     let changed: Vec<String> = plan.items.iter().map(|it| it.rec.package.name.clone()).collect();
     warn_revdep(ctx, &changed);
-    result
+    match err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 pub(crate) fn cmd_autoremove(ctx: &Ctx, dry_run: bool, yes: bool, build_deps: bool) -> Result<()> {
@@ -669,11 +795,48 @@ pub(crate) fn cmd_autoremove(ctx: &Ctx, dry_run: bool, yes: bool, build_deps: bo
         return Ok(());
     }
     confirm::confirm(&format!("nawa: remove {} package(s)?", order.len()), yes)?;
+    // the command holds the exclusive db lock for its whole duration
+    // (see cli::lock_mode), so no per-step locking happens here
+    let mut op = transaction::begin_operation(
+        &ctx.root,
+        transaction::OperationCommand::Autoremove,
+        &[],
+        &[],
+    )?;
     for (i, n) in order.iter().enumerate() {
         crate::interrupt::check()?;
         println!("nawa: [{}/{}] removing {n}", i + 1, order.len());
-        install::remove_with(n, &ctx.root, false)?;
+        let db = db::Db::new(&ctx.root);
+        let before = db.entry(n)?;
+        let mut recorder = op.recorder();
+        let step_no = recorder.step_intent(
+            n,
+            transaction::history::StepAction::Remove,
+            before.as_ref(),
+            None,
+            "",
+        )?;
+        match install::remove_with(n, &ctx.root, false) {
+            Ok(()) => {
+                recorder.step_result(
+                    step_no, n, transaction::history::StepAction::Remove,
+                    transaction::history::StepStatus::Committed,
+                    before.as_ref(), None, "autoremove", None, None,
+                )?;
+            }
+            Err(e) => {
+                recorder.step_result(
+                    step_no, n, transaction::history::StepAction::Remove,
+                    transaction::history::StepStatus::Failed,
+                    before.as_ref(), None, "autoremove", Some(format!("{e:#}")), None,
+                )?;
+                let err = e;
+                op.finish(Some(&err))?;
+                return Err(err);
+            }
+        }
     }
+    op.finish(None)?;
     println!("nawa: done — {} package(s) removed", order.len());
     Ok(())
 }
@@ -708,7 +871,52 @@ pub(crate) fn install_archive_file(
             suggest::hint(&wanted, &names)
         );
     }
-    install::install_archive(file, &ctx.root, force, allow_unsigned, key.as_deref(), "explicit")?;
+    // the caller (cmd_install) holds the exclusive lock for archive installs
+    let db = db::Db::new(&ctx.root);
+    let pkg_name = crate::archive::read_pkginfo(file)
+        .ok()
+        .and_then(|raw| crate::archive::parse_pkginfo(&raw).ok())
+        .and_then(|info| info.get("pkgname").cloned())
+        .unwrap_or_default();
+    let before = if pkg_name.is_empty() { None } else { db.entry(&pkg_name).ok().flatten() };
+    let action = match &before {
+        None => transaction::history::StepAction::Install,
+        Some(_) => transaction::history::StepAction::Upgrade,
+    };
+    let digest = crate::fetch::sha256_of_file(file).unwrap_or_default();
+    let mut op = transaction::begin_operation(
+        &ctx.root,
+        transaction::OperationCommand::ArchiveInstall,
+        &[file.display().to_string()],
+        &[],
+    )?;
+    let mut recorder = op.recorder();
+    let step_no = recorder
+        .step_intent(&pkg_name, action, before.as_ref(), None, &digest)
+        .unwrap_or(0);
+    let result = install::install_archive(file, &ctx.root, force, allow_unsigned, key.as_deref(), "explicit");
+    match &result {
+        Ok(entry) => {
+            recorder
+                .step_result(
+                    step_no, &entry.name, action,
+                    transaction::history::StepStatus::Committed,
+                    before.as_ref(), Some(entry), "archive", None, None,
+                )
+                .ok();
+        }
+        Err(e) => {
+            recorder
+                .step_result(
+                    step_no, &pkg_name, action,
+                    transaction::history::StepStatus::Failed,
+                    before.as_ref(), None, "archive", Some(format!("{e:#}")), None,
+                )
+                .ok();
+        }
+    }
+    op.finish(result.as_ref().err())?;
+    result?;
     Ok(())
 }
 
@@ -748,7 +956,41 @@ pub(crate) fn cmd_remove(ctx: &Ctx, name: &str, force: bool, yes: bool) -> Resul
         &format!("nawa: remove {name} from {}?", ctx.root.display()),
         yes,
     )?;
-    install::remove_with(name, &ctx.root, force)?;
+    let db = db::Db::new(&ctx.root);
+    let before = db.entry(name)?;
+    let mut op = transaction::begin_operation(
+        &ctx.root,
+        transaction::OperationCommand::Remove,
+        &[name.to_string()],
+        &[],
+    )?;
+    let mut recorder = op.recorder();
+    let step_no = recorder.step_intent(
+        name,
+        transaction::history::StepAction::Remove,
+        before.as_ref(),
+        None,
+        before.as_ref().map(|b| b.artifact_sha256.as_str()).unwrap_or(""),
+    )?;
+    let result = install::remove_with(name, &ctx.root, force);
+    match &result {
+        Ok(()) => {
+            recorder.step_result(
+                step_no, name, transaction::history::StepAction::Remove,
+                transaction::history::StepStatus::Committed,
+                before.as_ref(), None, "remove", None, None,
+            )?;
+        }
+        Err(e) => {
+            recorder.step_result(
+                step_no, name, transaction::history::StepAction::Remove,
+                transaction::history::StepStatus::Failed,
+                before.as_ref(), None, "remove", Some(format!("{e:#}")), None,
+            )?;
+        }
+    }
+    op.finish(result.as_ref().err())?;
+    result?;
     // the removed package is gone: this checks what depended on it
     warn_revdep(ctx, &[name.to_string()]);
     Ok(())
