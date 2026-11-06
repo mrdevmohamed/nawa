@@ -102,7 +102,7 @@ pub fn cmd_repolist(cfg: &Config, all: bool) -> Result<()> {
         println!("nawa: no repositories configured");
         return Ok(());
     }
-    println!("{:<12}  {:<8}  {:<8}  {}", "ID", "State", "Priority", "URL");
+    println!("{:<12}  {:<8}  {:<8}  URL", "ID", "State", "Priority");
     println!("{}", "-".repeat(60));
     for r in &repos {
         if !all && !r.enabled {
