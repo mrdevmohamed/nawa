@@ -63,7 +63,7 @@ impl PluginProcess {
         timeout: Duration,
     ) -> Result<Self> {
         let sandboxed = super::sandbox::spawn(&manifest.executable, protected_paths)?;
-        let super::sandbox::SandboxedChild { mut child, cleanup }
+        let super::sandbox::SandboxedChild { mut child, cleanup } = sandboxed;
         let stdin = child.stdin.take().context("plugin sandbox stdin pipe disappeared")?;
         let stdout = child.stdout.take().context("plugin sandbox stdout pipe disappeared")?;
         let stderr = child.stderr.take().context("plugin sandbox stderr pipe disappeared")?;
