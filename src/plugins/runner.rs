@@ -168,7 +168,18 @@ impl PluginProcess {
         let remaining = timeout.saturating_sub(started.elapsed());
         let envelope = match self.responses.recv_timeout(remaining) {
             Ok(Ok(envelope)) => envelope,
-            Ok(Err(error)) => return Err(error).context("read plugin response"),
+            Ok(Err(error)) => {
+                // Sandbox setup failures are written by namespace PID 1 to
+                // stderr before stdout closes. Give the drain thread a brief
+                // chance to collect those diagnostics so the caller sees the
+                // actual fail-closed reason rather than a generic EOF.
+                std::thread::sleep(Duration::from_millis(20));
+                let detail = self.stderr_summary();
+                if detail.is_empty() {
+                    return Err(error).context("read plugin response");
+                }
+                return Err(error).context(format!("read plugin response{detail}"));
+            },
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 let _ = self.child.kill();
                 let detail = self.stderr_summary();
