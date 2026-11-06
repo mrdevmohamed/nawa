@@ -55,15 +55,16 @@ fn ok(output: Output) -> String {
 /// A plugin that answers the handshake and echoes its arguments back.
 const GOOD_PLUGIN: &str = r#"#!/bin/sh
 read -r line
-printf '%s\n' '{"protocol":"nawa-plugin","protocol_version":1,"request_id":"1","ok":true,"result":{"plugin_id":"good","plugin_version":"1.0.0","api_version":"1","commands":["hello-cmd"],"capabilities":["history.read"]}}'
+printf '%s\n' '{"protocol":"nawa-plugin","protocol_version":1,"request_id":"hello-1","ok":true,"result":{"plugin_id":"good","plugin_version":"1.0.0","api_version":"1","commands":["hello-cmd"],"capabilities":["history.read"]}}'
 read -r line
-printf '%s\n' '{"protocol":"nawa-plugin","protocol_version":1,"request_id":"run-RUNID","ok":true,"result":{"greeting":"from-plugin"}}'
+rid=$(printf '%s' "$line" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+printf '{"protocol":"nawa-plugin","protocol_version":1,"request_id":"%s","ok":true,"result":{"greeting":"from-plugin"}}\n' "$rid"
 "#;
 
 /// A plugin whose response line uses a wrong request id.
 const WRONG_ID_PLUGIN: &str = r#"#!/bin/sh
 read -r line
-printf '%s\n' '{"protocol":"nawa-plugin","protocol_version":1,"request_id":"1","ok":true,"result":{"plugin_id":"wrongid","plugin_version":"1.0.0","api_version":"1","commands":["x"]}}'
+printf '%s\n' '{"protocol":"nawa-plugin","protocol_version":1,"request_id":"hello-1","ok":true,"result":{"plugin_id":"wrongid","plugin_version":"1.0.0","api_version":"1","commands":["x"]}}'
 read -r line
 printf '%s\n' '{"protocol":"nawa-plugin","protocol_version":1,"request_id":"someone-else","ok":true,"result":{}}'
 "#;
@@ -132,7 +133,7 @@ fn plugin_run_executes_and_prints_json() {
     // install the smart plugin directly: it reflects the request id back
     let smart = r#"#!/bin/sh
 read -r line
-printf '%s\n' '{"protocol":"nawa-plugin","protocol_version":1,"request_id":"1","ok":true,"result":{"plugin_id":"good","plugin_version":"1.0.0","api_version":"1","commands":["hello-cmd"],"capabilities":[]}}'
+printf '%s\n' '{"protocol":"nawa-plugin","protocol_version":1,"request_id":"hello-1","ok":true,"result":{"plugin_id":"good","plugin_version":"1.0.0","api_version":"1","commands":["hello-cmd"],"capabilities":[]}}'
 read -r line
 rid=$(printf '%s' "$line" | sed 's/.*"request_id":"\([^"]*\)".*/\1/')
 printf '{"protocol":"nawa-plugin","protocol_version":1,"request_id":"%s","ok":true,"result":{"greeting":"from-plugin"}}\n' "$rid"
