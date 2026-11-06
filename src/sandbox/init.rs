@@ -33,6 +33,13 @@ pub fn init(path: &Path) -> Result<i32> {
     let euid = sys::geteuid();
     let egid = sys::getegid();
 
+    // setgroups=deny is installed as part of the parent-side gid-map
+    // handshake. Clear inherited supplementary groups before entering the
+    // user namespace; the child can then safely set its mapped primary gid.
+    if euid == 0 {
+        sys::clear_supplementary_groups()?;
+    }
+
     // SAFETY: single-threaded process, no open file references that a
     // namespace change could observe.
     if let Err(e) = unsafe { unshare_unsafe(UnshareFlags::NEWUSER) } {
