@@ -86,11 +86,10 @@ pub fn set_parent_death_kill() -> Result<()> {
     if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) } != 0 {
         return Err(std::io::Error::last_os_error()).context("set sandbox parent-death signal");
     }
-    // Close the race where the parent died just before prctl().
-    if unsafe { libc::getppid() } <= 1 {
-        // SAFETY: this PID-namespace child may terminate itself.
-        unsafe { libc::raise(libc::SIGKILL) };
-    }
+    // Do not use getppid() as a liveness check here: the sandbox PID 1
+    // has a supervisor in an ancestor PID namespace, so Linux reports PPID 0
+    // even while that supervisor is alive. The signal is installed before
+    // any filesystem work or plugin exec.
     Ok(())
 }
 
