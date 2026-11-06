@@ -91,3 +91,25 @@ GitHub Actions run: [42250148164](https://github.com/mrdevmohamed/nawa/actions/r
 All 10 executable jobs passed: root and user tests on Ubuntu 22.04, root tests on Ubuntu 24.04, CLI smoke tests, static musl build, Clippy/build/tests, and all four sandbox isolation modes (`none`, `env`, `sandbox`, `closure`). CodeRabbit remained skipped by its repository eligibility condition and was not counted as a passing review.
 
 The remaining unchecked item is expanded fault-injection coverage across every filesystem/database commit boundary. This is additional hardening beyond the regressions added for the reproduced crash windows.
+
+
+## Follow-up remediation — 2026-11-06
+
+**Implementation code revision:** `d67dfa7570e52fdea5e66f37ce5db70518f7932c`
+
+The follow-up review found and addressed three additional transaction-integrity gaps:
+
+### R9 — Install reason was missing from undo conflict detection
+`PackageState::matches_entry()` now compares a non-empty recorded install reason with the live entry. Legacy snapshots with an empty reason retain the identity/digest fallback. Regression coverage verifies that an identical archive/version promoted from `dependency` to `explicit` blocks an older undo, both at the state-comparison layer and through `plan_undo()`.
+
+### R10 — `nawa rollback` was outside Transaction History
+Rollback now opens an `OperationCommand::Rollback` operation, persists a `restore` intent before calling the existing verified archive restore path, and records the committed/failed/hook-failed result. The resulting transaction is compensatable by `nawa history undo`. Observer events distinguish a restore from an absent package (installed) from a restore over an existing package (upgraded). A regression test checks the generated history record and undo plan.
+
+### R11 — History/WAL atomic renames lacked a durability boundary
+Added `src/transaction/atomic.rs` and routed transaction records, administrative record rewrites, the `last-id` marker, WAL intents/results/state through it. It writes a unique temporary file, calls `sync_all()`, renames it, then syncs the containing directory. New transaction records refuse to overwrite an existing id. If `last-id` is absent or stale, allocation scans existing transaction records and WAL directories before selecting the next id.
+
+### Fault-injection expansion
+The atomic writer now has test-only fault points after the write, after file sync, and after rename. Tests assert that pre-rename failures preserve the previous file and clean the temporary, while a post-rename failure leaves a complete new file visible for recovery. Additional coverage exercises nested parent creation, a final history record surviving a crash before WAL cleanup, stale/missing id-marker recovery, reason-only undo conflicts, and rollback history.
+
+### Verification status
+The implementation changes above are committed to the PR branch. GitHub Actions verification for the updated branch is pending at the time this log entry was written; no new passing result is claimed here. The prior 10-job result cited above belongs to the earlier head and must not be treated as verification of this follow-up.
