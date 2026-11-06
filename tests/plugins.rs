@@ -197,6 +197,19 @@ fn broken_plugins_do_not_crash_list_or_run() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn unknown_top_level_command_is_routed_through_plugin_dispatch() {
+    let dir = scratch("external");
+    let out = run(&dir, &["plugin-only-command", "one", "two words"]);
+    assert!(!out.status.success(), "an unregistered dynamic command must fail");
+    let error = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        error.contains("no enabled plugin has an administrator command.register grant"),
+        "{error}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
 fn pdir2(dir: &Path, id: &str) -> PathBuf {
     dir.join("plugins").join(id)
 }
