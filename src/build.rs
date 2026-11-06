@@ -998,6 +998,8 @@ fn prepare_sandbox(
         readonly_paths: Vec::new(),
         strict_readonly_root: false,
         writable_paths: Vec::new(),
+        strict_readonly_root: false,
+        writable_paths: Vec::new(),
     };
     if rec.sandbox.network && !opts.allow_network {
         eprintln!(
