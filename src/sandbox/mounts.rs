@@ -230,13 +230,13 @@ fn remount_mount_tree_ro(spec: &SandboxSpec) -> Result<()> {
         // mountinfo can retain entries for mounts absent in restricted
         // containers (notably EFI variables). Skip only ENOENT; permission
         // or lookup errors must fail closed rather than weaken read-only mode.
-        if !writable && !hidden {
-            if mount
+        if !writable
+            && !hidden
+            && mount
                 .try_exists()
                 .with_context(|| format!("inspect sandbox mount point {path}"))?
-            {
-                mounts.push(path);
-            }
+        {
+            mounts.push(path);
         }
     }
     // Children first: a read-only parent must not interfere with remounting
