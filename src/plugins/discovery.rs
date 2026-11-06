@@ -232,6 +232,11 @@ impl PluginState {
     }
 
     pub fn has_grant(&self, id: &str, capability: super::manifest::Capability) -> bool {
+        // notification.send is reserved until API v1 has a real host-side
+        // notification broker. A hand-edited TOML file cannot activate it.
+        if capability == super::manifest::Capability::NotificationSend {
+            return false;
+        }
         self.grants.get(id)
             .is_some_and(|items| items.iter().any(|item| item == capability.as_str()))
     }
