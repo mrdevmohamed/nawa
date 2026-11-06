@@ -25,7 +25,7 @@
 //!   sandbox come from our own config, verified at parse time);
 //! * every error is surfaced as an ordinary `Result`, never a panic.
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use rustix::fd::BorrowedFd;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
