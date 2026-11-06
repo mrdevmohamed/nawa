@@ -246,14 +246,37 @@ printf '{"protocol":"nawa-plugin","protocol_version":1,"request_id":"%s","ok":tr
         String::from_utf8_lossy(&denied.stderr)
     );
 
-    fs::write(
-        &config,
-        "[plugins]\nenabled = [\"registered\"]\n\n[plugins.grants]\nregistered = [\"command.register\"]\n",
-    ).unwrap();
-    fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+    let grant = run(&dir, &["plugin", "grant", "registered", "command.register"]);
+    assert!(
+        grant.status.success(),
+        "grant failed: {}",
+        String::from_utf8_lossy(&grant.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&grant.stdout).contains("granted command.register"),
+        "{}",
+        String::from_utf8_lossy(&grant.stdout)
+    );
 
     let output = ok(run(&dir, &["hello-cmd", "after-grant"]));
     assert!(output.contains("automatically_dispatched"), "{output}");
+
+    let revoke = run(&dir, &["plugin", "revoke", "registered", "command.register"]);
+    assert!(
+        revoke.status.success(),
+        "revoke failed: {}",
+        String::from_utf8_lossy(&revoke.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&revoke.stdout).contains("revoked command.register"),
+        "{}",
+        String::from_utf8_lossy(&revoke.stdout)
+    );
+    let denied_after_revoke = run(&dir, &["hello-cmd", "after-revoke"]);
+    assert!(
+        !denied_after_revoke.status.success(),
+        "revoked command.register must stop automatic dispatch"
+    );
     let _ = fs::remove_dir_all(&dir);
 }
 
