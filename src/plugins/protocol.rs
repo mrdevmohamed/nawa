@@ -29,6 +29,8 @@ pub struct HelloRequest<'a> {
 pub struct HelloParams<'a> {
     pub nawa_version: &'a str,
     pub plugin_api: &'a str,
+    /// Effective capabilities granted by the system administrator.
+    pub granted_capabilities: &'a [String],
 }
 
 /// A successful `hello` response. Every field is part of the protocol
@@ -72,6 +74,22 @@ pub struct RunRequest<'a> {
 pub struct RunParams<'a> {
     pub command: &'a str,
     pub args: &'a [String],
+}
+
+/// A post-transaction observer request.
+#[derive(Debug, Serialize)]
+pub struct EventRequest<'a> {
+    pub protocol: &'a str,
+    pub protocol_version: u32,
+    pub request_id: &'a str,
+    pub method: &'a str,
+    pub params: EventParams<'a>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EventParams<'a> {
+    pub event_type: &'a str,
+    pub payload: &'a serde_json::Value,
 }
 
 /// Serialize one request line.
@@ -169,6 +187,7 @@ mod tests {
             params: HelloParams {
                 nawa_version: "1.0.0",
                 plugin_api: "1",
+                granted_capabilities: &[],
             },
         })
         .unwrap()
