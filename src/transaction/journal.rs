@@ -152,33 +152,45 @@ pub fn read_result(root: &Path, tx: u64, step: u32) -> Result<Option<StepResult>
     Ok(Some(toml::from_str(&raw).context("corrupt step result")?))
 }
 
-/// Every (step, intent) of a transaction that has an intent but no result:
-/// the ones reconciliation must decide about.
-pub fn pending_steps(root: &Path, tx: u64) -> Result<Vec<(u32, StepIntent)>> {
+/// Every step intent paired with its durable result when one exists.
+pub fn transaction_steps(root: &Path, tx: u64) -> Result<Vec<(StepIntent, Option<StepResult>)>> {
     let dir = journal_dir(root, tx).join("steps");
-    let mut out = Vec::new();
     let rd = match std::fs::read_dir(&dir) {
         Ok(rd) => rd,
-        Err(_) => return Ok(out),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error).with_context(|| format!("read journal {}", dir.display())),
     };
-    let mut steps: Vec<u32> = rd
-        .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let n = e.file_name().to_string_lossy().to_string();
-            n.strip_prefix("intent-")
-                .and_then(|s| s.strip_suffix(".toml"))
-                .and_then(|s| s.parse::<u32>().ok())
-        })
-        .collect();
+    let mut steps: Vec<u32> = rd.filter_map(|entry| entry.ok()).filter_map(|entry| {
+        let name = entry.file_name().to_string_lossy().to_string();
+        name.strip_prefix("intent-").and_then(|value| value.strip_suffix(".toml"))
+            .and_then(|value| value.parse::<u32>().ok())
+    }).collect();
     steps.sort_unstable();
+    steps.dedup();
+    let mut out = Vec::with_capacity(steps.len());
     for step in steps {
-        if read_result(root, tx, step)?.is_none() {
-            if let Some(intent) = read_intent(root, tx, step)? {
-                out.push((step, intent));
+        let intent = read_intent(root, tx, step)?
+            .ok_or_else(|| anyhow::anyhow!("journal step {tx}/{step} disappeared while reading"))?;
+        if intent.schema != SCHEMA_VERSION || intent.tx != tx || intent.step != step {
+            anyhow::bail!("journal intent identity mismatch for transaction {tx}, step {step}");
+        }
+        let result = read_result(root, tx, step)?;
+        if let Some(result) = &result {
+            if result.schema != SCHEMA_VERSION || result.tx != tx
+                || result.step != step || result.package != intent.package {
+                anyhow::bail!("journal result identity mismatch for transaction {tx}, step {step}");
             }
         }
+        out.push((intent, result));
     }
     Ok(out)
+}
+
+/// Every intent without a durable result.
+pub fn pending_steps(root: &Path, tx: u64) -> Result<Vec<(u32, StepIntent)>> {
+    Ok(transaction_steps(root, tx)?.into_iter()
+        .filter_map(|(intent, result)| result.is_none().then_some((intent.step, intent)))
+        .collect())
 }
 
 /// Every transaction id that has a journal directory.
@@ -264,6 +276,10 @@ mod tests {
         let pending = pending_steps(&root, 7).unwrap();
         assert_eq!(pending.len(), 1, "a step with a result is no longer pending");
         assert_eq!(pending[0].1.package, "curl");
+        let all = transaction_steps(&root, 7).unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(all[0].1.is_some());
+        assert!(all[1].1.is_none());
 
         assert_eq!(journaled_transactions(&root).unwrap(), vec![7]);
         clear_journal(&root, 7).unwrap();

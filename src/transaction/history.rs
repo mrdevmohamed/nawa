@@ -365,6 +365,23 @@ pub fn rewrite_record(root: &Path, record: &TransactionRecord) -> Result<()> {
     write_record(root, record)
 }
 
+/// Mark the original transaction undone only after its compensating
+/// transaction is durably recorded as completed. This operation is idempotent.
+pub fn mark_undone_by(root: &Path, original_id: u64, undo_id: u64) -> Result<()> {
+    let undo = load_record(root, undo_id)?;
+    if undo.undoes != Some(original_id) || undo.status()? != TxStatus::Completed {
+        bail!("transaction {undo_id} is not a completed undo of transaction {original_id}");
+    }
+    let mut original = load_record(root, original_id)?;
+    match original.undone_by {
+        Some(existing) if existing == undo_id => return Ok(()),
+        Some(existing) => bail!("transaction {original_id} was already undone by transaction {existing}"),
+        None => {}
+    }
+    original.undone_by = Some(undo_id);
+    rewrite_record(root, &original)
+}
+
 /// Load one record by id.
 pub fn load_record(root: &Path, id: u64) -> Result<TransactionRecord> {
     let path = transaction_path(root, id);

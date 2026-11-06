@@ -70,6 +70,11 @@ pub fn plan_undo(root: &Path, id: u64) -> Result<UndoPlan> {
     if let Some(by) = record.undone_by {
         bail!("transaction {id} was already undone by transaction {by}");
     }
+    if let Some(undo) = crate::transaction::history::list_records(root)?.into_iter().find(|candidate| {
+        candidate.undoes == Some(id) && candidate.status().ok() == Some(TxStatus::Completed)
+    }) {
+        bail!("transaction {id} was already undone by transaction {}", undo.id);
+    }
     let committed: Vec<&super::history::PackageChange> = record
         .package_changes
         .iter()
@@ -148,15 +153,33 @@ pub fn plan_undo(root: &Path, id: u64) -> Result<UndoPlan> {
     if steps.is_empty() {
         bail!("transaction {id} has no compensable package changes");
     }
-    // dependency order (roadmap §5.9): removed dependencies are restored
-    // BEFORE the packages that require them; installed packages are removed
-    // dependents-first.
-    steps.sort_by(|a, b| match (&a.action, &b.action) {
-        (UndoAction::RestorePrevious { .. } | UndoAction::Reinstall { .. }, UndoAction::Remove) => std::cmp::Ordering::Less,
-        (UndoAction::Remove, UndoAction::RestorePrevious { .. } | UndoAction::Reinstall { .. }) => std::cmp::Ordering::Greater,
-        _ => std::cmp::Ordering::Equal,
-    });
-    Ok(UndoPlan { original_id: id, steps })
+    // Preserve dependency-first order for upgrades. Undoing removals
+    // reinstalls dependencies first (reverse original removal order).
+    // Undoing new installs removes dependents first using the shared planner.
+    let mut restore_previous = Vec::new();
+    let mut reinstall = Vec::new();
+    let mut remove = Vec::new();
+    for step in steps {
+        match &step.action {
+            UndoAction::RestorePrevious { .. } => restore_previous.push(step),
+            UndoAction::Reinstall { .. } => reinstall.push(step),
+            UndoAction::Remove => remove.push(step),
+            UndoAction::Nothing => {}
+        }
+    }
+    reinstall.reverse();
+    let installed = db.installed()?;
+    let names: Vec<String> = remove.iter().map(|step| step.package.clone()).collect();
+    let ordered_names = crate::plan::removal_order(&names, &installed);
+    let mut by_name: BTreeMap<String, UndoStep> =
+        remove.into_iter().map(|step| (step.package.clone(), step)).collect();
+    let mut ordered = restore_previous;
+    ordered.extend(reinstall);
+    for name in ordered_names {
+        if let Some(step) = by_name.remove(&name) { ordered.push(step); }
+    }
+    ordered.extend(by_name.into_values());
+    Ok(UndoPlan { original_id: id, steps: ordered })
 }
 
 /// Apply a preflighted undo plan through the ordinary installer/remover.
@@ -173,95 +196,70 @@ pub struct AppliedStep {
 }
 
 pub fn apply_undo(
-    root: &Path,
-    plan: &UndoPlan,
-    recorder: &mut super::context::RecorderHandle<'_>,
-    force: bool,
+    root: &Path, plan: &UndoPlan,
+    recorder: &mut super::context::RecorderHandle<'_>, force: bool,
 ) -> Result<Vec<AppliedStep>> {
     let db = crate::db::Db::new(root);
     let mut applied = Vec::new();
     for step in &plan.steps {
         let before_entry = db.entry(&step.package)?;
-        let (action, status, failure): (StepAction, bool, Option<String>) = match &step.action {
-            UndoAction::Nothing => (StepAction::Reinstall, true, None),
+        let (action, target) = match &step.action {
+            UndoAction::Nothing => (StepAction::Reinstall, before_entry.as_ref().map(PackageState::from_entry)),
+            UndoAction::Remove => (StepAction::Remove, None),
+            UndoAction::RestorePrevious { .. } | UndoAction::Reinstall { .. } => (StepAction::Restore, step.before.clone()),
+        };
+        let target_digest = target.as_ref().map(|state| state.artifact_sha256.as_str()).unwrap_or("");
+        // WAL must be durable before touching package files or the database.
+        let step_no = recorder.step_intent_state(
+            &step.package, action, before_entry.as_ref(), target.as_ref(), target_digest,
+        )?;
+        let (mut status, mut failure, mut hook) = (true, None, None);
+        match &step.action {
+            UndoAction::Nothing => {}
             UndoAction::Remove => {
-                // recheck reverse dependencies now, at execution time
-                let dependents: Vec<String> = db
-                    .installed()?
-                    .into_iter()
-                    .filter(|e| e.name != step.package && e.run.iter().any(|r| r == &step.package))
-                    .map(|e| e.name)
-                    .collect();
+                let dependents: Vec<String> = db.installed()?.into_iter()
+                    .filter(|entry| entry.name != step.package
+                        && entry.run.iter().any(|dependency| dependency == &step.package))
+                    .map(|entry| entry.name).collect();
                 if !dependents.is_empty() && !force {
-                    (
-                        StepAction::Remove,
-                        false,
-                        Some(format!("still required by {}", dependents.join(", "))),
-                    )
-                } else {
-                    match crate::install::remove_with(&step.package, root, force) {
-                        Ok(()) => (StepAction::Remove, true, None),
-                        Err(e) => (StepAction::Remove, false, Some(format!("{e:#}"))),
-                    }
+                    status = false;
+                    failure = Some(format!("still required by {}", dependents.join(", ")));
+                } else if let Err(error) = crate::install::remove_with(&step.package, root, force) {
+                    status = false;
+                    failure = Some(format!("{error:#}"));
                 }
             }
             UndoAction::RestorePrevious { digest } | UndoAction::Reinstall { digest } => {
-                match crate::artifact::verify_stored(root, digest)
-                    .map_err(|e| anyhow::anyhow!("object verification failed: {e:#}"))
+                if let Err(error) = crate::artifact::verify_stored(root, digest)
+                    .map_err(|error| anyhow::anyhow!("object verification failed: {error:#}"))
                     .and_then(|object| restore_object(root, &object, digest, &step.reason))
                 {
-                    Ok(()) => (StepAction::Restore, true, None),
-                    Err(e) => (StepAction::Restore, false, Some(format!("{e:#}"))),
+                    failure = Some(format!("{error:#}"));
+                    let current = db.entry(&step.package)?;
+                    if target.as_ref().is_some_and(|expected| current.as_ref()
+                        .is_some_and(|entry| expected.matches_entry(entry))) {
+                        status = true;
+                        hook = Some("failed".to_string());
+                    } else { status = false; }
                 }
             }
-        };
+        }
         let after_entry = db.entry(&step.package)?;
-        let step_no = recorder
-            .step_intent(
-                &step.package,
-                action,
-                before_entry.as_ref(),
-                after_entry.as_ref(),
-                step.before.as_ref().map(|b| b.artifact_sha256.as_str()).unwrap_or(""),
-            )
-            .unwrap_or(0);
-        recorder
-            .step_result(
-                step_no,
-                &step.package,
-                action,
-                if status {
-                    super::history::StepStatus::Committed
-                } else {
-                    super::history::StepStatus::Failed
-                },
-                before_entry.as_ref(),
-                after_entry.as_ref(),
-                "history-undo",
-                failure.clone(),
-                None,
-            )
-            .ok();
-        applied.push(AppliedStep {
-            package: step.package.clone(),
-            action,
-            committed: status,
-            failure,
-        });
+        let step_status = if !status { super::history::StepStatus::Failed }
+            else if hook.is_some() { super::history::StepStatus::CommittedHookFailed }
+            else { super::history::StepStatus::Committed };
+        recorder.step_result(
+            step_no, &step.package, action, step_status,
+            before_entry.as_ref(), after_entry.as_ref(), "history-undo",
+            failure.clone(), hook,
+        )?;
+        applied.push(AppliedStep { package: step.package.clone(), action, committed: status, failure });
     }
-    let any_failed = applied.iter().any(|s| !s.committed);
-    if any_failed {
-        let failed: Vec<String> = applied
-            .iter()
-            .filter(|s| !s.committed)
-            .map(|s| s.package.clone())
-            .collect();
-        bail!(
-            "undo of transaction {} partially failed for: {} (the completed steps \
-             remain in effect and are recorded)",
-            plan.original_id,
-            failed.join(", ")
-        );
+    let failed: Vec<String> = applied.iter().filter(|step| !step.committed)
+        .map(|step| step.package.clone()).collect();
+    if !failed.is_empty() {
+        bail!("undo of transaction {} partially failed for: {} (completed steps remain in effect and are recorded)",
+            plan.original_id, failed.join(", "));
     }
     Ok(applied)
 }
@@ -385,11 +383,8 @@ impl super::history::PackageChange {
 /// `nawa history undo <ID>`: plan, confirm, then apply as a new transaction
 /// linked to the original. Returns Ok(()) even when the user declined.
 pub fn history_undo(root: &Path, id: u64, yes: bool) -> Result<()> {
-    let _lock = crate::lock::acquire(root, crate::lock::Mode::Exclusive)?;
-    // reconcile anything a killed nawa left behind first
-    for note in super::recovery::reconcile_incomplete(root)? {
-        eprintln!("nawa: recovered: {note}");
-    }
+    // main::run owns the exclusive database lock for history commands.
+    // A second flock on another open file description would deadlock here.
     let plan = plan_undo(root, id)?;
     println!("nawa: undoing transaction {id} ({}) — compensating steps:", plan.steps.len());
     for step in &plan.steps {
@@ -419,16 +414,19 @@ pub fn history_undo(root: &Path, id: u64, yes: bool) -> Result<()> {
         &[],
     )?;
     op.link_undo(id)?;
-    let mut recorder = op.recorder();
-    let result = apply_undo(root, &plan, &mut recorder, false);
-    let err = result.err();
-    op.finish(err.as_ref())?;
-    match err {
-        Some(e) => Err(e),
-        None => {
-            println!("nawa: transaction {id} undone (recorded as a new transaction)");
+    let undo_id = op.tx().expect("history undo always records a transaction");
+    let result = {
+        let mut recorder = op.recorder();
+        apply_undo(root, &plan, &mut recorder, false)
+    };
+    match result {
+        Ok(_) => {
+            op.finish(None)?;
+            super::history::mark_undone_by(root, id, undo_id)?;
+            println!("nawa: transaction {id} undone (recorded as transaction {undo_id})");
             Ok(())
         }
+        Err(error) => { op.finish(Some(&error))?; Err(error) }
     }
 }
 
@@ -504,6 +502,38 @@ mod tests {
     }
 
     #[test]
+    fn undo_of_install_removes_dependents_before_their_dependencies() {
+        let base = tmpdir("dependency-order");
+        let root = base.join("root");
+        let zlib = entry("zlib", "1.0", &"a".repeat(64));
+        let mut curl = entry("curl", "1.0", &"b".repeat(64));
+        curl.run = vec!["zlib".to_string()];
+        let db = Db::new(&root);
+        db.add(&zlib, &[], &Default::default()).unwrap();
+        db.add(&curl, &[], &Default::default()).unwrap();
+        let record = crate::transaction::history::TransactionRecord {
+            schema: SCHEMA_VERSION, id: 1, command: "install".into(), status: "completed".into(),
+            started_at: 1, finished_at: Some(2), duration_seconds: Some(1),
+            initiated_by: "uid:0".into(), requested_packages: vec!["curl".into()],
+            repository_ids: vec![],
+            package_changes: vec![
+                PackageChange { name: "zlib".into(), action: "install".into(), status: "committed".into(),
+                    before: None, after: Some(PackageState::from_entry(&zlib)),
+                    source: "local-build".into(), failure: None, hook: None },
+                PackageChange { name: "curl".into(), action: "install".into(), status: "committed".into(),
+                    before: None, after: Some(PackageState::from_entry(&curl)),
+                    source: "local-build".into(), failure: None, hook: None },
+            ],
+            undone_by: None, undoes: None, groups: vec![],
+        };
+        crate::transaction::history::write_record(&root, &record).unwrap();
+        let plan = plan_undo(&root, 1).unwrap();
+        assert_eq!(plan.steps.iter().map(|step| step.package.as_str()).collect::<Vec<_>>(),
+            vec!["curl", "zlib"]);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn undo_of_install_removes_the_package() {
         let base = tmpdir("rm");
         let root = base.join("root");
@@ -530,9 +560,13 @@ mod tests {
 
         let mut op = begin_operation(&root, OperationCommand::HistoryUndo, &[], &[]).unwrap();
         op.link_undo(tx).unwrap();
-        let mut rec = op.recorder();
-        apply_undo(&root, &plan, &mut rec, false).unwrap();
+        let undo_id = op.tx().unwrap();
+        {
+            let mut rec = op.recorder();
+            apply_undo(&root, &plan, &mut rec, false).unwrap();
+        }
         op.finish(None).unwrap();
+        crate::transaction::history::mark_undone_by(&root, tx, undo_id).unwrap();
 
         assert!(Db::new(&root).entry("demo").unwrap().is_none(), "package removed");
         let original = crate::transaction::history::load_record(&root, tx).unwrap();

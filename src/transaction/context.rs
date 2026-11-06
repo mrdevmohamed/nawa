@@ -212,14 +212,14 @@ impl OperationHandle {
         Ok(())
     }
 
-    /// Link this transaction as the compensating undo of `original`, and
-    /// annotate the original with `undone_by` (an allowed rewrite).
+    /// Record the target of a compensating operation. The original record
+    /// is annotated only after this transaction is durably completed.
     pub fn link_undo(&mut self, original: u64) -> Result<()> {
-        let Some(tx) = self.tx else { return Ok(()) };
-        let mut orig = crate::transaction::history::load_record(&self.root, original)?;
-        orig.undone_by = Some(tx);
-        super::history::rewrite_record(&self.root, &orig)?;
-        // note it in memory so the final record carries `undoes`
+        if self.tx.is_none() { return Ok(()) }
+        let record = crate::transaction::history::load_record(&self.root, original)?;
+        if let Some(by) = record.undone_by {
+            anyhow::bail!("transaction {original} was already undone by transaction {by}");
+        }
         self.undo_target = Some(original);
         Ok(())
     }
@@ -234,27 +234,28 @@ impl RecorderHandle<'_> {
     /// Write the write-ahead intent for one package step (before the
     /// mutation runs).
     pub fn step_intent(
-        &mut self,
-        package: &str,
-        action: StepAction,
-        before: Option<&crate::db::Entry>,
-        target: Option<&crate::db::Entry>,
+        &mut self, package: &str, action: StepAction,
+        before: Option<&crate::db::Entry>, target: Option<&crate::db::Entry>,
         artifact_sha256: &str,
     ) -> Result<u32> {
-        if self.op.disabled {
-            return Ok(0);
-        }
+        let target = target.map(PackageState::from_entry);
+        self.step_intent_state(package, action, before, target.as_ref(), artifact_sha256)
+    }
+
+    /// Persist a target snapshot parsed from an archive or repository index.
+    pub fn step_intent_state(
+        &mut self, package: &str, action: StepAction,
+        before: Option<&crate::db::Entry>, target: Option<&PackageState>,
+        artifact_sha256: &str,
+    ) -> Result<u32> {
+        if self.op.disabled { return Ok(0); }
         let Some(tx) = self.op.tx else { return Ok(0) };
         let step = (self.op.changes.len() + 1) as u32;
         let intent = journal::StepIntent {
-            schema: SCHEMA_VERSION,
-            tx,
-            step,
-            package: package.to_string(),
+            schema: SCHEMA_VERSION, tx, step, package: package.to_string(),
             action: action.as_str().to_string(),
             precondition: before.map(PackageState::from_entry),
-            target: target.map(PackageState::from_entry),
-            artifact_sha256: artifact_sha256.to_string(),
+            target: target.cloned(), artifact_sha256: artifact_sha256.to_string(),
         };
         journal::write_intent(&self.op.root, &intent)?;
         Ok(step)
@@ -455,7 +456,9 @@ mod tests {
 
         let mut op2 = begin_operation(&root, OperationCommand::HistoryUndo, &[], &[]).unwrap();
         op2.link_undo(1).unwrap();
+        let undo_id = op2.tx().unwrap();
         op2.finish(None).unwrap();
+        crate::transaction::history::mark_undone_by(&root, 1, undo_id).unwrap();
         let original = crate::transaction::history::load_record(&root, 1).unwrap();
         assert_eq!(original.undone_by, Some(2));
         let _ = std::fs::remove_dir_all(&base);
