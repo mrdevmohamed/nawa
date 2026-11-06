@@ -206,6 +206,32 @@ scratch = "/w/sb"
     }
 
     #[test]
+    fn plugin_sandbox_fields_are_validated() {
+        let base = r#"
+version = 1
+script = "true"
+run_uid = 65534
+run_gid = 65534
+strict_readonly_root = true
+writable_paths = ["/tmp", "/build/home"]
+readonly_paths = ["/build/src"]
+[build]
+src_host = "/w/src"
+pkg_host = "/w/pkg"
+home_host = "/w/home"
+scratch = "/w/sb"
+"#;
+        let spec = SandboxSpec::parse(base).unwrap();
+        assert_eq!(spec.run_uid, Some(65534));
+        assert!(spec.strict_readonly_root);
+        assert_eq!(spec.writable_paths, vec!["/tmp", "/build/home"]);
+
+        assert!(SandboxSpec::parse(&base.replace("run_gid = 65534\\n", "")).is_err());
+        assert!(SandboxSpec::parse(&base.replace("/build/src", "../escape")).is_err());
+        assert!(SandboxSpec::parse(&base.replace("writable_paths = [\"/tmp\", \"/build/home\"]", "writable_paths = []")).is_err());
+    }
+
+    #[test]
     fn layers_default_to_empty_for_older_specs() {
         // a spec written before Phase 5 (no [root.layers]) must keep parsing
         let spec = SandboxSpec::parse(
