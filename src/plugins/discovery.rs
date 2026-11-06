@@ -158,6 +158,7 @@ fn broken(dir: PathBuf) -> PluginManifest {
         description: String::new(),
         commands: Vec::new(),
         requested_capabilities: Vec::new(),
+        events: Vec::new(),
     }
 }
 
@@ -190,6 +191,9 @@ pub struct PluginState {
     pub enabled: Vec<String>,
     #[serde(default)]
     pub disabled: Vec<String>,
+    /// Administrator grants keyed by plugin id. Project files never grant.
+    #[serde(default)]
+    pub grants: BTreeMap<String, Vec<String>>,
 }
 
 impl PluginState {
@@ -197,6 +201,62 @@ impl PluginState {
         let Some(path) = cfg_file else { return Self::default() };
         let Ok(raw) = std::fs::read_to_string(path) else { return Self::default() };
         Self::from_config_text(&raw)
+    }
+
+    /// Merge project enable/disable preferences with administrator policy.
+    /// Only a root-owned, non-writable system config can supply grants.
+    pub fn load_effective(
+        project_file: Option<&Path>,
+        system_file: Option<&Path>,
+    ) -> Self {
+        let project = Self::load(project_file);
+        let system = if system_file.is_some_and(secure_admin_config) {
+            Self::load(system_file)
+        } else {
+            Self::default()
+        };
+        let enabled = if project.enabled.is_empty() {
+            system.enabled.clone()
+        } else {
+            project.enabled
+        };
+        let mut disabled = system.disabled.clone();
+        for id in project.disabled {
+            if !disabled.iter().any(|known| known == &id) {
+                disabled.push(id);
+            }
+        }
+        Self { enabled, disabled, grants: system.grants }
+    }
+
+    pub fn has_grant(&self, id: &str, capability: super::manifest::Capability) -> bool {
+        self.grants.get(id)
+            .is_some_and(|items| items.iter().any(|item| item == capability.as_str()))
+    }
+
+    pub fn granted_capabilities(
+        &self,
+        id: &str,
+        requested: &[super::manifest::Capability],
+    ) -> Vec<super::manifest::Capability> {
+        requested.iter().copied().filter(|cap| self.has_grant(id, *cap)).collect()
+    }
+
+    pub fn grant(&mut self, id: &str, capability: super::manifest::Capability) {
+        let items = self.grants.entry(id.to_string()).or_default();
+        if !items.iter().any(|item| item == capability.as_str()) {
+            items.push(capability.as_str().to_string());
+            items.sort();
+        }
+    }
+
+    pub fn revoke(&mut self, id: &str, capability: super::manifest::Capability) {
+        if let Some(items) = self.grants.get_mut(id) {
+            items.retain(|item| item != capability.as_str());
+            if items.is_empty() {
+                self.grants.remove(id);
+            }
+        }
     }
 
     /// Extract the `[plugins]` table from a full nawa.toml document. A file
@@ -238,28 +298,48 @@ impl PluginState {
     }
 }
 
-/// Replace or append the `[plugins]` table in a TOML document, keeping every
-/// other line byte-for-byte identical.
+/// Administrator files and every parent must be root-owned, non-symlinked,
+/// and not writable by group or other users.
+fn secure_admin_config(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let mut current = Some(path);
+    while let Some(entry) = current {
+        let Ok(meta) = std::fs::symlink_metadata(entry) else { return false };
+        if meta.file_type().is_symlink() || meta.uid() != 0 || meta.mode() & 0o022 != 0 {
+            return false;
+        }
+        current = entry.parent();
+    }
+    true
+}
+
+#[derive(Serialize)]
+struct PluginsRoot<'a> {
+    plugins: &'a PluginState,
+}
+
+/// Replace the plugin table and all nested plugin tables while preserving
+/// unrelated top-level configuration lines.
 fn replace_plugins_table(raw: &str, state: &PluginState) -> Result<String> {
-    let body = toml::to_string_pretty(state)?;
-    let table = format!("[plugins]\n{body}");
+    let table = toml::to_string(&PluginsRoot { plugins: state })?;
     let mut out = String::new();
     let mut in_plugins = false;
     let mut replaced = false;
     for line in raw.lines() {
         let trimmed = line.trim_start();
         if trimmed.starts_with('[') {
-            if in_plugins {
-                in_plugins = false;
-                if !replaced {
-                    out.push_str(&table);
-                    out.push('\n');
-                    replaced = true;
-                }
-            }
-            if trimmed == "[plugins]" {
+            let is_plugin_table = trimmed == "[plugins]"
+                || trimmed.starts_with("[plugins.")
+                || trimmed.starts_with("[[plugins.");
+            if is_plugin_table {
                 in_plugins = true;
-                continue; // drop the old table header and body
+                continue;
+            }
+            if in_plugins {
+                out.push_str(&table);
+                out.push('\n');
+                in_plugins = false;
+                replaced = true;
             }
         }
         if !in_plugins {
@@ -267,7 +347,7 @@ fn replace_plugins_table(raw: &str, state: &PluginState) -> Result<String> {
             out.push('\n');
         }
     }
-    if in_plugins && !replaced {
+    if in_plugins {
         out.push_str(&table);
         out.push('\n');
         replaced = true;
@@ -353,12 +433,17 @@ mod tests {
         assert!(!st.is_enabled("z"), "once an enable-list exists, unknown ids are off");
         assert!(st.is_enabled("y"));
         assert!(!st.is_enabled("x"), "disabled wins over enabled");
+        st.grant("x", super::super::manifest::Capability::TransactionObserve);
+        assert!(st.has_grant("x", super::super::manifest::Capability::TransactionObserve));
+        st.revoke("x", super::super::manifest::Capability::TransactionObserve);
+        assert!(!st.has_grant("x", super::super::manifest::Capability::TransactionObserve));
     }
 
     #[test]
     fn plugins_table_replacement_preserves_the_rest() {
         let raw = "jobs = 4\n\n[plugins]\nenabled = [\"old\"]\n\n[other]\nkey = 1\n";
-        let st = PluginState { enabled: vec!["a".into()], disabled: vec![] };
+        let mut st = PluginState { enabled: vec!["a".into()], disabled: vec![], grants: BTreeMap::new() };
+        st.grant("audit", super::super::manifest::Capability::TransactionObserve);
         let out = replace_plugins_table(raw, &st).unwrap();
         assert!(out.contains("jobs = 4"));
         assert!(out.contains("[other]"));
@@ -372,6 +457,7 @@ mod tests {
         let parsed = PluginState::from_config_text(&out);
         assert_eq!(parsed.enabled, vec!["a".to_string()]);
         assert!(parsed.disabled.is_empty());
+        assert!(parsed.has_grant("audit", super::super::manifest::Capability::TransactionObserve));
         // a config without [plugins] yields the default state
         let parsed = PluginState::from_config_text("jobs = 4\n");
         assert!(parsed.enabled.is_empty());
