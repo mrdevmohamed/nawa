@@ -63,6 +63,37 @@ pub fn exit_now(code: i32) -> ! {
     unsafe { libc::_exit(code) }
 }
 
+/// Drop supplementary groups and switch to an already-mapped unprivileged
+/// identity inside the plugin user namespace. Called only in its PID 1.
+pub fn drop_to_ids(uid: u32, gid: u32) -> Result<()> {
+    // SAFETY: this is a single-purpose child before exec, with a valid
+    // zero-length supplementary group list.
+    if unsafe { libc::setgroups(0, std::ptr::null()) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("clear plugin supplementary groups");
+    }
+    if unsafe { libc::setgid(gid as libc::gid_t) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("drop plugin gid");
+    }
+    if unsafe { libc::setuid(uid as libc::uid_t) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("drop plugin uid");
+    }
+    Ok(())
+}
+
+/// Ensure sandbox PID 1 dies when its supervising Nawa process is killed.
+pub fn set_parent_death_kill() -> Result<()> {
+    // SAFETY: PR_SET_PDEATHSIG takes fixed scalar arguments.
+    if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("set sandbox parent-death signal");
+    }
+    // Close the race where the parent died just before prctl().
+    if unsafe { libc::getppid() } == 1 {
+        // SAFETY: this PID-namespace child may terminate itself.
+        unsafe { libc::raise(libc::SIGKILL) };
+    }
+    Ok(())
+}
+
 /// `prctl(PR_SET_NO_NEW_PRIVS, 1)` — even a setuid binary inside the build
 /// cannot regain privilege (design §4.4).
 pub fn no_new_privs() -> Result<()> {
