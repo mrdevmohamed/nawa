@@ -373,7 +373,15 @@ mod tests {
     use super::*;
 
     fn tmpdir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("nawa-plugin-disc-{}-{tag}", std::process::id()));
+        // Root discovery correctly rejects fixtures under world-writable
+        // /tmp. Put root-run tests under /root so they exercise the privileged
+        // path without weakening the production directory policy.
+        let base = if rustix::process::geteuid().is_root() {
+            PathBuf::from("/root")
+        } else {
+            std::env::temp_dir()
+        };
+        let d = base.join(format!("nawa-plugin-disc-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
