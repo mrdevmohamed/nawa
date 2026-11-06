@@ -227,10 +227,11 @@ fn event_payload(
         object.insert("repository_ids".into(), serde_json::to_value(&record.repository_ids).unwrap_or(serde_json::Value::Null));
     }
     if granted.contains(&Capability::PackagePlanInspect) {
-        let changes: Vec<serde_json::Value> = match change_index {
+        let selected: Vec<_> = match change_index {
             Some(index) => record.package_changes.get(index).into_iter().collect(),
             None => record.package_changes.iter().collect(),
-        }
+        };
+        let changes: Vec<serde_json::Value> = selected
         .into_iter()
         .map(|change| serde_json::json!({
             "name": change.name,
