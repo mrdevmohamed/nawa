@@ -884,7 +884,7 @@ pub(crate) fn install_archive_file(
             let target_is_current = current.as_ref().is_some_and(|entry| target.matches_entry(entry));
             let retry_hook = install::hook_needs_retry(&ctx.root, &pkg_name).unwrap_or(false);
             let committed_hook_failed = target_is_current
-                && (before.as_ref().map_or(true, |old| !target.matches_entry(old)) || retry_hook);
+                && (before.as_ref().is_none_or(|old| !target.matches_entry(old)) || retry_hook);
             recorder.step_result(
                 step_no, &pkg_name, action,
                 if committed_hook_failed { transaction::history::StepStatus::CommittedHookFailed }
