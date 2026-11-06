@@ -564,6 +564,62 @@ mod tests {
     }
 
     #[test]
+    fn undo_refuses_when_dependency_was_promoted_to_explicit_install() {
+        let base = tmpdir("reason-changed");
+        let root = base.join("root");
+        let digest = "a".repeat(64);
+
+        // The recorded transaction installed the package explicitly.
+        let after = entry("demo", "1.0", &digest);
+        crate::db::Db::new(&root)
+            .add(&after, &[], &Default::default())
+            .unwrap();
+
+        let record = crate::transaction::history::TransactionRecord {
+            schema: SCHEMA_VERSION,
+            id: 1,
+            command: "install".into(),
+            status: "completed".into(),
+            started_at: 1,
+            finished_at: Some(2),
+            duration_seconds: Some(1),
+            initiated_by: "uid:0".into(),
+            requested_packages: vec!["demo".into()],
+            repository_ids: vec![],
+            package_changes: vec![PackageChange {
+                name: "demo".into(),
+                action: "install".into(),
+                status: "committed".into(),
+                before: None,
+                after: Some(PackageState::from_entry(&after)),
+                source: "local-build".into(),
+                failure: None,
+                hook: None,
+            }],
+            undone_by: None,
+            undoes: None,
+            groups: vec![],
+        };
+        crate::transaction::history::write_record(&root, &record).unwrap();
+
+        // A later operation changes only the reason, not version or bytes.
+        let mut promoted = entry("demo", "1.0", &digest);
+        promoted.reason = "dependency".into();
+        Db::new(&root)
+            .add(&promoted, &[], &Default::default())
+            .unwrap();
+
+        let error = plan_undo(&root, 1).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("conflict"),
+            "reason-only changes must block stale undo: {error:#}"
+        );
+        let current = Db::new(&root).entry("demo").unwrap().unwrap();
+        assert_eq!(current.reason, "dependency");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn partial_undo_can_resume_without_replaying_committed_steps() {
         let base = tmpdir("resume-partial");
         let root = base.join("root");
