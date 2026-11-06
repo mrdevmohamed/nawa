@@ -603,68 +603,70 @@ pub fn rollback(name: &str, root: &Path) -> Result<()> {
         &[name.to_string()],
         &[],
     )?;
-    let mut recorder = operation.recorder();
-    let step_no = recorder.step_intent_state(
-        name,
-        crate::transaction::history::StepAction::Restore,
-        before.as_ref(),
-        Some(&target),
-        &digest,
-    )?;
+    let (result, proof) = {
+        let mut recorder = operation.recorder();
+        let step_no = recorder.step_intent_state(
+            name,
+            crate::transaction::history::StepAction::Restore,
+            before.as_ref(),
+            Some(&target),
+            &digest,
+        )?;
 
-    let (result, proof) = match source {
-        RestoreSource::SignedIndex { object, digest } => (
-            install_archive_from_index_proof(&object, root, false, &digest, "keep", None),
-            "signed-index proof re-verified".to_string(),
-        ),
-        RestoreSource::Detached { object, digest } => (
-            install_archive_pinned(&object, root, false, true, None, "keep", Some(&digest)),
-            "detached signature re-verified".to_string(),
-        ),
-        RestoreSource::Pinned { object, digest, proof } => (
-            install_archive_pinned(&object, root, false, true, None, "keep", Some(&digest)),
-            proof,
-        ),
-        RestoreSource::Legacy { archive } => (
-            install_archive(&archive, root, false, true, None, "keep"),
-            "legacy cached archive (no recorded authentication proof)".to_string(),
-        ),
-    };
+        let (result, proof) = match source {
+            RestoreSource::SignedIndex { object, digest } => (
+                install_archive_from_index_proof(&object, root, false, &digest, "keep", None),
+                "signed-index proof re-verified".to_string(),
+            ),
+            RestoreSource::Detached { object, digest } => (
+                install_archive_pinned(&object, root, false, true, None, "keep", Some(&digest)),
+                "detached signature re-verified".to_string(),
+            ),
+            RestoreSource::Pinned { object, digest, proof } => (
+                install_archive_pinned(&object, root, false, true, None, "keep", Some(&digest)),
+                proof,
+            ),
+            RestoreSource::Legacy { archive } => (
+                install_archive(&archive, root, false, true, None, "keep"),
+                "legacy cached archive (no recorded authentication proof)".to_string(),
+            ),
+        };
 
-    let current_after = match &result {
-        Ok(entry) => Some(entry.clone()),
-        Err(_) => db.entry(name)?,
+        let current_after = match &result {
+            Ok(entry) => Some(entry.clone()),
+            Err(_) => db.entry(name)?,
+        };
+        let target_is_current = current_after.as_ref()
+            .is_some_and(|entry| target.matches_entry(entry));
+        let retry_hook = hook_needs_retry(root, name).unwrap_or(false);
+        let committed_hook_failed = result.is_err()
+            && target_is_current
+            && (before.as_ref().is_none_or(|old| !target.matches_entry(old)) || retry_hook);
+        let step_status = if result.is_ok() {
+            crate::transaction::history::StepStatus::Committed
+        } else if committed_hook_failed {
+            crate::transaction::history::StepStatus::CommittedHookFailed
+        } else {
+            crate::transaction::history::StepStatus::Failed
+        };
+        let after = if result.is_ok() || committed_hook_failed {
+            current_after.as_ref()
+        } else {
+            None
+        };
+        recorder.step_result(
+            step_no,
+            name,
+            crate::transaction::history::StepAction::Restore,
+            step_status,
+            before.as_ref(),
+            after,
+            "rollback",
+            result.as_ref().err().map(|error| format!("{error:#}")),
+            committed_hook_failed.then(|| "failed".to_string()),
+        )?;
+        (result, proof)
     };
-    let target_is_current = current_after.as_ref()
-        .is_some_and(|entry| target.matches_entry(entry));
-    let retry_hook = hook_needs_retry(root, name).unwrap_or(false);
-    let committed_hook_failed = result.is_err()
-        && target_is_current
-        && (before.as_ref().is_none_or(|old| !target.matches_entry(old)) || retry_hook);
-    let step_status = if result.is_ok() {
-        crate::transaction::history::StepStatus::Committed
-    } else if committed_hook_failed {
-        crate::transaction::history::StepStatus::CommittedHookFailed
-    } else {
-        crate::transaction::history::StepStatus::Failed
-    };
-    let after = if result.is_ok() || committed_hook_failed {
-        current_after.as_ref()
-    } else {
-        None
-    };
-    recorder.step_result(
-        step_no,
-        name,
-        crate::transaction::history::StepAction::Restore,
-        step_status,
-        before.as_ref(),
-        after,
-        "rollback",
-        result.as_ref().err().map(|error| format!("{error:#}")),
-        committed_hook_failed.then(|| "failed".to_string()),
-    )?;
-    drop(recorder);
     operation.finish(result.as_ref().err())?;
 
     let entry = result?;
