@@ -220,20 +220,12 @@ impl PluginManifest {
         if running_as_root() {
             use std::os::unix::fs::MetadataExt;
             let mode = meta.mode();
-            if mode & 0o002 != 0 {
+            if mode & 0o022 != 0 {
                 bail!(
-                    "plugin {} executable {} is world-writable (mode {:o}) — refusing",
+                    "plugin {} executable {} is group- or world-writable (mode {:o}) — refusing",
                     p.id,
                     exe.display(),
                     mode & 0o777
-                );
-            }
-            let owner = meta.uid();
-            if owner != 0 && mode & 0o020 != 0 {
-                bail!(
-                    "plugin {} executable {} is group-writable by a non-root owner — refusing",
-                    p.id,
-                    exe.display()
                 );
             }
         }
