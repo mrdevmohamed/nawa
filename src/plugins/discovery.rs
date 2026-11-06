@@ -300,7 +300,7 @@ impl PluginState {
 
 /// Administrator files and every parent must be root-owned, non-symlinked,
 /// and not writable by group or other users.
-fn secure_admin_config(path: &Path) -> bool {
+pub fn secure_admin_config(path: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     let mut current = Some(path);
     while let Some(entry) = current {
