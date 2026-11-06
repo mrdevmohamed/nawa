@@ -8,7 +8,7 @@
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, Write};
+use std::io::BufRead;
 
 /// Hard ceiling on one protocol line (bytes).
 pub const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
@@ -157,21 +157,6 @@ pub fn parse_hello(result: serde_json::Value) -> Result<HelloResponse> {
     serde_json::from_value(result).context("plugin hello result has unexpected fields")
 }
 
-/// Drive one full request/response round over the child's pipes.
-pub fn round_trip(
-    child_stdin: &mut impl Write,
-    child_stdout: &mut impl BufRead,
-    request_line: &str,
-    request_id: &str,
-) -> Result<serde_json::Value> {
-    child_stdin
-        .write_all(request_line.as_bytes())
-        .and_then(|_| child_stdin.write_all(b"\n"))
-        .and_then(|_| child_stdin.flush())
-        .context("write plugin request")?;
-    let env = read_response(child_stdout)?;
-    expect_result(env, request_id)
-}
 
 #[cfg(test)]
 mod tests {

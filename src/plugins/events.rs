@@ -6,8 +6,12 @@
 
 use anyhow::{Context, Result};
 use serde::Serialize;
+use rustix::fd::AsFd;
+use rustix::fs::{flock, FlockOperation};
+use std::fs::{File, OpenOptions};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::transaction::history::TransactionRecord;
 use super::discovery::{self, PluginState};
@@ -20,6 +24,36 @@ fn outbox_dir(root: &Path) -> PathBuf {
 
 fn failures_dir(root: &Path) -> PathBuf {
     root.join("var/lib/nawa/plugins/failures")
+}
+
+static FAILURE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+/// Serialize event dispatchers without holding the package database lock.
+/// A non-blocking lock also avoids deadlocking a plugin that invokes Nawa.
+fn acquire_dispatch_lock(dir: &Path) -> Result<Option<File>> {
+    let path = dir.join(".dispatch.lock");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .open(&path)
+        .with_context(|| format!("open plugin dispatch lock {}", path.display()))?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    loop {
+        match flock(file.as_fd(), FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => return Ok(Some(file)),
+            Err(error) => {
+                let error = std::io::Error::from(error);
+                match error.kind() {
+                    std::io::ErrorKind::Interrupted => continue,
+                    std::io::ErrorKind::WouldBlock => return Ok(None),
+                    _ => return Err(error)
+                        .with_context(|| format!("lock plugin event outbox {}", dir.display())),
+                }
+            }
+        }
+    }
 }
 
 /// Queue one finalized transaction. The rename publishes a complete record.
@@ -64,6 +98,17 @@ pub fn dispatch_pending(
     system_config: Option<&Path>,
 ) {
     let dir = outbox_dir(root);
+    if !dir.is_dir() || std::env::var_os(crate::lock::HELD_ENV).is_some() {
+        return;
+    }
+    let _dispatch_lock = match acquire_dispatch_lock(&dir) {
+        Ok(Some(lock)) => lock,
+        Ok(None) => return,
+        Err(error) => {
+            eprintln!("nawa: warning: could not lock plugin event outbox: {error:#}");
+            return;
+        }
+    };
     let Ok(entries) = std::fs::read_dir(&dir) else { return };
     let mut paths: Vec<PathBuf> = entries
         .filter_map(|entry| entry.ok().map(|item| item.path()))
@@ -79,14 +124,20 @@ pub fn dispatch_pending(
                 continue;
             }
         };
+        let mut diagnostics_complete = true;
         for failure in dispatch_record(root, project_config, system_config, &record) {
             eprintln!(
                 "nawa: warning: observer plugin {} failed for {}: {}",
                 failure.plugin_id, failure.event_type, failure.error
             );
             if let Err(error) = store_failure(root, &failure) {
+                diagnostics_complete = false;
                 eprintln!("nawa: warning: could not store observer failure: {error:#}");
             }
+        }
+        // Retain the event if its failure diagnostics could not be persisted.
+        if !diagnostics_complete {
+            continue;
         }
         if let Err(error) = std::fs::remove_file(&path) {
             eprintln!("nawa: warning: could not remove dispatched event {}: {error}", path.display());
@@ -263,9 +314,14 @@ fn store_failure(root: &Path, failure: &ObserverFailure) -> Result<()> {
     let dir = failures_dir(root);
     std::fs::create_dir_all(&dir)?;
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    let sequence = FAILURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let target = dir.join(format!(
-        "{:010}-{}-{}.toml",
-        failure.transaction_id, failure.plugin_id, failure.recorded_at
+        "{:010}-{}-{}-{}-{}-{sequence}.toml",
+        failure.transaction_id,
+        failure.plugin_id,
+        failure.event_type,
+        failure.recorded_at,
+        std::process::id()
     ));
     let temporary = dir.join(format!(".{}.{}.tmp", failure.transaction_id, std::process::id()));
     let mut file = std::fs::OpenOptions::new()

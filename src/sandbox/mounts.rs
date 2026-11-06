@@ -227,7 +227,10 @@ fn remount_mount_tree_ro(spec: &SandboxSpec) -> Result<()> {
         let hidden = spec.mask.iter().any(|masked| {
             mount == Path::new(masked) || mount.starts_with(masked)
         });
-        if !writable && !hidden {
+        // mountinfo can retain entries for mounts absent in restricted
+        // containers (notably EFI variables). A missing path is unreachable
+        // by the sandboxed process and therefore needs no remount.
+        if !writable && !hidden && mount.exists() {
             mounts.push(path);
         }
     }

@@ -243,7 +243,9 @@ impl PluginManifest {
         }
         let mut commands = m.commands.names;
         commands.sort();
-        commands.dedup();
+        if let Some(duplicate) = commands.windows(2).find(|pair| pair[0] == pair[1]) {
+            bail!("plugin {} declares duplicate command name {:?}", p.id, duplicate[0]);
+        }
         for c in &commands {
             if !crate::db::valid_name(c) {
                 bail!("plugin {} registers an invalid command name {c:?}", p.id);
@@ -441,6 +443,16 @@ subscribe = ["transaction.completed"]
         );
         assert!(PluginManifest::parse(&raw, &plugins).is_err());
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn duplicate_command_names_are_rejected() {
+        let (_base, plugins) = dir("duplicate-command");
+        let raw = manifest(&plugins, "demo")
+            .replace("names = [\"demo-test\"]", "names = [\"demo-test\", \"demo-test\"]");
+        let error = PluginManifest::parse(&raw, &plugins).unwrap_err();
+        assert!(format!("{error:#}").contains("duplicate command name"), "{error:#}");
+        let _ = std::fs::remove_dir_all(&_base);
     }
 
     #[test]

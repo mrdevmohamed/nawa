@@ -48,6 +48,7 @@ impl Drop for PluginProcess {
 impl PluginProcess {
     /// Compatibility entry point for tests and callers that need no grants.
     /// It is still sandboxed; this never launches the plugin in the host.
+    #[allow(dead_code)] // retained as a no-capabilities entry point for internal callers
     pub fn start(manifest: &PluginManifest, timeout: Duration) -> Result<Self> {
         Self::start_with_policy(manifest, &[], &[], timeout)
     }
@@ -62,7 +63,7 @@ impl PluginProcess {
         timeout: Duration,
     ) -> Result<Self> {
         let sandboxed = super::sandbox::spawn(&manifest.executable, protected_paths)?;
-        let super::sandbox::SandboxedChild { child: mut child, cleanup } = sandboxed;
+        let super::sandbox::SandboxedChild { mut child, cleanup }
         let stdin = child.stdin.take().context("plugin sandbox stdin pipe disappeared")?;
         let stdout = child.stdout.take().context("plugin sandbox stdout pipe disappeared")?;
         let stderr = child.stderr.take().context("plugin sandbox stderr pipe disappeared")?;
@@ -204,10 +205,6 @@ impl PluginProcess {
         } else {
             format!("; plugin stderr: {}", String::from_utf8_lossy(&saved).trim())
         }
-    }
-
-    pub fn hello(&self) -> &HelloResponse {
-        &self.hello
     }
 
     /// Arguments stay an argv-like JSON array; no shell command is assembled.

@@ -198,6 +198,63 @@ fn broken_plugins_do_not_crash_list_or_run() {
 }
 
 #[test]
+fn registered_commands_require_an_administrator_grant_and_dispatch_automatically() {
+    // Only the root CI job can create an authentic administrator policy file.
+    if !rustix::process::geteuid().is_root() {
+        return;
+    }
+
+    let dir = scratch("command-register");
+    let pdir = dir.join("plugins").join("registered");
+    fs::create_dir_all(&pdir).unwrap();
+    let exe = pdir.join("nawa-plugin-registered");
+    fs::write(
+        &exe,
+        r#"#!/bin/sh
+read -r hello
+printf '%s\n' '{"protocol":"nawa-plugin","protocol_version":1,"request_id":"hello-1","ok":true,"result":{"plugin_id":"registered","plugin_version":"1.0.0","api_version":"1","commands":["hello-cmd"],"capabilities":["command.register"]}}'
+read -r request
+rid=$(printf '%s' "$request" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+printf '{"protocol":"nawa-plugin","protocol_version":1,"request_id":"%s","ok":true,"result":{"automatically_dispatched":true}}\n' "$rid"
+"#,
+    ).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(
+        pdir.join("nawa-plugin.toml"),
+        format!(
+            "[plugin]\nid = \"registered\"\nname = \"Registered command\"\nversion = \"1.0.0\"\napi_version = \"1\"\nexecutable = \"{}\"\n\n[commands]\nnames = [\"hello-cmd\"]\n\n[capabilities]\nrequested = [\"command.register\"]\n",
+            exe.display()
+        ),
+    ).unwrap();
+
+    let sysconf = dir.join("no-sysconf");
+    fs::create_dir_all(&sysconf).unwrap();
+    let config = sysconf.join("nawa.toml");
+    fs::write(&config, "[plugins]\nenabled = [\"registered\"]\n").unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let denied = run(&dir, &["hello-cmd", "before-grant"]);
+    assert!(!denied.status.success(), "command.register must not be implicit");
+    assert!(
+        String::from_utf8_lossy(&denied.stderr)
+            .contains("no enabled plugin has an administrator command.register grant"),
+        "{}",
+        String::from_utf8_lossy(&denied.stderr)
+    );
+
+    fs::write(
+        &config,
+        "[plugins]\nenabled = [\"registered\"]\n\n[plugins.grants]\nregistered = [\"command.register\"]\n",
+    ).unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let output = ok(run(&dir, &["hello-cmd", "after-grant"]));
+    assert!(output.contains("automatically_dispatched"), "{output}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn unknown_top_level_command_is_routed_through_plugin_dispatch() {
     let dir = scratch("external");
     let out = run(&dir, &["plugin-only-command", "one", "two words"]);

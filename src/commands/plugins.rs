@@ -12,11 +12,12 @@ fn effective_state(ctx: &Ctx) -> plugins::discovery::PluginState {
 
 fn protected_paths(ctx: &Ctx) -> Vec<PathBuf> {
     let mut paths = vec![ctx.root.clone()];
-    for file in [ctx.cfg.file.as_deref(), ctx.cfg.system_file.as_deref()] {
-        if let Some(path) = file {
-            if let Some(parent) = path.parent() {
-                paths.push(parent.to_path_buf());
-            }
+    for path in [ctx.cfg.file.as_deref(), ctx.cfg.system_file.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(parent) = path.parent() {
+            paths.push(parent.to_path_buf());
         }
     }
     paths
@@ -207,6 +208,9 @@ pub(crate) fn cmd_plugin_dispatch(ctx: &Ctx, command: &str, args: &[String]) -> 
     let mut candidates: Vec<_> = found.into_iter().filter(|plugin| {
         plugin.error.is_none()
             && state.is_enabled(&plugin.manifest.id)
+            && plugin.manifest.requested_capabilities.contains(
+                &plugins::manifest::Capability::CommandRegister,
+            )
             && state.has_grant(
                 &plugin.manifest.id,
                 plugins::manifest::Capability::CommandRegister,
