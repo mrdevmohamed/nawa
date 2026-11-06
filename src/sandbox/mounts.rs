@@ -127,6 +127,7 @@ pub(crate) fn setup_live_root(spec: &SandboxSpec) -> Result<()> {
     mbind("/", "/", true)?;
 
     overlay_scratch(spec)?;
+    remount_spec_paths_ro(spec)?;
     remount_ro("/", spec, "the build root (/)")?;
     Ok(())
 }
@@ -180,8 +181,19 @@ pub(crate) fn setup_dir_root(spec: &SandboxSpec) -> Result<()> {
     chdir("/").map_err(|e| anyhow::Error::msg(format!("chdir /: {e}")))?;
     // hide the old root entirely (pivot moved the live system to /old)
     tmpfs_mask("/old")?;
+    remount_spec_paths_ro(spec)?;
     // now that we live inside it, the build root becomes read-only
     remount_ro("/", spec, "the build root (/)")?;
+    Ok(())
+}
+
+fn remount_spec_paths_ro(spec: &SandboxSpec) -> Result<()> {
+    for path in &spec.readonly_paths {
+        if !Path::new(path).exists() {
+            bail!("sandbox read-only path does not exist: {path}");
+        }
+        remount_ro(path, spec, path)?;
+    }
     Ok(())
 }
 
@@ -503,6 +515,13 @@ mod tests {
             mask: vec![],
             build_inside: "/build".into(),
             workdir: String::new(),
+            run_uid: None,
+            run_gid: None,
+            memory_limit_bytes: 0,
+            process_limit: 0,
+            file_size_limit_bytes: 0,
+            open_files_limit: 0,
+            readonly_paths: Vec::new(),
         };
         let lower: Vec<String> = spec
             .root
