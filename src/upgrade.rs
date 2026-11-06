@@ -394,24 +394,25 @@ pub fn upgrade(
     for name in &ordered {
         // a Ctrl+C that arrived during the previous package was deferred
         // until it was complete; stop before starting the next one
-        if crate::interrupt::check().is_err() {
+        if let Err(error) = crate::interrupt::check() {
+            first_err = Some(error);
             break;
         }
         let (re, _) = plan
             .iter()
             .find(|(r, _)| &r.name == name)
             .expect("ordered name came from the plan");
-        let before = db_here.entry(name).ok().flatten();
+        let before = db_here.entry(name)?;
+        let target = crate::transaction::history::PackageState {
+            version: Some(re.version.clone()), rel: Some(re.rel), arch: re.arch.clone(),
+            reason: before.as_ref().map(|entry| entry.reason.clone()).unwrap_or_else(|| "explicit".to_string()),
+            artifact_sha256: re.sha256.clone(),
+        };
         let mut recorder = op.recorder();
-        let step_no = recorder
-            .step_intent(
-                name,
-                crate::transaction::history::StepAction::Upgrade,
-                before.as_ref(),
-                None,
-                &re.sha256,
-            )
-            .unwrap_or(0);
+        let step_no = recorder.step_intent_state(
+            name, crate::transaction::history::StepAction::Upgrade,
+            before.as_ref(), Some(&target), &re.sha256,
+        )?;
         let outcome = fetch_entry(root, &open, re, opts.allow_unsigned).and_then(|src| {
             if open.archive_auth == ArchiveAuth::SignedIndexSha256 {
                 install::install_archive_from_index_proof(
@@ -440,43 +441,38 @@ pub fn upgrade(
             }
         });
         match &outcome {
-            Ok(_entry) => {
-                let after = db_here.entry(name).ok().flatten();
-                recorder
-                    .step_result(
-                        step_no,
-                        name,
-                        crate::transaction::history::StepAction::Upgrade,
-                        crate::transaction::history::StepStatus::Committed,
-                        before.as_ref(),
-                        after.as_ref(),
-                        "repository",
-                        None,
-                        None,
-                    )
-                    .ok();
+            Ok(entry) => {
+                recorder.step_result(
+                    step_no, name, crate::transaction::history::StepAction::Upgrade,
+                    crate::transaction::history::StepStatus::Committed,
+                    before.as_ref(), Some(entry), "repository", None, None,
+                )?;
                 done += 1;
             }
-            Err(e) => {
-                recorder
-                    .step_result(
-                        step_no,
-                        name,
-                        crate::transaction::history::StepAction::Upgrade,
-                        crate::transaction::history::StepStatus::Failed,
-                        before.as_ref(),
-                        None,
-                        "repository",
-                        Some(format!("{e:#}")),
-                        None,
-                    )
-                    .ok();
-                first_err = Some(anyhow::anyhow!("{e:#}"));
+            Err(error) => {
+                let current = db_here.entry(name)?;
+                let target_is_current = current.as_ref().is_some_and(|entry| target.matches_entry(entry));
+                let retry_hook = install::hook_needs_retry(root, name).unwrap_or(false);
+                let committed_hook_failed = target_is_current
+                    && (before.as_ref().map_or(true, |old| !target.matches_entry(old)) || retry_hook);
+                recorder.step_result(
+                    step_no, name, crate::transaction::history::StepAction::Upgrade,
+                    if committed_hook_failed {
+                        crate::transaction::history::StepStatus::CommittedHookFailed
+                    } else {
+                        crate::transaction::history::StepStatus::Failed
+                    },
+                    before.as_ref(),
+                    if committed_hook_failed { current.as_ref() } else { None },
+                    "repository", Some(format!("{error:#}")),
+                    committed_hook_failed.then(|| "failed".to_string()),
+                )?;
+                first_err = Some(anyhow::anyhow!("{error:#}"));
                 break;
             }
         }
     }
-    let _ = op.finish(first_err.as_ref());
+    op.finish(first_err.as_ref())?;
     if let Some(e) = first_err {
         return Err(e.context(format!("upgraded {done} of {} package(s) before the failure", ordered.len())));
     }

@@ -282,49 +282,25 @@ fn install_one(
         request.number, request.total, request.what
     );
     let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
-    // the transaction this install belongs to (begin_operation ran under
-    // this same lock; the write-ahead intent goes out before the mutation)
+    // Resolve the real package identity from .PKGINFO; archive filenames
+    // are not authoritative package metadata.
+    let package = archive_name_of(archive)
+        .ok_or_else(|| anyhow::anyhow!("cannot read package name from {}", archive.display()))?;
     let db = db::Db::new(&ctx.root);
-    let name_guess = archive
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let before = name_guess
-        .split('-')
-        .next()
-        .map(|n| db.entry(n).ok().flatten())
-        .unwrap_or(None);
-    let before = match &before {
-        Some(_) => before,
-        None => {
-            // the archive filename need not encode the package name: read
-            // .PKGINFO for the real identity before touching anything
-            archive_name_of(archive)
-                .and_then(|n| db.entry(&n).ok().flatten())
-        }
-    };
+    let before = db.entry(&package)?;
+    let target = install::inspect_archive_state(archive, request.reason, before.as_ref())?;
     let action = match &before {
         None => transaction::history::StepAction::Install,
-        Some(old) if old.version_full() != new_full_of(archive) => {
-            transaction::history::StepAction::Upgrade
-        }
+        Some(old) if old.version != target.version.clone().unwrap_or_default()
+            || Some(old.rel) != target.rel => transaction::history::StepAction::Upgrade,
         Some(_) => transaction::history::StepAction::Reinstall,
     };
     let mut recorder = op.recorder();
-    let digest_guess = crate::fetch::sha256_of_file(archive).unwrap_or_default();
-    let step_no = recorder
-        .step_intent(
-            before.as_ref().map(|_| "").unwrap_or(archive_name_of(archive).as_deref().unwrap_or("package")),
-            action,
-            before.as_ref(),
-            None,
-            &digest_guess,
-        )
-        .unwrap_or(0);
+    let step_no = recorder.step_intent_state(
+        &package, action, before.as_ref(), Some(&target), &target.artifact_sha256,
+    )?;
     let installed = match request.index_sha256 {
         Some(expected) if request.signed_index => {
-            // retain the exact signed-index proof bytes so the installed
-            // artifact keeps its authentication evidence (roadmap §4.5)
             let proof = open_repo.map(|open| install::IndexProof {
                 index_bytes: Some(&open.index_bytes),
                 index_signature: open.index_signature.as_deref(),
@@ -332,55 +308,40 @@ fn install_one(
                 repo_id: open.base_url.as_deref(),
             });
             install::install_archive_from_index_proof(
-                archive,
-                &ctx.root,
-                flags.force,
-                expected,
-                request.reason,
-                proof,
+                archive, &ctx.root, flags.force, expected, request.reason, proof,
             )
         }
         pinned => install::install_archive_pinned(
-            archive,
-            &ctx.root,
-            flags.force,
-            flags.allow_unsigned,
-            None,
-            request.reason,
-            pinned,
+            archive, &ctx.root, flags.force, flags.allow_unsigned, None, request.reason, pinned,
         ),
     };
     match &installed {
         Ok(entry) => {
-            let _ = step_no;
-            recorder
-                .step_result(
-                    step_no,
-                    &entry.name,
-                    action,
-                    transaction::history::StepStatus::Committed,
-                    before.as_ref(),
-                    Some(entry),
-                    request.source,
-                    None,
-                    None,
-                )
-                .ok();
+            recorder.step_result(
+                step_no, &entry.name, action,
+                transaction::history::StepStatus::Committed,
+                before.as_ref(), Some(entry), request.source, None, None,
+            )?;
         }
-        Err(e) => {
-            recorder
-                .step_result(
-                    step_no,
-                    archive_name_of(archive).as_deref().unwrap_or(archive.to_str().unwrap_or("package")),
-                    action,
-                    transaction::history::StepStatus::Failed,
-                    before.as_ref(),
-                    None,
-                    request.source,
-                    Some(format!("{e:#}")),
-                    None,
-                )
-                .ok();
+        Err(error) => {
+            let current = db.entry(&package)?;
+            let target_is_current = current.as_ref().is_some_and(|entry| target.matches_entry(entry));
+            let retry_hook = install::hook_needs_retry(&ctx.root, &package).unwrap_or(false);
+            let committed_hook_failed = target_is_current
+                && (before.as_ref().map_or(true, |old| !target.matches_entry(old)) || retry_hook);
+            recorder.step_result(
+                step_no, &package, action,
+                if committed_hook_failed {
+                    transaction::history::StepStatus::CommittedHookFailed
+                } else {
+                    transaction::history::StepStatus::Failed
+                },
+                before.as_ref(),
+                if committed_hook_failed { current.as_ref() } else { None },
+                request.source,
+                Some(format!("{error:#}")),
+                committed_hook_failed.then(|| "failed".to_string()),
+            )?;
         }
     }
     installed.with_context(|| {
@@ -397,12 +358,6 @@ fn archive_name_of(archive: &Path) -> Option<String> {
     let raw = crate::archive::read_pkginfo(archive).ok()?;
     let info = crate::archive::parse_pkginfo(&raw).ok()?;
     info.get("pkgname").cloned()
-}
-
-fn new_full_of(archive: &Path) -> String {
-    archive_name_of(archive)
-        .map(|_| String::new())
-        .unwrap_or_default()
 }
 
 /// Show the plan, ask, then install every item in order — dependencies
@@ -873,46 +828,51 @@ pub(crate) fn install_archive_file(
     }
     // the caller (cmd_install) holds the exclusive lock for archive installs
     let db = db::Db::new(&ctx.root);
-    let pkg_name = crate::archive::read_pkginfo(file)
-        .ok()
-        .and_then(|raw| crate::archive::parse_pkginfo(&raw).ok())
-        .and_then(|info| info.get("pkgname").cloned())
-        .unwrap_or_default();
-    let before = if pkg_name.is_empty() { None } else { db.entry(&pkg_name).ok().flatten() };
+    let pkg_name = archive_name_of(file)
+        .ok_or_else(|| anyhow::anyhow!("cannot read package name from {}", file.display()))?;
+    let before = db.entry(&pkg_name)?;
+    let target = install::inspect_archive_state(file, "explicit", before.as_ref())?;
     let action = match &before {
         None => transaction::history::StepAction::Install,
-        Some(_) => transaction::history::StepAction::Upgrade,
+        Some(old) if old.version != target.version.clone().unwrap_or_default()
+            || Some(old.rel) != target.rel => transaction::history::StepAction::Upgrade,
+        Some(_) => transaction::history::StepAction::Reinstall,
     };
-    let digest = crate::fetch::sha256_of_file(file).unwrap_or_default();
+    let digest = target.artifact_sha256.clone();
     let mut op = transaction::begin_operation(
         &ctx.root,
         transaction::OperationCommand::ArchiveInstall,
-        &[file.display().to_string()],
+        &[pkg_name.clone()],
         &[],
     )?;
     let mut recorder = op.recorder();
-    let step_no = recorder
-        .step_intent(&pkg_name, action, before.as_ref(), None, &digest)
-        .unwrap_or(0);
+    let step_no = recorder.step_intent_state(
+        &pkg_name, action, before.as_ref(), Some(&target), &digest,
+    )?;
     let result = install::install_archive(file, &ctx.root, force, allow_unsigned, key.as_deref(), "explicit");
     match &result {
         Ok(entry) => {
-            recorder
-                .step_result(
-                    step_no, &entry.name, action,
-                    transaction::history::StepStatus::Committed,
-                    before.as_ref(), Some(entry), "archive", None, None,
-                )
-                .ok();
+            recorder.step_result(
+                step_no, &entry.name, action,
+                transaction::history::StepStatus::Committed,
+                before.as_ref(), Some(entry), "archive", None, None,
+            )?;
         }
-        Err(e) => {
-            recorder
-                .step_result(
-                    step_no, &pkg_name, action,
-                    transaction::history::StepStatus::Failed,
-                    before.as_ref(), None, "archive", Some(format!("{e:#}")), None,
-                )
-                .ok();
+        Err(error) => {
+            let current = db.entry(&pkg_name)?;
+            let target_is_current = current.as_ref().is_some_and(|entry| target.matches_entry(entry));
+            let retry_hook = install::hook_needs_retry(&ctx.root, &pkg_name).unwrap_or(false);
+            let committed_hook_failed = target_is_current
+                && (before.as_ref().map_or(true, |old| !target.matches_entry(old)) || retry_hook);
+            recorder.step_result(
+                step_no, &pkg_name, action,
+                if committed_hook_failed { transaction::history::StepStatus::CommittedHookFailed }
+                else { transaction::history::StepStatus::Failed },
+                before.as_ref(),
+                if committed_hook_failed { current.as_ref() } else { None },
+                "archive", Some(format!("{error:#}")),
+                committed_hook_failed.then(|| "failed".to_string()),
+            )?;
         }
     }
     op.finish(result.as_ref().err())?;

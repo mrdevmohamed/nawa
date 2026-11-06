@@ -56,10 +56,11 @@ The upgrade path discarded the result of `OperationHandle::finish()`.
 - [x] R4 — original transaction is marked undone only after successful finalization.
 - [x] R5 — undo ordering respects dependency direction.
 - [x] R8 — remove nested exclusive-lock acquisition.
-- [ ] R2 — migrate all install/update callers to validated target snapshots.
-- [ ] R6 — add per-package WAL steps to group removal.
-- [ ] R7 — propagate upgrade finalization errors.
-- [ ] Add crash-window regression tests for every transition.
+- [x] R2 — install, archive, build-install and repository-upgrade paths persist validated target snapshots and propagate WAL errors.
+- [x] R6 — group removal records every package change as a WAL step and preserves membership for retries.
+- [x] R7 — upgrade propagates transaction finalization errors.
+- [x] Add regressions for completed-WAL crash recovery, legacy null-target ambiguity and dependency-aware undo order.
+- [ ] Expand fault-injection coverage to every filesystem/DB commit boundary.
 - [ ] Re-run the full CI matrix on the final head.
 
 ## Plugin subsystem observations

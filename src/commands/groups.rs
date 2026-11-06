@@ -65,62 +65,67 @@ pub(crate) fn cmd_group_remove(ctx: &Ctx, id: &str, yes: bool) -> Result<()> {
     };
     let db = db::Db::new(&ctx.root);
     let installed = db.installed()?;
-    // packages still owned by another group or explicit stay
+    let installed_names: std::collections::BTreeSet<String> =
+        installed.iter().map(|entry| entry.name.clone()).collect();
     let other_groups = groups::membership::group_owned_packages(&ctx.root, Some(id))?;
-    let explicit: std::collections::BTreeSet<&str> = installed
-        .iter()
-        .filter(|e| e.reason == "explicit")
-        .map(|e| e.name.as_str())
-        .collect();
-    let mut candidates: Vec<String> = record
-        .packages
-        .iter()
-        .filter(|p| !other_groups.contains(*p) && !explicit.contains(p.as_str()))
-        .cloned()
-        .collect();
-    // dependent-first removal order, rechecking live reverse dependencies
+    let explicit: std::collections::BTreeSet<&str> = installed.iter()
+        .filter(|entry| entry.reason == "explicit")
+        .map(|entry| entry.name.as_str()).collect();
+    let mut candidates: Vec<String> = record.packages.iter()
+        .filter(|name| installed_names.contains(*name))
+        .filter(|name| !other_groups.contains(*name) && !explicit.contains(name.as_str()))
+        .cloned().collect();
     candidates = plan::removal_order(&candidates, &installed);
-    // a package required by something outside the removal set stays
-    let cand_set: std::collections::BTreeSet<String> = candidates.iter().cloned().collect();
-    candidates.retain(|p| {
-        installed
-            .iter()
-            .filter(|e| !cand_set.contains(&e.name))
-            .all(|e| !e.run.iter().any(|r| r == p))
-    });
+    let candidate_set: std::collections::BTreeSet<String> = candidates.iter().cloned().collect();
+    candidates.retain(|package| installed.iter()
+        .filter(|entry| !candidate_set.contains(&entry.name))
+        .all(|entry| !entry.run.iter().any(|dependency| dependency == package)));
 
     println!("nawa: removing group {} (membership record)", id);
-    if candidates.is_empty() {
-        println!("nawa: no packages to remove (all still owned by groups or explicit requests)");
-        groups::membership::remove(&ctx.root, id)?;
-        return Ok(());
+    for package in &candidates { println!("  remove {package}"); }
+    if !candidates.is_empty() {
+        confirm::confirm(&format!("nawa: remove {} package(s) of group {id}?", candidates.len()), yes)?;
     }
-    for p in &candidates {
-        println!("  remove {p}");
-    }
-    confirm::confirm(&format!("nawa: remove {} package(s) of group {id}?", candidates.len()), yes)?;
+
     let mut op = transaction::begin_operation(
-        &ctx.root,
-        transaction::OperationCommand::GroupRemove,
-        &[id.to_string()],
-        &[],
+        &ctx.root, transaction::OperationCommand::GroupRemove, &[id.to_string()], &[],
     )?;
     op.record_group(id);
-    let mut err: Option<anyhow::Error> = None;
-    for p in &candidates {
-        if let Err(e) = install::remove_with(p, &ctx.root, false) {
-            err = Some(e);
-            break;
+    let mut failure: Option<anyhow::Error> = None;
+    for package in &candidates {
+        let before = db.entry(package)?;
+        let step_no = {
+            let mut recorder = op.recorder();
+            recorder.step_intent(
+                package, transaction::history::StepAction::Remove,
+                before.as_ref(), None,
+                before.as_ref().map(|entry| entry.artifact_sha256.as_str()).unwrap_or(""),
+            )?
+        };
+        let result = install::remove_with(package, &ctx.root, false);
+        let after = db.entry(package)?;
+        {
+            let mut recorder = op.recorder();
+            recorder.step_result(
+                step_no, package, transaction::history::StepAction::Remove,
+                if result.is_ok() { transaction::history::StepStatus::Committed }
+                else { transaction::history::StepStatus::Failed },
+                before.as_ref(), after.as_ref(), "group-remove",
+                result.as_ref().err().map(|error| format!("{error:#}")), None,
+            )?;
         }
+        if let Err(error) = result { failure = Some(error); break; }
     }
-    // the membership drops only with a recorded transaction result
-    if err.is_none() {
-        groups::membership::remove(&ctx.root, id)?;
-    }
-    op.finish(err.as_ref())?;
-    match err {
-        Some(e) => Err(e),
+    match failure {
+        Some(error) => {
+            op.finish(Some(&error))?;
+            Err(error)
+        }
         None => {
+            // Persist history first. A retry can safely clean up membership if
+            // interruption happens between the two durable operations.
+            op.finish(None)?;
+            groups::membership::remove(&ctx.root, id)?;
             println!("nawa: group {id} removed ({} package(s))", candidates.len());
             Ok(())
         }

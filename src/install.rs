@@ -177,6 +177,43 @@ pub struct IndexProof<'a> {
     pub repo_id: Option<&'a str>,
 }
 
+/// Inspect package identity and archive digest before installation. This state
+/// is persisted in the WAL intent so recovery can distinguish installs from
+/// removals without guessing.
+pub fn inspect_archive_state(
+    archive_path: &Path,
+    reason: &str,
+    previous: Option<&Entry>,
+) -> Result<crate::transaction::history::PackageState> {
+    let raw = archive::read_pkginfo(archive_path)
+        .with_context(|| format!("read package metadata from {}", archive_path.display()))?;
+    let info = archive::parse_pkginfo(&raw).context("parse archive package metadata")?;
+    let name = info.get("pkgname").cloned().unwrap_or_default();
+    let version = info.get("pkgver").cloned().unwrap_or_default();
+    crate::db::check_name(&name)?;
+    if !crate::db::valid_version(&version) {
+        bail!("archive {} has an invalid package version {:?}", archive_path.display(), version);
+    }
+    let rel = info.get("pkgrel").and_then(|value| value.parse::<u32>().ok())
+        .filter(|value| *value > 0)
+        .ok_or_else(|| anyhow::anyhow!("archive {} has an invalid pkgrel", archive_path.display()))?;
+    let arch = info.get("arch").cloned().unwrap_or_default();
+    let digest = crate::fetch::sha256_of_file(archive_path)
+        .with_context(|| format!("hash package archive {}", archive_path.display()))?;
+    let effective_reason = if reason == "keep" {
+        previous.map(|entry| entry.reason.clone()).unwrap_or_else(|| "explicit".to_string())
+    } else {
+        reason.to_string()
+    };
+    Ok(crate::transaction::history::PackageState {
+        version: Some(version),
+        rel: Some(rel),
+        arch,
+        reason: effective_reason,
+        artifact_sha256: digest,
+    })
+}
+
 fn install_archive_payload(
     archive_path: &Path,
     cache_name_source: &Path,
