@@ -132,6 +132,7 @@ pub(super) fn spawn(executable: &Path, protected_paths: &[PathBuf]) -> Result<Sa
     let nawa = std::env::current_exe().context("locate nawa for plugin sandbox")?;
     let (parent_end, child_end) = UnixStream::pair().context("create plugin sandbox sync socket")?;
     let child_fd = child_end.as_raw_fd();
+    let parent_pid = std::process::id() as libc::pid_t;
     let mut command = Command::new(nawa);
     command
         .arg("sandbox-init")
@@ -147,6 +148,18 @@ pub(super) fn spawn(executable: &Path, protected_paths: &[PathBuf]) -> Result<Sa
     // sandbox and close_range is mandatory for this security boundary.
     unsafe {
         command.pre_exec(move || {
+            // The sandbox supervisor must not outlive the Nawa process that
+            // owns the plugin session. Set this before exec and verify the
+            // parent did not die in the fork/pre_exec race.
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::getppid() != parent_pid {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "Nawa parent exited while starting plugin sandbox",
+                ));
+            }
             if child_fd != 3 && libc::dup2(child_fd, 3) < 0 {
                 return Err(std::io::Error::last_os_error());
             }
