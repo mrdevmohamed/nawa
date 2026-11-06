@@ -9,7 +9,6 @@
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use std::io::{Read, Write};
-use std::path::PathBuf;
 use std::process::{Child, ChildStdin};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -32,7 +31,7 @@ pub struct PluginProcess {
     requests: mpsc::Sender<PendingWrite>,
     responses: mpsc::Receiver<Result<protocol::Envelope>>,
     stderr_tail: Arc<Mutex<Vec<u8>>>,
-    sandbox_dir: PathBuf,
+    _sandbox_cleanup: super::sandbox::WorkDir,
     hello: HelloResponse,
 }
 
@@ -42,7 +41,6 @@ impl Drop for PluginProcess {
         // PID namespace teardown then kills the plugin and all its children.
         let _ = self.child.kill();
         let _ = self.child.wait();
-        let _ = std::fs::remove_dir_all(&self.sandbox_dir);
     }
 }
 
@@ -63,7 +61,7 @@ impl PluginProcess {
         timeout: Duration,
     ) -> Result<Self> {
         let sandboxed = super::sandbox::spawn(&manifest.executable, protected_paths)?;
-        let mut child = sandboxed.child;
+        let super::sandbox::SandboxedChild { child: mut child, cleanup } = sandboxed;
         let stdin = child.stdin.take().context("plugin sandbox stdin pipe disappeared")?;
         let stdout = child.stdout.take().context("plugin sandbox stdout pipe disappeared")?;
         let stderr = child.stderr.take().context("plugin sandbox stderr pipe disappeared")?;
@@ -91,7 +89,7 @@ impl PluginProcess {
             requests: request_tx,
             responses,
             stderr_tail,
-            sandbox_dir: sandboxed.workdir,
+            _sandbox_cleanup: cleanup,
             hello: HelloResponse {
                 plugin_id: String::new(),
                 plugin_version: String::new(),
