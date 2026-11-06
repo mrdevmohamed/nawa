@@ -195,5 +195,12 @@ fn probe_spec(scratch: &str) -> SandboxSpec {
         mask: vec![],
         build_inside: "/build".to_string(),
         workdir: String::new(),
+        run_uid: None,
+        run_gid: None,
+        memory_limit_bytes: 0,
+        process_limit: 0,
+        file_size_limit_bytes: 0,
+        open_files_limit: 0,
+        readonly_paths: Vec::new(),
     }
 }
