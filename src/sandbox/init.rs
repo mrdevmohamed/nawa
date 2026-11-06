@@ -36,7 +36,7 @@ pub fn init(path: &Path) -> Result<i32> {
     // setgroups=deny is installed as part of the parent-side gid-map
     // handshake. Clear inherited supplementary groups before entering the
     // user namespace; the child can then safely set its mapped primary gid.
-    if euid == 0 {
+    if euid == 0 && spec.run_uid.is_some() {
         sys::clear_supplementary_groups()?;
     }
 
