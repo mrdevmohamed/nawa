@@ -77,6 +77,8 @@ pub fn clear_supplementary_groups() -> Result<()> {
 /// Switch to an already-mapped unprivileged identity inside the plugin
 /// user namespace. Supplementary groups were cleared before unshare.
 pub fn drop_to_ids(uid: u32, gid: u32) -> Result<()> {
+    // SAFETY: called only by sandbox PID 1 after the parent installed the
+    // subordinate gid/uid mappings; these scalar IDs contain no pointers.
     if unsafe { libc::setgid(gid as libc::gid_t) } != 0 {
         return Err(std::io::Error::last_os_error()).context("drop plugin gid");
     }
