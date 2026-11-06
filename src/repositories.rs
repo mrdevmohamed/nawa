@@ -1,0 +1,308 @@
+//! Multiple-repository configuration and administration commands
+//! (roadmap Phase 4): repolist, makecache, repoquery, clean.
+//!
+//! `[[repositories]]` entries in nawa.toml add to (and, when present,
+//! replace) the legacy scalar `repo`. Repository ids are validated
+//! identifiers; cache stays URL-scoped as before.
+
+use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+use crate::config::Config;
+use crate::fetch::RepoRef;
+
+/// One configured repository (roadmap §8.2).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepoConfig {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    pub url: String,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_priority")]
+    pub priority: u32,
+}
+
+fn default_enabled() -> bool {
+    true
+}
+
+fn default_priority() -> u32 {
+    50
+}
+
+/// Validate a repository id: conservative identifier charset.
+pub fn check_repo_id(id: &str) -> Result<()> {
+    if !crate::db::valid_name(id) {
+        bail!("invalid repository id {id:?} (letters, digits, + _ . - only)");
+    }
+    Ok(())
+}
+
+/// The effective repository set (roadmap §8.3):
+/// * explicit `[[repositories]]` entries are the set;
+/// * otherwise the legacy scalar `repo` becomes one `default` repository;
+/// * both present: entries win and the legacy value is ignored (warned).
+pub fn effective(cfg: &Config) -> Result<Vec<RepoConfig>> {
+    let entries = parse_file_entries(cfg)?;
+    if !entries.is_empty() {
+        if cfg.repo.is_some() {
+            eprintln!(
+                "nawa: note: both `repo` and [[repositories]] are configured — \
+                 the explicit repository list wins"
+            );
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        for r in &entries {
+            check_repo_id(&r.id)?;
+            if !ids.insert(r.id.clone()) {
+                bail!("duplicate repository id {:?}", r.id);
+            }
+        }
+        return Ok(entries);
+    }
+    Ok(cfg
+        .repo
+        .as_ref()
+        .map(|url| vec![RepoConfig {
+            id: "default".into(),
+            name: "Default repository".into(),
+            url: url.clone(),
+            enabled: true,
+            priority: 50,
+        }])
+        .unwrap_or_default())
+}
+
+fn parse_file_entries(cfg: &Config) -> Result<Vec<RepoConfig>> {
+    let Some(path) = cfg.file.as_deref() else { return Ok(Vec::new()) };
+    let raw = std::fs::read_to_string(path).unwrap_or_default();
+    let doc: toml::Table = toml::from_str(&raw).unwrap_or_default();
+    let Some(arr) = doc.get("repositories").and_then(|v| v.as_array()) else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for v in arr {
+        let r: RepoConfig = v
+            .clone()
+            .try_into()
+            .context("a [[repositories]] entry is malformed")?;
+        out.push(r);
+    }
+    Ok(out)
+}
+
+/// `nawa repolist [--all|--enabled]` — configuration + cached state, no
+/// downloads (roadmap §8.6).
+pub fn cmd_repolist(cfg: &Config, all: bool) -> Result<()> {
+    let repos = effective(cfg)?;
+    if repos.is_empty() {
+        println!("nawa: no repositories configured");
+        return Ok(());
+    }
+    println!("{:<12}  {:<8}  {:<8}  URL", "ID", "State", "Priority");
+    println!("{}", "-".repeat(60));
+    for r in &repos {
+        if !all && !r.enabled {
+            continue;
+        }
+        println!(
+            "{:<12}  {:<8}  {:<8}  {}",
+            r.id,
+            if r.enabled { "enabled" } else { "disabled" },
+            r.priority,
+            r.url
+        );
+    }
+    Ok(())
+}
+
+/// `nawa makecache` — refresh enabled repositories' metadata through the
+/// existing authentication/freshness path (roadmap §8.10).
+pub fn cmd_makecache(cfg: &Config, root: &Path, allow_unsigned: bool, force: bool) -> Result<()> {
+    let repos = effective(cfg)?;
+    let enabled: Vec<&RepoConfig> = repos.iter().filter(|r| r.enabled).collect();
+    if enabled.is_empty() {
+        println!("nawa: no enabled repositories to refresh");
+        return Ok(());
+    }
+    let total = enabled.len();
+    let mut failures = 0;
+    for r in enabled {
+        let repo_ref = RepoRef::parse(&r.url)?;
+        match crate::upgrade::open_repo(root, &repo_ref, allow_unsigned, force) {
+            Ok(open) => println!(
+                "nawa: {} ({}): cache verified — {} package(s), schema v{}",
+                r.id,
+                r.url,
+                open.index.packages.len(),
+                open.index.repository.as_ref().map(|m| m.schema).unwrap_or(1)
+            ),
+            Err(e) => {
+                failures += 1;
+                eprintln!("nawa: error: {} ({}): {e:#}", r.id, r.url);
+            }
+        }
+    }
+    if failures > 0 {
+        bail!("{failures} of {total} repository refresh(es) failed — caches NOT replaced");
+    }
+    Ok(())
+}
+
+/// `nawa repoquery <name>` — query enabled repositories' cached metadata
+/// without downloading any archive (roadmap §8.9).
+pub fn cmd_repoquery(cfg: &Config, root: &Path, name: &str, repo_id: Option<&str>, info: bool) -> Result<()> {
+    let repos = effective(cfg)?;
+    let enabled: Vec<&RepoConfig> = repos
+        .iter()
+        .filter(|r| r.enabled && repo_id.map(|i| i == r.id).unwrap_or(true))
+        .collect();
+    if enabled.is_empty() {
+        bail!("no enabled repositories to query");
+    }
+    let mut found = 0;
+    for r in &enabled {
+        let repo_ref = RepoRef::parse(&r.url)?;
+        // local repos read directly; remote repos use the cache
+        let dir = match &repo_ref {
+            RepoRef::Local(d) => d.clone(),
+            RepoRef::Remote(_) => crate::fetch::remote_cache_dir(root, &r.url),
+        };
+        let index_path = dir.join("index.toml");
+        if !index_path.exists() {
+            continue;
+        }
+        let bytes = std::fs::read(&index_path).unwrap_or_default();
+        let Ok(index) = crate::repo::load_index_bytes(&bytes) else { continue };
+        if let Some(e) = index.find(name) {
+            found += 1;
+            if info {
+                println!("Package   : {}-{}-{}", e.name, e.version, e.rel);
+                println!("Repository: {}", r.id);
+                println!("Arch      : {}", e.arch);
+                println!("Size      : {}", crate::humanize::format_size(e.size));
+                println!("Installed : {}", crate::humanize::format_size(e.installed_size));
+                println!("SHA-256   : {}", e.sha256);
+                println!("File      : {}", e.file);
+            } else {
+                println!("{:<12}  {}-{}-{}  {}", r.id, e.name, e.version, e.rel, e.arch);
+            }
+        }
+    }
+    if found == 0 {
+        bail!("no package {name:?} found in the enabled repositories");
+    }
+    Ok(())
+}
+
+/// `nawa clean <metadata|packages|sources|layers|all> [--dry-run]`
+/// (roadmap §8.11). Mark-and-sweep for package objects: everything
+/// referenced by installed entries, history records or legacy undo records
+/// is retained.
+pub fn cmd_clean(root: &Path, category: &str, dry_run: bool) -> Result<()> {
+    let cat = category.to_ascii_lowercase();
+    if !matches!(cat.as_str(), "metadata" | "packages" | "sources" | "layers" | "all") {
+        bail!("unknown clean category {cat:?} (metadata | packages | sources | layers | all)");
+    }
+    let mut removed: u64 = 0;
+    let mut retained: u64 = 0;
+
+    if cat == "metadata" || cat == "all" {
+        let dir = root.join("var/cache/nawa/remote");
+        removed += clean_dir(&dir, dry_run);
+    }
+    if cat == "sources" || cat == "all" {
+        let dir = root.join("var/cache/nawa/sources");
+        removed += clean_dir(&dir, dry_run);
+    }
+    if cat == "layers" || cat == "all" {
+        let dir = root.join("var/cache/nawa/layers");
+        removed += clean_dir(&dir, dry_run);
+    }
+    if cat == "packages" || cat == "all" {
+        // mark: installed entries + history + legacy undo
+        let mut keep = std::collections::BTreeSet::new();
+        for e in crate::db::Db::new(root).installed()? {
+            if !e.artifact_sha256.is_empty() {
+                keep.insert(e.artifact_sha256.clone());
+            }
+            // legacy named caches of installed versions stay too
+            let legacy = root.join("var/cache/nawa").join(format!("{}.nawa.tar.zst", e.version_full()));
+            if let Ok(md) = std::fs::metadata(&legacy) {
+                retained += md.len();
+            }
+        }
+        for digest in crate::transaction::history::referenced_artifacts(root)? {
+            keep.insert(digest);
+        }
+        let store = crate::artifact::store_dir(root);
+        if store.exists() {
+            for fan in std::fs::read_dir(&store)?.filter_map(|e| e.ok()) {
+                let fan_dir = fan.path();
+                if !fan_dir.is_dir() {
+                    continue;
+                }
+                for obj in std::fs::read_dir(&fan_dir)?.filter_map(|e| e.ok()) {
+                    let p = obj.path();
+                    let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    let Some(digest) = name
+                        .strip_suffix(".nawa.tar.zst")
+                        .map(str::to_string)
+                        .and_then(|d| {
+                            // reconstruct full digest from fan + file name
+                            d.strip_prefix(&fan_dir.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default()).map(str::to_string)
+                        })
+                    else {
+                        continue;
+                    };
+                    let full = format!("{}{}", fan_dir.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default(), name.strip_suffix(".nawa.tar.zst").unwrap_or(&name));
+                    let _ = digest;
+                    if keep.contains(&full) {
+                        if let Ok(md) = std::fs::metadata(&p) {
+                            retained += md.len();
+                        }
+                        continue;
+                    }
+                    if let Ok(md) = std::fs::metadata(&p) {
+                        removed += md.len();
+                    }
+                    if !dry_run {
+                        std::fs::remove_file(&p).with_context(|| format!("remove {}", p.display()))?;
+                    }
+                }
+            }
+        }
+    }
+    if dry_run {
+        println!("nawa: dry run — would free {}, retaining {}", crate::humanize::format_size(removed), crate::humanize::format_size(retained));
+    } else {
+        println!("nawa: cleaned {} (retained {} of referenced data)", crate::humanize::format_size(removed), crate::humanize::format_size(retained));
+    }
+    Ok(())
+}
+
+fn clean_dir(dir: &Path, dry_run: bool) -> u64 {
+    let mut freed = 0;
+    let Ok(rd) = std::fs::read_dir(dir) else { return 0 };
+    for e in rd.filter_map(|e| e.ok()) {
+        let p = e.path();
+        let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        // active .part files of live workers are never touched
+        if name.ends_with(".part") {
+            continue;
+        }
+        if let Ok(md) = std::fs::metadata(&p) {
+            freed += md.len();
+        }
+        if !dry_run {
+            let _ = std::fs::remove_dir_all(&p);
+        }
+    }
+    freed
+}
+
+#[allow(dead_code)]
+fn unused(_: PathBuf) {}

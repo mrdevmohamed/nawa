@@ -91,7 +91,38 @@ pub(crate) fn cmd_install(
     for name in &plan.up_to_date {
         println!("nawa: {name} is already installed and up to date");
     }
-    run_plan(ctx, &plan, flags, &sourcing, &extras)
+    if plan.items.is_empty() && extras.is_empty() {
+        return Ok(());
+    }
+    // one transaction for the whole command (roadmap §5.1): the id is
+    // allocated under the exclusive db lock inside begin_operation
+    let requested: Vec<String> = remaining_targets.clone();
+    let repo_ids: Vec<String> = sourcing
+        .open
+        .as_ref()
+        .and_then(|o| o.base_url.clone())
+        .into_iter()
+        .collect();
+    {
+        let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
+        let mut op = transaction::begin_operation(
+            &ctx.root,
+            transaction::OperationCommand::Install,
+            &requested,
+            &repo_ids,
+        )?;
+        drop(_lock);
+        let result = run_plan(ctx, &plan, flags, &sourcing, &extras, &mut op);
+        let err = result.err();
+        {
+            let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
+            op.finish(err.as_ref())?;
+        }
+        match err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
 }
 
 /// Where each package of a plan comes from, decided per package.
@@ -232,6 +263,8 @@ struct InstallRequest<'a> {
     /// The index was authenticated by a trusted key and replaces the
     /// per-archive detached signature (schema v2).
     signed_index: bool,
+    /// Where this archive comes from, for the history record.
+    source: &'a str,
 }
 
 /// Install one ready archive. The library functions never lock; hold the db
@@ -241,30 +274,88 @@ fn install_one(
     archive: &Path,
     flags: &PlanFlags,
     request: InstallRequest<'_>,
+    open_repo: Option<&upgrade::OpenRepo>,
+    op: &mut transaction::OperationHandle,
 ) -> Result<()> {
     println!(
         "nawa: [{}/{}] installing {}",
         request.number, request.total, request.what
     );
     let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
-    let installed = match request.index_sha256 {
-        Some(expected) if request.signed_index => install::install_archive_from_index(
-            archive,
-            &ctx.root,
-            flags.force,
-            expected,
-            request.reason,
-        ),
-        pinned => install::install_archive_pinned(
-            archive,
-            &ctx.root,
-            flags.force,
-            flags.allow_unsigned,
-            None,
-            request.reason,
-            pinned,
-        ),
+    // Resolve the real package identity from .PKGINFO; archive filenames
+    // are not authoritative package metadata.
+    let package = archive_name_of(archive)
+        .ok_or_else(|| anyhow::anyhow!("cannot read package name from {}", archive.display()))?;
+    let db = db::Db::new(&ctx.root);
+    let before = db.entry(&package)?;
+    let target = install::inspect_archive_state(archive, request.reason, before.as_ref())?;
+    if let Some(expected) = request.index_sha256 {
+        if expected != target.artifact_sha256 {
+            bail!(
+                "archive {} changed after repository verification: index expected {}, inspected {}",
+                archive.display(), expected, target.artifact_sha256
+            );
+        }
+    }
+    let action = match &before {
+        None => transaction::history::StepAction::Install,
+        Some(old) if old.version != target.version.clone().unwrap_or_default()
+            || Some(old.rel) != target.rel => transaction::history::StepAction::Upgrade,
+        Some(_) => transaction::history::StepAction::Reinstall,
     };
+    let mut recorder = op.recorder();
+    let step_no = recorder.step_intent_state(
+        &package, action, before.as_ref(), Some(&target), &target.artifact_sha256,
+    )?;
+    let installed = match request.index_sha256 {
+        Some(expected) if request.signed_index => {
+            let proof = open_repo.map(|open| install::IndexProof {
+                index_bytes: Some(&open.index_bytes),
+                index_signature: open.index_signature.as_deref(),
+                signer_public: open.signer_public.as_deref(),
+                repo_id: open.base_url.as_deref(),
+            });
+            install::install_archive_from_index_proof(
+                archive, &ctx.root, flags.force, expected, request.reason, proof,
+            )
+        }
+        pinned => {
+            let expected = pinned.unwrap_or(target.artifact_sha256.as_str());
+            install::install_archive_pinned(
+                archive, &ctx.root, flags.force, flags.allow_unsigned, None,
+                request.reason, Some(expected),
+            )
+        },
+    };
+    match &installed {
+        Ok(entry) => {
+            recorder.step_result(
+                step_no, &entry.name, action,
+                transaction::history::StepStatus::Committed,
+                before.as_ref(), Some(entry), request.source, None, None,
+            )?;
+        }
+        Err(error) => {
+            let current = db.entry(&package)?;
+            let target_is_current = current.as_ref().is_some_and(|entry| target.matches_entry(entry));
+            let retry_hook = install::hook_needs_retry(&ctx.root, &package).unwrap_or(false);
+            let committed_hook_failed = target_is_current
+                && (before.as_ref().is_none_or(|old| !target.matches_entry(old)) || retry_hook);
+            recorder.step_result(
+                step_no, &package, action,
+                if committed_hook_failed {
+                    transaction::history::StepStatus::CommittedHookFailed
+                } else {
+                    transaction::history::StepStatus::Failed
+                },
+                before.as_ref(),
+                if committed_hook_failed { current.as_ref() } else { None },
+                request.source,
+                Some(format!("{error:#}")),
+                committed_hook_failed.then(|| "failed".to_string()),
+            )?;
+        }
+    }
     installed.with_context(|| {
         format!(
             "[{}/{}] install of {} failed",
@@ -272,6 +363,13 @@ fn install_one(
         )
     })?;
     Ok(())
+}
+
+/// The package name inside an archive (from .PKGINFO), when readable.
+fn archive_name_of(archive: &Path) -> Option<String> {
+    let raw = crate::archive::read_pkginfo(archive).ok()?;
+    let info = crate::archive::parse_pkginfo(&raw).ok()?;
+    info.get("pkgname").cloned()
 }
 
 /// Show the plan, ask, then install every item in order — dependencies
@@ -284,6 +382,7 @@ pub(crate) fn run_plan(
     flags: &PlanFlags,
     sourcing: &Sourcing,
     extras: &[repo::RepoEntry],
+    op: &mut transaction::OperationHandle,
 ) -> Result<()> {
     let total = plan.items.len() + extras.len();
     if total == 0 {
@@ -421,7 +520,7 @@ pub(crate) fn run_plan(
         crate::interrupt::check()?;
         let n = i + 1;
         let id = it.rec.id();
-        let step = || -> Result<()> {
+        let mut step = || -> Result<()> {
             let (archive, index_sha256, signed_index): (PathBuf, Option<String>, bool) = match &sources[i] {
                 Source::Build => (build_one(ctx, it, flags, n, total)?, None, false),
                 Source::Repo(re) => {
@@ -451,6 +550,10 @@ pub(crate) fn run_plan(
                     }
                 }
             };
+            let source = match &sources[i] {
+                Source::Repo(_) => "repository",
+                Source::Build => "local-build",
+            };
             install_one(
                 ctx,
                 &archive,
@@ -462,7 +565,10 @@ pub(crate) fn run_plan(
                     total,
                     index_sha256: index_sha256.as_deref(),
                     signed_index,
+                    source,
                 },
+                sourcing.open.as_ref(),
+                op,
             )
         };
         if let Err(e) = step() {
@@ -479,7 +585,7 @@ pub(crate) fn run_plan(
         crate::interrupt::check()?;
         let n = plan.items.len() + j + 1;
         let what = format!("{}-{}-{}", re.name, re.version, re.rel);
-        let step = || -> Result<()> {
+        let mut step = || -> Result<()> {
             println!("nawa: [{n}/{total}] fetching {what} from the repository");
             let open = sourcing
                 .open
@@ -499,7 +605,10 @@ pub(crate) fn run_plan(
                     total,
                     index_sha256: Some(re.sha256.as_str()),
                     signed_index,
+                    source: "repository",
                 },
+                sourcing.open.as_ref(),
+                op,
             )
         };
         if let Err(e) = step() {
@@ -596,11 +705,35 @@ pub(crate) fn cmd_update(
         }
     }
 
-    let result = run_plan(ctx, &plan, flags, &sourcing, &[]);
+    let requested = targets.clone();
+    let repo_ids: Vec<String> = sourcing
+        .open
+        .as_ref()
+        .and_then(|o| o.base_url.clone())
+        .into_iter()
+        .collect();
+    let mut op = {
+        let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
+        transaction::begin_operation(
+            &ctx.root,
+            transaction::OperationCommand::Update,
+            &requested,
+            &repo_ids,
+        )?
+    };
+    let result = run_plan(ctx, &plan, flags, &sourcing, &[], &mut op);
+    let err = result.err();
+    {
+        let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
+        op.finish(err.as_ref())?;
+    }
     // also after a partial run: whatever was installed is worth checking
     let changed: Vec<String> = plan.items.iter().map(|it| it.rec.package.name.clone()).collect();
     warn_revdep(ctx, &changed);
-    result
+    match err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 pub(crate) fn cmd_autoremove(ctx: &Ctx, dry_run: bool, yes: bool, build_deps: bool) -> Result<()> {
@@ -629,11 +762,55 @@ pub(crate) fn cmd_autoremove(ctx: &Ctx, dry_run: bool, yes: bool, build_deps: bo
         return Ok(());
     }
     confirm::confirm(&format!("nawa: remove {} package(s)?", order.len()), yes)?;
+    // the command holds the exclusive db lock for its whole duration
+    // (see cli::lock_mode), so no per-step locking happens here
+    let mut op = transaction::begin_operation(
+        &ctx.root,
+        transaction::OperationCommand::Autoremove,
+        &[],
+        &[],
+    )?;
     for (i, n) in order.iter().enumerate() {
         crate::interrupt::check()?;
         println!("nawa: [{}/{}] removing {n}", i + 1, order.len());
-        install::remove_with(n, &ctx.root, false)?;
+        let db = db::Db::new(&ctx.root);
+        let before = db.entry(n)?;
+        let mut recorder = op.recorder();
+        let step_no = recorder.step_intent(
+            n,
+            transaction::history::StepAction::Remove,
+            before.as_ref(),
+            None,
+            "",
+        )?;
+        match install::remove_with(n, &ctx.root, false) {
+            Ok(()) => {
+                recorder.step_result(
+                    step_no, n, transaction::history::StepAction::Remove,
+                    transaction::history::StepStatus::Committed,
+                    before.as_ref(), None, "autoremove", None, None,
+                )?;
+            }
+            Err(e) => {
+                let after = db.entry(n)?;
+                let committed_hook_failed = before.is_some() && after.is_none();
+                recorder.step_result(
+                    step_no, n, transaction::history::StepAction::Remove,
+                    if committed_hook_failed {
+                        transaction::history::StepStatus::CommittedHookFailed
+                    } else {
+                        transaction::history::StepStatus::Failed
+                    },
+                    before.as_ref(), after.as_ref(), "autoremove", Some(format!("{e:#}")),
+                    committed_hook_failed.then(|| "failed".to_string()),
+                )?;
+                let err = e;
+                op.finish(Some(&err))?;
+                return Err(err);
+            }
+        }
     }
+    op.finish(None)?;
     println!("nawa: done — {} package(s) removed", order.len());
     Ok(())
 }
@@ -668,7 +845,59 @@ pub(crate) fn install_archive_file(
             suggest::hint(&wanted, &names)
         );
     }
-    install::install_archive(file, &ctx.root, force, allow_unsigned, key.as_deref(), "explicit")?;
+    // the caller (cmd_install) holds the exclusive lock for archive installs
+    let db = db::Db::new(&ctx.root);
+    let pkg_name = archive_name_of(file)
+        .ok_or_else(|| anyhow::anyhow!("cannot read package name from {}", file.display()))?;
+    let before = db.entry(&pkg_name)?;
+    let target = install::inspect_archive_state(file, "explicit", before.as_ref())?;
+    let action = match &before {
+        None => transaction::history::StepAction::Install,
+        Some(old) if old.version != target.version.clone().unwrap_or_default()
+            || Some(old.rel) != target.rel => transaction::history::StepAction::Upgrade,
+        Some(_) => transaction::history::StepAction::Reinstall,
+    };
+    let digest = target.artifact_sha256.clone();
+    let mut op = transaction::begin_operation(
+        &ctx.root,
+        transaction::OperationCommand::ArchiveInstall,
+        std::slice::from_ref(&pkg_name),
+        &[],
+    )?;
+    let mut recorder = op.recorder();
+    let step_no = recorder.step_intent_state(
+        &pkg_name, action, before.as_ref(), Some(&target), &digest,
+    )?;
+    let result = install::install_archive_pinned(
+        file, &ctx.root, force, allow_unsigned, key.as_deref(), "explicit", Some(&digest),
+    );
+    match &result {
+        Ok(entry) => {
+            recorder.step_result(
+                step_no, &entry.name, action,
+                transaction::history::StepStatus::Committed,
+                before.as_ref(), Some(entry), "archive", None, None,
+            )?;
+        }
+        Err(error) => {
+            let current = db.entry(&pkg_name)?;
+            let target_is_current = current.as_ref().is_some_and(|entry| target.matches_entry(entry));
+            let retry_hook = install::hook_needs_retry(&ctx.root, &pkg_name).unwrap_or(false);
+            let committed_hook_failed = target_is_current
+                && (before.as_ref().is_none_or(|old| !target.matches_entry(old)) || retry_hook);
+            recorder.step_result(
+                step_no, &pkg_name, action,
+                if committed_hook_failed { transaction::history::StepStatus::CommittedHookFailed }
+                else { transaction::history::StepStatus::Failed },
+                before.as_ref(),
+                if committed_hook_failed { current.as_ref() } else { None },
+                "archive", Some(format!("{error:#}")),
+                committed_hook_failed.then(|| "failed".to_string()),
+            )?;
+        }
+    }
+    op.finish(result.as_ref().err())?;
+    result?;
     Ok(())
 }
 
@@ -708,7 +937,48 @@ pub(crate) fn cmd_remove(ctx: &Ctx, name: &str, force: bool, yes: bool) -> Resul
         &format!("nawa: remove {name} from {}?", ctx.root.display()),
         yes,
     )?;
-    install::remove_with(name, &ctx.root, force)?;
+    let db = db::Db::new(&ctx.root);
+    let before = db.entry(name)?;
+    let mut op = transaction::begin_operation(
+        &ctx.root,
+        transaction::OperationCommand::Remove,
+        &[name.to_string()],
+        &[],
+    )?;
+    let mut recorder = op.recorder();
+    let step_no = recorder.step_intent(
+        name,
+        transaction::history::StepAction::Remove,
+        before.as_ref(),
+        None,
+        before.as_ref().map(|b| b.artifact_sha256.as_str()).unwrap_or(""),
+    )?;
+    let result = install::remove_with(name, &ctx.root, force);
+    match &result {
+        Ok(()) => {
+            recorder.step_result(
+                step_no, name, transaction::history::StepAction::Remove,
+                transaction::history::StepStatus::Committed,
+                before.as_ref(), None, "remove", None, None,
+            )?;
+        }
+        Err(e) => {
+            let after = db.entry(name)?;
+            let committed_hook_failed = before.is_some() && after.is_none();
+            recorder.step_result(
+                step_no, name, transaction::history::StepAction::Remove,
+                if committed_hook_failed {
+                    transaction::history::StepStatus::CommittedHookFailed
+                } else {
+                    transaction::history::StepStatus::Failed
+                },
+                before.as_ref(), after.as_ref(), "remove", Some(format!("{e:#}")),
+                committed_hook_failed.then(|| "failed".to_string()),
+            )?;
+        }
+    }
+    op.finish(result.as_ref().err())?;
+    result?;
     // the removed package is gone: this checks what depended on it
     warn_revdep(ctx, &[name.to_string()]);
     Ok(())

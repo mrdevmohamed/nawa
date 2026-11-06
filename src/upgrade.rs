@@ -50,6 +50,14 @@ pub struct OpenRepo {
     pub index: repo::Index,
     /// Authentication method selected only after validating the index signer.
     pub archive_auth: ArchiveAuth,
+    /// The exact index bytes that were signature-verified (kept so installs
+    /// can retain the proof bundle, roadmap §4.5).
+    pub index_bytes: Vec<u8>,
+    /// The signature sidecar bytes used for that verification, when one exists.
+    pub index_signature: Option<Vec<u8>>,
+    /// The public key bytes of the trusted signer, when the index was
+    /// authenticated by a configured trusted key.
+    pub signer_public: Option<Vec<u8>>,
 }
 
 /// Fetch (remote) or locate (local) a repository, then parse and
@@ -150,6 +158,17 @@ pub fn open_repo(
         ArchiveAuth::DetachedSignature
     };
 
+    // Retain the exact proof bytes of the verification above so later
+    // installs can persist them as artifact provenance (roadmap §4.5).
+    let index_signature = std::fs::read(sign::sig_path_for(&index_path)).ok();
+    let signer_public = match &index_trust {
+        sign::IndexTrust::TrustedKey { key_name } => std::fs::read(
+            sign::trust_dir(root).join(key_name),
+        )
+        .ok(),
+        _ => None,
+    };
+
     // Only an index authenticated by a configured trusted key advances the
     // newest-index marker used to prevent remote repository rollback.
     check_index_freshness(
@@ -159,7 +178,15 @@ pub fn open_repo(
         force,
         index_trust.is_trusted(),
     )?;
-    Ok(OpenRepo { dir: repo_dir, base_url, index, archive_auth })
+    Ok(OpenRepo {
+        dir: repo_dir,
+        base_url,
+        index,
+        archive_auth,
+        index_bytes,
+        index_signature,
+        signer_public,
+    })
 }
 
 /// Resolve an archive URL while keeping legacy base-URL repositories unchanged.
@@ -353,30 +380,101 @@ pub fn upgrade(
     crate::confirm::confirm("nawa: proceed with the upgrade?", opts.yes)?;
 
     // ---- apply ----------------------------------------------------------------
+    let repo_ids: Vec<String> = open.base_url.clone().into_iter().collect();
+    let requested: Vec<String> = ordered.clone();
+    let mut op = crate::transaction::begin_operation(
+        root,
+        crate::transaction::OperationCommand::Upgrade,
+        &requested,
+        &repo_ids,
+    )?;
+    let db_here = Db::new(root);
     let mut done = 0usize;
+    let mut first_err: Option<anyhow::Error> = None;
     for name in &ordered {
         // a Ctrl+C that arrived during the previous package was deferred
         // until it was complete; stop before starting the next one
-        crate::interrupt::check()?;
+        if let Err(error) = crate::interrupt::check() {
+            first_err = Some(error.into());
+            break;
+        }
         let (re, _) = plan
             .iter()
             .find(|(r, _)| &r.name == name)
             .expect("ordered name came from the plan");
-        let src = fetch_entry(root, &open, re, opts.allow_unsigned)?;
-        if open.archive_auth == ArchiveAuth::SignedIndexSha256 {
-            install::install_archive_from_index(&src, root, opts.force, &re.sha256, "keep")?;
-        } else {
-            install::install_archive_pinned(
-                &src,
-                root,
-                opts.force,
-                opts.allow_unsigned,
-                None,
-                "keep",
-                Some(&re.sha256),
-            )?;
+        let before = db_here.entry(name)?;
+        let target = crate::transaction::history::PackageState {
+            version: Some(re.version.clone()), rel: Some(re.rel), arch: re.arch.clone(),
+            reason: before.as_ref().map(|entry| entry.reason.clone()).unwrap_or_else(|| "explicit".to_string()),
+            artifact_sha256: re.sha256.clone(),
+        };
+        let mut recorder = op.recorder();
+        let step_no = recorder.step_intent_state(
+            name, crate::transaction::history::StepAction::Upgrade,
+            before.as_ref(), Some(&target), &re.sha256,
+        )?;
+        let outcome = fetch_entry(root, &open, re, opts.allow_unsigned).and_then(|src| {
+            if open.archive_auth == ArchiveAuth::SignedIndexSha256 {
+                install::install_archive_from_index_proof(
+                    &src,
+                    root,
+                    opts.force,
+                    &re.sha256,
+                    "keep",
+                    Some(install::IndexProof {
+                        index_bytes: Some(&open.index_bytes),
+                        index_signature: open.index_signature.as_deref(),
+                        signer_public: open.signer_public.as_deref(),
+                        repo_id: None,
+                    }),
+                )
+            } else {
+                install::install_archive_pinned(
+                    &src,
+                    root,
+                    opts.force,
+                    opts.allow_unsigned,
+                    None,
+                    "keep",
+                    Some(&re.sha256),
+                )
+            }
+        });
+        match &outcome {
+            Ok(entry) => {
+                recorder.step_result(
+                    step_no, name, crate::transaction::history::StepAction::Upgrade,
+                    crate::transaction::history::StepStatus::Committed,
+                    before.as_ref(), Some(entry), "repository", None, None,
+                )?;
+                done += 1;
+            }
+            Err(error) => {
+                let current = db_here.entry(name)?;
+                let target_is_current = current.as_ref().is_some_and(|entry| target.matches_entry(entry));
+                let retry_hook = install::hook_needs_retry(root, name).unwrap_or(false);
+                let committed_hook_failed = target_is_current
+                    && (before.as_ref().is_none_or(|old| !target.matches_entry(old)) || retry_hook);
+                recorder.step_result(
+                    step_no, name, crate::transaction::history::StepAction::Upgrade,
+                    if committed_hook_failed {
+                        crate::transaction::history::StepStatus::CommittedHookFailed
+                    } else {
+                        crate::transaction::history::StepStatus::Failed
+                    },
+                    before.as_ref(),
+                    if committed_hook_failed { current.as_ref() } else { None },
+                    "repository", Some(format!("{error:#}")),
+                    committed_hook_failed.then(|| "failed".to_string()),
+                )?;
+                first_err = Some(anyhow::anyhow!("{error:#}"));
+                break;
+            }
         }
-        done += 1;
+    }
+    op.finish(first_err.as_ref())?;
+    if let Some(e) = first_err {
+        return Err(e.context(format!("upgraded {done} of {} package(s) before the failure", ordered.len())));
     }
     println!("nawa: upgraded {done} package(s)");
     Ok(())

@@ -706,6 +706,7 @@ mod tests {
             run: vec![],
             install_date: 0,
             size: 0,
+            artifact_sha256: String::new(),
         }
     }
 

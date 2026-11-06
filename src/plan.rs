@@ -284,6 +284,7 @@ mod tests {
             run: run.iter().map(|s| s.to_string()).collect(),
             install_date: 0,
             size: 0,
+            artifact_sha256: String::new(),
         }
     }
 

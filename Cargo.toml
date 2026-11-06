@@ -64,6 +64,9 @@ rustix = { version = "1.0", default-features = false, features = [
 ] }
 # Levenshtein ("did you mean"): replaces the handwritten distance in suggest.rs
 strsim = { version = "0.11.1", default-features = false }
+# JSON Lines protocol for the out-of-process plugin host (roadmap Phase 2).
+# Pure Rust, no unsafe, works with musl static builds.
+serde_json = "1.0"
 
 [[bin]]
 name = "nawa"

@@ -55,7 +55,62 @@ pub(crate) fn cmd_build(
     // the library functions never lock; this command-level lock covers just
     // the install step (upgrade calls install_archive the same way)
     let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
-    install::install_archive(&archive, &ctx.root, install_force, false, None, "explicit")?;
+    let mut op = transaction::begin_operation(
+        &ctx.root,
+        transaction::OperationCommand::BuildInstall,
+        &[name.to_string()],
+        &[],
+    )?;
+    let db = db::Db::new(&ctx.root);
+    let before = db.entry(name)?;
+    let target = install::inspect_archive_state(&archive, "explicit", before.as_ref())?;
+    let actual_name = crate::archive::read_pkginfo(&archive)
+        .ok()
+        .and_then(|raw| crate::archive::parse_pkginfo(&raw).ok())
+        .and_then(|info| info.get("pkgname").cloned())
+        .unwrap_or_default();
+    if actual_name != name {
+        bail!("built archive package name {actual_name:?} does not match requested recipe {name:?}");
+    }
+    let action = match &before {
+        None => transaction::history::StepAction::Install,
+        Some(old) if old.version != target.version.clone().unwrap_or_default()
+            || Some(old.rel) != target.rel => transaction::history::StepAction::Upgrade,
+        Some(_) => transaction::history::StepAction::Reinstall,
+    };
+    let digest = target.artifact_sha256.clone();
+    let mut recorder = op.recorder();
+    let step_no = recorder.step_intent_state(name, action, before.as_ref(), Some(&target), &digest)?;
+    let result = install::install_archive_pinned(
+        &archive, &ctx.root, install_force, false, None, "explicit", Some(&digest),
+    );
+    match &result {
+        Ok(entry) => {
+            recorder.step_result(
+                step_no, &entry.name, action,
+                transaction::history::StepStatus::Committed,
+                before.as_ref(), Some(entry), "local-build", None, None,
+            )?;
+        }
+        Err(error) => {
+            let current = db.entry(name)?;
+            let target_is_current = current.as_ref().is_some_and(|entry| target.matches_entry(entry));
+            let retry_hook = install::hook_needs_retry(&ctx.root, name).unwrap_or(false);
+            let committed_hook_failed = target_is_current
+                && (before.as_ref().is_none_or(|old| !target.matches_entry(old)) || retry_hook);
+            recorder.step_result(
+                step_no, name, action,
+                if committed_hook_failed { transaction::history::StepStatus::CommittedHookFailed }
+                else { transaction::history::StepStatus::Failed },
+                before.as_ref(),
+                if committed_hook_failed { current.as_ref() } else { None },
+                "local-build", Some(format!("{error:#}")),
+                committed_hook_failed.then(|| "failed".to_string()),
+            )?;
+        }
+    }
+    op.finish(result.as_ref().err())?;
+    result?;
     Ok(())
 }
 

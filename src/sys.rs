@@ -25,7 +25,7 @@
 //!   sandbox come from our own config, verified at parse time);
 //! * every error is surfaced as an ordinary `Result`, never a panic.
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use rustix::fd::BorrowedFd;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
@@ -61,6 +61,44 @@ pub fn fork() -> Result<i32> {
 pub fn exit_now(code: i32) -> ! {
     // SAFETY: constant procedure, no state held.
     unsafe { libc::_exit(code) }
+}
+
+/// Clear supplementary groups while the sandbox helper still has host-root
+/// credentials, before the user namespace installs setgroups=deny.
+pub fn clear_supplementary_groups() -> Result<()> {
+    // SAFETY: a zero-length list with a null pointer is the documented
+    // setgroups(2) form for clearing all supplementary groups.
+    if unsafe { libc::setgroups(0, std::ptr::null()) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("clear sandbox supplementary groups");
+    }
+    Ok(())
+}
+
+/// Switch to an already-mapped unprivileged identity inside the plugin
+/// user namespace. Supplementary groups were cleared before unshare.
+pub fn drop_to_ids(uid: u32, gid: u32) -> Result<()> {
+    // SAFETY: called only by sandbox PID 1 after the parent installed the
+    // subordinate gid/uid mappings; these scalar IDs contain no pointers.
+    if unsafe { libc::setgid(gid as libc::gid_t) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("drop plugin gid");
+    }
+    if unsafe { libc::setuid(uid as libc::uid_t) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("drop plugin uid");
+    }
+    Ok(())
+}
+
+/// Ensure sandbox PID 1 dies when its supervising Nawa process is killed.
+pub fn set_parent_death_kill() -> Result<()> {
+    // SAFETY: PR_SET_PDEATHSIG takes fixed scalar arguments.
+    if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("set sandbox parent-death signal");
+    }
+    // Do not use getppid() as a liveness check here: the sandbox PID 1
+    // has a supervisor in an ancestor PID namespace, so Linux reports PPID 0
+    // even while that supervisor is alive. The signal is installed before
+    // any filesystem work or plugin exec.
+    Ok(())
 }
 
 /// `prctl(PR_SET_NO_NEW_PRIVS, 1)` — even a setuid binary inside the build

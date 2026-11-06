@@ -127,6 +127,8 @@ pub(crate) fn setup_live_root(spec: &SandboxSpec) -> Result<()> {
     mbind("/", "/", true)?;
 
     overlay_scratch(spec)?;
+    remount_spec_paths_ro(spec)?;
+    remount_mount_tree_ro(spec)?;
     remount_ro("/", spec, "the build root (/)")?;
     Ok(())
 }
@@ -180,9 +182,78 @@ pub(crate) fn setup_dir_root(spec: &SandboxSpec) -> Result<()> {
     chdir("/").map_err(|e| anyhow::Error::msg(format!("chdir /: {e}")))?;
     // hide the old root entirely (pivot moved the live system to /old)
     tmpfs_mask("/old")?;
+    remount_spec_paths_ro(spec)?;
+    remount_mount_tree_ro(spec)?;
     // now that we live inside it, the build root becomes read-only
     remount_ro("/", spec, "the build root (/)")?;
     Ok(())
+}
+
+fn remount_spec_paths_ro(spec: &SandboxSpec) -> Result<()> {
+    for path in &spec.readonly_paths {
+        if !Path::new(path).exists() {
+            bail!("sandbox read-only path does not exist: {path}");
+        }
+        remount_ro(path, spec, path)?;
+    }
+    Ok(())
+}
+
+/// In strict plugin mode remount every existing mount read-only, including
+/// separate host filesystems beneath / (for example /var or /home). Only
+/// private tmpfs and the explicit scratch HOME remain writable.
+fn remount_mount_tree_ro(spec: &SandboxSpec) -> Result<()> {
+    if !spec.strict_readonly_root {
+        return Ok(());
+    }
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")
+        .context("read mountinfo for strict plugin sandbox")?;
+    let mut mounts = Vec::new();
+    for line in mountinfo.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let Some(raw_path) = fields.get(4) else { continue };
+        let path = unescape_mountinfo(raw_path);
+        let mount = Path::new(&path);
+        if !mount.is_absolute() || path == "/" {
+            continue;
+        }
+        let writable = spec.writable_paths.iter().any(|allowed| {
+            mount == Path::new(allowed) || mount.starts_with(allowed)
+        });
+        // Masked parents are covered by fresh tmpfs mounts. Their former
+        // child mounts remain listed in mountinfo but are no longer reachable
+        // by path; attempting to remount them would target the covering tmpfs
+        // or fail. The covering tmpfs itself is already empty/unsearchable.
+        let hidden = spec.mask.iter().any(|masked| {
+            mount == Path::new(masked) || mount.starts_with(masked)
+        });
+        // mountinfo can retain entries for mounts absent in restricted
+        // containers (notably EFI variables). Skip only ENOENT; permission
+        // or lookup errors must fail closed rather than weaken read-only mode.
+        if !writable
+            && !hidden
+            && mount
+                .try_exists()
+                .with_context(|| format!("inspect sandbox mount point {path}"))?
+        {
+            mounts.push(path);
+        }
+    }
+    // Children first: a read-only parent must not interfere with remounting
+    // a nested bind or host filesystem.
+    mounts.sort_by_key(|path| std::cmp::Reverse(path.matches('/').count()));
+    mounts.dedup();
+    for path in mounts {
+        remount_ro(&path, spec, &path)?;
+    }
+    Ok(())
+}
+
+fn unescape_mountinfo(path: &str) -> String {
+    path.replace("\\040", " ")
+        .replace("\\011", "\t")
+        .replace("\\012", "\n")
+        .replace("\\134", "\\")
 }
 
 /// Mount the build root as an overlayfs over the extracted layers (§5.3 v2).
@@ -503,6 +574,15 @@ mod tests {
             mask: vec![],
             build_inside: "/build".into(),
             workdir: String::new(),
+            run_uid: None,
+            run_gid: None,
+            memory_limit_bytes: 0,
+            process_limit: 0,
+            file_size_limit_bytes: 0,
+            open_files_limit: 0,
+            readonly_paths: Vec::new(),
+        strict_readonly_root: false,
+        writable_paths: Vec::new(),
         };
         let lower: Vec<String> = spec
             .root

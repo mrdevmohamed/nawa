@@ -2,6 +2,7 @@
 //! A source-based package manager for a from-scratch Linux distribution.
 
 mod archive;
+mod artifact;
 mod build;
 mod buildenv;
 mod cli;
@@ -13,15 +14,18 @@ mod confirm;
 mod db;
 mod deps;
 mod fetch;
+mod groups;
 mod humanize;
 mod install;
 mod interrupt;
 mod lint;
 mod lock;
 mod plan;
+mod plugins;
 mod profile;
 mod recipe;
 mod repo;
+mod repositories;
 mod revdep;
 mod sandbox;
 mod service;
@@ -30,6 +34,7 @@ mod slim;
 mod suggest;
 mod sync;
 mod sys;
+mod transaction;
 mod upgrade;
 mod version;
 
@@ -84,6 +89,7 @@ fn main() {
         jobs,
         repo: None,
         install_mode: None,
+        downloads: None,
     };
     // config errors happen before anything else; report them in style
     let cfg = match config::load(&overrides) {
@@ -94,7 +100,15 @@ fn main() {
         }
     };
     let ctx = Ctx::from_config(&cfg);
-    if let Err(e) = run(&ctx, cmd) {
+    let result = run(&ctx, cmd);
+    // Observer plugins execute only after run() has dropped the package DB
+    // lock; a slow notification must never block a package commit.
+    plugins::events::dispatch_pending(
+        &ctx.root,
+        ctx.cfg.file.as_deref(),
+        ctx.cfg.system_file.as_deref(),
+    );
+    if let Err(e) = result {
         // Ctrl+C: the current step was rolled back or finished, never left
         // half-done. Not an error to shout about; exit like a shell would.
         if e.downcast_ref::<interrupt::Interrupted>().is_some() {
@@ -124,6 +138,12 @@ fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     // transaction is mistaken for a dead one
     if matches!(lock_mode(&cmd), Some(lock::Mode::Exclusive)) {
         install::recover_and_report(&ctx.root);
+        // one-shot, idempotent migration of legacy nanosecond install dates
+        // (roadmap §4.3): only clearly-nanosecond values are rewritten, each
+        // with a .bak copy of the old desc
+        for note in db::migrate_install_dates(&ctx.root)? {
+            eprintln!("nawa: migrated: {note}");
+        }
     }
     match cmd {
         Cmd::Build {
@@ -289,7 +309,54 @@ fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             let repo_ref = fetch::RepoRef::parse(&repo)?;
             sync::sync(&ctx.root, &repo_ref, &ctx.recipes, &sync::SyncOpts { force, allow_unsigned })
         }
+        Cmd::Repolist { all } => repositories::cmd_repolist(&ctx.cfg, all),
+        Cmd::Makecache { allow_unsigned, force } => {
+            repositories::cmd_makecache(&ctx.cfg, &ctx.root, allow_unsigned, force)
+        }
+        Cmd::Repoquery { name, repo_id, info } => {
+            repositories::cmd_repoquery(&ctx.cfg, &ctx.root, &name, repo_id.as_deref(), info)
+        }
+        Cmd::Clean { category, dry_run } => repositories::cmd_clean(&ctx.root, &category, dry_run),
+        Cmd::Group { action } => match action {
+            GroupCmd::List => cmd_group_list(ctx),
+            GroupCmd::Info { id } => cmd_group_info(ctx, &id),
+            GroupCmd::Install { id } => cmd_group_install(ctx, &id),
+            GroupCmd::Remove { id, yes } => cmd_group_remove(ctx, &id, yes),
+        },
+        Cmd::Plugin { action } => match action {
+            PluginCmd::List => cmd_plugin_list(ctx),
+            PluginCmd::Info { id } => cmd_plugin_info(ctx, &id),
+            PluginCmd::Enable { id } => cmd_plugin_enable(ctx, &id, true),
+            PluginCmd::Disable { id } => cmd_plugin_enable(ctx, &id, false),
+            PluginCmd::Grant { id, capability } => cmd_plugin_grant(ctx, &id, &capability, true),
+            PluginCmd::Revoke { id, capability } => cmd_plugin_grant(ctx, &id, &capability, false),
+            PluginCmd::Run { id, command, args } => cmd_plugin_run(ctx, &id, &command, &args),
+        },
+        Cmd::External(values) => {
+            let mut values = values.into_iter();
+            let command = values.next()
+                .ok_or_else(|| anyhow::anyhow!("missing plugin command name"))?
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("plugin command name is not valid UTF-8"))?;
+            let args: Result<Vec<String>> = values
+                .map(|value| value.into_string().map_err(|_| anyhow::anyhow!("plugin arguments must be valid UTF-8 for JSONL")))
+                .collect();
+            cmd_plugin_dispatch(ctx, &command, &args?)
+        },
         Cmd::Rollback { name } => install::rollback(&name, &ctx.root),
+        Cmd::History { action, limit } => {
+            // the lock is already held (see lock_mode); reconcile what a
+            // killed nawa left behind before showing or undoing anything
+            for note in transaction::recovery::reconcile_incomplete(&ctx.root)? {
+                eprintln!("nawa: recovered: {note}");
+            }
+            match action {
+                None => transaction::undo::print_history(&ctx.root, limit.unwrap_or(20)),
+                Some(HistoryCmd::List) => transaction::undo::print_history(&ctx.root, limit.unwrap_or(20)),
+                Some(HistoryCmd::Info { id }) => transaction::undo::print_info(&ctx.root, id),
+                Some(HistoryCmd::Undo { id, yes }) => transaction::undo::history_undo(&ctx.root, id, yes),
+            }
+        }
         Cmd::Service { action } => match action {
             ServiceCmd::List => service::print_list(&ctx.root),
             ServiceCmd::Enable { name, now } => {

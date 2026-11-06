@@ -30,6 +30,15 @@ pub(crate) fn format_date(secs: u64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
+/// Unix seconds -> "YYYY-MM-DD HH:MM" (UTC), for transaction history.
+pub(crate) fn format_datetime(secs: u64) -> String {
+    if secs == 0 {
+        return "-".to_string();
+    }
+    let time = secs % 86_400;
+    format!("{} {:02}:{:02}", format_date(secs), time / 3600, (time % 3600) / 60)
+}
+
 /// Byte count in human units.
 pub(crate) fn format_size(bytes: u64) -> String {
     const K: f64 = 1024.0;

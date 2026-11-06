@@ -33,6 +33,13 @@ pub fn init(path: &Path) -> Result<i32> {
     let euid = sys::geteuid();
     let egid = sys::getegid();
 
+    // setgroups=deny is installed as part of the parent-side gid-map
+    // handshake. Clear inherited supplementary groups before entering the
+    // user namespace; the child can then safely set its mapped primary gid.
+    if euid == 0 && spec.run_uid.is_some() {
+        sys::clear_supplementary_groups()?;
+    }
+
     // SAFETY: single-threaded process, no open file references that a
     // namespace change could observe.
     if let Err(e) = unsafe { unshare_unsafe(UnshareFlags::NEWUSER) } {
@@ -114,6 +121,9 @@ pub fn init(path: &Path) -> Result<i32> {
 
 /// Set up the filesystem as PID 1 and exec the build.
 fn run_pid1(spec: &SandboxSpec) -> Result<()> {
+    // If the Nawa supervisor is killed, PID 1 dies and the kernel tears down
+    // every process in the plugin's PID namespace.
+    sys::set_parent_death_kill()?;
     if spec.root.mode == "live" {
         mounts::setup_live_root(spec)?;
     } else {
@@ -131,14 +141,44 @@ fn common_prep(spec: &SandboxSpec) -> Result<()> {
     if !spec.network {
         sys::bring_up_loopback()?;
     }
+    // Plugin sandboxes may map a subordinate identity. Build sandboxes leave
+    // this unset and retain their historical namespace-root behavior.
+    if let (Some(uid), Some(gid)) = (spec.run_uid, spec.run_gid) {
+        sys::drop_to_ids(uid, gid)?;
+        // setuid/setgid clear PR_SET_PDEATHSIG; restore it after the
+        // credential transition so it survives exec of the plugin.
+        sys::set_parent_death_kill()?;
+    }
+    set_optional_limit(libc::RLIMIT_AS as libc::c_int, spec.memory_limit_bytes)?;
+    set_optional_limit(libc::RLIMIT_NPROC as libc::c_int, spec.process_limit)?;
+    set_optional_limit(libc::RLIMIT_FSIZE as libc::c_int, spec.file_size_limit_bytes)?;
+    set_optional_limit(libc::RLIMIT_NOFILE as libc::c_int, spec.open_files_limit)?;
+
     // umask 022 (§6): environment variables cannot carry it
     umask(rustix::fs::Mode::from_raw_mode(0o022));
     // RLIMIT_CORE = 0 (§4.5)
     let _ = setrlimit(Resource::Core, Rlimit { current: Some(0), maximum: Some(0) });
     // PR_SET_NO_NEW_PRIVS: even a setuid binary inside cannot regain power
     sys::no_new_privs()?;
-    // drop every capability (§4.1): builds need none
+    // drop every capability (§4.1): builds and plugins need none
     sys::drop_capabilities()?;
+    Ok(())
+}
+
+fn set_optional_limit(resource: libc::c_int, value: u64) -> Result<()> {
+    if value == 0 {
+        return Ok(());
+    }
+    let limit = libc::rlimit {
+        rlim_cur: value as libc::rlim_t,
+        rlim_max: value as libc::rlim_t,
+    };
+    // SAFETY: resource is a fixed RLIMIT constant and value comes from the
+    // trusted sandbox specification.
+    if unsafe { libc::setrlimit(resource as _, &limit) } != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("set sandbox resource limit {resource}={value}"));
+    }
     Ok(())
 }
 

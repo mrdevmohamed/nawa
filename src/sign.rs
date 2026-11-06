@@ -285,6 +285,20 @@ pub fn verify_for_install_with_sig(
     key: Option<&Path>,
     allow_unsigned: bool,
 ) -> Result<()> {
+    verify_for_install_with_sig_reported(archive, sig_path, root, key, allow_unsigned).map(|_| ())
+}
+
+/// [`verify_for_install_with_sig`] reporting HOW the archive was
+/// authenticated, so the installer can record provenance (roadmap §4.5):
+/// `true` only for a verified detached signature (trusted key or an
+/// explicitly pinned `--key`), `false` for bootstrap-mode acceptance.
+pub fn verify_for_install_with_sig_reported(
+    archive: &Path,
+    sig_path: &Path,
+    root: &Path,
+    key: Option<&Path>,
+    allow_unsigned: bool,
+) -> Result<bool> {
     if !sig_path.exists() {
         let trusted = trusted_keys(root)?;
         if !trusted.is_empty() && !allow_unsigned {
@@ -301,7 +315,7 @@ pub fn verify_for_install_with_sig(
                 archive.file_name().unwrap_or_default().to_string_lossy()
             );
         }
-        return Ok(());
+        return Ok(false);
     }
 
     let sf = read_sig_file(sig_path)?;
@@ -309,7 +323,7 @@ pub fn verify_for_install_with_sig(
         let vk = load_verify_key(kp)?;
         verify(archive, &vk, &sf.sig)?;
         println!("nawa: signature OK (explicit key {})", kp.display());
-        return Ok(());
+        return Ok(true);
     }
 
     let trusted = trusted_keys(root)?;
@@ -317,7 +331,7 @@ pub fn verify_for_install_with_sig(
         for (name, vk) in &trusted {
             if verify(archive, vk, &sf.sig).is_ok() {
                 println!("nawa: signature OK (trusted key {name})");
-                return Ok(());
+                return Ok(true);
             }
         }
         bail!(
@@ -333,7 +347,7 @@ pub fn verify_for_install_with_sig(
         "nawa: warning: no trusted keys configured — verified against the key embedded in {} only",
         sig_path.file_name().unwrap_or_default().to_string_lossy()
     );
-    Ok(())
+    Ok(true)
 }
 
 /// How the repository index was authenticated. Only TrustedKey is strong

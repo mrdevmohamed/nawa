@@ -15,19 +15,90 @@ pub struct Entry {
     #[serde(default)]
     pub arch: String,
     #[serde(default)]
-    pub reason: String, // "explicit" | "dependency"
+    pub reason: String, // "explicit" | "dependency" | "group"
     #[serde(default)]
     pub run: Vec<String>,
+    /// Unix SECONDS (the human formatters interpret it that way). Legacy
+    /// entries written by pre-roadmap nawa stored nanoseconds here; see
+    /// [`normalize_legacy_install_date`].
     #[serde(default)]
     pub install_date: u64,
     #[serde(default)]
     pub size: u64,
+    /// SHA-256 of the exact archive bytes this entry was installed from
+    /// (a content-addressed object reference, roadmap §4.6). Empty for
+    /// legacy entries; never a filename.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub artifact_sha256: String,
 }
 
 impl Entry {
     pub fn version_full(&self) -> String {
         format!("{}-{}-{}", self.name, self.version, self.rel)
     }
+}
+
+/// Interpret a stored `install_date` as it should be displayed.
+///
+/// Pre-roadmap nawa wrote a NANOSECOND timestamp into `Entry.install_date`
+/// while every formatter read it as Unix seconds, so legacy entries show as
+/// far-future dates. A value is unambiguously nanoseconds when it exceeds
+/// `u64::MAX / 1000` — converting it by `/1000` can never corrupt a genuine
+/// seconds value, because real seconds timestamps stay far below that
+/// threshold until the year ~584 billion. Values between one year and that
+/// threshold are ambiguous in theory; the conservative rule keeps them as-is
+/// (seconds interpretation) and migration only rewrites clearly-nanosecond
+/// values, idempotently.
+pub fn normalize_legacy_install_date(raw: u64) -> u64 {
+    const NANOS_THRESHOLD: u64 = u64::MAX / 1000;
+    if raw > NANOS_THRESHOLD {
+        raw / 1_000_000_000
+    } else {
+        raw
+    }
+}
+
+/// One-shot, idempotent migration of legacy nanosecond `install_date`
+/// values across the whole database (roadmap §4.3):
+/// * old descriptions keep deserializing (the field is just a u64);
+/// * a clearly-nanosecond value is rewritten to seconds, with a `.bak`
+///   copy of the old `desc` kept next to it the first time;
+/// * already-correct entries are left untouched, so re-running is a no-op.
+///
+/// Must be called while holding the exclusive database lock.
+pub fn migrate_install_dates(root: &Path) -> Result<Vec<String>> {
+    let db = Db::new(root);
+    let mut changed = Vec::new();
+    if !db.local_dir().exists() {
+        return Ok(changed);
+    }
+        for entry in db.installed()? {
+            let dir = db.local_dir().join(&entry.name);
+            let desc = dir.join("desc");
+            if !desc.exists() {
+                continue;
+            }
+        let fixed = normalize_legacy_install_date(entry.install_date);
+        if fixed == entry.install_date {
+            continue;
+        }
+        // recoverable backup, only when not already present
+        let bak = dir.join("desc.pre-seconds.bak");
+        if !bak.exists() {
+            std::fs::copy(&desc, &bak).with_context(|| format!("back up {}", desc.display()))?;
+        }
+        let mut e = entry.clone();
+        e.install_date = fixed;
+        let new = toml::to_string_pretty(&e)?;
+        let tmp = dir.join(".desc.migrate.tmp");
+        std::fs::write(&tmp, new)?;
+        std::fs::rename(&tmp, &desc)?;
+        changed.push(format!(
+            "{}: install date migrated from nanoseconds to seconds",
+            e.name
+        ));
+    }
+    Ok(changed)
 }
 
 /// Package names become directory names (db, undo log, hooks) and parts of
@@ -225,9 +296,60 @@ mod tests {
             run: vec![],
             install_date: 0,
             size: 0,
+            artifact_sha256: String::new(),
         };
         assert!(db.add(&e, &[], &HashMap::new()).is_err());
         assert!(!base.join("var/lib/nawa/evil").exists());
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn legacy_nanosecond_dates_are_normalized_conservatively() {
+        // a genuine seconds timestamp (year 2026) is kept
+        assert_eq!(normalize_legacy_install_date(1_762_000_000), 1_762_000_000);
+        // a nanosecond timestamp (same instant) is converted
+        assert_eq!(normalize_legacy_install_date(1_762_000_000_000_000_000), 1_762_000_000);
+        // zero/unknown stays
+        assert_eq!(normalize_legacy_install_date(0), 0);
+    }
+
+    #[test]
+    fn migration_is_idempotent_and_backs_up() {
+        let base = std::env::temp_dir().join(format!("nawa-db-migrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let db = Db::new(&base);
+        let e = Entry {
+            name: "old".into(),
+            version: "1".into(),
+            rel: 1,
+            arch: String::new(),
+            reason: "explicit".into(),
+            run: vec![],
+            // what pre-roadmap nawa actually wrote (nanos)
+            install_date: 1_762_000_000_000_000_000,
+            size: 1,
+            artifact_sha256: String::new(),
+        };
+        db.add(&e, &[], &HashMap::new()).unwrap();
+        let changed = migrate_install_dates(&base).unwrap();
+        assert_eq!(changed.len(), 1);
+        let after = db.entry("old").unwrap().unwrap();
+        assert_eq!(after.install_date, 1_762_000_000);
+        // a .bak copy of the original desc exists
+        assert!(db.local_dir().join("old/desc.pre-seconds.bak").exists());
+        // second run: nothing left to do
+        assert!(migrate_install_dates(&base).unwrap().is_empty());
+        assert_eq!(db.entry("old").unwrap().unwrap().install_date, 1_762_000_000);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn artifact_reference_field_is_optional_for_legacy_entries() {
+        let raw = "name = \"x\"\nversion = \"1\"\nrel = 1\n";
+        let e: Entry = toml::from_str(raw).unwrap();
+        assert_eq!(e.artifact_sha256, "");
+        let serialized = toml::to_string_pretty(&e).unwrap();
+        assert!(!serialized.contains("artifact_sha256"), "legacy shape preserved on write");
     }
 }
