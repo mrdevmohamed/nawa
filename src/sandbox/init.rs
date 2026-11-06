@@ -145,6 +145,9 @@ fn common_prep(spec: &SandboxSpec) -> Result<()> {
     // this unset and retain their historical namespace-root behavior.
     if let (Some(uid), Some(gid)) = (spec.run_uid, spec.run_gid) {
         sys::drop_to_ids(uid, gid)?;
+        // setuid/setgid clear PR_SET_PDEATHSIG; restore it after the
+        // credential transition so it survives exec of the plugin.
+        sys::set_parent_death_kill()?;
     }
     set_optional_limit(libc::RLIMIT_AS as libc::c_int, spec.memory_limit_bytes)?;
     set_optional_limit(libc::RLIMIT_NPROC as libc::c_int, spec.process_limit)?;
