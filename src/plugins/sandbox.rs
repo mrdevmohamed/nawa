@@ -66,6 +66,10 @@ pub(super) fn spawn(executable: &Path, protected_paths: &[PathBuf]) -> Result<Sa
 
     let mut mask = vec![
         "/root".to_string(),
+        // This kernel pseudo-filesystem cannot be remounted read-only with
+        // bind-remount semantics in several user-namespace kernels. It is not
+        // needed by plugins, so hide it with the other host-sensitive paths.
+        "/proc/sys/fs/binfmt_misc".to_string(),
         "/home".to_string(),
         "/run".to_string(),
         "/etc/nawa".to_string(),
@@ -90,6 +94,12 @@ pub(super) fn spawn(executable: &Path, protected_paths: &[PathBuf]) -> Result<Sa
     // An unprivileged Nawa has only its own uid mapped as namespace uid 0;
     // it is already unprivileged outside the namespace and loses all caps.
     let privileged = rustix::process::geteuid().is_root();
+    // /tmp is replaced with a private tmpfs by overlay_scratch before
+    // build_inside is created. Keeping the plugin staging base there avoids
+    // requiring write access to a host-level /build directory.
+    let build_inside = "/tmp/nawa-plugin".to_string();
+    let plugin_src_inside = format!("{build_inside}/src");
+    let plugin_home_inside = format!("{build_inside}/home");
     let spec = SandboxSpec {
         version: 1,
         root: RootSpec::default(),
@@ -100,13 +110,13 @@ pub(super) fn spawn(executable: &Path, protected_paths: &[PathBuf]) -> Result<Sa
             scratch: scratch_dir.to_string_lossy().to_string(),
         },
         env,
-        script: format!("exec {}", shell_quote(&format!("/build/src/{filename}"))),
+        script: format!("exec {}", shell_quote(&format!("{plugin_src_inside}/{filename}"))),
         timeout_secs: 30,
         network: false,
         sysfs: false,
         allow_degraded: false,
         mask,
-        build_inside: "/build".to_string(),
+        build_inside: build_inside.clone(),
         workdir: String::new(),
         run_uid: privileged.then_some(65534),
         run_gid: privileged.then_some(65534),
@@ -114,14 +124,14 @@ pub(super) fn spawn(executable: &Path, protected_paths: &[PathBuf]) -> Result<Sa
         process_limit: 32,
         file_size_limit_bytes: 64 * 1024 * 1024,
         open_files_limit: 64,
-        readonly_paths: vec!["/build/src".to_string()],
+        readonly_paths: vec![plugin_src_inside],
         strict_readonly_root: true,
         // /dev is a private tmpfs populated by setup_dev; leave its mount
         // writable for normal device-node opens while directory permissions
         // still prevent the unprivileged plugin from creating nodes.
         writable_paths: vec![
             "/tmp".to_string(),
-            "/build/home".to_string(),
+            plugin_home_inside,
             "/dev".to_string(),
         ],
     };
