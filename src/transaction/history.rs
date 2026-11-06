@@ -336,7 +336,7 @@ fn max_persisted_id(root: &Path) -> Result<u64> {
             let entry = entry?;
             if !entry.file_type()?.is_dir() { continue; }
             let name = entry.file_name();
-            if let Some(id) = name.to_string_lossy().parse::<u64>().ok() {
+            if let Ok(id) = name.to_string_lossy().parse::<u64>() {
                 highest = highest.max(id);
             }
         },
@@ -373,8 +373,25 @@ fn store_record(root: &Path, record: &TransactionRecord, replace: bool) -> Resul
     atomic::write_atomic(&path, record.to_toml()?.as_bytes(), 0o600)
 }
 
-/// Write an immutable transaction record durably.
+/// Publish a new transaction record, or finalize the one preparing record
+/// created by `begin_operation`. A terminal record is never overwritten by
+/// this API; administrative annotations must use `rewrite_record`.
 pub fn write_record(root: &Path, record: &TransactionRecord) -> Result<()> {
+    let path = transaction_path(root, record.id);
+    if path.exists() {
+        let existing = load_record(root, record.id)?;
+        if existing.status()? != TxStatus::Preparing
+            || record.status()? == TxStatus::Preparing
+            || existing.command != record.command
+            || existing.started_at != record.started_at
+            || existing.initiated_by != record.initiated_by
+            || existing.requested_packages != record.requested_packages
+            || existing.repository_ids != record.repository_ids
+        {
+            bail!("transaction {} already exists; refusing to overwrite history", record.id);
+        }
+        return store_record(root, record, true);
+    }
     store_record(root, record, false)
 }
 
