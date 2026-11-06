@@ -126,3 +126,6 @@ The rollback recorder now leaves scope before finalizing the operation. The late
 
 
 The next run ([42269835662](https://github.com/mrdevmohamed/nawa/actions/runs/42269835662)) confirmed that the Clippy and transaction-finalization corrections compiled; its remaining test-build error was three test references still using the pre-rename fault-point variants. Those references now use `Wrote`, `Synced`, and `Published` in code revision `6c4e922f42196dad7b98e41ef8650b48657efda7`. This correction has not yet been verified by a new CI run.
+
+
+Run `42270320448` passed the build, Clippy, static musl build, smoke-v05, and all isolation jobs. The only failing assertion was in the new stale-id regression test: it erased the only durable evidence of an allocated-but-not-committed id and then expected that reservation to be remembered. The test now uses separate roots to verify the two supported recovery cases independently: a stale marker behind an existing record and a missing marker with an existing record. This test-only correction is in `b2a2eb3503ae70717b1e30b449d4817a326d8b38`; a fresh complete CI run is pending.
