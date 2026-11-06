@@ -989,6 +989,13 @@ fn prepare_sandbox(
         mask,
         build_inside: build_inside.to_string(),
         workdir: workdir.to_string_lossy().into_owned(),
+        run_uid: None,
+        run_gid: None,
+        memory_limit_bytes: 0,
+        process_limit: 0,
+        file_size_limit_bytes: 0,
+        open_files_limit: 0,
+        readonly_paths: Vec::new(),
     };
     if rec.sandbox.network && !opts.allow_network {
         eprintln!(
