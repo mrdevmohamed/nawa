@@ -17,12 +17,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::sandbox::spec::{BuildPaths, RootSpec, SandboxSpec};
 
-pub struct SandboxedChild {
-    pub child: Child,
-    pub workdir: PathBuf,
+pub(super) struct SandboxedChild {
+    pub(super) child: Child,
+    pub(super) cleanup: WorkDir,
 }
 
-struct WorkDir(PathBuf);
+pub(super) struct WorkDir(PathBuf);
 
 impl Drop for WorkDir {
     fn drop(&mut self) {
@@ -30,7 +30,7 @@ impl Drop for WorkDir {
     }
 }
 
-pub fn spawn(executable: &Path, protected_paths: &[PathBuf]) -> Result<SandboxedChild> {
+pub(super) fn spawn(executable: &Path, protected_paths: &[PathBuf]) -> Result<SandboxedChild> {
     let executable = std::fs::canonicalize(executable)
         .with_context(|| format!("resolve plugin executable {}", executable.display()))?;
     let source_dir = executable.parent()
@@ -162,8 +162,7 @@ pub fn spawn(executable: &Path, protected_paths: &[PathBuf]) -> Result<Sandboxed
     let child = command.spawn().context("start plugin namespace sandbox")?;
     drop(child_end);
     crate::sandbox::parent_sync(&child, parent_end);
-    std::mem::forget(guard);
-    Ok(SandboxedChild { child, workdir })
+    Ok(SandboxedChild { child, cleanup: guard })
 }
 
 fn create_workdir() -> Result<PathBuf> {
