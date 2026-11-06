@@ -31,6 +31,7 @@ pub enum OperationCommand {
     GroupInstall,
     GroupRemove,
     HistoryUndo,
+    Rollback,
 }
 
 impl OperationCommand {
@@ -46,6 +47,7 @@ impl OperationCommand {
             OperationCommand::GroupInstall => "group-install",
             OperationCommand::GroupRemove => "group-remove",
             OperationCommand::HistoryUndo => "history-undo",
+            OperationCommand::Rollback => "rollback",
         }
     }
 }
