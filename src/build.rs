@@ -996,6 +996,8 @@ fn prepare_sandbox(
         file_size_limit_bytes: 0,
         open_files_limit: 0,
         readonly_paths: Vec::new(),
+        strict_readonly_root: false,
+        writable_paths: Vec::new(),
     };
     if rec.sandbox.network && !opts.allow_network {
         eprintln!(
