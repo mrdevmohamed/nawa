@@ -482,7 +482,7 @@ pub(crate) const RESERVED_COMMANDS: &[&str] = &[
     "revdep", "repo-create", "sync", "keygen", "sign", "verify", "trust",
     "upgrade", "rollback", "repolist", "makecache", "repoquery", "clean",
     "group", "history", "plugin", "service", "config", "init",
-    "completions", "sandbox-init", "sandbox-probe", "__complete_pkgs",
+    "completions", "sandbox-init", "sandbox-probe", "__complete_pkgs", "help",
 ];
 
 /// Flags shared by the commands that build and install by name.
@@ -810,7 +810,7 @@ mod tests {
 
     #[test]
     fn reserved_commands_cover_every_builtin_cli_command() {
-        let command = Cmd::command();
+        let command = Cli::command();
         for subcommand in command.get_subcommands() {
             let name = subcommand.get_name();
             assert!(
