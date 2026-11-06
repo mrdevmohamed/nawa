@@ -202,5 +202,7 @@ fn probe_spec(scratch: &str) -> SandboxSpec {
         file_size_limit_bytes: 0,
         open_files_limit: 0,
         readonly_paths: Vec::new(),
+        strict_readonly_root: false,
+        writable_paths: Vec::new(),
     }
 }
