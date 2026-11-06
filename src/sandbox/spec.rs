@@ -65,6 +65,12 @@ pub struct SandboxSpec {
     /// Existing bind mounts to mark read-only before the root is locked down.
     #[serde(default)]
     pub readonly_paths: Vec<String>,
+    /// Make every mount below / read-only except writable_paths.
+    #[serde(default)]
+    pub strict_readonly_root: bool,
+    /// Explicit private writable mounts for strict plugin sandboxes.
+    #[serde(default)]
+    pub writable_paths: Vec<String>,
 }
 
 fn default_build_inside() -> String {
@@ -122,13 +128,16 @@ impl SandboxSpec {
         if spec.run_uid.is_some() != spec.run_gid.is_some() {
             bail!("sandbox run_uid and run_gid must be specified together");
         }
-        for path in &spec.readonly_paths {
+        for path in spec.readonly_paths.iter().chain(spec.writable_paths.iter()) {
             let parsed = Path::new(path);
             if !parsed.is_absolute()
                 || parsed.components().any(|part| matches!(part, std::path::Component::ParentDir))
             {
-                bail!("sandbox readonly path must be absolute and must not contain '..': {path:?}");
+                bail!("sandbox mount path must be absolute and must not contain '..': {path:?}");
             }
+        }
+        if spec.strict_readonly_root && spec.writable_paths.is_empty() {
+            bail!("strict read-only sandbox must explicitly list its writable mounts");
         }
         match spec.root.mode.as_str() {
             "live" => {}
