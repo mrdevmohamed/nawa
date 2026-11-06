@@ -705,6 +705,8 @@ mod tests {
             reason: "explicit".into(),
             run: vec![],
             install_date: 0,
+            artifact_sha256: None,
+            artifact_record: None,
             size: 0,
         }
     }

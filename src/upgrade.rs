@@ -50,6 +50,10 @@ pub struct OpenRepo {
     pub index: repo::Index,
     /// Authentication method selected only after validating the index signer.
     pub archive_auth: ArchiveAuth,
+    /// Exact index (+signature) bytes that authenticated this repository
+    /// session, when the index was trusted. Preserved with every artifact
+    /// installed on its authority, so a later restore can re-verify.
+    pub proof: Option<install::RepoProof>,
 }
 
 /// Fetch (remote) or locate (local) a repository, then parse and
@@ -150,6 +154,22 @@ pub fn open_repo(
         ArchiveAuth::DetachedSignature
     };
 
+    // Preserve the exact index/auth bytes behind the trust decision so
+    // artifact provenance can be recorded and re-verified later.
+    let proof = if archive_auth == ArchiveAuth::SignedIndexSha256 {
+        let sig = sign::sig_path_for(&index_path);
+        Some(install::RepoProof {
+            repo_id: base_url
+                .clone()
+                .unwrap_or_else(|| repo_dir.display().to_string()),
+            index_path: index_path.clone(),
+            index_sig_path: Some(sig).filter(|s| s.is_file()),
+            index_trusted: true,
+        })
+    } else {
+        None
+    };
+
     // Only an index authenticated by a configured trusted key advances the
     // newest-index marker used to prevent remote repository rollback.
     check_index_freshness(
@@ -159,7 +179,7 @@ pub fn open_repo(
         force,
         index_trust.is_trusted(),
     )?;
-    Ok(OpenRepo { dir: repo_dir, base_url, index, archive_auth })
+    Ok(OpenRepo { dir: repo_dir, base_url, index, archive_auth, proof })
 }
 
 /// Resolve an archive URL while keeping legacy base-URL repositories unchanged.
@@ -364,7 +384,14 @@ pub fn upgrade(
             .expect("ordered name came from the plan");
         let src = fetch_entry(root, &open, re, opts.allow_unsigned)?;
         if open.archive_auth == ArchiveAuth::SignedIndexSha256 {
-            install::install_archive_from_index(&src, root, opts.force, &re.sha256, "keep")?;
+            install::install_archive_from_index_proof(
+                &src,
+                root,
+                opts.force,
+                &re.sha256,
+                "keep",
+                open.proof.as_ref().expect("trusted index carries a proof"),
+            )?;
         } else {
             install::install_archive_pinned(
                 &src,

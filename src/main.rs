@@ -18,6 +18,7 @@ mod install;
 mod interrupt;
 mod lint;
 mod lock;
+mod objects;
 mod plan;
 mod profile;
 mod recipe;

@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased — feat: content-addressed artifact identity and verified rollback
+
+- Every installed archive is now identified by the SHA-256 of its exact bytes.
+  The bytes are published to a content-addressed object store
+  (`<root>/var/cache/nawa/objects/sha256/<xx>/<digest>.nawa.tar.zst`) and the
+  database entry records them as `artifact_sha256` — package file names stop
+  being the identity.
+- A provenance record (`<digest>.artifact.toml`) is stored next to every
+  object: package identity, origin (source build, repository, standalone
+  archive), and how the bytes were authenticated (detached signature,
+  trusted signed index, or explicitly unsigned), including the signer's
+  key fingerprint and whether that key was trusted at install time.
+- For signed-index (schema v2) repositories, the exact index and signature
+  bytes that authenticated the install are preserved with the artifact, so
+  the evidence never depends on the live repository or its current state.
+  Detached signatures are preserved the same way.
+- Publication is fail-safe: bytes are hashed again while they are copied,
+  a digest/size disagreement with the record is refused, an already-present
+  object is re-verified before reuse, and a corrupt object is replaced by
+  the freshly verified duplicate (self-healing, path is always the digest).
+- `nawa rollback` re-resolves the previous artifact by its recorded digest
+  (object store first, then the version-named cache only if it hashes to
+  the same digest), re-verifies the bytes, and re-checks authentication
+  under the recorded evidence: saved index + signature against the current
+  trust store (with or without a currently-trusted key — never substituted
+  by different or embedded-key evidence), preserved detached signature, or
+  an explicit unsigned record. Missing, corrupt, or foreign-package bytes
+  and invalid signatures are hard refusals — restore never weakens the
+  install policy (`--allow-unsigned` cannot convert invalid signatures).
+- Legacy databases without artifact digests keep the old rollback path; a
+  legacy cache file is only accepted when it matches the recorded digest.
+
 ## Unreleased — fix: install dates display correctly again
 
 - `Entry.install_date` is now written as Unix **seconds**. It used to be

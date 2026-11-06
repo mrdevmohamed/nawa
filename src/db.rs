@@ -15,13 +15,23 @@ pub struct Entry {
     #[serde(default)]
     pub arch: String,
     #[serde(default)]
-    pub reason: String, // "explicit" | "dependency"
+    pub reason: String, // "explicit" | "dependency" | "keep"(installer-internal sentinel)
     #[serde(default)]
     pub run: Vec<String>,
     #[serde(default)]
     pub install_date: u64,
     #[serde(default)]
     pub size: u64,
+    /// SHA-256 of the exact archive bytes that produced this installation —
+    /// the immutable object identity. Optional: legacy desc files without it
+    /// stay valid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_sha256: Option<String>,
+    /// Provenance record pointer in `sha256:<digest>` form. Optional as well;
+    /// the full authentication evidence lives in the object store sidecar,
+    /// never copied into every package description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_record: Option<String>,
 }
 
 impl Entry {
@@ -313,6 +323,8 @@ mod tests {
             run: vec![],
             // written by a pre-fix release: nanoseconds
             install_date: 1_791_388_800_000_000_000,
+            artifact_sha256: None,
+            artifact_record: None,
             size: 5,
         };
         db.add(&e, &["/usr/bin/old".to_string()], &HashMap::new()).unwrap();
@@ -377,6 +389,8 @@ mod tests {
             reason: String::new(),
             run: vec![],
             install_date: 0,
+            artifact_sha256: None,
+            artifact_record: None,
             size: 0,
         };
         assert!(db.add(&e, &[], &HashMap::new()).is_err());

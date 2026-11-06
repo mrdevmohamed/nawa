@@ -283,6 +283,8 @@ mod tests {
             reason: reason.into(),
             run: run.iter().map(|s| s.to_string()).collect(),
             install_date: 0,
+            artifact_sha256: None,
+            artifact_record: None,
             size: 0,
         }
     }

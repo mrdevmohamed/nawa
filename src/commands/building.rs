@@ -55,7 +55,7 @@ pub(crate) fn cmd_build(
     // the library functions never lock; this command-level lock covers just
     // the install step (upgrade calls install_archive the same way)
     let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
-    install::install_archive(&archive, &ctx.root, install_force, false, None, "explicit")?;
+    install::install_built_archive(&archive, &ctx.root, install_force, false, None, "explicit")?;
     Ok(())
 }
 
