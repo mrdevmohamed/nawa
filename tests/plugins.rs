@@ -208,7 +208,12 @@ fn registered_commands_require_an_administrator_grant_and_dispatch_automatically
     }
 
     let dir = scratch("command-register");
-    let pdir = dir.join("plugins").join("registered");
+    // The grant command intentionally accepts only plugins discovered in a
+    // trusted system directory. Install this fixture there, under a unique
+    // directory, and remove only our own fixture when the test finishes.
+    let system_plugins = PathBuf::from("/usr/local/lib/nawa/plugins");
+    fs::create_dir_all(&system_plugins).unwrap();
+    let pdir = system_plugins.join(format!("nawa-test-registered-{}", std::process::id()));
     fs::create_dir_all(&pdir).unwrap();
     let exe = pdir.join("nawa-plugin-registered");
     fs::write(
@@ -277,6 +282,7 @@ printf '{"protocol":"nawa-plugin","protocol_version":1,"request_id":"%s","ok":tr
         !denied_after_revoke.status.success(),
         "revoked command.register must stop automatic dispatch"
     );
+    let _ = fs::remove_dir_all(&pdir);
     let _ = fs::remove_dir_all(&dir);
 }
 
