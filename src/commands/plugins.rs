@@ -2,7 +2,6 @@
 
 use crate::*;
 use anyhow::bail;
-use std::os::unix::fs::MetadataExt;
 
 fn effective_state(ctx: &Ctx) -> plugins::discovery::PluginState {
     plugins::discovery::PluginState::load_effective(
