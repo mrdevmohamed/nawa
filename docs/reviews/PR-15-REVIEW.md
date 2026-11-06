@@ -64,13 +64,13 @@ The upgrade path discarded the result of `OperationHandle::finish()`.
 - [x] R7 — upgrade propagates transaction finalization errors.
 - [x] Add regressions for completed-WAL crash recovery, legacy null-target ambiguity and dependency-aware undo order.
 - [ ] Expand fault-injection coverage to every filesystem/DB commit boundary.
-- [ ] Re-run the full CI matrix on the final head.
+- [x] Re-run the full CI matrix on final head `a20d843ce4c082031df3ccd5f3340cbf96f218b2` — all 10 executable checks passed; CodeRabbit was skipped by repository eligibility.
 
 ## Plugin subsystem observations
 
 The plugin subsystem has good foundations: manifests reject unknown fields, requested capabilities are intersected with administrator grants, privileged plugin paths are validated, the protocol is bounded, and plugin execution has no unsandboxed fallback. These are positive design properties, not a formal security proof.
 
-Do not merge until all high-severity transaction findings are resolved and CI passes on the final head.
+R1–R8 have been remediated in the PR branch, and the final CI matrix passed on 2026-11-06. Keep the broader filesystem/database fault-injection expansion as follow-up hardening before treating transaction recovery as exhaustively proven.
 
 
 ### Additional integrity hardening
@@ -81,3 +81,13 @@ Install/update WAL target metadata is now tied to the exact archive digest passe
 ### CI follow-up
 
 The first run after the implementation changes exposed Clippy-as-error findings, an undo-link test that did not apply the compensating package step, and an interrupt error conversion missed by an intermediate commit. The follow-up changes correct these issues. The latest PR head must still pass a fresh CI run before merge.
+
+
+## Final verification — 2026-11-06
+
+Final PR head: `a20d843ce4c082031df3ccd5f3340cbf96f218b2`  
+GitHub Actions run: [42250148164](https://github.com/mrdevmohamed/nawa/actions/runs/42250148164)
+
+All 10 executable jobs passed: root and user tests on Ubuntu 22.04, root tests on Ubuntu 24.04, CLI smoke tests, static musl build, Clippy/build/tests, and all four sandbox isolation modes (`none`, `env`, `sandbox`, `closure`). CodeRabbit remained skipped by its repository eligibility condition and was not counted as a passing review.
+
+The remaining unchecked item is expanded fault-injection coverage across every filesystem/database commit boundary. This is additional hardening beyond the regressions added for the reproduced crash windows.
