@@ -327,6 +327,41 @@ mod tests {
     }
 
     #[test]
+    fn final_record_written_before_journal_cleanup_is_preserved() {
+        let base = tmpdir("record-before-cleanup");
+        let root = base.join("root");
+        let mut record = TransactionRecord {
+            schema: SCHEMA_VERSION, id: 8, command: "install".into(),
+            status: "completed".into(), started_at: 10, finished_at: Some(11),
+            duration_seconds: Some(1), initiated_by: "uid:1000".into(),
+            requested_packages: vec!["demo".into()], repository_ids: vec![],
+            package_changes: vec![], undone_by: None, undoes: None, groups: vec![],
+        };
+        journal::write_tx_state(&root, &journal::TxState {
+            schema: 1, tx: 8, command: "install".into(), started_at: 10,
+        }).unwrap();
+        journal::write_intent(&root, &journal::StepIntent {
+            schema: SCHEMA_VERSION, tx: 8, step: 1, package: "demo".into(),
+            action: "install".into(), precondition: None, target: None,
+            artifact_sha256: String::new(),
+        }).unwrap();
+        journal::write_result(&root, &journal::StepResult {
+            schema: SCHEMA_VERSION, tx: 8, step: 1, package: "demo".into(),
+            outcome: "failed".into(), failure: None, hook: None,
+        }).unwrap();
+        // Crash after publishing the final record but before journal cleanup.
+        record.package_changes.push(PackageChange {
+            name: "demo".into(), action: "install".into(), status: "failed".into(),
+            before: None, after: None, source: "test".into(), failure: None, hook: None,
+        });
+        super::super::history::write_record(&root, &record).unwrap();
+        assert!(reconcile_incomplete(&root).unwrap().is_empty());
+        assert!(!journal::journaled_transactions(&root).unwrap().contains(&8));
+        assert_eq!(super::super::history::load_record(&root, 8).unwrap().status, "completed");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn needs_recovery_journal_is_retained_after_repeated_reconciliation() {
         let base = tmpdir("retain-needs-recovery");
         let root = base.join("root");
