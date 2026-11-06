@@ -8,12 +8,13 @@ use anyhow::{bail, Context, Result};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FailPoint { AfterWrite, AfterFileSync, AfterRename }
 
@@ -31,9 +32,6 @@ fn maybe_fail(point: FailPoint) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(test))]
-fn maybe_fail(_point: FailPoint) -> Result<()> { Ok(()) }
-
 /// Sync a directory so its current entries are durable.
 pub fn sync_directory(path: &Path) -> Result<()> {
     File::open(path)
@@ -43,35 +41,38 @@ pub fn sync_directory(path: &Path) -> Result<()> {
 }
 
 /// Create missing parent directories and persist their directory entries.
+/// This recursive form also handles relative paths whose first component has
+/// an empty parent (for example, `var/lib/nawa`) without attempting to fsync
+/// an empty path.
 fn create_dir_all_durable(path: &Path) -> Result<()> {
-    let normalized: PathBuf = if path.as_os_str().is_empty() {
-        PathBuf::from(".")
-    } else {
-        path.to_path_buf()
-    };
-    let mut missing = Vec::new();
-    let mut cursor = Some(normalized.as_path());
-    while let Some(current) = cursor {
-        match fs::symlink_metadata(current) {
-            Ok(metadata) if metadata.is_dir() => break,
-            Ok(_) => bail!("{} exists but is not a directory", current.display()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                missing.push(current.to_path_buf());
-                cursor = current.parent();
+    match fs::metadata(path) {
+        Ok(metadata) if metadata.is_dir() => return Ok(()),
+        Ok(_) => bail!("{} exists but is not a directory", path.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error)
+            .with_context(|| format!("inspect parent directory {}", path.display())),
+    }
+
+    let parent = path.parent()
+        .filter(|candidate| !candidate.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    create_dir_all_durable(parent)?;
+
+    match fs::create_dir(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let metadata = fs::metadata(path)
+                .with_context(|| format!("inspect concurrently-created directory {}", path.display()))?;
+            if !metadata.is_dir() {
+                bail!("{} exists but is not a directory", path.display());
             }
-            Err(error) => return Err(error)
-                .with_context(|| format!("inspect parent directory {}", current.display())),
         }
+        Err(error) => return Err(error)
+            .with_context(|| format!("create directory {}", path.display())),
     }
-    fs::create_dir_all(&normalized)
-        .with_context(|| format!("create directory {}", normalized.display()))?;
-    for directory in missing.iter().rev() {
-        if let Some(parent) = directory.parent() {
-            let parent = if parent.as_os_str().is_empty() { Path::new(".") } else { parent };
-            sync_directory(parent)?;
-        }
-        sync_directory(directory)?;
-    }
+
+    sync_directory(parent)?;
+    sync_directory(path)?;
     Ok(())
 }
 
@@ -102,9 +103,11 @@ pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
         let written = (|| -> Result<()> {
             file.write_all(bytes)
                 .with_context(|| format!("write temporary file {}", temporary.display()))?;
+            #[cfg(test)]
             maybe_fail(FailPoint::AfterWrite)?;
             file.sync_all()
                 .with_context(|| format!("fsync temporary file {}", temporary.display()))?;
+            #[cfg(test)]
             maybe_fail(FailPoint::AfterFileSync)?;
             Ok(())
         })();
@@ -121,6 +124,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
         }
         // Failure here means the new file is visible but its directory entry
         // was not confirmed durable. The transaction WAL resolves that case.
+        #[cfg(test)]
         maybe_fail(FailPoint::AfterRename)?;
         sync_directory(parent)?;
         return Ok(());
@@ -151,6 +155,27 @@ mod tests {
         assert!(write_atomic(&target, b"new", 0o600).is_err());
         assert_eq!(fs::read(&target).unwrap(), b"old");
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn write_failure_before_file_sync_keeps_old_file_and_cleans_temporary() {
+        let dir = temp_dir();
+        let target = dir.join("record.toml");
+        fs::write(&target, b"old").unwrap();
+        FAILPOINT.with(|slot| slot.set(Some(FailPoint::AfterWrite)));
+        assert!(write_atomic(&target, b"new", 0o600).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"old");
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn write_atomic_durably_creates_missing_nested_parents() {
+        let dir = temp_dir();
+        let target = dir.join("var/lib/nawa/history/last-id");
+        write_atomic(&target, b"42", 0o600).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"42");
         fs::remove_dir_all(dir).unwrap();
     }
 
