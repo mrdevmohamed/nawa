@@ -28,6 +28,92 @@ impl Entry {
     pub fn version_full(&self) -> String {
         format!("{}-{}-{}", self.name, self.version, self.rel)
     }
+
+    /// In-memory fix-up for legacy entries that stored nanoseconds instead of
+    /// Unix seconds in `install_date`. See [`normalize_install_date`].
+    pub fn with_normalized_date(mut self) -> Self {
+        if let Some(secs) = normalize_install_date(self.install_date) {
+            self.install_date = secs;
+        }
+        self
+    }
+}
+
+/// `install_date` holds **Unix seconds**.
+///
+/// Releases before the timestamp fix stored nanoseconds there, while
+/// `humanize::format_date` (and every viewer) interpreted the field as
+/// seconds, which produced absurd dates. Values at or above this threshold
+/// cannot be a plausible Unix-seconds timestamp (it is astronomically in the
+/// future) but match a nanosecond stamp of any realistic wall-clock age, so
+/// they are classified as legacy nanoseconds.
+///
+/// Values below the threshold stay seconds: `as_nanos()` for the first
+/// 27.7 hours since the epoch falls below 1e14 too, but no database can
+/// have been written with such stamps (nawa did not exist yet), so the
+/// conversion is one-way, conservative, and never touches genuinely small
+/// explicit values (tests write 0 or 1).
+pub const NANOS_THRESHOLD: u64 = 100_000_000_000_000; // 1e14
+
+/// Legacy nanosecond `install_date` -> Unix seconds; `None` when the value
+/// is already a seconds timestamp (or the "never recorded" 0).
+pub fn normalize_install_date(raw: u64) -> Option<u64> {
+    (raw >= NANOS_THRESHOLD).then(|| raw / 1_000_000_000)
+}
+
+impl Db {
+    /// Durable repair for legacy nanosecond `install_date` values. Run while
+    /// holding the exclusive database lock (see `install::recover`), which
+    /// both call sites already guarantee.
+    ///
+    /// For every package whose desc contains a detected legacy stamp, the
+    /// original file is kept as a recoverable backup (`desc.legacy-nanos`)
+    /// before the corrected value is written, and existing backups are never
+    /// overwritten — the conversion never destroys the raw data it judged
+    /// about. Idempotent: after conversion the value is below the threshold,
+    /// so a second run does nothing.
+    pub fn repair_legacy_dates(&self) -> Result<u32> {
+        let mut fixed = 0u32;
+        if !self.local_dir().exists() {
+            return Ok(fixed);
+        }
+        for entry_path in self.db_desc_files()? {
+            let raw = std::fs::read_to_string(&entry_path)?;
+            let parsed: Entry = match toml::from_str(&raw) {
+                Ok(e) => e,
+                Err(_) => continue, // a broken desc is not a timestamp problem
+            };
+            let secs = match normalize_install_date(parsed.install_date) {
+                Some(s) => s,
+                None => continue,
+            };
+            let backup = entry_path.with_file_name("desc.legacy-nanos");
+            if !backup.exists() {
+                std::fs::copy(&entry_path, &backup)?;
+            }
+            let mut fixed_entry = parsed;
+            fixed_entry.install_date = secs;
+            let desc = toml::to_string_pretty(&fixed_entry)?;
+            let tmp = entry_path.with_file_name(".desc.tmp");
+            std::fs::write(&tmp, desc)?;
+            std::fs::rename(&tmp, &entry_path)?;
+            fixed += 1;
+        }
+        Ok(fixed)
+    }
+
+    /// Every `<pkg>/desc` under the local database, sorted for determinism.
+    fn db_desc_files(&self) -> Result<Vec<PathBuf>> {
+        let mut out = Vec::new();
+        for p in std::fs::read_dir(self.local_dir())?.flatten() {
+            let desc = p.path().join("desc");
+            if desc.is_file() {
+                out.push(desc);
+            }
+        }
+        out.sort();
+        Ok(out)
+    }
 }
 
 /// Package names become directory names (db, undo log, hooks) and parts of
@@ -103,7 +189,7 @@ impl Db {
             let raw = std::fs::read_to_string(p.join("desc"))?;
             let e: Entry = toml::from_str(&raw)
                 .with_context(|| format!("corrupt db entry {}", p.display()))?;
-            out.push(e);
+            out.push(e.with_normalized_date());
         }
         Ok(out)
     }
@@ -113,7 +199,8 @@ impl Db {
         if !desc.exists() {
             return Ok(None);
         }
-        Ok(Some(toml::from_str(&std::fs::read_to_string(desc)?)?))
+        let e: Entry = toml::from_str(&std::fs::read_to_string(desc)?)?;
+        Ok(Some(e.with_normalized_date()))
     }
 
     pub fn files(&self, name: &str) -> Result<Vec<String>> {
@@ -193,6 +280,72 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- timestamp unit migration ------------------------------------------
+
+    #[test]
+    fn legacy_nanosecond_dates_are_recognized_as_seconds_after_conversion() {
+        // ~2026-11-06 in nanoseconds, as old releases stored it
+        let nanos: u64 = 1_791_388_800_000_000_000;
+        let secs = normalize_install_date(nanos).expect("classified as nanos");
+        assert_eq!(secs, 1_791_388_800);
+        // any realistic nanosecond stamp converts below the threshold
+        assert!(secs < NANOS_THRESHOLD);
+        // plausibly seconds-shaped values and the "never recorded" 0 stay
+        assert_eq!(normalize_install_date(0), None);
+        assert_eq!(normalize_install_date(1), None);
+        assert_eq!(normalize_install_date(1_791_388_800), None);
+        assert_eq!(normalize_install_date(NANOS_THRESHOLD - 1), None);
+    }
+
+    #[test]
+    fn repair_rewrites_legacy_dates_and_keeps_a_recoverable_backup_once() {
+        let base = std::env::temp_dir().join(format!("nawa-db-dates-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let db = Db::new(&base);
+        let e = Entry {
+            name: "old".into(),
+            version: "1.0".into(),
+            rel: 1,
+            arch: "x86_64".into(),
+            reason: "explicit".into(),
+            run: vec![],
+            // written by a pre-fix release: nanoseconds
+            install_date: 1_791_388_800_000_000_000,
+            size: 5,
+        };
+        db.add(&e, &["/usr/bin/old".to_string()], &HashMap::new()).unwrap();
+
+        // first run: converts in place, keeps the raw bytes
+        assert_eq!(db.repair_legacy_dates().unwrap(), 1);
+        let fixed = db.entry("old").unwrap().unwrap();
+        assert_eq!(fixed.install_date, 1_791_388_800);
+        let backup = db
+            .local_dir()
+            .join("old")
+            .join("desc.legacy-nanos");
+        assert!(backup.exists());
+        let raw_backup = std::fs::read_to_string(&backup).unwrap();
+        assert!(raw_backup.contains("1791388800000000000"), "{raw_backup}");
+
+        // idempotent: a second run changes nothing, and the backup survives
+        assert_eq!(db.repair_legacy_dates().unwrap(), 0);
+        assert!(backup.exists());
+
+        // a stamp small enough to be in the first 27.7h of the epoch is left
+        // alone (not destructively rewritten)
+        let tiny = db
+            .local_dir()
+            .join("old")
+            .join("desc");
+        let mut ambiguous = fixed.clone();
+        ambiguous.install_date = 123_456_789; // 1973-11-29, plausible seconds
+        std::fs::write(&tiny, toml::to_string_pretty(&ambiguous).unwrap()).unwrap();
+        assert_eq!(db.repair_legacy_dates().unwrap(), 0);
+        assert_eq!(db.entry("old").unwrap().unwrap().install_date, 123_456_789);
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn names_with_path_syntax_are_rejected() {

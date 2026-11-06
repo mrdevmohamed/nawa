@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased — fix: install dates display correctly again
+
+- `Entry.install_date` is now written as Unix **seconds**. It used to be
+  written in nanoseconds while every viewer (`nawa info`, `nawa query`,
+  removal plans) interpreted it as seconds, which produced absurd dates.
+- Existing databases are detected and migrated conservatively: a value that
+  can only be a legacy nanosecond stamp (at or above 1e14) is converted to
+  seconds on the next nawa run that takes the exclusive database lock; the
+  original bytes are kept beside the entry as `desc.legacy-nanos` so the
+  conversion is always recoverable. The repair is idempotent, and ambiguous
+  small values are never rewritten.
+- Temporary directory names no longer derive from the recorded install date;
+  uniqueness comes from an internal nanosecond id, so a same-second install
+  pair cannot collide on a backup/staging directory.
+
 ## Unreleased — fix: Ctrl+C and crashes can no longer corrupt an install
 
 - SIGINT / SIGTERM / SIGHUP are deferred while an install or removal changes

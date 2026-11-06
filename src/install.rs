@@ -97,11 +97,19 @@ fn install_archive_payload(
     // a previous nawa killed mid-install (SIGKILL, power cut) is repaired
     // before anything else looks at the files or the db
     recover_and_report(root);
+    // Decouple identity from the install date: `stamp` is the recorded
+    // install_date (Unix **seconds**, the unit every viewer uses), while
+    // `tmp_id` only derives unique temporary directory names and must never
+    // be mistaken for a timestamp a formatter will interpret.
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
+        .map(|d| d.as_secs())
         .unwrap_or(0);
-    let tmp = root.join(".nawa").join(format!("tmp-{stamp}"));
+    let tmp_id = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0_u128);
+    let tmp = root.join(".nawa").join(format!("tmp-{tmp_id}"));
     std::fs::create_dir_all(&tmp)?;
     // remove the staging dir on every exit path (errors included)
     struct TmpGuard(PathBuf);
@@ -188,7 +196,7 @@ fn install_archive_payload(
 
     // ---- move staged tree into the root -------------------------------------
     let mut diverted: Vec<(String, String)> = Vec::new(); // (orig, diverted)
-    let mut tx = Tx::new(root, root.join(".nawa").join(format!("bak-{stamp}")));
+    let mut tx = Tx::new(root, root.join(".nawa").join(format!("bak-{tmp_id}")));
     // last clean exit before any file is touched
     interrupt::check()?;
     if let Err(e) = move_tree(&tmp, root, root, &old_hashes, &mut diverted, &mut tx) {
@@ -243,7 +251,7 @@ fn install_archive_payload(
         arch: arch.clone(),
         reason,
         run,
-        install_date: stamp as u64,
+        install_date: stamp,
         size,
     };
     let hooks = match archive::read_hooks(archive_path) {
@@ -976,6 +984,13 @@ pub fn recover_and_report(root: &Path) {
             }
         }
         Err(e) => eprintln!("nawa: warning: could not check for an interrupted transaction: {e:#}"),
+    }
+    // an exclusive-lock caller is also the right place to convert legacy
+    // nanosecond install_date values (idempotent, keeps a recoverable backup)
+    match Db::new(root).repair_legacy_dates() {
+        Ok(0) => {}
+        Ok(n) => eprintln!("nawa: repaired {n} package(s): legacy nanosecond install dates converted to Unix seconds (originals kept as desc.legacy-nanos)"),
+        Err(e) => eprintln!("nawa: warning: could not repair legacy install dates: {e:#}"),
     }
 }
 
