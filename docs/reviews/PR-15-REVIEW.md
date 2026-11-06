@@ -129,3 +129,14 @@ The next run ([42269835662](https://github.com/mrdevmohamed/nawa/actions/runs/42
 
 
 Run `42270320448` passed the build, Clippy, static musl build, smoke-v05, and all isolation jobs. The only failing assertion was in the new stale-id regression test: it erased the only durable evidence of an allocated-but-not-committed id and then expected that reservation to be remembered. The test now uses separate roots to verify the two supported recovery cases independently: a stale marker behind an existing record and a missing marker with an existing record. This test-only correction is in `b2a2eb3503ae70717b1e30b449d4817a326d8b38`; a fresh complete CI run is pending.
+
+
+## Final follow-up verification — 2026-11-06
+
+**Validated code head:** `34efc76609e7525e7bbe7eda18b3d9ddf9c48738`  
+**GitHub Actions:** [run 42270749132](https://github.com/mrdevmohamed/nawa/actions/runs/42270749132)
+
+All ten executable CI jobs passed, and the required aggregate **CI passed** job also completed successfully. This run covers build, Clippy, the unit/integration test suites on Ubuntu 22.04 and 24.04 (root and user configurations), all four isolation levels, CLI smoke tests including signing/upgrade/rollback and remote repository/service flows, and the static musl binary check.
+
+The test-only correction for the stale/missing `last-id` marker regression was included in the validated head. The final verification replaces the earlier pending status above; the intermediate failed runs remain documented as diagnostic iterations, not as the final result.
+
