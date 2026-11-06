@@ -87,7 +87,7 @@ pub fn set_parent_death_kill() -> Result<()> {
         return Err(std::io::Error::last_os_error()).context("set sandbox parent-death signal");
     }
     // Close the race where the parent died just before prctl().
-    if unsafe { libc::getppid() } == 1 {
+    if unsafe { libc::getppid() } <= 1 {
         // SAFETY: this PID-namespace child may terminate itself.
         unsafe { libc::raise(libc::SIGKILL) };
     }
