@@ -226,7 +226,7 @@ scratch = "/w/sb"
         assert!(spec.strict_readonly_root);
         assert_eq!(spec.writable_paths, vec!["/tmp", "/build/home"]);
 
-        assert!(SandboxSpec::parse(&base.replace("run_gid = 65534\\n", "")).is_err());
+        assert!(SandboxSpec::parse(&base.replace("run_gid = 65534\n", "")).is_err());
         assert!(SandboxSpec::parse(&base.replace("/build/src", "../escape")).is_err());
         assert!(SandboxSpec::parse(&base.replace("writable_paths = [\"/tmp\", \"/build/home\"]", "writable_paths = []")).is_err());
     }
