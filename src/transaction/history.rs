@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::db::{self, Entry};
+use super::atomic;
 
 pub const SCHEMA_VERSION: u32 = 1;
 
@@ -163,9 +164,11 @@ impl PackageState {
             (None, None) => true,
             _ => false,
         };
-        if !identity {
-            return false;
-        }
+        if !identity { return false; }
+        // The same archive can be promoted from a dependency to an explicit
+        // install. That is a later user change and must conflict with undo.
+        // Empty reasons belong to legacy snapshots and retain their old fallback.
+        if !self.reason.is_empty() && self.reason != e.reason { return false; }
         if self.artifact_sha256.is_empty() || e.artifact_sha256.is_empty() {
             // legacy records without a digest fall back to identity only
             return true;
@@ -309,60 +312,86 @@ pub fn parse_status(s: &str) -> Result<TxStatus> {
 // store operations (caller holds the exclusive db lock)
 // ---------------------------------------------------------------------------
 
-/// Allocate the next monotonic transaction id by updating `last-id`.
-/// Gaps after crashes are acceptable; reusing an id is not.
+/// Find ids already represented by an immutable record or journal directory.
+/// Existing state remains authoritative if last-id is missing or stale.
+fn max_persisted_id(root: &Path) -> Result<u64> {
+    let mut highest = 0u64;
+    let records = transactions_dir(root);
+    match std::fs::read_dir(&records) {
+        Ok(entries) => for entry in entries {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() { continue; }
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if let Some(id) = name.strip_suffix(".toml").and_then(|value| value.parse::<u64>().ok()) {
+                highest = highest.max(id);
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+        Err(error) => return Err(error).with_context(|| format!("scan {}", records.display())),
+    }
+    let journals = history_dir(root).join("journal");
+    match std::fs::read_dir(&journals) {
+        Ok(entries) => for entry in entries {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() { continue; }
+            let name = entry.file_name();
+            if let Some(id) = name.to_string_lossy().parse::<u64>().ok() {
+                highest = highest.max(id);
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+        Err(error) => return Err(error).with_context(|| format!("scan {}", journals.display())),
+    }
+    Ok(highest)
+}
+
+/// Allocate the next monotonic transaction id. Gaps after crashes are
+/// acceptable; reusing an id is not. Reconstruct a missing/stale marker from
+/// persisted records and journal directories.
 pub fn allocate_id(root: &Path) -> Result<u64> {
-    let dir = history_dir(root);
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("create {}", dir.display()))?;
-    let last_path = dir.join("last-id");
-    let next = match std::fs::read_to_string(&last_path) {
-        Ok(raw) => raw.trim().parse::<u64>().context("corrupt history last-id")? + 1,
-        Err(_) => 1,
+    let last_path = history_dir(root).join("last-id");
+    let recorded = match std::fs::read_to_string(&last_path) {
+        Ok(raw) => raw.trim().parse::<u64>().context("corrupt history last-id")?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => return Err(error).with_context(|| format!("read {}", last_path.display())),
     };
-    let tmp = dir.join(".last-id.tmp");
-    std::fs::write(&tmp, next.to_string())?;
-    std::fs::rename(&tmp, &last_path)?;
+    let next = recorded.max(max_persisted_id(root)?).checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("transaction id space is exhausted"))?;
+    atomic::write_atomic(&last_path, next.to_string().as_bytes(), 0o600)?;
     Ok(next)
 }
 
-/// Write a transaction record atomically (temp file + rename). Records are
-/// immutable once written EXCEPT the narrowly defined administrative
-/// annotations (`undone_by`, status transitions out of interrupted states).
-pub fn write_record(root: &Path, record: &TransactionRecord) -> Result<()> {
+/// Store a validated record. New records are no-clobber; only the explicit
+/// reconciliation/annotation path may replace an existing record.
+fn store_record(root: &Path, record: &TransactionRecord, replace: bool) -> Result<()> {
     record.validate()?;
-    let dir = transactions_dir(root);
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("create {}", dir.display()))?;
     let path = transaction_path(root, record.id);
-    let tmp = dir.join(format!(".{}.{}.tmp", record.id, std::process::id()));
-    let write = (|| -> Result<()> {
-        std::fs::write(&tmp, record.to_toml()?)?;
-        std::fs::rename(&tmp, &path)?;
-        Ok(())
-    })();
-    if write.is_err() {
-        let _ = std::fs::remove_file(&tmp);
+    if !replace && path.exists() {
+        bail!("transaction {} already exists; refusing to overwrite history", record.id);
     }
-    write
+    atomic::write_atomic(&path, record.to_toml()?.as_bytes(), 0o600)
 }
 
-/// Replace an existing record (only for the allowed annotations: status
-/// reconciliation, `undone_by`). The old record is kept in `.old/`.
+/// Write an immutable transaction record durably.
+pub fn write_record(root: &Path, record: &TransactionRecord) -> Result<()> {
+    store_record(root, record, false)
+}
+
+/// Replace an existing record for allowed administrative annotations.
+/// Retain the previous byte-for-byte record in `.old/`.
 pub fn rewrite_record(root: &Path, record: &TransactionRecord) -> Result<()> {
     record.validate()?;
     let path = transaction_path(root, record.id);
-    if !path.exists() {
-        bail!("cannot rewrite transaction {}: no such record", record.id);
-    }
-    let old_dir = transactions_dir(root).join(".old");
-    std::fs::create_dir_all(&old_dir)?;
+    let old = std::fs::read(&path)
+        .with_context(|| format!("read transaction {} before rewrite", record.id))?;
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let _ = std::fs::copy(&path, old_dir.join(format!("{}-{stamp}", record.id)));
-    write_record(root, record)
+    let backup = transactions_dir(root).join(".old").join(format!("{}-{stamp}", record.id));
+    atomic::write_atomic(&backup, &old, 0o600)?;
+    store_record(root, record, true)
 }
 
 /// Return whether a durable compensating transaction restored every
@@ -635,7 +664,18 @@ mod tests {
     }
 
     #[test]
-    fn state_comparison_uses_artifact_digest() {
+    fn missing_or_stale_id_marker_never_reuses_a_persisted_id() {
+        let base = tmpdir("ids-recover");
+        let root = base.join("root");
+        write_record(&root, &sample(7)).unwrap();
+        assert_eq!(allocate_id(&root).unwrap(), 8);
+        std::fs::write(history_dir(&root).join("last-id"), "2").unwrap();
+        assert_eq!(allocate_id(&root).unwrap(), 9);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn state_comparison_uses_artifact_digest_and_install_reason() {
         let mut e = crate::db::Entry {
             name: "x".into(),
             version: "1.0".into(),
@@ -649,12 +689,16 @@ mod tests {
         };
         let mut st = PackageState::from_entry(&e);
         assert!(st.matches_entry(&e));
-        // same version, different bytes -> superseded
+        e.reason = "dependency".into();
+        assert!(!st.matches_entry(&e), "install-reason changes must conflict");
+        e.reason = "explicit".into();
         e.artifact_sha256 = "d".repeat(64);
         assert!(!st.matches_entry(&e), "identity alone must not win over bytes");
         e.artifact_sha256 = "c".repeat(64);
-        // digest-less legacy state falls back to identity
+        // Legacy snapshots without reason/digest retain identity fallback.
+        st.reason.clear();
         st.artifact_sha256.clear();
+        e.reason = "dependency".into();
         e.artifact_sha256.clear();
         assert!(st.matches_entry(&e));
     }
