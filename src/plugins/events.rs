@@ -278,3 +278,76 @@ fn store_failure(root: &Path, failure: &ObserverFailure) -> Result<()> {
     std::fs::rename(temporary, target)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transaction::history::PackageChange;
+
+    fn sample_record(status: &str) -> TransactionRecord {
+        TransactionRecord {
+            schema: 1,
+            id: 7,
+            command: "install".into(),
+            status: status.into(),
+            started_at: 100,
+            finished_at: Some(112),
+            duration_seconds: Some(12),
+            initiated_by: "uid:1000".into(),
+            requested_packages: vec!["curl".into()],
+            repository_ids: vec!["main".into()],
+            package_changes: vec![PackageChange {
+                name: "curl".into(),
+                action: "install".into(),
+                status: "committed".into(),
+                before: None,
+                after: None,
+                source: "main".into(),
+                failure: None,
+                hook: None,
+            }],
+            undone_by: None,
+            undoes: None,
+            groups: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn completed_install_emits_transaction_and_package_events() {
+        let events = transaction_events(&sample_record("completed"));
+        assert!(events.contains(&("transaction.completed".into(), None)));
+        assert!(events.contains(&("package.installed".into(), Some(0))));
+    }
+
+    #[test]
+    fn observer_payload_is_redacted_until_capabilities_are_granted() {
+        let record = sample_record("completed");
+        let minimal = event_payload(&record, "transaction.completed", None, &[]);
+        assert_eq!(minimal["transaction_id"], 7);
+        assert!(minimal.get("started_at").is_none());
+        assert!(minimal.get("repository_ids").is_none());
+        assert!(minimal.get("package_changes").is_none());
+
+        let granted = event_payload(
+            &record,
+            "transaction.completed",
+            None,
+            &[
+                Capability::HistoryRead,
+                Capability::RepositoryMetadataRead,
+                Capability::PackagePlanInspect,
+            ],
+        );
+        assert_eq!(granted["started_at"], 100);
+        assert_eq!(granted["repository_ids"][0], "main");
+        assert_eq!(granted["package_changes"][0]["name"], "curl");
+    }
+
+    #[test]
+    fn failed_and_partial_transactions_map_to_distinct_events() {
+        assert!(transaction_events(&sample_record("failed"))
+            .contains(&("transaction.failed".into(), None)));
+        assert!(transaction_events(&sample_record("partial"))
+            .contains(&("transaction.partial".into(), None)));
+    }
+}
