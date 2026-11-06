@@ -444,6 +444,11 @@ mod tests {
         assert!(st.has_grant("x", super::super::manifest::Capability::TransactionObserve));
         st.revoke("x", super::super::manifest::Capability::TransactionObserve);
         assert!(!st.has_grant("x", super::super::manifest::Capability::TransactionObserve));
+        st.grant("x", super::super::manifest::Capability::NotificationSend);
+        assert!(
+            !st.has_grant("x", super::super::manifest::Capability::NotificationSend),
+            "reserved capabilities are never effective even if present in TOML"
+        );
     }
 
     #[test]
