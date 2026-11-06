@@ -155,7 +155,7 @@ fn common_prep(spec: &SandboxSpec) -> Result<()> {
     Ok(())
 }
 
-fn set_optional_limit(resource: libc::c_uint, value: u64) -> Result<()> {
+fn set_optional_limit(resource: libc::c_int, value: u64) -> Result<()> {
     if value == 0 {
         return Ok(());
     }
