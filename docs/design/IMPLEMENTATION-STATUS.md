@@ -33,8 +33,16 @@ clean at the time it landed.
   reconciliation (committed / failed / needs-recovery decided by comparing
   intents with the db; never re-runs hooks), and compensating undo.
 - Every package-changing command (install / update / upgrade / remove /
-  autoremove / build --install / archive install) opens one operation and
-  records each package step around the real installer call.
+  autoremove / build --install / archive install / rollback) opens one
+  operation and records each package step around the real installer call.
+- Transaction history records, WAL intents/results/state, and the monotonic
+  transaction id marker use durable atomic publication: file fsync before
+  rename, followed by parent-directory fsync. Missing/stale id markers are
+  recovered from existing records and journal directories; new record writes
+  are no-clobber.
+- Undo conflict detection includes install reason when the snapshot has one,
+  so promoting an identical dependency archive to an explicit install is not
+  mistaken for an unchanged package.
 - `nawa history` (newest-first table), `nawa history info <ID>`,
   `nawa history undo <ID> [--yes]`.
 - Undo preflights EVERY required artifact and state conflict (identity +
