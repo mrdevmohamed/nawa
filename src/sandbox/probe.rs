@@ -204,5 +204,7 @@ fn probe_spec(scratch: &str) -> SandboxSpec {
         readonly_paths: Vec::new(),
         strict_readonly_root: false,
         writable_paths: Vec::new(),
+        strict_readonly_root: false,
+        writable_paths: Vec::new(),
     }
 }
