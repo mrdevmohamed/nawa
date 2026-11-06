@@ -104,14 +104,19 @@ pub(crate) fn cmd_group_remove(ctx: &Ctx, id: &str, yes: bool) -> Result<()> {
         };
         let result = install::remove_with(package, &ctx.root, false);
         let after = db.entry(package)?;
+        let committed_hook_failed = result.is_err() && before.is_some() && after.is_none();
         {
             let mut recorder = op.recorder();
             recorder.step_result(
                 step_no, package, transaction::history::StepAction::Remove,
                 if result.is_ok() { transaction::history::StepStatus::Committed }
+                else if committed_hook_failed { transaction::history::StepStatus::CommittedHookFailed }
                 else { transaction::history::StepStatus::Failed },
-                before.as_ref(), after.as_ref(), "group-remove",
-                result.as_ref().err().map(|error| format!("{error:#}")), None,
+                before.as_ref(),
+                after.as_ref(),
+                "group-remove",
+                result.as_ref().err().map(|error| format!("{error:#}")),
+                committed_hook_failed.then(|| "failed".to_string()),
             )?;
         }
         if let Err(error) = result { failure = Some(error); break; }

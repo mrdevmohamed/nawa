@@ -54,8 +54,9 @@ The upgrade path discarded the result of `OperationHandle::finish()`.
 - [x] R1 — recovery consumes completed and pending WAL steps; inferred results are persisted.
 - [x] R3 — undo writes intent before mutation and propagates WAL errors.
 - [x] R4 — original transaction is marked undone only after successful finalization.
-- [x] R5 — undo ordering respects dependency direction.
+- [x] R5 — undo ordering respects dependency direction; partial undo can resume without replaying committed steps.
 - [x] R8 — remove nested exclusive-lock acquisition.
+- [x] Classify post-remove hook failures as committed package removals rather than failed mutations.
 - [x] R2 — install, archive, build-install and repository-upgrade paths persist validated target snapshots and propagate WAL errors.
 - [x] R6 — group removal records every package change as a WAL step and preserves membership for retries.
 - [x] R7 — upgrade propagates transaction finalization errors.

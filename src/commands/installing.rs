@@ -780,10 +780,17 @@ pub(crate) fn cmd_autoremove(ctx: &Ctx, dry_run: bool, yes: bool, build_deps: bo
                 )?;
             }
             Err(e) => {
+                let after = db.entry(n)?;
+                let committed_hook_failed = before.is_some() && after.is_none();
                 recorder.step_result(
                     step_no, n, transaction::history::StepAction::Remove,
-                    transaction::history::StepStatus::Failed,
-                    before.as_ref(), None, "autoremove", Some(format!("{e:#}")), None,
+                    if committed_hook_failed {
+                        transaction::history::StepStatus::CommittedHookFailed
+                    } else {
+                        transaction::history::StepStatus::Failed
+                    },
+                    before.as_ref(), after.as_ref(), "autoremove", Some(format!("{e:#}")),
+                    committed_hook_failed.then(|| "failed".to_string()),
                 )?;
                 let err = e;
                 op.finish(Some(&err))?;
@@ -942,10 +949,17 @@ pub(crate) fn cmd_remove(ctx: &Ctx, name: &str, force: bool, yes: bool) -> Resul
             )?;
         }
         Err(e) => {
+            let after = db.entry(name)?;
+            let committed_hook_failed = before.is_some() && after.is_none();
             recorder.step_result(
                 step_no, name, transaction::history::StepAction::Remove,
-                transaction::history::StepStatus::Failed,
-                before.as_ref(), None, "remove", Some(format!("{e:#}")), None,
+                if committed_hook_failed {
+                    transaction::history::StepStatus::CommittedHookFailed
+                } else {
+                    transaction::history::StepStatus::Failed
+                },
+                before.as_ref(), after.as_ref(), "remove", Some(format!("{e:#}")),
+                committed_hook_failed.then(|| "failed".to_string()),
             )?;
         }
     }

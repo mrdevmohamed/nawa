@@ -85,9 +85,32 @@ pub fn plan_undo(root: &Path, id: u64) -> Result<UndoPlan> {
     }
 
     let db = crate::db::Db::new(root);
+    let prior_undos: Vec<_> = crate::transaction::history::list_records(root)?
+        .into_iter()
+        .filter(|candidate| candidate.undoes == Some(id))
+        .collect();
     let mut steps = Vec::new();
     for change in &committed {
         let current = db.entry(&change.name)?;
+        let was_compensated = prior_undos.iter().any(|undo| {
+            undo.package_changes.iter().any(|step| {
+                step.name == change.name
+                    && (step.status == "committed" || step.status == "committed-hook-failed")
+            })
+        });
+        if was_compensated {
+            let desired_before = change.before.clone().unwrap_or(PackageState::absent());
+            let already_at_before = if desired_before.is_installed() {
+                current.as_ref().is_some_and(|entry| desired_before.matches_entry(entry))
+            } else {
+                current.is_none()
+            };
+            if already_at_before {
+                // A previous partial undo committed this compensation. Do not
+                // compare it against the original after-state or apply it twice.
+                continue;
+            }
+        }
         // optimistic concurrency (roadmap §5.9): the current state must still
         // correspond to the after-state this transaction created
         let after = change.after.clone().unwrap_or(PackageState::absent());
@@ -225,8 +248,13 @@ pub fn apply_undo(
                     status = false;
                     failure = Some(format!("still required by {}", dependents.join(", ")));
                 } else if let Err(error) = crate::install::remove_with(&step.package, root, force) {
-                    status = false;
                     failure = Some(format!("{error:#}"));
+                    if before_entry.is_some() && db.entry(&step.package)?.is_none() {
+                        status = true;
+                        hook = Some("failed".to_string());
+                    } else {
+                        status = false;
+                    }
                 }
             }
             UndoAction::RestorePrevious { digest } | UndoAction::Reinstall { digest } => {
@@ -530,6 +558,56 @@ mod tests {
         let plan = plan_undo(&root, 1).unwrap();
         assert_eq!(plan.steps.iter().map(|step| step.package.as_str()).collect::<Vec<_>>(),
             vec!["curl", "zlib"]);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn partial_undo_can_resume_without_replaying_committed_steps() {
+        let base = tmpdir("resume-partial");
+        let root = base.join("root");
+        let zlib = entry("zlib", "1.0", &"a".repeat(64));
+        let mut curl = entry("curl", "1.0", &"b".repeat(64));
+        curl.run = vec!["zlib".to_string()];
+        let db = Db::new(&root);
+        db.add(&zlib, &[], &Default::default()).unwrap();
+        db.add(&curl, &[], &Default::default()).unwrap();
+        let original = crate::transaction::history::TransactionRecord {
+            schema: SCHEMA_VERSION, id: 1, command: "install".into(), status: "completed".into(),
+            started_at: 1, finished_at: Some(2), duration_seconds: Some(1),
+            initiated_by: "uid:0".into(), requested_packages: vec!["curl".into()],
+            repository_ids: vec![],
+            package_changes: vec![
+                PackageChange { name: "zlib".into(), action: "install".into(), status: "committed".into(),
+                    before: None, after: Some(PackageState::from_entry(&zlib)),
+                    source: "local-build".into(), failure: None, hook: None },
+                PackageChange { name: "curl".into(), action: "install".into(), status: "committed".into(),
+                    before: None, after: Some(PackageState::from_entry(&curl)),
+                    source: "local-build".into(), failure: None, hook: None },
+            ],
+            undone_by: None, undoes: None, groups: vec![],
+        };
+        crate::transaction::history::write_record(&root, &original).unwrap();
+
+        // Simulate a first undo that removed curl and then failed before zlib.
+        crate::db::Db::new(&root).remove("curl").unwrap();
+        crate::transaction::history::write_record(&root,
+            &crate::transaction::history::TransactionRecord {
+                schema: SCHEMA_VERSION, id: 2, command: "history-undo".into(), status: "partial".into(),
+                started_at: 3, finished_at: Some(4), duration_seconds: Some(1),
+                initiated_by: "uid:0".into(), requested_packages: vec![],
+                repository_ids: vec![],
+                package_changes: vec![PackageChange {
+                    name: "curl".into(), action: "remove".into(), status: "committed".into(),
+                    before: Some(PackageState::from_entry(&curl)), after: None,
+                    source: "history-undo".into(), failure: None, hook: None,
+                }],
+                undone_by: None, undoes: Some(1), groups: vec![],
+            }
+        ).unwrap();
+
+        let plan = plan_undo(&root, 1).unwrap();
+        assert_eq!(plan.steps.len(), 1);
+        assert_eq!(plan.steps[0].package, "zlib");
         let _ = std::fs::remove_dir_all(&base);
     }
 

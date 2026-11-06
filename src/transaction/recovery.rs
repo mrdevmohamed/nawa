@@ -34,11 +34,17 @@ pub fn reconcile(root: &Path, tx: u64) -> Result<Option<TransactionRecord>> {
                 "committed" => ("committed", result.failure, result.hook),
                 "committed-hook-failed" => ("committed-hook-failed", result.failure, result.hook),
                 "failed" => {
-                    // Older callers recorded hook failure as "failed" after
-                    // the package commit. Recognize the durable target state.
-                    if intent.target.as_ref().is_some_and(|target| current.as_ref()
-                        .is_some_and(|entry| target.matches_entry(entry))) {
+                    let target_matches = intent.target.as_ref().is_some_and(|target| current.as_ref()
+                        .is_some_and(|entry| target.matches_entry(entry)));
+                    let before_matches = intent.precondition.as_ref().is_some_and(|before| current.as_ref()
+                        .is_some_and(|entry| before.matches_entry(entry)));
+                    if target_matches && !before_matches {
+                        // Legacy callers could write "failed" after a package
+                        // commit when only the post-install hook had failed.
                         ("committed-hook-failed", result.failure, Some("failed".to_string()))
+                    } else if target_matches && before_matches {
+                        ambiguous = true;
+                        ("ambiguous", Some("legacy WAL says failed but both before- and target-state match the database".into()), None)
                     } else { ("failed", result.failure, result.hook) }
                 }
                 other => anyhow::bail!("transaction {tx} step {} has unknown outcome {other:?}", intent.step),
