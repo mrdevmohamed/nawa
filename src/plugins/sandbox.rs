@@ -67,15 +67,15 @@ pub fn spawn(executable: &Path, protected_paths: &[PathBuf]) -> Result<Sandboxed
     let mut mask = vec![
         "/root".to_string(),
         "/home".to_string(),
-        "/run/user".to_string(),
+        "/run".to_string(),
         "/etc/nawa".to_string(),
         "/etc/ssh".to_string(),
         "/etc/wireguard".to_string(),
         "/etc/NetworkManager/system-connections".to_string(),
         "/etc/ssl/private".to_string(),
-        "/var/lib/nawa".to_string(),
-        "/var/lib/dbus".to_string(),
-        "/var/cache/nawa".to_string(),
+        "/var/lib".to_string(),
+        "/var/cache".to_string(),
+        "/var/log".to_string(),
     ];
     if let Ok(home) = std::env::var("HOME") {
         push_mask_dir(Path::new(&home), &mut mask);
@@ -115,6 +115,8 @@ pub fn spawn(executable: &Path, protected_paths: &[PathBuf]) -> Result<Sandboxed
         file_size_limit_bytes: 64 * 1024 * 1024,
         open_files_limit: 64,
         readonly_paths: vec!["/build/src".to_string()],
+        strict_readonly_root: true,
+        writable_paths: vec!["/tmp".to_string(), "/build/home".to_string()],
     };
     let spec_path = workdir.join("plugin-sandbox.toml");
     std::fs::write(&spec_path, toml::to_string(&spec)?)?;
