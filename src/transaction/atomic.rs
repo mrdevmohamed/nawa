@@ -16,11 +16,11 @@ static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum FailPoint { AfterWrite, AfterFileSync, AfterRename }
+enum FailPoint { Wrote, Synced, Published }
 
 #[cfg(test)]
 thread_local! {
-    static FAILPOINT: std::cell::Cell<Option<FailPoint>> = std::cell::Cell::new(None);
+    static FAILPOINT: std::cell::Cell<Option<FailPoint>> = const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]
@@ -104,11 +104,11 @@ pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
             file.write_all(bytes)
                 .with_context(|| format!("write temporary file {}", temporary.display()))?;
             #[cfg(test)]
-            maybe_fail(FailPoint::AfterWrite)?;
+            maybe_fail(FailPoint::Wrote)?;
             file.sync_all()
                 .with_context(|| format!("fsync temporary file {}", temporary.display()))?;
             #[cfg(test)]
-            maybe_fail(FailPoint::AfterFileSync)?;
+            maybe_fail(FailPoint::Synced)?;
             Ok(())
         })();
         if let Err(error) = written {
@@ -125,7 +125,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
         // Failure here means the new file is visible but its directory entry
         // was not confirmed durable. The transaction WAL resolves that case.
         #[cfg(test)]
-        maybe_fail(FailPoint::AfterRename)?;
+        maybe_fail(FailPoint::Published)?;
         sync_directory(parent)?;
         return Ok(());
     }
