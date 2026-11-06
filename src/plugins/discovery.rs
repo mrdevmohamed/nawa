@@ -215,13 +215,12 @@ impl PluginState {
         } else {
             Self::default()
         };
-        let enabled = match (system.enabled.is_empty(), project.enabled.is_empty()) {
-            (true, _) => project.enabled,
-            (false, true) => system.enabled.clone(),
-            (false, false) => project.enabled
-                .into_iter()
-                .filter(|id| system.enabled.iter().any(|allowed| allowed == id))
-                .collect(),
+        // A non-empty system enabled list is an administrator allow-list.
+        // Project preferences cannot add entries or replace that policy.
+        let enabled = if system.enabled.is_empty() {
+            project.enabled
+        } else {
+            system.enabled.clone()
         };
         let mut disabled = system.disabled.clone();
         for id in project.disabled {
