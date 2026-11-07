@@ -1268,7 +1268,9 @@ fn cargo_fetch_and_offline_build_work_under_sandbox() {
     );
     let install = format!(
         "export PATH={cargo}:$PATH && cargo build --release --locked --offline \
-         && ./target/release/testmain"
+         && mkdir -p %{{pkgdir}}/usr/bin \
+         && cp target/release/testmain %{{pkgdir}}/usr/bin/ \
+         && %{{pkgdir}}/usr/bin/testmain"
     );
     write_recipe(&s.join("recipes/cargo-b"), &recipe(&tar_sha, &addr, &install));
 
