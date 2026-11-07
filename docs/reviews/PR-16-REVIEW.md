@@ -2,7 +2,8 @@
 
 **Pull request:** https://github.com/mrdevmohamed/nawa/pull/16  
 **Branch:** docs/fetch-phase-design  
-**Reviewed head:** a1144ccb55f22866ed229088c94890c742f435cd  
+**Implementation commit verified by CI:** a1144ccb55f22866ed229088c94890c742f435cd  
+**Current docs head:** 3feb4c27a97be36dfea1101631e991d172ff2094 (documentation-only commits after the verified implementation commit)  
 **Review date:** 2026-11-07  
 **Initial recommendation:** Request changes before remediation; keep Draft until all required checks and remaining integration work are resolved.
 
@@ -47,7 +48,8 @@ Non-closure build IDs include the actual Go/Cargo version strings obtained throu
 
 ## Current CI verification
 
-**Exact head:** a1144ccb55f22866ed229088c94890c742f435cd  
+**Implementation commit:** a1144ccb55f22866ed229088c94890c742f435cd  
+**Current PR head:** 3feb4c27a97be36dfea1101631e991d172ff2094 (docs-only changes after the tested implementation tree)  
 **Workflow run:** [42391105667](https://github.com/mrdevmohamed/nawa/actions/runs/42391105667)  
 **Conclusion:** **Success** (completed).
 
@@ -59,7 +61,7 @@ The successful run included:
 - Static musl binary verification.
 - CLI smoke tests.
 
-The earlier statement that the remediation head had no associated workflow run is superseded by this result. The previous pending run mentioned in the PR description is not the latest verification record.
+The earlier statement that the remediation head had no associated workflow run is superseded by this result. The tested implementation commit is the parent of the later documentation-only commits; no workflow run is currently associated with the latest documentation head.
 
 ## Remaining verification gaps
 
