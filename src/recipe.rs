@@ -1354,4 +1354,28 @@ mod tests {
         assert_eq!(CA_BUNDLE, "ca-certificates");
     }
 
+    
+    #[test]
+    fn fetch_backends_add_toolchain_and_ca_bundle_to_build_dependencies() {
+        let raw = r#"
+[package]
+name = "fetch-deps-test"
+version = "1.0"
+rel = 1
+arch = ["x86_64"]
+source = "local:/nawa-schema-2-requires-a-newer-nawa"
+
+[fetch.go]
+dir = "go"
+
+[fetch.cargo]
+dir = "rust"
+"#;
+        let rec: Recipe = toml::from_str(raw).unwrap();
+        let deps = rec.build_deps();
+        assert!(deps.contains(&"golang".to_string()), "{deps:?}");
+        assert!(deps.contains(&"rust".to_string()), "{deps:?}");
+        assert!(deps.contains(&"ca-certificates".to_string()), "{deps:?}");
+    }
+
 }
