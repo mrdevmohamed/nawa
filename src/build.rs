@@ -1136,6 +1136,10 @@ fn run_section(
             .env("NAWA_JOBS", ctx.jobs.to_string())
             .env("NAWA_PKGDIR", &ctx.pkgdir)
             .env("NAWA_SRCDIR", &ctx.srcdir)
+            // §4.3: the new-schema names are injected exactly like
+            // NAWA_SRCDIR; a legacy recipe's ctx has no srcroot, so the
+            // name never enters a legacy build
+            .envs(ctx.srcroot.iter().map(|r| ("NAWA_SRCROOT", r.to_string_lossy().into_owned())))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .spawn()
