@@ -3,6 +3,7 @@
 
 mod archive;
 mod artifact;
+mod assets;
 mod build;
 mod buildenv;
 mod cli;
@@ -14,6 +15,7 @@ mod confirm;
 mod db;
 mod deps;
 mod fetch;
+mod fetchrun;
 mod groups;
 mod humanize;
 mod install;
@@ -31,6 +33,7 @@ mod sandbox;
 mod service;
 mod sign;
 mod slim;
+mod sources;
 mod suggest;
 mod sync;
 mod sys;
@@ -156,6 +159,7 @@ fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             allow_degraded,
             timeout,
             use_cache,
+            offline,
             install,
             force,
         } => {
@@ -176,6 +180,7 @@ fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
                 allow_degraded,
                 timeout,
                 use_cache,
+                offline,
                 install,
                 force,
             )
@@ -316,7 +321,32 @@ fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         Cmd::Repoquery { name, repo_id, info } => {
             repositories::cmd_repoquery(&ctx.cfg, &ctx.root, &name, repo_id.as_deref(), info)
         }
-        Cmd::Clean { category, dry_run } => repositories::cmd_clean(&ctx.root, &category, dry_run),
+        Cmd::Fetch { names, all, isolation, sources_only, offline, allow_degraded } => {
+            if !all && names.is_empty() {
+                bail!("`nawa fetch` needs recipe names or --all");
+            }
+            cmd_fetch(
+                ctx,
+                &names,
+                all,
+                isolation.as_deref(),
+                sources_only,
+                offline,
+                allow_degraded,
+            )
+        }
+        Cmd::Recipe { action } => match action {
+            RecipeCmd::Check { name, all } => {
+                if name.is_none() && !all {
+                    bail!("`nawa recipe check` needs a recipe name or --all");
+                }
+                if name.is_some() && all {
+                    bail!("a recipe name and --all are exclusive");
+                }
+                cmd_recipe_check(ctx, name.as_deref(), all)
+            }
+        },
+        Cmd::Clean { category, dry_run } => repositories::cmd_clean(ctx, &category, dry_run),
         Cmd::Group { action } => match action {
             GroupCmd::List => cmd_group_list(ctx),
             GroupCmd::Info { id } => cmd_group_info(ctx, &id),

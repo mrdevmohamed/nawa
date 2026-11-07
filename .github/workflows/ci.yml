@@ -169,6 +169,14 @@ jobs:
         # `--examples` alone would build only the examples and skip the nawa binary
         run: cargo build --release --locked --bins --examples
 
+      - name: Build Nawa from its real package recipe
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: >-
+          cargo test --release --locked --test fetchcargo
+          builds_nawa_from_its_real_recipe --
+          --ignored --exact --nocapture
+
       - name: Signing, upgrade, rollback (smoke-v05)
         env:
           NAWA: ${{ github.workspace }}/target/release/nawa

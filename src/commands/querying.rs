@@ -91,7 +91,7 @@ pub(crate) fn cmd_info(ctx: &Ctx, name: &str) -> Result<()> {
         "{:<10} {} build: {}  run: {}  check: {}",
         pal.header("depends:"),
         pal.dim("·"),
-        pal.dim(&dep(&rec.depends.build)),
+        pal.dim(&dep(&rec.build_deps())),
         pal.dim(&dep(&rec.depends.run)),
         pal.dim(&dep(&rec.depends.check)),
     );
@@ -171,7 +171,7 @@ pub(crate) fn cmd_why(ctx: &Ctx, name: &str, tree: bool) -> Result<()> {
                 continue;
             }
             let mut kinds: Vec<&str> = Vec::new();
-            if r.depends.build.iter().any(|d| d == name) {
+            if r.build_deps().iter().any(|d| d == name) {
                 kinds.push("build");
             }
             if r.depends.run.iter().any(|d| d == name) {
@@ -209,14 +209,15 @@ pub(crate) fn cmd_deps(ctx: &Ctx, name: &str) -> Result<()> {
     let order = deps::resolve_target(name, &installed, &known)?;
     let pal = Palette::auto(Stream::Stdout);
     for (i, r) in order.iter().enumerate() {
+        let bdeps = r.build_deps();
         println!(
             "{:>3}. {} (build deps: {})",
             i + 1,
             pal.ver(&r.id()),
-            pal.dim(&if r.depends.build.is_empty() {
+            pal.dim(&if bdeps.is_empty() {
                 "-".into()
             } else {
-                r.depends.build.join(", ")
+                bdeps.join(", ")
             })
         );
     }

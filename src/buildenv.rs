@@ -93,6 +93,18 @@ pub struct EnvSpec<'a> {
     /// `$HOME` inside the sandbox (the bind of an empty dir).
     pub home: &'a str,
     pub source_date_epoch: u64,
+    /// `NAWA_SRCROOT` for recipes using `[[package.sources]]`
+    /// (fetch-phase.md §4.3). `None` for legacy recipes — the whitelist
+    /// must stay exactly today's set for them.
+    pub srcroot: Option<&'a Path>,
+    /// `NAWA_ASSETSDIR` for recipes that declare `[assets]`
+    /// (fetch-phase.md §5.3). Same legacy rule as `srcroot`.
+    pub assetsdir: Option<&'a Path>,
+    /// Extra whitelist entries a recipe's `[fetch.*]` tables require
+    /// (fetch-phase.md §7: GOMODCACHE, GOPROXY=off, GOFLAGS, GOTOOLCHAIN,
+    /// GOWORK, GOCACHE; §8 adds the Cargo names). Empty for every legacy
+    /// recipe, so the whitelist stays exactly today's set for them.
+    pub fetch_env: Vec<(String, String)>,
 }
 
 /// The whitelist for `env` and above — nothing else is inherited.
@@ -115,6 +127,17 @@ pub fn whitelist(spec: &EnvSpec) -> Vec<(String, String)> {
     v.push(("NAWA_JOBS".into(), spec.jobs.to_string()));
     v.push(("NAWA_SRCDIR".into(), spec.srcdir.display().to_string()));
     v.push(("NAWA_PKGDIR".into(), spec.pkgdir.display().to_string()));
+    // new-schema names join the whitelist only when the recipe enables
+    // them (§4.3/§5.3): a legacy recipe's whitelist is unchanged
+    if let Some(p) = spec.srcroot {
+        v.push(("NAWA_SRCROOT".into(), p.display().to_string()));
+    }
+    if let Some(p) = spec.assetsdir {
+        v.push(("NAWA_ASSETSDIR".into(), p.display().to_string()));
+    }
+    // [fetch.*] whitelist additions (§7): joined only when the backend is
+    // declared; the paths they carry are already in the frame the build sees
+    v.extend(spec.fetch_env.iter().cloned());
     v.sort_by(|a, b| a.0.cmp(&b.0));
     v
 }
@@ -156,6 +179,56 @@ pub fn source_date_epoch(srcdir: &Path, pinned: Option<u64>) -> Result<u64> {
     Ok(newest.max(1))
 }
 
+/// The new-schema variant (fetch-phase.md §6): only **regular files** feed
+/// the epoch. Directories are ignored — merging and later child creation
+/// bump them — and symlinks/special files never carry a trustworthy mtime.
+///
+/// The caller must have already created every source in the workspace and
+/// must compute this *before* stamping `unpack = false` files (their copy
+/// carries the staging time, §6). Unlike the legacy variant this errors
+/// when the workspace has no regular file at all: with no tarball there is
+/// nothing reproducible to derive the epoch from, and the recipe must pin
+/// `package.source_date_epoch` instead.
+pub fn source_date_epoch_from_files(srcdir: &Path) -> Result<u64> {
+    let mut newest: Option<u64> = None;
+    for e in walkdir::WalkDir::new(srcdir).max_depth(usize::MAX) {
+        let e = match e {
+            Ok(e) => e,
+            // dangling symlinks have no metadata to read
+            Err(_) => continue,
+        };
+        // the workspace root itself was just created by the staging engine,
+        // never by the sources
+        if e.depth() == 0 {
+            continue;
+        }
+        let Ok(md) = e.metadata() else { continue };
+        // WalkDir without follow_links returns symlink_metadata: a symlink
+        // to a regular file does not pass the is_file test either
+        if !md.is_file() {
+            continue;
+        }
+        let mtime = md
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
+        newest = match (newest, mtime) {
+            (_, Some(m)) => Some(newest.unwrap_or(m).max(m)),
+            (n, None) => n,
+        };
+    }
+    match newest {
+        Some(t) => Ok(t.max(1)),
+        None => bail!(
+            "no regular source files under {} to derive SOURCE_DATE_EPOCH from — \
+             a recipe with no archive sources must pin package.source_date_epoch \
+             (fetch-phase.md §6)",
+            srcdir.display()
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,6 +261,9 @@ mod tests {
             pkgdir: Path::new(SANDBOX_PKG),
             home: SANDBOX_HOME,
             source_date_epoch: 1_700_000_000,
+            srcroot: None,
+            assetsdir: None,
+            fetch_env: Vec::new(),
         };
         let env = whitelist(&spec);
         let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
@@ -211,6 +287,107 @@ mod tests {
         assert_eq!(get("NAWA_JOBS"), "8");
         assert_eq!(get("SOURCE_DATE_EPOCH"), "1700000000");
         assert_eq!(get("CFLAGS"), "-O2 -pipe");
+    }
+
+    /// The two new-schema names join the whitelist only when the recipe
+    /// enables them — and then extend, never replace, today's set.
+    #[test]
+    fn whitelist_gains_srcroot_and_assetsdir_only_when_enabled() {
+        let profile = profile();
+        let mk = |srcroot: Option<&Path>, assetsdir: Option<&Path>, fetch_env: &[(String, String)]| {
+            let spec = EnvSpec {
+                isolation: Isolation::Env,
+                profile_env: &profile,
+                jobs: 8,
+                srcdir: Path::new(SANDBOX_SRC),
+                pkgdir: Path::new(SANDBOX_PKG),
+                home: SANDBOX_HOME,
+                source_date_epoch: 1_700_000_000,
+                srcroot,
+                assetsdir,
+                fetch_env: fetch_env.to_vec(),
+            };
+            whitelist(&spec)
+        };
+        // enabled: exactly the legacy set plus the two names, sorted in
+        let env = mk(
+            Some(Path::new("/build/src/kernel")),
+            Some(Path::new("/build/assets")),
+            &[("GOMODCACHE".to_string(), "/build/fetch/go".to_string())],
+        );
+        let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "CFLAGS", "GOMODCACHE", "HOME", "LANG", "LC_ALL", "LDFLAGS", "NAWA_ASSETSDIR",
+                "NAWA_JOBS", "NAWA_PKGDIR", "NAWA_SRCDIR", "NAWA_SRCROOT", "PATH", "SHELL",
+                "SOURCE_DATE_EPOCH", "TMPDIR", "TZ",
+            ],
+            "new-schema whitelist = legacy set + NAWA_SRCROOT + NAWA_ASSETSDIR + [fetch] env"
+        );
+        let get = |k: &str| {
+            env.iter().find(|(ek, _)| *ek == k).map(|(_, v)| v.clone()).unwrap()
+        };
+        assert_eq!(get("NAWA_SRCROOT"), "/build/src/kernel");
+        assert_eq!(get("NAWA_ASSETSDIR"), "/build/assets");
+        assert_eq!(get("GOMODCACHE"), "/build/fetch/go");
+        // each name alone is possible (sources-only or assets-only recipe)
+        for (srcroot, assetsdir) in
+            [(Some(Path::new("/r")), None), (None, Some(Path::new("/a")))]
+        {
+            let keys: Vec<String> =
+                mk(srcroot, assetsdir, &[]).into_iter().map(|(k, _)| k).collect();
+            assert!(
+                keys.iter().any(|k| k == "NAWA_SRCROOT") == srcroot.is_some(),
+                "NAWA_SRCROOT presence must follow the field"
+            );
+            assert!(
+                keys.iter().any(|k| k == "NAWA_ASSETSDIR") == assetsdir.is_some(),
+                "NAWA_ASSETSDIR presence must follow the field"
+            );
+            // fetch entries are absent without them — legacy recipes keep
+            // exactly today's whitelist (§16 backward compatibility 3)
+            assert!(
+                !keys.iter().any(|k| k == "GOMODCACHE"),
+                "a legacy whitelist must not gain Go names"
+            );
+        }
+    }
+
+    /// The `[fetch.*]` whitelist extensions (fetch-phase.md §7): they ride
+    /// the same allowlist — nothing Go-related is inherited from nawa's own
+    /// environment.
+    #[test]
+    fn fetch_env_joins_the_whitelist_only_when_present() {
+        let profile = profile();
+        let base = |fetch_env: Vec<(String, String)>| {
+            let spec = EnvSpec {
+                isolation: Isolation::Env,
+                profile_env: &profile,
+                jobs: 8,
+                srcdir: Path::new(SANDBOX_SRC),
+                pkgdir: Path::new(SANDBOX_PKG),
+                home: SANDBOX_HOME,
+                source_date_epoch: 1_700_000_000,
+                srcroot: None,
+                assetsdir: None,
+                fetch_env,
+            };
+            whitelist(&spec)
+        };
+        let env = base(Vec::new());
+        assert!(
+            !env.iter().any(|(k, _)| k == "GOMODCACHE" || k == "GOCACHE"),
+            "an empty fetch table must not add build-time env"
+        );
+        let env = base(vec![
+            ("GOMODCACHE".into(), "/build/fetch/go".into()),
+            ("GOCACHE".into(), "/build/home/gocache".into()),
+        ]);
+        let get = |k: &str| env.iter().find(|(ek, _)| *ek == k).map(|(_, v)| v.clone()).unwrap();
+        assert_eq!(get("GOMODCACHE"), "/build/fetch/go");
+        assert_eq!(get("GOCACHE"), "/build/home/gocache");
+        assert_eq!(env.len(), 15, "two extra keys, rest identical to legacy");
     }
 
     #[test]
@@ -246,6 +423,42 @@ mod tests {
         let empty = d.join("empty");
         std::fs::create_dir_all(&empty).unwrap();
         assert_eq!(source_date_epoch(&empty, None).unwrap(), 1);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// §6 new-schema rules: directories and symlinks are ignored — only
+    /// regular files count — and a workspace with none is a hard error
+    /// (the recipe must pin the epoch).
+    #[test]
+    fn epoch_from_files_counts_regular_files_only() {
+        let d = std::env::temp_dir().join(format!("nawa-sdef-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("only-dirs").join("deep")).unwrap();
+        std::os::unix::fs::symlink("elsewhere", d.join("link")).unwrap();
+
+        // nothing regular: the pinned-epoch demand (§6)
+        let err = source_date_epoch_from_files(&d).unwrap_err();
+        assert!(
+            err.to_string().contains("source_date_epoch"),
+            "got: {err}"
+        );
+
+        // one regular file makes the epoch — the newest regular-file mtime
+        let f = d.join("x");
+        std::fs::write(&f, b"data").unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::File::open(&f).unwrap().set_modified(old).unwrap();
+        let newest = d.join("only-dirs").join("deep").join("f");
+        std::fs::write(&newest, b"data").unwrap();
+        let expect = newest
+            .metadata()
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!(source_date_epoch_from_files(&d).unwrap(), expect);
         let _ = std::fs::remove_dir_all(&d);
     }
 }

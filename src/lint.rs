@@ -67,6 +67,10 @@ pub struct LintCtx<'a> {
     /// Absolute host build dir — leaking it into a file is an error even
     /// at the `env` level (where `/build/...` does not exist).
     pub host_builddir: Option<&'a str>,
+    /// Extra in-sandbox paths that must not leak into the archive, beyond
+    /// the staging pins (`/build/src`, `/build/pkg`): `/build/assets` for
+    /// recipes that declare `[assets]` (§5.3).
+    pub extra_leak_paths: Vec<&'static str>,
 }
 
 pub fn run(ctx: &LintCtx) -> LintReport {
@@ -208,7 +212,11 @@ fn check_elf(rel: &str, info: &ElfInfo, ctx: &LintCtx, rep: &mut LintReport) {
 
 fn check_text_leaks(rel: &str, data: &[u8], ctx: &LintCtx, rep: &mut LintReport) {
     let text = String::from_utf8_lossy(data);
-    let needles = ["/build/src", "/build/pkg"];
+    // the two staging pins every recipe sees, plus the per-recipe insides
+    // (§5.3): <build_inside>/assets for recipes that declare [assets] —
+    // <build_inside>/fetch joins with the ecosystem phases
+    let mut needles = vec!["/build/src", "/build/pkg"];
+    needles.extend(ctx.extra_leak_paths.iter().copied());
     for n in needles {
         if text.contains(n) {
             rep.errors.push(format!("{rel}: contains the sandbox path {n}"));
@@ -356,6 +364,21 @@ pub fn build_id(
     closure_archives: &[std::path::PathBuf],
     profile_flags: &str,
 ) -> String {
+    build_id_with(recipe_bytes, source_sha256, closure_archives, profile_flags, &[])
+}
+
+/// [`build_id`] with post-flag inputs appended, one `\0label=value` segment
+/// per entry, in the given order. Only genuinely new inputs join here
+/// (asset-tree digest, per-backend fetch-schema versions — fetch-phase.md
+/// §10.3); `build_id` forwards an empty slice, so legacy recipes hash
+/// exactly today's bytes by construction.
+pub fn build_id_with(
+    recipe_bytes: &[u8],
+    source_sha256: &str,
+    closure_archives: &[std::path::PathBuf],
+    profile_flags: &str,
+    extras: &[(&str, &str)],
+) -> String {
     use sha2::Digest;
     let mut h = sha2::Sha256::new();
     h.update(recipe_bytes);
@@ -368,10 +391,8 @@ pub fn build_id(
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
     archives.sort();
-    let closure_archives: Vec<std::path::PathBuf> =
-        archives.into_iter().map(std::path::PathBuf::from).collect();
-    for a in &closure_archives {
-        h.update(a.to_string_lossy().as_bytes());
+    for a in &archives {
+        h.update(a.as_bytes());
         // the archive *name* pins the version; its *content* is pinned by
         // the signature chain — hashing content here would make every
         // rebuild of a dependency invalidate every dependent
@@ -379,6 +400,12 @@ pub fn build_id(
     }
     h.update(b"\0");
     h.update(profile_flags.as_bytes());
+    for (label, value) in extras {
+        h.update(b"\0");
+        h.update(label.as_bytes());
+        h.update(b"=");
+        h.update(value.as_bytes());
+    }
     hex::encode(h.finalize())
 }
 
@@ -407,6 +434,67 @@ mod tests {
         assert_ne!(b1, build_id(b"recipe2", "abc", &[a1.clone(), a2.clone()], "-O2"));
         assert_ne!(b1, build_id(b"recipe", "abd", std::slice::from_ref(&a2), "-O2"));
         assert_ne!(b1, build_id(b"recipe", "abc", &[a1, a2], "-O3"));
+    }
+
+    /// The golden id pins the legacy byte layout forever (fetch-phase.md
+    /// §10.3: "legacy ids must not move" — one release shifting this hash
+    /// invalidates every `--use-cache` sidecar in existence). The literal is
+    /// sha256 over exactly today's byte sequence, independently verified:
+    ///
+    /// ```text
+    /// recipe bytes ‖ \0 ‖ source sha256 ‖ \0 ‖ (sorted archive name ‖ \0)*
+    ///   ‖ \0 ‖ profile flags
+    /// ```
+    #[test]
+    fn golden_legacy_build_id_is_unchanged_and_build_id_with_preserves_it() {
+        let recipe = b"[package]\nname = \"probe\"\nversion = \"1\"\n" as &[u8];
+        let sha = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let archives = [
+            PathBuf::from("/out/base-devel-1-1.nawa.tar.zst"),
+            PathBuf::from("/out/musl-1-1.nawa.tar.zst"),
+        ];
+        const GOLDEN: &str = "1017bb0b5b5c00af36707fa03f094b5659396a1ab6940ed40e4bfd5ac8c98598";
+
+        // (1) the plain call still produces the golden hash
+        let id = build_id(recipe, sha, &archives, "-O2 slim=1");
+        assert_eq!(id, GOLDEN);
+
+        // (2) build_id forwards an EMPTY extras slice — identical by
+        // construction, and identical against the golden value
+        assert_eq!(
+            build_id_with(recipe, sha, &archives, "-O2 slim=1", &[]),
+            GOLDEN
+        );
+
+        // (3) any extra changes the id, so a new-schema recipe cannot
+        // collide with a legacy one that differs only in those tables
+        assert_ne!(
+            build_id_with(recipe, sha, &archives, "-O2 slim=1", &[("assets", "digest")]),
+            GOLDEN
+        );
+        // a different extra value is a different id
+        assert_ne!(
+            build_id_with(recipe, sha, &archives, "-O2 slim=1", &[("assets", "digest2")]),
+            build_id_with(recipe, sha, &archives, "-O2 slim=1", &[("assets", "digest")])
+        );
+        // extras are appended in the given order — fixed order, not a set
+        assert_ne!(
+            build_id_with(
+                recipe,
+                sha,
+                &archives,
+                "-O2 slim=1",
+                &[("fetch-go", "1"), ("fetch-cargo", "1")],
+            ),
+            build_id_with(
+                recipe,
+                sha,
+                &archives,
+                "-O2 slim=1",
+                &[("fetch-cargo", "1"), ("fetch-go", "1")],
+            ),
+            "extras are position-sensitive by design (documented order: assets, fetch-go, fetch-cargo)"
+        );
     }
 
     #[test]
@@ -681,6 +769,7 @@ mod tests {
             rundeps: &rundeps,
             sonames: &sonames,
             host_builddir: None,
+            extra_leak_paths: Vec::new(),
         });
 
         assert_eq!(report.elf_count, 1);
@@ -715,6 +804,7 @@ mod tests {
             rundeps: &rundeps,
             sonames: &sonames,
             host_builddir: None,
+            extra_leak_paths: Vec::new(),
         });
 
         assert_eq!(report.elf_count, 1);
@@ -873,6 +963,7 @@ mod tests {
             rundeps: &[], // missing zlib!
             sonames: &sonames,
             host_builddir: Some("/home/z/big-build"),
+            extra_leak_paths: Vec::new(),
         };
         // a real (fixture) ELF linking libz goes through the parser path
         let elf = elf64_fixture(&["libz.so.1"], None, None);
@@ -889,6 +980,45 @@ mod tests {
             "leaked build path: {:?}",
             rep.errors
         );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// §5.3: recipes that declare [assets] also leak-check against
+    /// `<build_inside>/assets`.
+    #[test]
+    fn asset_recipes_leak_check_against_build_assets() {
+        let base = std::env::temp_dir().join(format!("nawa-lint-assets-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let pkg = base.join("pkg");
+        std::fs::create_dir_all(pkg.join("usr/share")).unwrap();
+        std::fs::write(
+            pkg.join("usr/share/config.mk"),
+            b"KCONFIG = /build/assets/files/config/default.fragment\n",
+        )
+        .unwrap();
+
+        let ctx = LintCtx {
+            pkgdir: &pkg,
+            rundeps: &[],
+            sonames: &BTreeMap::new(),
+            host_builddir: None,
+            extra_leak_paths: vec!["/build/assets"],
+        };
+        let rep = run(&ctx);
+        assert!(
+            rep.errors.iter().any(|e| e.contains("/build/assets")),
+            "leaked assets path: {:?}",
+            rep.errors
+        );
+        // the needle is opt-in: the same string passes without it
+        let plain = run(&LintCtx {
+            pkgdir: &pkg,
+            rundeps: &[],
+            sonames: &BTreeMap::new(),
+            host_builddir: None,
+            extra_leak_paths: Vec::new(),
+        });
+        assert!(plain.ok(), "no needle, no error: {:?}", plain.errors);
         let _ = std::fs::remove_dir_all(&base);
     }
 }

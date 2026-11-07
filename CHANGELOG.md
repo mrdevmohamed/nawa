@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased — feat: fetch phase, multiple sources and recipe-local assets
+
+Design: `docs/design/fetch-phase.md`. Existing recipes keep working unchanged
+and keep byte-identical build ids (pinned by a golden test).
+
+- New `nawa fetch [<name>...|--all] [--isolation <level>] [--sources-only]
+  [--offline] [--allow-degraded]`: downloads and verifies every external
+  source, then runs the recipe's fetch backends, so that later builds can run
+  with no network. `--sources-only` needs no toolchain; `--offline` is a
+  verify-only check that every cached entry exists and is complete.
+- New `nawa build --offline` (also `NAWA_OFFLINE`): every download is refused,
+  only cached and verified entries are used.
+- New `nawa recipe check [<name>|--all]`: source-independent warnings for
+  assets, unknown tables and keys, unknown placeholders and fetch
+  anti-patterns. Local files only, no network.
+- Recipes can declare several external sources with `[[package.sources]]`
+  (`name`, `url`, `sha256`, `mirrors`, `unpack`, `into`, `strip_components`),
+  each with its own sha256 and cache entry, plus `workdir` and a new
+  `%{srcroot}` placeholder. The new form cannot be mixed with the legacy
+  `source` / `sha256` / `mirrors` keys.
+- Recipes can ship files next to the recipe with `[assets] include = [...]`.
+  Only declared paths are staged, read-only, at `%{assetsdir}`
+  (`NAWA_ASSETSDIR`); symlinks and special files are refused, and the assets
+  are part of the build id.
+- `[fetch.go]` and `[fetch.cargo]` (`dir = "."`) fetch language dependencies
+  from the lockfile: `go mod download && go mod verify`, and
+  `cargo fetch --locked`. The fetch runs in the sandbox with the network open;
+  the build that follows is offline. Entries are cached under
+  `NAWA_SRCCACHE`, keyed by the lockfile bytes (and the Cargo version for
+  Cargo). A missing `go.sum` / `Cargo.lock` is a hard error; an already
+  vendored Go project skips the fetch. `NAWA_GOPROXY` (`https://` or
+  `file://`) overrides the Go proxy and `NAWA_FETCH_TIMEOUT` the 1800 s limit.
+- The source cache now lives at `<srccache>/sha256/<digest>` with per-digest
+  locks; entries from the old layout are reused when their bytes verify.
+
 ## Unreleased — fix: Ctrl+C and crashes can no longer corrupt an install
 
 - SIGINT / SIGTERM / SIGHUP are deferred while an install or removal changes

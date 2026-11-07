@@ -62,7 +62,7 @@ pub fn buildroot(target: &Recipe, known: &BTreeMap<String, Recipe>, with_check: 
     } else {
         seeds.push(BASE_DEVEL.to_string());
     }
-    seeds.extend(target.depends.build.iter().cloned());
+    seeds.extend(target.build_deps());
     if with_check {
         seeds.extend(target.depends.check.iter().cloned());
     }

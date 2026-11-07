@@ -77,8 +77,10 @@ fn newer_than_installed(r: &Recipe, e: &Entry) -> bool {
 }
 
 /// Everything that must exist before `rec` can be built and used.
-fn deps_of(rec: &Recipe) -> impl Iterator<Item = &String> {
-    rec.depends.build.iter().chain(rec.depends.run.iter())
+fn deps_of(
+    rec: &Recipe,
+) -> impl Iterator<Item = String> + use<'_> {
+    rec.build_deps().into_iter().chain(rec.depends.run.iter().cloned())
 }
 
 /// Plan the installation of `targets`.
@@ -158,7 +160,7 @@ fn visit(
     visiting.push(name.to_string());
     if with_deps {
         for dep in deps_of(rec) {
-            visit(dep, wanted, installed, known, target_why, with_deps, done, visiting, plan)?;
+            visit(&dep, wanted, installed, known, target_why, with_deps, done, visiting, plan)?;
         }
     }
     visiting.pop();
@@ -213,7 +215,7 @@ pub fn orphans(
         }
         if !build_deps {
             if let Some(r) = known.get(&n) {
-                stack.extend(deps_of(r).filter(|d| by_name.contains_key(d.as_str())).cloned());
+                stack.extend(deps_of(r).filter(|d| by_name.contains_key(d.as_str())));
             }
         }
     }

@@ -65,12 +65,37 @@ pub struct SandboxSpec {
     /// Existing bind mounts to mark read-only before the root is locked down.
     #[serde(default)]
     pub readonly_paths: Vec<String>,
+    /// Extra directory/file binds the build needs (§5.3): the assets
+    /// snapshot at `<build_inside>/assets`, later the fetch views. `host`
+    /// is opened as an O_PATH handle before any cover (with the staging
+    /// handles), bound at `inside` and, when `readonly`, remounted
+    /// read-only at once. `serde(default)` keeps older specs parsing.
+    #[serde(default)]
+    pub extra_binds: Vec<ExtraBind>,
     /// Make every mount below / read-only except writable_paths.
     #[serde(default)]
     pub strict_readonly_root: bool,
     /// Explicit private writable mounts for strict plugin sandboxes.
     #[serde(default)]
     pub writable_paths: Vec<String>,
+}
+
+/// One extra bind mount, raw data of the spec (§5.3).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtraBind {
+    /// Host path of the bind source.
+    pub host: String,
+    /// Absolute path *inside* the sandbox, under `build_inside` (validated
+    /// like `readonly_paths`: absolute, no `..`).
+    pub inside: String,
+    /// Remount the bind read-only right after mounting it. A *writable*
+    /// extra bind must additionally be listed in `writable_paths` when
+    /// `strict_readonly_root` is set.
+    #[serde(default)]
+    pub readonly: bool,
+    /// `dir` (bind a directory) or `file` (bind a single file, whose
+    /// placeholder is created first).
+    pub kind: String,
 }
 
 fn default_build_inside() -> String {
@@ -134,6 +159,29 @@ impl SandboxSpec {
                 || parsed.components().any(|part| matches!(part, std::path::Component::ParentDir))
             {
                 bail!("sandbox mount path must be absolute and must not contain '..': {path:?}");
+            }
+        }
+        for b in &spec.extra_binds {
+            let inside = Path::new(&b.inside);
+            if !inside.is_absolute()
+                || inside
+                    .components()
+                    .any(|part| matches!(part, std::path::Component::ParentDir))
+            {
+                bail!(
+                    "sandbox extra bind inside must be absolute and must not contain '..': {:?}",
+                    b.inside
+                );
+            }
+            if b.host.trim().is_empty() {
+                bail!("sandbox extra bind for {:?} has no host path", b.inside);
+            }
+            match b.kind.as_str() {
+                "dir" | "file" => {}
+                other => bail!(
+                    "sandbox extra bind kind must be \"dir\" or \"file\", got {other:?} (inside {:?})",
+                    b.inside
+                ),
             }
         }
         if spec.strict_readonly_root && spec.writable_paths.is_empty() {
@@ -229,6 +277,55 @@ scratch = "/w/sb"
         assert!(SandboxSpec::parse(&base.replace("run_gid = 65534\n", "")).is_err());
         assert!(SandboxSpec::parse(&base.replace("/build/src", "../escape")).is_err());
         assert!(SandboxSpec::parse(&base.replace("writable_paths = [\"/tmp\", \"/build/home\"]", "writable_paths = []")).is_err());
+    }
+
+    /// §5.3: extra binds are raw data of the spec, `serde(default)` so older
+    /// specs keep parsing; `inside` is validated like `readonly_paths`.
+    #[test]
+    fn extra_binds_parse_and_validate() {
+        let base = r#"
+version = 1
+script = "true"
+[build]
+src_host = "/w/src"
+pkg_host = "/w/pkg"
+home_host = "/w/home"
+scratch = "/w/sb"
+
+[[extra_binds]]
+host = "/s/build/boot/linux/assets"
+inside = "/build/assets"
+readonly = true
+kind = "dir"
+
+[[extra_binds]]
+host = "/s/.conf"
+inside = "/build/fetch/seeds.conf"
+readonly = false
+kind = "file"
+"#;
+        let spec = SandboxSpec::parse(base).unwrap();
+        assert_eq!(spec.extra_binds.len(), 2);
+        assert_eq!(spec.extra_binds[0].inside, "/build/assets");
+        assert!(spec.extra_binds[0].readonly);
+        assert_eq!(spec.extra_binds[1].kind, "file");
+
+        // serde default: a spec without extra_binds (older revision) parses
+        let legacy =
+            SandboxSpec::parse(base.split("[[extra_binds]]").next().unwrap()).unwrap();
+        assert!(legacy.extra_binds.is_empty());
+
+        assert!(SandboxSpec::parse(&base.replace("/build/assets", "assets")).is_err());
+        assert!(SandboxSpec::parse(&base.replace("/build/assets", "/build/../assets")).is_err());
+        assert!(
+            SandboxSpec::parse(&base.replace("kind = \"file\"", "kind = \"fyle\"")).is_err(),
+            "unknown file kind is refused"
+        );
+        // an empty host path is refused
+        assert!(
+            SandboxSpec::parse(&base.replace("host = \"/s/.conf\"", "host = \"\"")).is_err(),
+            "missing host path is refused"
+        );
     }
 
     #[test]

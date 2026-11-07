@@ -202,7 +202,16 @@ pub fn cmd_repoquery(cfg: &Config, root: &Path, name: &str, repo_id: Option<&str
 /// (roadmap §8.11). Mark-and-sweep for package objects: everything
 /// referenced by installed entries, history records or legacy undo records
 /// is retained.
-pub fn cmd_clean(root: &Path, category: &str, dry_run: bool) -> Result<()> {
+///
+/// `sources` (fetch-phase.md §11) operates on the *resolved* source cache —
+/// `$NAWA_SRCCACHE`, default `<builddir>/distfiles` — where staging actually
+/// puts files, and removes only what Nawa owns: legacy `<sha16>-*` entries,
+/// the `sha256/` and `fetch/` directories, and leftover `*.part` / `*.lock`
+/// files. The cache root itself is never removed (it may be a directory
+/// shared with other tools/users) and unrelated entries are left alone. A
+/// `.lock` held by a live fetch keeps its file; read-only cache entries get
+/// owner-write restored before removal.
+pub fn cmd_clean(ctx: &crate::Ctx, category: &str, dry_run: bool) -> Result<()> {
     let cat = category.to_ascii_lowercase();
     if !matches!(cat.as_str(), "metadata" | "packages" | "sources" | "layers" | "all") {
         bail!("unknown clean category {cat:?} (metadata | packages | sources | layers | all)");
@@ -211,19 +220,24 @@ pub fn cmd_clean(root: &Path, category: &str, dry_run: bool) -> Result<()> {
     let mut retained: u64 = 0;
 
     if cat == "metadata" || cat == "all" {
-        let dir = root.join("var/cache/nawa/remote");
+        let dir = ctx.root.join("var/cache/nawa/remote");
         removed += clean_dir(&dir, dry_run);
     }
     if cat == "sources" || cat == "all" {
-        let dir = root.join("var/cache/nawa/sources");
-        removed += clean_dir(&dir, dry_run);
+        let srccache = std::env::var_os("NAWA_SRCCACHE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| ctx.builddir.join("distfiles"));
+        let (freed, kept) = clean_sources(&srccache, dry_run)?;
+        removed += freed;
+        retained += kept;
     }
     if cat == "layers" || cat == "all" {
-        let dir = root.join("var/cache/nawa/layers");
+        let dir = ctx.root.join("var/cache/nawa/layers");
         removed += clean_dir(&dir, dry_run);
     }
     if cat == "packages" || cat == "all" {
         // mark: installed entries + history + legacy undo
+        let root = &ctx.root;
         let mut keep = std::collections::BTreeSet::new();
         for e in crate::db::Db::new(root).installed()? {
             if !e.artifact_sha256.is_empty() {
@@ -302,6 +316,102 @@ fn clean_dir(dir: &Path, dry_run: bool) -> u64 {
         }
     }
     freed
+}
+
+/// §11 `clean sources`: sweep the *resolved* source cache root's Nawa-owned
+/// subsets, leaving the root and everything else untouched. Returns
+/// (freed, retained) bytes.
+fn clean_sources(cache: &Path, dry_run: bool) -> Result<(u64, u64)> {
+    let mut freed = 0u64;
+    let mut retained = 0u64;
+    if !cache.is_dir() {
+        return Ok((0, 0));
+    }
+    for e in std::fs::read_dir(cache)?.filter_map(|e| e.ok()) {
+        let p = e.path();
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let md = e.metadata()?;
+        if md.is_dir() && (name == "sha256" || name == "fetch") {
+            // Nawa-owned directories: content-addressed entries (§11) and
+            // per-backend ecosystem entries (§7/§8) live wholly inside.
+            freed += sweep_tree(&p, dry_run)?;
+        } else if md.is_file() {
+            let leftover_lock = name.ends_with(".lock") && lock_leftover(&p);
+            if name.ends_with(".part") || leftover_lock {
+                // downloads leave *.part; the fetch runners leave *.lock —
+                // a lock nobody holds belongs to a dead fetch, a held one
+                // belongs to a live worker and is kept
+                freed += md.len();
+                if !dry_run {
+                    std::fs::remove_file(&p)
+                        .with_context(|| format!("remove {}", p.display()))?;
+                }
+            } else if legacy_cache_entry(&name) {
+                // the legacy pinned tarball cache: `<sha16>-<file name>` (§1.1)
+                freed += md.len();
+                if !dry_run {
+                    std::fs::remove_file(&p)
+                        .with_context(|| format!("remove {}", p.display()))?;
+                }
+            } else if name.ends_with(".lock") {
+                // a lock we couldn't take: a live fetch holds it
+                retained += md.len();
+                println!("nawa: clean sources: leaving {} (a live fetch holds its lock)", p.display());
+            } else {
+                retained += md.len();
+                println!("nawa: clean sources: leaving {} (not Nawa-owned)", p.display());
+            }
+        } else {
+            retained += md.len();
+            println!("nawa: clean sources: leaving {} (not Nawa-owned)", p.display());
+        }
+    }
+    Ok((freed, retained))
+}
+
+/// `<sha16>-<file name>` legacy cache entry.
+fn legacy_cache_entry(name: &str) -> bool {
+    name.len() > 16
+        && name.as_bytes()[16] == b'-'
+        && name[..16].bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// A `.lock` file with no flock holder is a leftover of a dead fetch; the
+/// probe lock is released the moment the handle closes.
+fn lock_leftover(p: &Path) -> bool {
+    let Ok(f) = std::fs::OpenOptions::new().read(true).open(p) else {
+        return true; // unreadable → nothing holds it meaningfully
+    };
+    rustix::fs::flock(&f, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_ok()
+}
+
+/// Walk a tree reverting read-only bits to owner-write where needed and
+/// summing file sizes, then remove it; cache entries are published without
+/// write bits (§11) and cannot be unlinked from 0555 directories otherwise.
+fn sweep_tree(dir: &Path, dry_run: bool) -> Result<u64> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut freed = 0u64;
+    for e in walkdir::WalkDir::new(dir).into_iter().flatten() {
+        if e.file_type().is_symlink() {
+            continue; // links carry no content; their removal needs only the parent
+        }
+        let Ok(md) = e.metadata() else { continue };
+        if md.is_file() {
+            freed += md.len();
+        }
+        let mut perm = md.permissions();
+        if perm.mode() & 0o200 == 0 {
+            perm.set_mode(perm.mode() | 0o200);
+            let _ = std::fs::set_permissions(e.path(), perm);
+        }
+    }
+    if !dry_run {
+        std::fs::remove_dir_all(dir).with_context(|| format!("remove {}", dir.display()))?;
+    }
+    Ok(freed)
 }
 
 #[allow(dead_code)]
