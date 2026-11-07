@@ -1064,6 +1064,11 @@ fn fetch_sandbox_spec(
         "/var/lib/nawa",
         "/var/cache/nawa",
         "/run",
+        // A host may expose binfmt_misc as a nested mount under /proc. The
+        // fetch sandbox mounts a fresh procfs; hide this non-fetch interface
+        // so strict_readonly_root does not try to remount the now-covered host
+        // mount through the fresh procfs path (EINVAL on GitHub runners).
+        "/proc/sys/fs/binfmt_misc",
     ]
     .into_iter()
     .map(String::from)
