@@ -192,9 +192,9 @@ fn default_fetch_dir() -> String {
 
 /// Implicit package providing the Go toolchain, added by `[fetch.go]`
 /// (fetch-phase.md §9). The toolchain names live here in **one** place and
-/// must be verified against faseela-repo before release; this tree does not
-/// contain them.
-pub const GO_TOOLCHAIN: &str = "go";
+/// are kept here in one place and must match the package names published
+/// by faseela-repo. Go is `golang`; Rust is `rust`.
+pub const GO_TOOLCHAIN: &str = "golang";
 /// Implicit package providing the Rust toolchain, added by `[fetch.cargo]`.
 pub const CARGO_TOOLCHAIN: &str = "rust";
 /// The closure must provide a CA bundle for the fetch toolchain's TLS (§9);
