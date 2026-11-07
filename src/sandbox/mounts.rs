@@ -234,17 +234,22 @@ fn remount_mount_tree_ro(spec: &SandboxSpec) -> Result<()> {
         // setup_dev() has replaced /dev and everything beneath it with
         // sandbox-private mounts. Keep /dev/null, devpts and shm writable;
         // these are ephemeral device interfaces, not host filesystem paths.
-        let private_dev = mount.starts_with("/dev");
-        // mountinfo can retain entries for mounts absent in restricted
-        // containers (notably EFI variables). Skip only ENOENT; permission
-        // or lookup errors must fail closed rather than weaken read-only mode.
-        if !writable
-            && !hidden
-            && !private_dev
-            && mount
-                .try_exists()
-                .with_context(|| format!("inspect sandbox mount point {path}"))?
-        {
+        //
+        // setup_dev() first bind-mounts the host device nodes into
+        // <scratch>/devnodes, then binds those staged mounts into /dev.
+        // The staging mountpoints are also present in mountinfo, but are not
+        // part of the build root and must remain writable just like /dev/null.
+        let private_dev = is_private_dev_mount(mount, Path::new(&spec.build.scratch));
+        if writable || hidden || private_dev {
+            continue;
+        }
+        // Mountinfo can retain entries for mounts that the mapped sandbox
+        // identity cannot traverse (for example an outer container's private
+        // overlay mount). The build runs as this same identity after dropping
+        // capabilities, so an inaccessible mountpoint cannot be reached by
+        // the build either. Skip only EACCES; all other lookup errors remain
+        // fail-closed.
+        if mountpoint_visible(mount.try_exists(), mount)? {
             mounts.push(path);
         }
     }
@@ -256,6 +261,34 @@ fn remount_mount_tree_ro(spec: &SandboxSpec) -> Result<()> {
         remount_ro(&path, spec, &path)?;
     }
     Ok(())
+}
+
+/// True for the private device interfaces assembled by setup_dev.
+///
+/// The staging binds under <scratch>/devnodes are as essential as their
+/// final /dev/* binds: both paths refer to character devices whose normal
+/// read/write semantics must be preserved inside the sandbox. Do not confuse
+/// them with ordinary files elsewhere in the writable build scratch tree.
+fn is_private_dev_mount(mount: &Path, scratch: &Path) -> bool {
+    mount.starts_with("/dev") || mount.starts_with(scratch.join("devnodes"))
+}
+
+/// A mountpoint hidden from the mapped sandbox identity is unreachable by
+/// the build too. EACCES is therefore safe to skip; other lookup errors still
+/// abort the read-only scan.
+fn mountpoint_visible(exists: std::io::Result<bool>, path: &Path) -> Result<bool> {
+    match exists {
+        Ok(exists) => Ok(exists),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            eprintln!(
+                "nawa: sandbox: note: skipping mountpoint inaccessible to the sandbox identity: {}",
+                path.display()
+            );
+            Ok(false)
+        }
+        Err(error) => Err(error)
+            .with_context(|| format!("inspect sandbox mount point {}", path.display())),
+    }
 }
 
 fn unescape_mountinfo(path: &str) -> String {
@@ -647,6 +680,62 @@ pub(crate) fn setup_sys(spec: &SandboxSpec, at: &Path) -> Result<()> {
 mod tests {
     use super::super::spec::{BuildPaths, RootSpec};
     use super::*;
+
+    #[test]
+    fn staged_device_bind_mounts_are_not_marked_read_only() {
+        let scratch = Path::new("/build/nawa-1.0.0-18/sb");
+
+        for path in [
+            "/dev/null",
+            "/dev/pts",
+            "/dev/shm",
+            "/build/nawa-1.0.0-18/sb/devnodes/null",
+            "/build/nawa-1.0.0-18/sb/devnodes/urandom",
+        ] {
+            assert!(
+                is_private_dev_mount(Path::new(path), scratch),
+                "{path} is a private device mount"
+            );
+        }
+
+        for path in [
+            "/device/null",
+            "/build/nawa-1.0.0-18/sb/devnodes-backup/null",
+            "/build/nawa-1.0.0-18/sb/src",
+            "/build/nawa-1.0.0-18/sb/pkg",
+            "/etc",
+        ] {
+            assert!(
+                !is_private_dev_mount(Path::new(path), scratch),
+                "{path} is not a private device mount"
+            );
+        }
+    }
+
+    #[test]
+    fn inaccessible_mountpoints_are_skipped_but_other_lookup_errors_fail_closed() {
+        let path = Path::new("/var/lib/containers/storage/overlay/private/merged");
+
+        assert!(mountpoint_visible(Ok(true), path).unwrap());
+        assert!(!mountpoint_visible(Ok(false), path).unwrap());
+        assert!(!mountpoint_visible(
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "not reachable in this user namespace",
+            )),
+            path,
+        )
+        .unwrap());
+
+        assert!(
+            mountpoint_visible(
+                Err(std::io::Error::other("I/O error")),
+                path,
+            )
+            .is_err(),
+            "errors other than EACCES must still fail closed"
+        );
+    }
 
     #[test]
     fn overlay_data_string_is_built_in_layer_order() {
