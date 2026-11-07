@@ -25,6 +25,11 @@ pub struct Recipe {
     /// (§7 of docs/design/build-isolation.md). Not part of the TOML.
     #[serde(skip)]
     pub raw: String,
+    /// The directory this recipe.toml lives in: the base for recipe-local
+    /// assets (fetch-phase.md §5.2). Not part of the TOML; empty when the
+    /// recipe was parsed straight from TOML rather than loaded from disk.
+    #[serde(skip)]
+    pub dir: PathBuf,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -136,6 +141,9 @@ impl Recipe {
         recipe.validate()?;
         let mut recipe = recipe;
         recipe.raw = raw;
+        // the recipe's own directory: the base for recipe-local assets
+        // (file paths are resolved relative to it, never to the cwd)
+        recipe.dir = path.parent().unwrap_or(path).to_path_buf();
         Ok(recipe)
     }
 
@@ -320,6 +328,24 @@ mod tests {
         let rec: Recipe = toml::from_str(&bad).unwrap();
         let err = rec.validate().unwrap_err().to_string();
         assert!(err.contains("package.mirrors"), "got: {err}");
+    }
+
+    #[test]
+    fn load_records_the_recipe_directory() {
+        // Recipe::load remembers where recipe.toml lives (the base for
+        // recipe-local assets, fetch-phase.md §5.2); byte-parsing does not
+        let dir = std::env::temp_dir().join(format!("nawa-recipe-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("recipe.toml");
+        std::fs::write(&path, SAMPLE).unwrap();
+        let rec = Recipe::load(&path).unwrap();
+        assert_eq!(rec.dir, dir);
+        assert!(!rec.raw.is_empty(), "raw bytes remembered too");
+        let parsed: Recipe = toml::from_str(SAMPLE).unwrap();
+        assert!(parsed.dir.as_os_str().is_empty());
+        assert!(parsed.raw.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
