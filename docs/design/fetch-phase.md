@@ -1,6 +1,6 @@
 # Nawa build inputs and fetch phase — design
 
-**Status:** Proposal, revision 3 (design only; no production code in this PR)
+**Status:** Revision 3, implemented in this PR for delivery phases 0–5 (§16). Phase 6, the bootstrap switch (§13), is not part of it. Open decisions in §17 that the implementation has since settled have not been back-filled yet.
 **Project:** Nawa
 **Baseline:** the Nawa 1.0.0 tree (`src/recipe.rs`, `src/build.rs`, `src/buildenv.rs`, `src/sandbox/`, `src/fetch.rs`, `src/lint.rs`)
 **Review:** revision 2 was checked claim by claim against the 1.0.0 tree; every correction is listed in Appendix B
