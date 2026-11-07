@@ -1409,6 +1409,49 @@ fn run_section(
 
 
 #[cfg(test)]
+mod fetch_toolchain_identity_tests {
+    use super::*;
+
+    fn fetch_recipe() -> Recipe {
+        let raw = r#"
+[package]
+name = "fetch-id-test"
+version = "1.0"
+rel = 1
+arch = ["x86_64"]
+source = "local:/nawa-schema-2-requires-a-newer-nawa"
+
+[fetch.go]
+dir = "."
+"#;
+        let mut rec: Recipe = toml::from_str(raw).unwrap();
+        rec.raw = raw.to_string();
+        rec
+    }
+
+    #[test]
+    fn host_toolchain_version_changes_build_identity() {
+        let rec = fetch_recipe();
+        let opts = BuildOpts::default();
+        let go_a = vec![("go", "go version go1.26.0 linux/amd64".to_string())];
+        let go_b = vec![("go", "go version go1.27.0 linux/amd64".to_string())];
+        let id_a = build_id_for(&rec, &opts, &[], None, &go_a);
+        let id_b = build_id_for(&rec, &opts, &[], None, &go_b);
+        assert_ne!(id_a, id_b, "a Go toolchain update must invalidate --use-cache");
+    }
+
+    #[test]
+    fn closure_toolchain_identity_is_carried_by_archives_not_host_versions() {
+        let rec = fetch_recipe();
+        let opts = BuildOpts::default();
+        let archives = vec![PathBuf::from("golang-1.27.3-1.nawa.tar.zst")];
+        let id_a = build_id_for(&rec, &opts, &archives, None, &[]);
+        let id_b = build_id_for(&rec, &opts, &archives, None, &[]);
+        assert_eq!(id_a, id_b);
+    }
+}
+
+#[cfg(test)]
 mod wipe_tests {
     use super::wipe_work;
     use std::os::unix::fs::PermissionsExt;
