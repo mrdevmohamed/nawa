@@ -832,6 +832,48 @@ fn fetch_path() -> String {
     }
 }
 
+}
+
+/// Toolchain identity used by the build cache. Closure builds already hash
+/// the exact toolchain package archives in their dependency closure; other
+/// isolation modes must pin the executable versions found through the exact
+/// PATH used by the fetch runner.
+pub(crate) fn build_toolchain_identity(
+    rec: &Recipe,
+    isolation: crate::buildenv::Isolation,
+) -> Result<Vec<(&'static str, String)>> {
+    if isolation == crate::buildenv::Isolation::Closure {
+        return Ok(Vec::new());
+    }
+    let mut identity = Vec::new();
+    for (enabled, name, args, label) in [
+        (rec.fetch.go.is_some(), "go", vec!["version"], "go"),
+        (rec.fetch.cargo.is_some(), "cargo", vec!["--version"], "cargo"),
+    ] {
+        if !enabled {
+            continue;
+        }
+        let output = std::process::Command::new(name)
+            .args(args)
+            .env_clear()
+            .env("PATH", fetch_path())
+            .output()
+            .with_context(|| format!("query {name} version using the fetch PATH"))?;
+        if !output.status.success() {
+            bail!(
+                "cannot determine {name} toolchain identity: {name} version exited with {}",
+                output.status
+            );
+        }
+        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if version.is_empty() {
+            bail!("{name} version command returned an empty toolchain identity");
+        }
+        identity.push((label, version));
+    }
+    Ok(identity)
+}
+
 /// The §7 fetch allowlist, parameterised for the run flavor. The build
 /// environment (§7 bottom list) is separate — see [`run`].
 fn go_fetch_env(
