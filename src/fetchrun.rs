@@ -649,6 +649,7 @@ fn cargo_version_query(r: &FetchRun, plan: &CargoPlan) -> Result<String> {
     let label = "fetch-cargo-version";
     let out_dir = r.work.join("fetch").join("verq");
     std::fs::create_dir_all(&out_dir).with_context(|| format!("create {}", out_dir.display()))?;
+    std::fs::set_permissions(&out_dir, std::fs::Permissions::from_mode(0o777))?;
     let out_host = out_dir.join("version");
     let script = format!("exec 2>&1\\n{CARGO_VERSION_SCRIPT}");
     let (cargo_home_host, cwd_host) = isolated_cargo_paths(&out_dir)?;
@@ -993,6 +994,8 @@ fn fetch_sandbox_spec(
     let home = scratch.join("home");
     std::fs::create_dir_all(&home)
         .with_context(|| format!("create the fetch scratch home {}", home.display()))?;
+    // The fetch identity is dropped to uid/gid 65534 in sandbox mode.
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o777))?;
 
     // host paths to hide in live mode (§4.2), as the build spec does
     let mut mask: Vec<String> = [
