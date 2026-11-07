@@ -1255,6 +1255,17 @@ fn cargo_fetch_and_offline_build_work_under_sandbox() {
     let tar_sha = sha256(&tar);
     let (addr, _) = route_server(vec![("/src.tar.gz", Some(tar))]);
     let cargo = cargo_dir();
+    // The sandbox masks /home and /root (src/fetchrun.rs `mask`), exactly as
+    // a production build does: toolchains there are packages under /usr/bin.
+    // A rustup toolchain below a masked path is invisible inside it, which
+    // used to surface only as an opaque "cargo: command not found".
+    assert!(
+        !["/home/", "/root/", "/mnt/"].iter().any(|m| cargo.starts_with(m)),
+        "cargo lives at {cargo}, which the sandbox masks. Put the toolchain \
+         outside /home, /root and /mnt (CI sets RUSTUP_HOME=/usr/local/rustup; \
+         locally: `RUSTUP_HOME=/usr/local/rustup rustup toolchain install stable`) \
+         or point NAWA_FETCH_PATH at a visible directory."
+    );
     let install = format!(
         "export PATH={cargo}:$PATH && cargo build --release --locked --offline \
          && ./target/release/testmain"

@@ -814,8 +814,9 @@ fn go_fetch_and_offline_build_work_under_sandbox() {
     let (addr, _) = route_server(vec![("/src.tar.gz", Some(source))]);
     let gobin = toolchain_dir();
     let install = format!(
-        "{gobin}/go build -mod=readonly -o %{{pkgdir}}/m ./... \
-         && %{{pkgdir}}/m"
+        "mkdir -p %{{pkgdir}}/usr/bin \
+         && {gobin}/go build -mod=readonly -o %{{pkgdir}}/usr/bin/m ./... \
+         && %{{pkgdir}}/usr/bin/m"
     );
     fs::write(
         pkg.join("recipe.toml"),

@@ -38,6 +38,8 @@ jobs:
     name: nawa (build, clippy, tests)
     runs-on: ubuntu-24.04
     timeout-minutes: 40
+    env:
+      RUSTUP_HOME: /usr/local/rustup
     steps:
       - uses: actions/checkout@v4
 
@@ -45,6 +47,14 @@ jobs:
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
+
+      # The sandbox tests build with the REAL toolchain inside the sandbox,
+      # which masks /home and /root exactly like a production build does
+      # (there toolchains are packages under /usr/bin). rustup's default
+      # location, /home/runner/.rustup, would be invisible in it
+      # ("cargo: command not found"), so install the toolchain outside.
+      - name: Prepare a toolchain location the sandbox can see
+        run: sudo install -d -o "$USER" -g "$(id -gn)" -m 755 /usr/local/rustup
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -68,6 +78,8 @@ jobs:
     name: nawa tests (${{ matrix.os }}, ${{ matrix.as }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
+    env:
+      RUSTUP_HOME: /usr/local/rustup
     strategy:
       fail-fast: false
       matrix:
@@ -83,6 +95,14 @@ jobs:
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
+
+      # The sandbox tests build with the REAL toolchain inside the sandbox,
+      # which masks /home and /root exactly like a production build does
+      # (there toolchains are packages under /usr/bin). rustup's default
+      # location, /home/runner/.rustup, would be invisible in it
+      # ("cargo: command not found"), so install the toolchain outside.
+      - name: Prepare a toolchain location the sandbox can see
+        run: sudo install -d -o "$USER" -g "$(id -gn)" -m 755 /usr/local/rustup
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -115,7 +135,7 @@ jobs:
           stat -c '%a %U %n' "$CARGO_TARGET_DIR" /var/tmp
           getfacl -p "$CARGO_TARGET_DIR" 2>/dev/null || true
           cargo test --release --locked --no-fail-fast --no-run
-          sudo -E env "PATH=$PATH" "HOME=$HOME" "CARGO_HOME=$HOME/.cargo" "RUSTUP_HOME=$HOME/.rustup" \
+          sudo -E env "PATH=$PATH" "HOME=$HOME" "CARGO_HOME=$HOME/.cargo" "RUSTUP_HOME=$RUSTUP_HOME" \
             bash -c 'umask 022; exec cargo test --release --locked --no-fail-fast -- --nocapture' 2>&1 \
             | tee "$RUNNER_TEMP/test.log"
 
