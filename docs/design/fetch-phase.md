@@ -1,6 +1,6 @@
 # Nawa build inputs and fetch phase — design
 
-**Status:** Revision 3, implemented in this PR for delivery phases 0–5 (§16). The current PR head passed CI run [42391105667](https://github.com/mrdevmohamed/nawa/actions/runs/42391105667); this verifies the configured build, lint, unit/integration, isolation, static-musl and CLI-smoke jobs, but does not close the fetch-specific sandbox/closure integration gap in §17. Phase 6, the bootstrap switch (§13), is not part of it. §17 records which open decisions the implementation settled and which are still open.
+**Status:** Revision 3, implemented in this PR for delivery phases 0–5 (§16). The implementation commit `a1144ccb55f22866ed229088c94890c742f435cd` passed CI run [42391105667](https://github.com/mrdevmohamed/nawa/actions/runs/42391105667). The later PR commits only update documentation; no CI run is associated with the latest documentation head yet; this verifies the configured build, lint, unit/integration, isolation, static-musl and CLI-smoke jobs, but does not close the fetch-specific sandbox/closure integration gap in §17. Phase 6, the bootstrap switch (§13), is not part of it. §17 records which open decisions the implementation settled and which are still open.
 **Project:** Nawa
 **Baseline:** the Nawa 1.0.0 tree (`src/recipe.rs`, `src/build.rs`, `src/buildenv.rs`, `src/sandbox/`, `src/fetch.rs`, `src/lint.rs`)
 **Review:** revision 2 was checked claim by claim against the 1.0.0 tree; every correction is listed in Appendix B
