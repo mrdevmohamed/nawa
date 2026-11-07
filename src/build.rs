@@ -1441,6 +1441,29 @@ dir = "."
     }
 
     #[test]
+    fn cargo_toolchain_version_changes_build_identity() {
+        let raw = r#"
+[package]
+name = "fetch-cargo-id-test"
+version = "1.0"
+rel = 1
+arch = ["x86_64"]
+source = "local:/nawa-schema-2-requires-a-newer-nawa"
+
+[fetch.cargo]
+dir = "."
+"#;
+        let mut rec: Recipe = toml::from_str(raw).unwrap();
+        rec.raw = raw.to_string();
+        let opts = BuildOpts::default();
+        let cargo_a = vec![("cargo", "cargo 1.88.0 (test-a)".to_string())];
+        let cargo_b = vec![("cargo", "cargo 1.89.0 (test-b)".to_string())];
+        let id_a = build_id_for(&rec, &opts, &[], None, &cargo_a);
+        let id_b = build_id_for(&rec, &opts, &[], None, &cargo_b);
+        assert_ne!(id_a, id_b, "a Cargo toolchain update must invalidate --use-cache");
+    }
+
+    #[test]
     fn closure_toolchain_identity_is_carried_by_archives_not_host_versions() {
         let rec = fetch_recipe();
         let opts = BuildOpts::default();
@@ -1448,6 +1471,9 @@ dir = "."
         let id_a = build_id_for(&rec, &opts, &archives, None, &[]);
         let id_b = build_id_for(&rec, &opts, &archives, None, &[]);
         assert_eq!(id_a, id_b);
+        let updated_archives = vec![PathBuf::from("golang-1.27.4-1.nawa.tar.zst")];
+        let id_updated = build_id_for(&rec, &opts, &updated_archives, None, &[]);
+        assert_ne!(id_a, id_updated, "a closure toolchain archive update must invalidate the id");
     }
 }
 
