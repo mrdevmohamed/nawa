@@ -534,7 +534,12 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
         };
         (buildenv::whitelist(&spec_env), opts.isolation.script_prefix())
     } else {
-        (opts.env.clone(), "")
+        // `none`: the build runs with the profile env as-is, but the fetch
+        // phase's additions (CARGO_HOME, GOFLAGS, ...) still have to reach
+        // the sections, or an offline build cannot see what was fetched.
+        let mut v = opts.env.clone();
+        v.extend(fetch_env.iter().cloned());
+        (v, "")
     };
 
     // ---- run build sections ---------------------------------------------

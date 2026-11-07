@@ -1288,3 +1288,65 @@ fn cargo_fetch_and_offline_build_work_under_sandbox() {
     );
     let _ = fs::remove_dir_all(&s);
 }
+
+
+// ---------------------------------------------------------------------------
+// Fetch env must reach the build at `--isolation none` (the default)
+// ---------------------------------------------------------------------------
+
+/// Regression: at `none` the build env is the profile env as-is, and the
+/// fetch phase's `CARGO_HOME` used to be dropped, so the offline compile
+/// looked in the (empty) default Cargo home and failed with
+/// "no matching package named ..." even though the fetch had succeeded.
+#[test]
+fn cargo_fetch_env_reaches_the_build_at_isolation_none() {
+    let s = scratch("isolation-none");
+    let repo = s.join("dep");
+    let rev = git_dep_repo(&repo, "none");
+    let cg_home = s.join("cg-setup");
+    fs::create_dir_all(&cg_home).unwrap();
+    let main = s.join("main");
+    prepare_main(&main, &repo);
+    let lock = generate_lock(&main, &cg_home);
+    assert!(
+        String::from_utf8_lossy(&lock).contains(&rev),
+        "fixture lock must pin the local git dependency"
+    );
+
+    let files = vec![
+        ("Cargo.toml".to_string(), fs::read(main.join("Cargo.toml")).unwrap()),
+        ("Cargo.lock".to_string(), lock),
+        ("src/main.rs".to_string(), fs::read(main.join("src/main.rs")).unwrap()),
+    ];
+    let tar = fixture_tar_gz("main-1.0", &files);
+    let tar_sha = sha256(&tar);
+    let (addr, _) = route_server(vec![("/src.tar.gz", Some(tar))]);
+    let cargo = cargo_dir();
+    let install = format!(
+        "export PATH={cargo}:$PATH && echo \"cargo-home=$CARGO_HOME\" \
+         && cargo build --release --locked --offline \
+         && mkdir -p %{{pkgdir}}/usr/bin \
+         && cp target/release/testmain %{{pkgdir}}/usr/bin/ \
+         && %{{pkgdir}}/usr/bin/testmain"
+    );
+    write_recipe(&s.join("recipes/cargo-b"), &recipe(&tar_sha, &addr, &install));
+
+    let (out, err, ok) = run_fetch_build_with_isolation(&s, "none", &[], &[]);
+    assert!(
+        ok,
+        "Cargo fetch/build failed at isolation=none\nstdout:\n{out}\nstderr:\n{err}"
+    );
+    assert!(
+        out.contains("dep-ok-none"),
+        "offline build did not resolve the fetched git dependency at none:\n{out}\n{err}"
+    );
+    assert!(
+        out.contains("/fetch/cargo"),
+        "CARGO_HOME did not point at the per-build fetch view at none:\n{out}\n{err}"
+    );
+    assert!(
+        s.join("build/cargo-b-1.0-1/fetch-cargo.log").is_file(),
+        "Cargo fetch phase did not run at isolation=none"
+    );
+    let _ = fs::remove_dir_all(&s);
+}
