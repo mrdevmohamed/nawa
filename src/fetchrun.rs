@@ -1263,6 +1263,7 @@ fn privileged() -> bool {
 /// written the entry) and strip write permission (dirs 0555, files 0444,
 /// symlinks untouched), then write the completion marker LAST, normalise
 /// the marked root itself and rename the sibling into place atomically.
+/// (Files are 0444, or 0555 when the owner-execute bit was set.)
 fn publish_entry(temp: &Path, entry: &Path) -> Result<()> {
     let euid = rustix::process::geteuid().as_raw();
     let egid = rustix::process::getegid().as_raw();
@@ -1274,7 +1275,11 @@ fn publish_entry(temp: &Path, entry: &Path) -> Result<()> {
             return Ok(());
         }
         let _ = std::os::unix::fs::chown(p, Some(euid), Some(egid));
-        let mode = if is_dir { 0o555 } else { 0o444 };
+        // read-only, but an owner-executable file stays executable (0555):
+        // copy_into_view derives the build view's 0755 from this bit, and a
+        // vendored script (a `-sys` crate's ./configure, say) must still run
+        let executable = !is_dir && md.permissions().mode() & 0o100 != 0;
+        let mode = if is_dir || executable { 0o555 } else { 0o444 };
         std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode))
             .with_context(|| format!("chmod {:o} {}", mode, p.display()))?;
         Ok(())
@@ -1573,5 +1578,40 @@ mod resolver_path_tests {
         let error = resolver_target_inside(&root, "resolv.conf").expect_err("must remain inside root");
         assert!(error.to_string().contains("escapes the sandbox root"), "{error}");
         let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod publish_tests {
+    use super::*;
+
+    fn mode_of(p: &Path) -> u32 {
+        std::fs::symlink_metadata(p).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn publication_and_the_build_view_keep_the_executable_bit() {
+        let base = std::env::temp_dir().join(format!("nawa-publish-exec-{}", std::process::id()));
+        cleanup_failed_populate(&base);
+        let temp = base.join("temp");
+        std::fs::create_dir_all(temp.join("sub")).unwrap();
+        std::fs::write(temp.join("sub/run.sh"), b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(temp.join("sub/run.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(temp.join("plain.txt"), b"data").unwrap();
+        std::fs::set_permissions(temp.join("plain.txt"), std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let entry = base.join("entry");
+        publish_entry(&temp, &entry).unwrap();
+        assert_eq!(mode_of(&entry.join("sub/run.sh")), 0o555, "executable stays executable");
+        assert_eq!(mode_of(&entry.join("plain.txt")), 0o444);
+        assert_eq!(mode_of(&entry.join("sub")), 0o555);
+
+        let view = base.join("view");
+        std::fs::create_dir_all(&view).unwrap();
+        copy_into_view(&entry, &view).unwrap();
+        assert_eq!(mode_of(&view.join("sub/run.sh")), 0o755, "the view restores a writable executable");
+        assert_eq!(mode_of(&view.join("plain.txt")), 0o644);
+
+        cleanup_failed_populate(&base);
     }
 }

@@ -670,9 +670,20 @@ pub fn download_content_addressed(
         if legacy.is_file() {
             match verify_sha256(&legacy, sha256) {
                 Ok(()) => {
-                    std::fs::copy(&legacy, dest).with_context(|| {
-                        format!("migrate legacy cache entry {}", legacy.display())
-                    })?;
+                    // same publication discipline as a download: copy to a
+                    // unique `.part` sibling, then rename. A direct copy onto
+                    // `dest` is not atomic and fails with EACCES when a
+                    // corrupt, read-only entry (0444) already sits there.
+                    let part = unique_part_path(dest);
+                    let migrated = std::fs::copy(&legacy, &part)
+                        .and_then(|_| std::fs::rename(&part, dest));
+                    if let Err(e) = migrated {
+                        let _ = std::fs::remove_file(&part);
+                        return Err(anyhow::Error::new(e).context(format!(
+                            "migrate legacy cache entry {}",
+                            legacy.display()
+                        )));
+                    }
                     strip_write_permission(dest);
                     println!(
                         "nawa: source cached (migrated legacy entry {}): {}",
@@ -2089,6 +2100,36 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let mode = std::fs::symlink_metadata(&dest).unwrap().permissions().mode();
         assert_eq!(mode & 0o222, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_migration_replaces_a_corrupt_read_only_entry() {
+        use std::os::unix::fs::PermissionsExt;
+        let body = b"content-addressed-source\n";
+        let sha = sha256_of(body);
+        let dir = scratch("ca-legacy-corrupt");
+        let legacy = dir.join(format!("{}-gzip-1.2.tar.gz", &sha[..16]));
+        std::fs::write(&legacy, body).unwrap();
+        // a corrupt entry a previous publication left behind: read-only, as
+        // strip_write_permission makes every published entry
+        let dest = digest_cache_dir(&dir).join(&sha);
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        std::fs::write(&dest, b"corrupt").unwrap();
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        let dead = dead_addr();
+        download_content_addressed(&format!("{dead}/gzip-1.2.tar.gz"), &[], &sha, &dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), body, "the corrupt entry was replaced");
+        let got: Vec<String> = digest_cache_dir(&dir)
+            .read_dir()
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert!(
+            got.iter().all(|n| *n == sha.as_str() || *n == format!("{sha}.lock")),
+            "no .part debris: {got:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
