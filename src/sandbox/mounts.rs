@@ -341,12 +341,21 @@ fn overlay_scratch(spec: &SandboxSpec) -> Result<()> {
     std::fs::create_dir_all(base_p)
         .with_context(|| format!("create the sandbox build base {}", spec.build_inside))?;
     tmpfs_at(base_p, "size=1m,mode=755")?;
+    // Mask /run BEFORE extra resolver binds. A host resolv.conf commonly
+    // points into /run/systemd/resolve; the bind then lands on the empty
+    // private tmpfs target rather than being hidden by a later mask.
+    if spec.mask.iter().any(|p| p == "/run") {
+        tmpfs_mask("/run")?;
+    }
     staging.bind_at(base_p, None, spec)?;
     drop(staging);
     setup_dev(Path::new("/dev"), Path::new(&spec.build.scratch))?;
     fresh_proc_or_mask(spec, Path::new("/proc"))?;
     setup_sys(spec, Path::new("/sys"))?;
     for p in &spec.mask {
+        if p == "/run" {
+            continue; // already masked before resolver binds above
+        }
         if Path::new(p).exists() {
             tmpfs_mask(p)?;
         }
@@ -457,11 +466,24 @@ impl StagingHandles {
                 None => Path::new(&x.bind.inside).to_path_buf(),
             };
             if x.bind.kind == "file" {
-                // a file bind needs its placeholder to exist before the cover
-                if !target.is_file() {
-                    std::fs::File::create(&target).with_context(|| {
-                        format!("create extra bind placeholder {}", target.display())
-                    })?;
+                // Never follow a final symlink while preparing a file bind:
+                // resolver binds have already resolved it within the sandbox
+                // root. Create missing parents after /run has been masked.
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                match std::fs::symlink_metadata(&target) {
+                    Ok(md) if md.file_type().is_file() => {}
+                    Ok(md) if md.file_type().is_symlink() => {
+                        bail!("extra file bind target {} is still a symlink; refusing to follow it", target.display());
+                    }
+                    Ok(_) => bail!("extra file bind target {} is not a regular file", target.display()),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        std::fs::File::create(&target).with_context(|| {
+                            format!("create extra bind placeholder {}", target.display())
+                        })?;
+                    }
+                    Err(e) => return Err(e).with_context(|| format!("inspect extra bind target {}", target.display())),
                 }
             } else if !target.is_dir() {
                 std::fs::create_dir_all(&target).with_context(|| {
