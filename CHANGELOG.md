@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased — build: remove checked-in Cargo vendor tree
+
+- Remove `vendor/`, the Cargo source-replacement config, and the obsolete
+  `scripts/vendor-nawa.sh` generator.
+- Keep `Cargo.lock` as the dependency version and checksum authority.
+- Fetch dependencies with `cargo fetch --locked` (or Nawa's
+  `[fetch.cargo]` phase), then compile with
+  `cargo build --release --offline --locked`.
+- Bootstrap builds must fetch before their offline compile; ordinary package
+  builds use Nawa's lockfile-keyed Cargo fetch cache.
+
 ## Unreleased — feat: fetch phase, multiple sources and recipe-local assets
 
 Design: `docs/design/fetch-phase.md`. Existing recipes keep working unchanged
@@ -53,171 +64,172 @@ and keep byte-identical build ids (pinned by a golden test).
 - A `Tx` that is dropped without commit (early return, panic) rolls back.
 
 ## Unreleased — fix: runit service control
-
-- `nawa service start|stop|restart <name>` control a running service through
-  `sv` using the full runsvdir path (a bare name resolves against `$SVDIR`,
-  which does not exist here, so the old `sv up <name>` hint never worked).
-- `enable --now` waits for runsv to pick the service up and starts it;
-  `disable --now` stops it first, then removes the link.
-- `disable` records the choice in `/etc/runit/disabled/<n>`; package installs
-  and upgrades no longer recreate a runsvdir link the admin disabled
-  (`enable` clears the marker).
-- `status` no longer reports "down" for services that are merely disabled or
-  not yet picked up by runsvdir, and shows `sv status` output as-is.
-
-## Unreleased — feat: update from binary repositories
-
-- `nawa update` keeps building from source by default; choose `--from repo`
-  (or `--from-repo` / `-r`) for repository-only updates, `--from auto` to use
-  repository archives when they are at least as new as the local recipes and
-  otherwise build, or `--from ask` to choose interactively. `--build` / `-b`
-  explicitly keeps source builds. `--repo DIR_OR_URL` selects the repository
-  for one run; without it, the configured repository is used.
-- Repository-only updates preflight every package in the complete plan and
-  reject missing, wrong-architecture, or stale entries before installing
-  anything. `nawa upgrade` remains the direct index-based binary updater.
-
-## Unreleased — ux: sizes in the install plan, readable download output
-
-- `nawa install` / `update` print a table (package, version, source, download
-  size, installed size, reason) and the totals, like `dnf`.
-- Repository indexes record each archive's `size` (bytes) and `installed_size`;
-  older indexes still parse (sizes show as `-`, the totals say how many are unknown).
-- Downloads on a terminal show `name  12.0 MiB / 48.0 MiB  25%` on one updating
-  line; small files (index, signatures) stay silent.
-- Redirect hops are no longer printed (the signed CDN URLs were hundreds of
-  characters); `NAWA_VERBOSE=1` prints host and path.
-
-## Unreleased — feat: automatic package slimming (strip, cleanup, `-doc`/`-lang` split)
-
-- New `src/slim.rs`, run by the build engine between `install` and the
-  archive: removes junk files (libtool `*.la`, `share/info/dir`,
-  `charset.alias`, `perllocal.pod`, `.packlist`), splits man/info/doc into
-  `<name>-doc` and gettext catalogs into `<name>-lang` (separate
-  `.nawa.tar.zst`, same version/rel, `rundeps = <name>`), and strips ELF
-  files (`--strip-unneeded`; `--strip-debug` for `*.a`, `.o`, unsigned `.ko`).
-  A split that would empty the main package is skipped; `rustlib`, `/boot`,
-  `/usr/lib/debug` and `/usr/src` are never stripped.
-- Opt-outs: recipe `[slim] strip|cleanup|split = false`, profile
-  `[build] slim = false`, environment `NAWA_SLIM=0|1` (wins).
-- The slimming rules version is part of the build id: `--use-cache` rebuilds
-  archives made before this change.
-- `repo-create` / `sign` need no change: sub-packages are ordinary archives.
-
-## Unreleased — fix: `nawa deps <pkg>` ignored the dependencies of an installed package
-
-- `nawa deps <name>` seeded the resolver with the installed set, the requested
-  package included, so for an installed package it printed nothing and never
-  looked at its dependencies. A package that ships in the rootfs but is being
-  rebuilt (glibc in the min build rootfs) therefore never got its build tools
-  (bison) installed, and its configure failed with "critical programs are
-  missing". The requested package is now always walked: its missing
-  dependencies are listed first and the package itself last, as for an
-  uninstalled one. `deps-all` is unchanged (it still skips what is installed).
-
-## Unreleased — feat: `nawa revdep` — find broken shared-library links
-
-- New `nawa revdep [name...] [--lib-dir DIR]... [--ignore GLOB]... [--no-symlinks]
-  [--unowned] [--scan-dir DIR]...`: reads every ELF file owned by the installed
-  packages (db file lists) with the existing goblin reader (`lint::parse_elf`)
-  and checks each `DT_NEEDED` the way the loader resolves it: RPATH/RUNPATH with
-  `$ORIGIN`, `--lib-dir`, `/etc/ld.so.conf` + includes, `/etc/ld-musl-*.path`,
-  then `/lib /usr/lib /lib64 /usr/lib64 /usr/local/lib`. A candidate must have
-  the same ELF class and machine as the file needing it (a 32-bit library does
-  not satisfy a 64-bit program; reported as "wrong architecture"). Also checks
-  the ELF interpreter and dangling symlinks.
-- `--unowned` (or `--scan-dir`) additionally walks `/usr /bin /sbin /lib /lib64
-  /opt` (or the given dirs) with `walkdir` and checks files no package owns,
-  reported under "(not owned by any package)".
-- Output is grouped by package and ends with the list of packages to rebuild;
-  exit status 1 when anything is broken. Takes the shared db lock; all lookups
-  happen inside `--root`. No new dependencies.
-- Automatic check: after `install`, `update` and `remove` nawa re-checks what
-  the change can have broken (the changed packages plus every installed
-  package that lists them in its run-dependencies) and prints a warning on
-  stderr; the command's exit status is unaffected. `NAWA_NO_REVDEP=1` turns it
-  off.
-- `--json` prints one JSON document (`ok`, `scanned`, `packages` with the
-  missing libraries and their providers, `unowned`, `rebuild`); the exit
-  status is still 1 when something is broken.
-- Missing libraries come with suggestions (disable with `--no-suggest`): the
-  packages whose locally built archive in `<builddir>/out` ships the file
-  (read from the archive's file list), else a recipe named like the library
-  (`libpng16.so.16` → `png`/`libpng`), with the `nawa install` hint, or
-  "installed but lacks the file" when the provider is already installed.
-- `scripts/check-rootfs.sh ROOTFS` runs `nawa --root ROOTFS revdep --unowned`
-  as a last gate for bootstrap/rootfs builds (exit 1 on broken links).
-- `lint::ElfInfo` gained `interp`, `is_64` and `machine`; `install` gained
-  `resolve_in_root` (`exists_in_root` is now built on it, both `pub(crate)`).
-
-## Unreleased — feat: `nawa sync` — signed recipe tree from the repository
-
-- New `nawa sync [--repo <dir-or-url>] [--force] [--allow-unsigned]`: fetches
-  the newest recipe tree published by the repository and installs it at the
-  configured `recipes` path. Replaces shipping the tree as the `nawa-recipes`
-  package, whose pinned source always lagged the code it was cut from.
-- The tree is carried by the signed `index.toml` (`[recipes]` rev / file /
-  sha256), so it gets the same checks as `nawa upgrade`: trusted key,
-  signature, rollback (`index.seen`) and freeze (`expires`) protection; the
-  tarball must match the sha256 in the authenticated index.
-- The tree is unpacked beside the target and swapped in with two renames
-  (an interrupted sync never leaves a mixed tree); an archive without any
-  `recipe.toml` never replaces a working tree. The synced revision is kept in
-  `<root>/var/lib/nawa/recipes.rev`; syncing the same revision is a no-op.
-- `nawa repo-create --recipes <dir> --recipes-rev <rev>` packs the tree
-  (`recipes-<rev>.recipes.tar.zst`, deterministic, `.git` skipped, symlinks
-  refused) and records it in the index; `--sign` signs it as before.
-
-## Unreleased — feat: system config `/etc/nawa/nawa.toml`, default repository, install from repo or build
-
-- New config layer `/etc/nawa/nawa.toml` (dir overridable with
-  `NAWA_SYSCONFDIR`) below the project `nawa.toml`: precedence is now
-  flag > env > nawa.toml > /etc/nawa/nawa.toml > default. `nawa init --system`
-  writes it; the `nawa` package ships it (`dist/nawa.toml`, kept in sync
-  with `config::system_template()` by a unit test; recipe rel 2).
-- Built-in default repository
-  `https://raw.githubusercontent.com/mrdevmohamed/faseela-repo/main`
-  (`repo = ""` / `none` switches it off). `nawa upgrade` uses it too.
-- New key `install_mode` (`NAWA_INSTALL_MODE`): `auto` (default) | `repo` |
-  `build` | `ask`. `nawa install <name>` takes each package from the
-  repository when it has it (at least as new as the recipe, right
-  architecture), otherwise builds it. Flags: `--build/-b`, `--from-repo/-r`,
-  `--from <mode>`, `--repo <dir-or-url>`. The plan lists `[repo ]`/`[build]` per
-  package; `repo` mode fails before touching anything; `auto` falls back to a
-  build when the repository is unusable or a download/verification fails.
-  Repository-only packages (no recipe) install as binary packages.
-- `upgrade::open_repo` / `fetch_entry` extracted from `upgrade` (same
-  trust, signature, freshness and archive checks) and shared with `install`.
-- `nawa update` and `bootstrap/build-packages-inner.sh` always build
-  (`--build`), so stage builds stay reproducible source builds.
-- Tests: config layering/defaults (config.rs), `choose` prompt (confirm.rs),
-  `tests/repo_install.rs` (auto / --build / --from-repo / binary-only /
-  fallback / system-config precedence). Existing integration test helpers pin
-  `NAWA_SYSCONFDIR` and `NAWA_INSTALL_MODE=build`.
-
-## 1.0.0
-
-Renamed from `dpm` to **nawa** (Arabic نواة, "the date stone a seedling grows
-from"). This is a clean break, not a drop-in upgrade:
-
-| was | now |
-|---|---|
-| binary / crate `dpm` | `nawa` |
-| `dpm.toml`, `DPM_*` env vars | `nawa.toml`, `NAWA_*` |
-| `*.dpm.tar.zst` archives | `*.nawa.tar.zst` |
-| `/var/lib/dpm`, `/var/cache/dpm`, `/etc/dpm` | `/var/lib/nawa`, `/var/cache/nawa`, `/etc/nawa` |
-| signed message `dpm-v1:sha256:<hash>` | `nawa-v1:sha256:<hash>` (old signatures do not verify) |
-
-First release as a standalone project. The code is the `pkgmgr` 0.8.0 tree of the
-mydistro repository (history before this release lives there), with the version
-bumped to 1.0.0.
-
-- Own repository: sources, tests, vendored crates, smoke scripts, CI.
-- `scripts/smoke-v06.sh` no longer needs a distribution recipe tree
-  (`RECIPES=` overrides it; default is an empty fixture directory).
-
-### Known issues
-
-- `ureq` 2.x (`proxy-from-env`) ignores `NO_PROXY`: with `HTTP(S)_PROXY` set,
-  requests to `127.0.0.1` also go through the proxy. Four `fetch::` unit tests and
-  `scripts/smoke-v06.sh` fail on such hosts; unset the proxy variables to run them.
+## Unreleased — fix: runit service control
+## Unreleased — fix: runit service control- `nawa service start|stop|restart <name>` control a running service through
+## Unreleased — fix: runit service control  `sv` using the full runsvdir path (a bare name resolves against `$SVDIR`,
+## Unreleased — fix: runit service control  which does not exist here, so the old `sv up <name>` hint never worked).
+## Unreleased — fix: runit service control- `enable --now` waits for runsv to pick the service up and starts it;
+## Unreleased — fix: runit service control  `disable --now` stops it first, then removes the link.
+## Unreleased — fix: runit service control- `disable` records the choice in `/etc/runit/disabled/<n>`; package installs
+## Unreleased — fix: runit service control  and upgrades no longer recreate a runsvdir link the admin disabled
+## Unreleased — fix: runit service control  (`enable` clears the marker).
+## Unreleased — fix: runit service control- `status` no longer reports "down" for services that are merely disabled or
+## Unreleased — fix: runit service control  not yet picked up by runsvdir, and shows `sv status` output as-is.
+## Unreleased — fix: runit service control
+## Unreleased — fix: runit service control## Unreleased — feat: update from binary repositories
+## Unreleased — fix: runit service control
+## Unreleased — fix: runit service control- `nawa update` keeps building from source by default; choose `--from repo`
+## Unreleased — fix: runit service control  (or `--from-repo` / `-r`) for repository-only updates, `--from auto` to use
+## Unreleased — fix: runit service control  repository archives when they are at least as new as the local recipes and
+## Unreleased — fix: runit service control  otherwise build, or `--from ask` to choose interactively. `--build` / `-b`
+## Unreleased — fix: runit service control  explicitly keeps source builds. `--repo DIR_OR_URL` selects the repository
+## Unreleased — fix: runit service control  for one run; without it, the configured repository is used.
+## Unreleased — fix: runit service control- Repository-only updates preflight every package in the complete plan and
+## Unreleased — fix: runit service control  reject missing, wrong-architecture, or stale entries before installing
+## Unreleased — fix: runit service control  anything. `nawa upgrade` remains the direct index-based binary updater.
+## Unreleased — fix: runit service control
+## Unreleased — fix: runit service control## Unreleased — ux: sizes in the install plan, readable download output
+## Unreleased — fix: runit service control
+## Unreleased — fix: runit service control- `nawa install` / `update` print a table (package, version, source, download
+## Unreleased — fix: runit service control  size, installed size, reason) and the totals, like `dnf`.
+## Unreleased — fix: runit service control- Repository indexes record each archive's `size` (bytes) and `installed_size`;
+## Unreleased — fix: runit service control  older indexes still parse (sizes show as `-`, the totals say how many are unknown).
+## Unreleased — fix: runit service control- Downloads on a terminal show `name  12.0 MiB / 48.0 MiB  25%` on one updating
+## Unreleased — fix: runit service control  line; small files (index, signatures) stay silent.
+## Unreleased — fix: runit service control- Redirect hops are no longer printed (the signed CDN URLs were hundreds of
+## Unreleased — fix: runit service control  characters); `NAWA_VERBOSE=1` prints host and path.
+## Unreleased — fix: runit service control
+## Unreleased — fix: runit service control## Unreleased — feat: automatic package slimming (strip, cleanup, `-doc`/`-lang` split)
+## Unreleased — fix: runit service control
+## Unreleased — fix: runit service control- New `src/slim.rs`, run by the build engine between `install` and the
+## Unreleased — fix: runit service control  archive: removes junk files (libtool `*.la`, `share/info/dir`,
+## Unreleased — fix: runit service control  `charset.alias`, `perllocal.pod`, `.packlist`), splits man/info/doc into
+## Unreleased — fix: runit service control  `<name>-doc` and gettext catalogs into `<name>-lang` (separate
+## Unreleased — fix: runit service control  `.nawa.tar.zst`, same version/rel, `rundeps = <name>`), and strips ELF
+## Unreleased — fix: runit service control  files (`--strip-unneeded`; `--strip-debug` for `*.a`, `.o`, unsigned `.ko`).
+## Unreleased — fix: runit service control  A split that would empty the main package is skipped; `rustlib`, `/boot`,
+## Unreleased — fix: runit service control  `/usr/lib/debug` and `/usr/src` are never stripped.
+## Unreleased — fix: runit service control- Opt-outs: recipe `[slim] strip|cleanup|split = false`, profile
+## Unreleased — fix: runit service control  `[build] slim = false`, environment `NAWA_SLIM=0|1` (wins).
+## Unreleased — fix: runit service control- The slimming rules version is part of the build id: `--use-cache` rebuilds
+## Unreleased — fix: runit service control  archives made before this change.
+## Unreleased — fix: runit service control- `repo-create` / `sign` need no change: sub-packages are ordinary archives.
+## Unreleased — fix: runit service control
+## Unreleased — fix: runit service control## Unreleased — fix: `nawa deps <pkg>` ignored the dependencies of an installed package
+## Unreleased — fix: runit service control
+## Unreleased — fix: runit service control- `nawa deps <name>` seeded the resolver with the installed set, the requested
+## Unreleased — fix: runit service control  package included, so for an installed package it printed nothing and never
+## Unreleased — fix: runit service control  looked at its dependencies. A package that ships in the rootfs but is being
+## Unreleased — fix: runit service control  rebuilt (glibc in the min build rootfs) therefore never got its build tools
+## Unreleased — fix: runit service control  (bison) installed, and its configure failed with "critical programs are
+## Unreleased — fix: runit service control  missing". The requested package is now always walked: its missing
+## Unreleased — fix: runit service control  dependencies are listed first and the package itself last, as for an
+## Unreleased — fix: runit service control  uninstalled one. `deps-all` is unchanged (it still skips what is installed).
+## Unreleased — fix: runit service control
+## Unreleased — fix: runit service control## Unreleased — feat: `nawa revdep` — find broken shared-library links
+## Unreleased — fix: runit service control
+## Unreleased — fix: runit service control- New `nawa revdep [name...] [--lib-dir DIR]... [--ignore GLOB]... [--no-symlinks]
+## Unreleased — fix: runit service control  [--unowned] [--scan-dir DIR]...`: reads every ELF file owned by the installed
+## Unreleased — fix: runit service control  packages (db file lists) with the existing goblin reader (`lint::parse_elf`)
+## Unreleased — fix: runit service control  and checks each `DT_NEEDED` the way the loader resolves it: RPATH/RUNPATH with
+## Unreleased — fix: runit service control  `$ORIGIN`, `--lib-dir`, `/etc/ld.so.conf` + includes, `/etc/ld-musl-*.path`,
+## Unreleased — fix: runit service control  then `/lib /usr/lib /lib64 /usr/lib64 /usr/local/lib`. A candidate must have
+## Unreleased — fix: runit service control  the same ELF class and machine as the file needing it (a 32-bit library does
+## Unreleased — fix: runit service control  not satisfy a 64-bit program; reported as "wrong architecture"). Also checks
+## Unreleased — fix: runit service control  the ELF interpreter and dangling symlinks.
+## Unreleased — fix: runit service control- `--unowned` (or `--scan-dir`) additionally walks `/usr /bin /sbin /lib /lib64
+## Unreleased — fix: runit service control  /opt` (or the given dirs) with `walkdir` and checks files no package owns,
+## Unreleased — fix: runit service control  reported under "(not owned by any package)".
+## Unreleased — fix: runit service control- Output is grouped by package and ends with the list of packages to rebuild;
+## Unreleased — fix: runit service control  exit status 1 when anything is broken. Takes the shared db lock; all lookups
+## Unreleased — fix: runit service control  happen inside `--root`. No new dependencies.
+## Unreleased — fix: runit service control- Automatic check: after `install`, `update` and `remove` nawa re-checks what
+## Unreleased — fix: runit service control  the change can have broken (the changed packages plus every installed
+## Unreleased — fix: runit service control  package that lists them in its run-dependencies) and prints a warning on
+## Unreleased — fix: runit service control  stderr; the command's exit status is unaffected. `NAWA_NO_REVDEP=1` turns it
+## Unreleased — fix: runit service control  off.
+## Unreleased — fix: runit service control- `--json` prints one JSON document (`ok`, `scanned`, `packages` with the
+## Unreleased — fix: runit service control  missing libraries and their providers, `unowned`, `rebuild`); the exit
+## Unreleased — fix: runit service control  status is still 1 when something is broken.
+## Unreleased — fix: runit service control- Missing libraries come with suggestions (disable with `--no-suggest`): the
+## Unreleased — fix: runit service control  packages whose locally built archive in `<builddir>/out` ships the file
+## Unreleased — fix: runit service control  (read from the archive's file list), else a recipe named like the library
+## Unreleased — fix: runit service control  (`libpng16.so.16` → `png`/`libpng`), with the `nawa install` hint, or
+## Unreleased — fix: runit service control  "installed but lacks the file" when the provider is already installed.
+## Unreleased — fix: runit service control- `scripts/check-rootfs.sh ROOTFS` runs `nawa --root ROOTFS revdep --unowned`
+## Unreleased — fix: runit service control  as a last gate for bootstrap/rootfs builds (exit 1 on broken links).
+## Unreleased — fix: runit service control- `lint::ElfInfo` gained `interp`, `is_64` and `machine`; `install` gained
+## Unreleased — fix: runit service control  `resolve_in_root` (`exists_in_root` is now built on it, both `pub(crate)`).
+## Unreleased — fix: runit service control
+## Unreleased — fix: runit service control## Unreleased — feat: `nawa sync` — signed recipe tree from the repository
+## Unreleased — fix: runit service control
+## Unreleased — fix: runit service control- New `nawa sync [--repo <dir-or-url>] [--force] [--allow-unsigned]`: fetches
+## Unreleased — fix: runit service control  the newest recipe tree published by the repository and installs it at the
+## Unreleased — fix: runit service control  configured `recipes` path. Replaces shipping the tree as the `nawa-recipes`
+## Unreleased — fix: runit service control  package, whose pinned source always lagged the code it was cut from.
+## Unreleased — fix: runit service control- The tree is carried by the signed `index.toml` (`[recipes]` rev / file /
+## Unreleased — fix: runit service control  sha256), so it gets the same checks as `nawa upgrade`: trusted key,
+## Unreleased — fix: runit service control  signature, rollback (`index.seen`) and freeze (`expires`) protection; the
+## Unreleased — fix: runit service control  tarball must match the sha256 in the authenticated index.
+## Unreleased — fix: runit service control- The tree is unpacked beside the target and swapped in with two renames
+## Unreleased — fix: runit service control  (an interrupted sync never leaves a mixed tree); an archive without any
+## Unreleased — fix: runit service control  `recipe.toml` never replaces a working tree. The synced revision is kept in
+## Unreleased — fix: runit service control  `<root>/var/lib/nawa/recipes.rev`; syncing the same revision is a no-op.
+## Unreleased — fix: runit service control- `nawa repo-create --recipes <dir> --recipes-rev <rev>` packs the tree
+## Unreleased — fix: runit service control  (`recipes-<rev>.recipes.tar.zst`, deterministic, `.git` skipped, symlinks
+## Unreleased — fix: runit service control  refused) and records it in the index; `--sign` signs it as before.
+## Unreleased — fix: runit service control
+## Unreleased — fix: runit service control## Unreleased — feat: system config `/etc/nawa/nawa.toml`, default repository, install from repo or build
+## Unreleased — fix: runit service control
+## Unreleased — fix: runit service control- New config layer `/etc/nawa/nawa.toml` (dir overridable with
+## Unreleased — fix: runit service control  `NAWA_SYSCONFDIR`) below the project `nawa.toml`: precedence is now
+## Unreleased — fix: runit service control  flag > env > nawa.toml > /etc/nawa/nawa.toml > default. `nawa init --system`
+## Unreleased — fix: runit service control  writes it; the `nawa` package ships it (`dist/nawa.toml`, kept in sync
+## Unreleased — fix: runit service control  with `config::system_template()` by a unit test; recipe rel 2).
+## Unreleased — fix: runit service control- Built-in default repository
+## Unreleased — fix: runit service control  `https://raw.githubusercontent.com/mrdevmohamed/faseela-repo/main`
+## Unreleased — fix: runit service control  (`repo = ""` / `none` switches it off). `nawa upgrade` uses it too.
+## Unreleased — fix: runit service control- New key `install_mode` (`NAWA_INSTALL_MODE`): `auto` (default) | `repo` |
+## Unreleased — fix: runit service control  `build` | `ask`. `nawa install <name>` takes each package from the
+## Unreleased — fix: runit service control  repository when it has it (at least as new as the recipe, right
+## Unreleased — fix: runit service control  architecture), otherwise builds it. Flags: `--build/-b`, `--from-repo/-r`,
+## Unreleased — fix: runit service control  `--from <mode>`, `--repo <dir-or-url>`. The plan lists `[repo ]`/`[build]` per
+## Unreleased — fix: runit service control  package; `repo` mode fails before touching anything; `auto` falls back to a
+## Unreleased — fix: runit service control  build when the repository is unusable or a download/verification fails.
+## Unreleased — fix: runit service control  Repository-only packages (no recipe) install as binary packages.
+## Unreleased — fix: runit service control- `upgrade::open_repo` / `fetch_entry` extracted from `upgrade` (same
+## Unreleased — fix: runit service control  trust, signature, freshness and archive checks) and shared with `install`.
+## Unreleased — fix: runit service control- `nawa update` and `bootstrap/build-packages-inner.sh` always build
+## Unreleased — fix: runit service control  (`--build`), so stage builds stay reproducible source builds.
+## Unreleased — fix: runit service control- Tests: config layering/defaults (config.rs), `choose` prompt (confirm.rs),
+## Unreleased — fix: runit service control  `tests/repo_install.rs` (auto / --build / --from-repo / binary-only /
+## Unreleased — fix: runit service control  fallback / system-config precedence). Existing integration test helpers pin
+## Unreleased — fix: runit service control  `NAWA_SYSCONFDIR` and `NAWA_INSTALL_MODE=build`.
+## Unreleased — fix: runit service control
+## Unreleased — fix: runit service control## 1.0.0
+## Unreleased — fix: runit service control
+## Unreleased — fix: runit service controlRenamed from `dpm` to **nawa** (Arabic نواة, "the date stone a seedling grows
+## Unreleased — fix: runit service controlfrom"). This is a clean break, not a drop-in upgrade:
+## Unreleased — fix: runit service control
+## Unreleased — fix: runit service control| was | now |
+## Unreleased — fix: runit service control|---|---|
+## Unreleased — fix: runit service control| binary / crate `dpm` | `nawa` |
+## Unreleased — fix: runit service control| `dpm.toml`, `DPM_*` env vars | `nawa.toml`, `NAWA_*` |
+## Unreleased — fix: runit service control| `*.dpm.tar.zst` archives | `*.nawa.tar.zst` |
+## Unreleased — fix: runit service control| `/var/lib/dpm`, `/var/cache/dpm`, `/etc/dpm` | `/var/lib/nawa`, `/var/cache/nawa`, `/etc/nawa` |
+## Unreleased — fix: runit service control| signed message `dpm-v1:sha256:<hash>` | `nawa-v1:sha256:<hash>` (old signatures do not verify) |
+## Unreleased — fix: runit service control
+## Unreleased — fix: runit service controlFirst release as a standalone project. The code is the `pkgmgr` 0.8.0 tree of the
+## Unreleased — fix: runit service controlmydistro repository (history before this release lives there), with the version
+## Unreleased — fix: runit service controlbumped to 1.0.0.
+## Unreleased — fix: runit service control
+## Unreleased — fix: runit service control- Own repository: sources, tests, vendored crates, smoke scripts, CI.
+## Unreleased — fix: runit service control- `scripts/smoke-v06.sh` no longer needs a distribution recipe tree
+## Unreleased — fix: runit service control  (`RECIPES=` overrides it; default is an empty fixture directory).
+## Unreleased — fix: runit service control
+## Unreleased — fix: runit service control### Known issues
+## Unreleased — fix: runit service control
+## Unreleased — fix: runit service control- `ureq` 2.x (`proxy-from-env`) ignores `NO_PROXY`: with `HTTP(S)_PROXY` set,
+## Unreleased — fix: runit service control  requests to `127.0.0.1` also go through the proxy. Four `fetch::` unit tests and
+## Unreleased — fix: runit service control  `scripts/smoke-v06.sh` fail on such hosts; unset the proxy variables to run them.
+## Unreleased — fix: runit service control

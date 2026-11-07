@@ -239,10 +239,8 @@ fn cargo_cmd(cg_home: &Path) -> Command {
 
 /// Generate the lockfile of a fixture crate with the real cargo. The lock
 /// embeds the absolute `file://` dependency URL, so it is cooked per
-/// scratch rather than pinned as a constant. The cwd is the fixture's own
-/// directory: this repo's checkout is itself a *vendored* cargo build (its
-/// `.cargo/config.toml` redirects crates-io), and a cargo launched from the
-/// test's cwd would load that config on top of the fixture's.
+/// scratch rather than pinned as a constant. Run from the fixture directory
+/// so Cargo resolves its manifest and configuration only from that fixture.
 fn generate_lock(manifest_dir: &Path, cg_home: &Path) -> Vec<u8> {
     let out = cargo_cmd(cg_home)
         .current_dir(manifest_dir)
@@ -1074,7 +1072,7 @@ fn nawa_source_tar_gz() -> Vec<u8> {
                 )
                 .unwrap();
         }
-        for directory in [".cargo", "src", "vendor"] {
+        for directory in ["src"] {
             for entry in walkdir::WalkDir::new(root.join(directory)).sort_by_file_name() {
                 let entry = entry.unwrap();
                 let relative = entry.path().strip_prefix(root).unwrap();
