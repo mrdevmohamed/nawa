@@ -314,7 +314,7 @@ fn scan_cargo_configs(r: &FetchRun, dir: &Path) -> Result<bool> {
     let mut vendored = false;
     let mut scan = dir.to_path_buf();
     loop {
-        let in_source_tree = scan.starts_with(&r.src);
+        let in_source_tree = scan.starts_with(r.src);
         for name in [".cargo/config.toml", ".cargo/config"] {
             let cfg = scan.join(name);
             if !cfg.exists() {
@@ -574,10 +574,7 @@ const CARGO_VERSION_SCRIPT: &str = "cargo --version > \"$NAWA_CARGO_VER_OUT\"";
 /// fresh CARGO_HOME inside the output bind. Cargo searches cwd ancestors for
 /// config files, so refuse any ambient ancestor config rather than allowing
 /// an unscanned host setting to redirect the fetch.
-fn isolated_cargo_paths(out_host: &Path) -> Result<(PathBuf, PathBuf)> {
-    let home = out_host.join("cargo-home");
-    std::fs::create_dir_all(&home).with_context(|| format!("create {}", home.display()))?;
-    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o777))?;
+fn isolated_cargo_cwd() -> Result<PathBuf> {
     let cwd = std::env::temp_dir().join(format!(
         "nawa-cargo-cwd-{}-{}",
         std::process::id(),
@@ -597,7 +594,17 @@ fn isolated_cargo_paths(out_host: &Path) -> Result<(PathBuf, PathBuf)> {
             }
         }
     }
-    Ok((home, cwd))
+    Ok(cwd)
+}
+
+/// A fresh Cargo home is the output directory itself: the published entry is
+/// later mounted/copied as CARGO_HOME, so its git/ and registry/ directories
+/// must live at the entry root rather than one level below it.
+fn isolated_cargo_paths(out_host: &Path) -> Result<(PathBuf, PathBuf)> {
+    std::fs::create_dir_all(out_host).with_context(|| format!("create {}", out_host.display()))?;
+    std::fs::set_permissions(out_host, std::fs::Permissions::from_mode(0o777))?;
+    let cwd = isolated_cargo_cwd()?;
+    Ok((out_host.to_path_buf(), cwd))
 }
 
 fn run_populate_cargo(r: &FetchRun, plan: &CargoPlan, temp: &Path) -> Result<()> {
@@ -612,14 +619,16 @@ fn run_populate_cargo(r: &FetchRun, plan: &CargoPlan, temp: &Path) -> Result<()>
     let log_path = r.work.join(format!("{label}.log"));
     let script = format!("exec 2>&1\n{CARGO_POPULATE_SCRIPT}");
     let manifest_rel = plan.dir.strip_prefix(r.src).unwrap_or(Path::new("")).join("Cargo.toml");
-    let (cargo_home_host, cwd_host) = isolated_cargo_paths(temp)?;
+    let cwd_host = isolated_cargo_cwd()?;
     let result = (|| -> Result<()> {
         let mut child = if r.sandboxed {
             let base = r.build_inside.trim_end_matches('/');
             let env = [
                 cargo_fetch_base_env(&format!("{base}/home")),
                 vec![
-                    ("CARGO_HOME".into(), format!("{base}/fetch-out/cargo-home")),
+                    // fetch-out is the published cache entry and is exposed
+                    // unchanged as CARGO_HOME during the offline build.
+                    ("CARGO_HOME".into(), format!("{base}/fetch-out")),
                     ("NAWA_CARGO_MANIFEST".into(), format!("{}/src/{}", base, manifest_rel.display())),
                 ],
             ].concat();
@@ -630,7 +639,7 @@ fn run_populate_cargo(r: &FetchRun, plan: &CargoPlan, temp: &Path) -> Result<()>
             let env = [
                 cargo_fetch_base_env(&home_host.to_string_lossy()),
                 vec![
-                    ("CARGO_HOME".into(), cargo_home_host.to_string_lossy().into_owned()),
+                    ("CARGO_HOME".into(), temp.to_string_lossy().into_owned()),
                     ("NAWA_CARGO_MANIFEST".into(), plan.dir.join("Cargo.toml").to_string_lossy().into_owned()),
                 ],
             ].concat();
