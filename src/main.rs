@@ -3,6 +3,7 @@
 
 mod archive;
 mod artifact;
+mod assets;
 mod build;
 mod buildenv;
 mod cli;

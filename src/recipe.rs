@@ -9,6 +9,12 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Deserialize)]
 pub struct Recipe {
     pub package: Package,
+    /// Recipe-local assets (fetch-phase.md §5). A top-level table, like
+    /// `[sandbox]`; any use makes the recipe a new-schema recipe whose
+    /// `package.source` must carry the schema marker (§19), like
+    /// `[[package.sources]]`.
+    #[serde(default)]
+    pub assets: AssetSpec,
     #[serde(default)]
     pub depends: Depends,
     #[serde(default)]
@@ -128,6 +134,19 @@ pub struct SourceSpec {
     pub strip_components: u32,
 }
 
+/// Recipe-local assets (fetch-phase.md §5.2): files that live beside the
+/// recipe — patches, config fragments, scripts — snapshotted into
+/// `<work>/assets` and exposed read-only as `%{assetsdir}` (§5.3). They are
+/// declared, versioned and published *with* the recipe tree (the signed
+/// tarball already covers them), so they need no checksum in the recipe.
+/// `deny_unknown_fields`: a misspelled key is a parse-time error (§9).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssetSpec {
+    #[serde(default)]
+    pub include: Vec<String>,
+}
+
 fn default_rel() -> u32 {
     1
 }
@@ -198,8 +217,7 @@ pub struct ExpandCtx {
     pub srcroot: Option<PathBuf>,
     /// `%{assetsdir}` / `NAWA_ASSETSDIR` — the read-only snapshot of the
     /// recipe-declared `[assets]` files (fetch-phase.md §5.3). Same rule
-    /// as above: legacy recipes never see the name.
-    #[allow(dead_code)] // consumed when %{assetsdir} expansion lands (Phase 2)
+    /// as above: recipes without `[assets]` never see the name.
     pub assetsdir: Option<PathBuf>,
 }
 
@@ -238,7 +256,7 @@ impl Recipe {
         }
         if new_schema && !marker {
             bail!(
-                "recipe {} uses [[package.sources]] but package.source does not carry the \
+                "recipe {} uses new-schema tables but package.source does not carry the \
                  fail-closed schema marker (fetch-phase.md §19):\n  {}",
                 self.package.name,
                 SCHEMA_MARKER
@@ -247,8 +265,8 @@ impl Recipe {
         if marker && !new_schema {
             bail!(
                 "recipe {} sets the schema marker in package.source without using any \
-                 new-schema table (fetch-phase.md §19) — either add [[package.sources]] \
-                 or drop the marker",
+                 new-schema table — either add [[package.sources]] or drop the marker \
+                 (fetch-phase.md §19)",
                 self.package.name
             );
         }
@@ -311,11 +329,12 @@ impl Recipe {
             check_rel_path("[package] workdir", &self.package.workdir)?;
             // a build whose every input is a stamped plain file has no
             // reproducible mtime to derive the epoch from (§6)
-            if self
-                .package
-                .sources
-                .iter()
-                .all(|s| s.unpack == Some(false))
+            if !self.package.sources.is_empty()
+                && self
+                    .package
+                    .sources
+                    .iter()
+                    .all(|s| s.unpack == Some(false))
                 && self.package.source_date_epoch.is_none()
             {
                 bail!(
@@ -324,6 +343,31 @@ impl Recipe {
                      package.source_date_epoch (fetch-phase.md §6)",
                     self.package.name
                 );
+            }
+            // and with no external sources at all there is nothing the epoch
+            // could be derived from: assets never feed it (§6 makes them
+            // invisible to the derivation on purpose)
+            if self.package.sources.is_empty() && self.package.source_date_epoch.is_none() {
+                bail!(
+                    "recipe {} has no external sources to derive SOURCE_DATE_EPOCH from — \
+                     assets and fetch views are excluded on purpose; pin \
+                     package.source_date_epoch (fetch-phase.md §6)",
+                    self.package.name
+                );
+            }
+        }
+        // assets: declared paths must stay inside the recipe directory
+        // (never absolute, no `..`, no trailing `/`) — checked at parse time
+        // for the same reason as `into`/`workdir` (§5.2, §14)
+        if !self.assets.include.is_empty() {
+            for p in &self.assets.include {
+                let kind = "[assets] include";
+                if p.trim().is_empty() {
+                    bail!("recipe {} has an empty entry in [assets] include", self.package.name);
+                }
+                check_rel_path(kind, p).with_context(|| {
+                    format!("recipe {}", self.package.name)
+                })?;
             }
         }
         if !self.package.mirrors.is_empty() {
@@ -364,29 +408,46 @@ impl Recipe {
     }
 
     /// Whether the recipe uses new-schema tables (fetch-phase.md §4, §19).
-    /// Phase 1 means `[[package.sources]]` (the `[package] workdir` key
-    /// requires them; `[assets]` and `[fetch.*]` come later). On a
-    /// new-schema recipe `package.source` carries [`SCHEMA_MARKER`] and the
-    /// staging engine is `sources.rs`, not the legacy path in `build()`.
+    /// In this revision: `[[package.sources]]` and `[assets]` (`[fetch.*]`
+    /// comes with the ecosystem phases). On a new-schema recipe
+    /// `package.source` carries [`SCHEMA_MARKER`], `[[package.sources]]`
+    /// takes the staging engine in `sources.rs` instead of the legacy path,
+    /// and `[assets]` takes `assets.rs`.
     pub fn is_new_schema(&self) -> bool {
-        !self.package.sources.is_empty()
+        !self.package.sources.is_empty() || !self.assets.include.is_empty()
     }
 
-    /// §14C: `%{srcroot}` / `NAWA_SRCROOT` used by a recipe that does not
-    /// enable the new schema is a hard stage-time error, not a silent
-    /// expansion — legacy recipes keep their environment exactly as today,
-    /// so the names never enter it. Scanned over the raw recipe bytes, so
-    /// build sections *and* hooks are covered.
+    /// §14C: `%{srcroot}` / `NAWA_SRCROOT` and `%{assetsdir}` /
+    /// `NAWA_ASSETSDIR` used by a recipe that does not enable the
+    /// corresponding table are hard build-time errors, not silent
+    /// expansions — legacy recipes keep their environment exactly as
+    /// today, so the names never enter it. Scanned over the raw recipe
+    /// bytes, so build sections *and* hooks are covered; a test that wants
+    /// to check the environment names must spell them through shell string
+    /// concatenation, or it trips this scan itself.
     pub fn check_schema_placeholders(&self) -> Result<()> {
-        if self.is_new_schema() {
-            return Ok(());
-        }
-        for needle in ["%{srcroot}", "NAWA_SRCROOT"] {
+        let enabled = [
+            ("%{srcroot}", !self.package.sources.is_empty()),
+            ("NAWA_SRCROOT", !self.package.sources.is_empty()),
+            ("%{assetsdir}", !self.assets.include.is_empty()),
+            ("NAWA_ASSETSDIR", !self.assets.include.is_empty()),
+        ];
+        for (needle, on) in enabled {
+            if on {
+                continue;
+            }
+            let is_srcroot = needle == "%{srcroot}" || needle == "NAWA_SRCROOT";
+            let why = if is_srcroot {
+                "the workspace-root placeholder only exists for recipes with \
+                 [[package.sources]] (fetch-phase.md §4.3)"
+            } else {
+                "the assets snapshot placeholder only exists for recipes that declare \
+                 [assets] (fetch-phase.md §5.3)"
+            };
             if self.raw.contains(needle) {
                 bail!(
-                    "recipe {} uses `{needle}` but does not declare [[package.sources]] — \
-                     the workspace-root placeholder only exists for new-schema recipes \
-                     (fetch-phase.md §4.3); enable the schema or drop the reference",
+                    "recipe {} uses `{needle}` but does not enable it — {why}; \
+                     enable the table or drop the reference",
                     self.package.name
                 );
             }
@@ -412,10 +473,11 @@ impl Recipe {
 
     /// Expand placeholders inside a build/hook script.
     ///
-    /// `%{srcroot}` expands only on new-schema recipes (§4.3): for legacy
-    /// recipes the placeholder is left alone — `build()` already refuses any
-    /// raw recipe that references it (§14C) — so their environment and
-    /// scripts stay byte-for-byte unchanged.
+    /// `%{srcroot}` and `%{assetsdir}` expand only on recipes that enable
+    /// the corresponding table (§4.3/§5.3): for every other recipe the
+    /// placeholder is left alone — `build()` already refuses any raw recipe
+    /// that references it (§14C) — so their environment and scripts stay
+    /// byte-for-byte unchanged.
     pub fn expand(&self, script: &str, ctx: &ExpandCtx) -> String {
         let out = script
             .replace("%{name}", &self.package.name)
@@ -425,8 +487,12 @@ impl Recipe {
             .replace("%{jobs}", &ctx.jobs.to_string())
             .replace("%{pkgdir}", &ctx.pkgdir.to_string_lossy())
             .replace("%{srcdir}", &ctx.srcdir.to_string_lossy());
-        match &ctx.srcroot {
+        let out = match &ctx.srcroot {
             Some(root) => out.replace("%{srcroot}", &root.to_string_lossy()),
+            None => out,
+        };
+        match &ctx.assetsdir {
+            Some(dir) => out.replace("%{assetsdir}", &dir.to_string_lossy()),
             None => out,
         }
     }
@@ -949,5 +1015,122 @@ mod tests {
             .replace("rel = 1", "rel = 1\n        source_date_epoch = 1700000000");
         let rec: Recipe = toml::from_str(&pinned).unwrap();
         rec.validate().unwrap();
+    }
+
+    // ---- [assets] (fetch-phase.md §5.2) -----------------------------------
+
+    /// The `[assets]` table parses and denies misspelled keys (§9/§14: a
+    /// typo'd `include` must not silently stage nothing).
+    #[test]
+    fn assets_parse_and_deny_unknown_fields() {
+        let with = NEW_SCHEMA
+            .replace("    \"#;", "")
+            .replace("</沉默>", "")
+            + r#"
+        [assets]
+        include = ["patches/fix-build.patch", "config/x86_64.fragment"]
+    "#;
+        let rec: Recipe = toml::from_str(&with).unwrap();
+        assert_eq!(rec.assets.include.len(), 2);
+        assert_eq!(rec.assets.include[1], "config/x86_64.fragment");
+        // deny_unknown_fields: a typo'd key is a parse error
+        assert!(toml::from_str::<Recipe>(&with.replace("include =", "incude =")).is_err());
+        // ...and so is a scalar `assets` (string instead of table)
+        assert!(toml::from_str::<Recipe>(&with.replace(
+            "[assets]\n        include = [\"patches/fix-build.patch\", \"config/x86_64.fragment\"]",
+            "assets = \"patches\""
+        )).is_err());
+    }
+
+    /// An `[assets]` table alone is a new-schema table: the marker is
+    /// required (§19), and a markered recipe without any new table is
+    /// rejected — including assets-only, where the table is the whole point.
+    #[test]
+    fn assets_only_recipe_needs_marker_and_is_new_schema() {
+        let assets_only = r#"
+        [package]
+        name = "assets-only"
+        version = "1.0.0"
+        rel = 1
+        source = "local:/nawa-schema-2-requires-a-newer-nawa"
+        source_date_epoch = 1700000000
+
+        [assets]
+        include = ["kernel.config"]
+    "#;
+        let rec: Recipe = toml::from_str(assets_only).unwrap();
+        assert!(rec.is_new_schema());
+        rec.validate().unwrap();
+
+        // same recipe without the marker is refused
+        let unmarked = assets_only.replace(SCHEMA_MARKER, "local:/nowhere");
+        let rec: Recipe = toml::from_str(&unmarked).unwrap();
+        assert!(rec.is_new_schema());
+        let err = rec.validate().unwrap_err().to_string();
+        assert!(err.contains("schema marker"), "got: {err}");
+
+        // ...and an assets-only recipe with the marker but no epoch is
+        // refused too (§6: assets never feed the epoch)
+        let no_epoch = assets_only.replace("source_date_epoch = 1700000000\n", "");
+        let rec: Recipe = toml::from_str(&no_epoch).unwrap();
+        assert!(rec.package.source_date_epoch.is_none());
+        let err = rec.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("derive SOURCE_DATE_EPOCH"),
+            "assets-only without epoch: {err}"
+        );
+        // percent-expansion of %{srcroot} is refused for it too (no sources)
+        let mut rec: Recipe = toml::from_str(&no_epoch).unwrap();
+        rec.raw = no_epoch.to_string();
+        rec.raw.push_str("\nconfigure = \"ls %{srcroot}\"");
+        let err = rec.check_schema_placeholders().unwrap_err().to_string();
+        assert!(err.contains("%{srcroot}"), "got: {err}");
+    }
+
+    /// `[assets]` include entries must be relative, non-`..`, non-trailing-slash
+    /// paths (§5.2, same rules as `into`/`workdir`).
+    #[test]
+    fn assets_include_paths_are_validated() {
+        for bad in ["", "  ", "/abs/config", "../escape", "kernel.config/"] {
+            let bad_line = format!("include = [\"{bad}\"]");
+            let with = NEW_SCHEMA.replace("    \"#;", "") + format!(
+                "\n        [assets]\n        {bad_line}\n    "
+            ).as_str();
+            let rec: Recipe = toml::from_str(&with).unwrap();
+            let err = format!("{:#}", rec.validate().unwrap_err());
+            assert!(
+                err.contains("[assets] include"),
+                "{bad:?}: {err}"
+            );
+        }
+    }
+
+    /// §14C per-name: a recipe that declares `[[package.sources]]` but no
+    /// `[assets]` must be refused when its bytes reference `%{assetsdir}`
+    /// or `NAWA_ASSETSDIR` — and the reverse combination too.
+    #[test]
+    fn assets_placeholders_are_enabled_per_name() {
+        // sources but no assets: %{assetsdir} is refused
+        let mut rec: Recipe = toml::from_str(NEW_SCHEMA).unwrap();
+        rec.raw = NEW_SCHEMA.to_string();
+        rec.raw.push_str("\nconfigure = \"cp %{assetsdir}/conf .\"");
+        let err = rec.check_schema_placeholders().unwrap_err().to_string();
+        assert!(err.contains("%{assetsdir}"), "got: {err}");
+        // the env name, same refusal
+        rec.raw = "install = \"ls $NAWA_ASSETSDIR\"".to_string();
+        let rec: Recipe = toml::from_str(NEW_SCHEMA).unwrap();
+        let mut rec = rec;
+        rec.raw = format!("{}install = \"ls $NAWA_ASSETSDIR\"", "\n");
+        let err = rec.check_schema_placeholders().unwrap_err().to_string();
+        assert!(err.contains("NAWA_ASSETSDIR"), "got: {err}");
+        // assets but no sources: %{srcroot} is refused (see above) and the
+        // combined recipe passes
+        let both = NEW_SCHEMA.replace("    \"#;", "") + r#"
+        [assets]
+        include = ["config/x86_64.fragment"]
+    "#;
+        let mut rec: Recipe = toml::from_str(&both).unwrap();
+        rec.raw = both.to_string();
+        rec.check_schema_placeholders().unwrap();
     }
 }

@@ -170,8 +170,14 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
 
     let source = &rec.package.source;
     let mut staged: Option<crate::sources::SourcesStaged> = None;
+    let mut staged_assets: Option<crate::assets::AssetsStaged> = None;
     let srcdir: PathBuf = if rec.is_new_schema() {
-        // ---- new-schema staging (fetch-phase.md §4.2, §6, §11) -----------
+        // ---- new-schema staging (fetch-phase.md §4.2, §5, §6, §11) -------
+        // §5.2: an unreadable/missing asset path fails BEFORE any download,
+        // by the same sweep the snapshot will run (§16 Assets 3).
+        if !rec.assets.include.is_empty() {
+            crate::assets::precheck(rec)?;
+        }
         // All sources are downloaded, verified and extracted by the sources
         // engine; the workspace is `<work>/src` and `[package] workdir`
         // selects the section cwd through `staged.srcdir`.
@@ -183,6 +189,15 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
         grant_source_write(&s.srcroot);
         let sub_srcdir = s.srcdir.clone();
         staged = Some(s);
+        // the asset snapshot runs after the sources (which may have failed
+        // with a wrong hash) but still before the build root is assembled
+        // (§3): the digest comes from the copy, and only the snapshot is
+        // copied, never the checkout again
+        if !rec.assets.include.is_empty() {
+            let a = crate::assets::snapshot(rec, &work)
+                .with_context(|| format!("stage assets of recipe {}", name))?;
+            staged_assets = Some(a);
+        }
         sub_srcdir
     } else if source.is_empty() {
         src.clone() // meta package: run scripts directly in src
@@ -278,9 +293,18 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
 
     // the build sees sandbox paths for %{srcdir}/%{pkgdir}; the spec carries
     // the host paths for the bind mounts
-    // §4.3: %{srcroot} is the workspace root — the parent of the working
-    // directory; inside the sandbox the whole staging dir is bound at
-    // <base>/src, so the view of both is the same bind root
+    // §4.3/§5.3: %{srcroot} is the workspace root and %{assetsdir} the
+    // assets snapshot — both live at <work>/… and are bound inside the
+    // sandbox under <build_inside>/…; inside the sandbox the whole staging
+    // dir is bound at <base>/src, so the srcroot view is that same root
+    let view_assets = match (&staged_assets, sandboxed) {
+        (Some(a), false) => a.dir.clone(),
+        (Some(a), true) => {
+            let _ = a; // a.dir is `<work>/assets`; the sandbox binds it at <base>/assets
+            PathBuf::from(format!("{}/assets", sandbox_base.trim_end_matches('/')))
+        }
+        (None, _) => PathBuf::new(),
+    };
     let view_srcroot = if sandboxed {
         PathBuf::from(format!("{}/src", sandbox_base.trim_end_matches('/')))
     } else {
@@ -404,6 +428,7 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
             buildenv::SANDBOX_HOME.to_string()
         };
         let spec_srcroot = staged.as_ref().map(|_| view_srcroot.clone());
+        let spec_assetsdir = staged_assets.as_ref().map(|_| view_assets.clone());
         let spec_env = buildenv::EnvSpec {
             isolation: opts.isolation,
             profile_env: &opts.env,
@@ -415,7 +440,7 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
             // new-schema names (§4.3/§5.3); joined to the whitelist only
             // when the recipe enables them
             srcroot: spec_srcroot.as_deref(),
-            assetsdir: None,
+            assetsdir: spec_assetsdir.as_deref(),
         };
         (buildenv::whitelist(&spec_env), opts.isolation.script_prefix())
     } else {
@@ -431,7 +456,8 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
         // §4.3: %{srcroot} exists for new-schema recipes only — legacy
         // expansions and environments stay byte-for-byte unchanged
         srcroot: staged.as_ref().map(|_| view_srcroot.clone()),
-        assetsdir: None,
+        // §5.3: same rule for %{assetsdir}
+        assetsdir: staged_assets.as_ref().map(|_| view_assets.clone()),
     };
     let arch = rec.arch();
     let sandbox_cfg = if sandboxed {
@@ -538,6 +564,12 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
             rundeps: &rec.depends.run,
             sonames: &sonames,
             host_builddir: host_builddir.as_deref(),
+            // §5.3: the staged snapshot is /build/assets inside the sandbox
+            extra_leak_paths: if staged_assets.is_some() {
+                vec!["/build/assets"]
+            } else {
+                Vec::new()
+            },
         };
         let rep = crate::lint::run(&ctx);
         for w in &rep.warnings {
@@ -584,7 +616,7 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
             .as_ref()
             .map(|a| a.archives.clone())
             .unwrap_or_default();
-        let bid = build_id_for(rec, opts, &closure_shas);
+        let bid = build_id_for(rec, opts, &closure_shas, staged_assets.as_ref().map(|a| a.digest.as_str()));
         pkginfo.push_str(&format!("build_id = {bid}\n"));
         if opts.allow_network && rec.sandbox.network {
             pkginfo.push_str("impure = network\n");
@@ -748,7 +780,16 @@ fn sandbox_inside_base(_work: &Path) -> String {
 
 /// The build id for `rec` as `build()` would record it: recipe bytes, pinned
 /// source sha256, the closure archive set (names pin versions) and flags.
-fn build_id_for(rec: &Recipe, opts: &BuildOpts, closure_archives: &[PathBuf]) -> String {
+/// The build id for this recipe/opts/closure combination.
+/// `asset_digest` carries the `[assets]` probe (cache decisions) or the
+/// snapshot digest (recording, §5.3 "two moments, one digest") — `None`
+/// keeps the input set byte-for-byte legacy (§10.3).
+fn build_id_for(
+    rec: &Recipe,
+    opts: &BuildOpts,
+    closure_archives: &[PathBuf],
+    asset_digest: Option<&str>,
+) -> String {
     // slimming changes the archive, so its rules are an input of the id
     let flags = if opts.slim {
         format!("{} slim={}", opts.profile_flags, slim::VERSION)
@@ -770,12 +811,28 @@ fn build_id_for(rec: &Recipe, opts: &BuildOpts, closure_archives: &[PathBuf]) ->
         pairs.sort();
         pairs.join(",")
     };
-    crate::lint::build_id(
-        rec.raw.as_bytes(),
-        &source_sha256,
-        closure_archives,
-        &flags,
-    )
+    // §10.3 extras, in the pinned order (assets, then the later fetch
+    // backends): only appended when the table exists, so legacy ids are
+    // identical by construction
+    let extras: Vec<(&str, &str)> = asset_digest
+        .map(|d| vec![("assets", d)])
+        .unwrap_or_default();
+    if extras.is_empty() {
+        crate::lint::build_id(
+            rec.raw.as_bytes(),
+            &source_sha256,
+            closure_archives,
+            &flags,
+        )
+    } else {
+        crate::lint::build_id_with(
+            rec.raw.as_bytes(),
+            &source_sha256,
+            closure_archives,
+            &flags,
+            &extras,
+        )
+    }
 }
 
 /// `<out>/<archive>.buildid` — the sidecar `--use-cache` compares against.
@@ -792,6 +849,11 @@ fn buildid_sidecar(out_path: &Path) -> PathBuf {
 /// Return the existing archive when its sidecar build id matches the id the
 /// current inputs would produce (§7: "is this archive up to date?" becomes
 /// a hash comparison). `Ok(None)` = no hit, build as usual.
+///
+/// §5.3 "two moments, one digest": the assets extra here is the *probe*
+/// digest read from the checkout — computing it needs no `<work>` dir. A
+/// probe error (missing/symlinked asset) simply means no cache hit; the
+/// build then fails in `assets::precheck` with the real message.
 fn try_cache_hit(
     rec: &Recipe,
     opts: &BuildOpts,
@@ -803,7 +865,12 @@ fn try_cache_hit(
         return Ok(None);
     }
     let stored = std::fs::read_to_string(&sidecar).unwrap_or_default();
-    let bid = build_id_for(rec, opts, closure_archives);
+    let asset_digest: Option<String> = if rec.assets.include.is_empty() {
+        None
+    } else {
+        crate::assets::probe_digest(rec).ok()
+    };
+    let bid = build_id_for(rec, opts, closure_archives, asset_digest.as_deref());
     if stored.trim() != bid {
         println!("nawa: build cache: {} changed (build_id mismatch) — rebuilding", rec.id());
         return Ok(None);
@@ -1075,6 +1142,20 @@ fn prepare_sandbox(
         file_size_limit_bytes: 0,
         open_files_limit: 0,
         readonly_paths: Vec::new(),
+        // §5.3: scripts see the snapshot at <build_inside>/assets — the
+        // same dir NAWA_ASSETSDIR/%{assetsdir} name. `<work>/assets` was
+        // filled by assets::snapshot before the sandbox is prepared, so
+        // the O_PATH handles resolve.
+        extra_binds: if rec.assets.include.is_empty() {
+            Vec::new()
+        } else {
+            vec![crate::sandbox::spec::ExtraBind {
+                host: work.join("assets").to_string_lossy().into_owned(),
+                inside: format!("{}/assets", build_inside),
+                readonly: true,
+                kind: "dir".into(),
+            }]
+        },
         strict_readonly_root: false,
         writable_paths: Vec::new(),
     };
@@ -1140,6 +1221,12 @@ fn run_section(
             // NAWA_SRCDIR; a legacy recipe's ctx has no srcroot, so the
             // name never enters a legacy build
             .envs(ctx.srcroot.iter().map(|r| ("NAWA_SRCROOT", r.to_string_lossy().into_owned())))
+            // §5.3: same for the assets snapshot
+            .envs(
+                ctx.assetsdir
+                    .iter()
+                    .map(|a| ("NAWA_ASSETSDIR", a.to_string_lossy().into_owned())),
+            )
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .spawn()

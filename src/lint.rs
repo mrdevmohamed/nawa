@@ -67,6 +67,10 @@ pub struct LintCtx<'a> {
     /// Absolute host build dir — leaking it into a file is an error even
     /// at the `env` level (where `/build/...` does not exist).
     pub host_builddir: Option<&'a str>,
+    /// Extra in-sandbox paths that must not leak into the archive, beyond
+    /// the staging pins (`/build/src`, `/build/pkg`): `/build/assets` for
+    /// recipes that declare `[assets]` (§5.3).
+    pub extra_leak_paths: Vec<&'static str>,
 }
 
 pub fn run(ctx: &LintCtx) -> LintReport {
@@ -208,7 +212,11 @@ fn check_elf(rel: &str, info: &ElfInfo, ctx: &LintCtx, rep: &mut LintReport) {
 
 fn check_text_leaks(rel: &str, data: &[u8], ctx: &LintCtx, rep: &mut LintReport) {
     let text = String::from_utf8_lossy(data);
-    let needles = ["/build/src", "/build/pkg"];
+    // the two staging pins every recipe sees, plus the per-recipe insides
+    // (§5.3): <build_inside>/assets for recipes that declare [assets] —
+    // <build_inside>/fetch joins with the ecosystem phases
+    let mut needles = vec!["/build/src", "/build/pkg"];
+    needles.extend(ctx.extra_leak_paths.iter().copied());
     for n in needles {
         if text.contains(n) {
             rep.errors.push(format!("{rel}: contains the sandbox path {n}"));
@@ -761,6 +769,7 @@ mod tests {
             rundeps: &rundeps,
             sonames: &sonames,
             host_builddir: None,
+            extra_leak_paths: Vec::new(),
         });
 
         assert_eq!(report.elf_count, 1);
@@ -795,6 +804,7 @@ mod tests {
             rundeps: &rundeps,
             sonames: &sonames,
             host_builddir: None,
+            extra_leak_paths: Vec::new(),
         });
 
         assert_eq!(report.elf_count, 1);
@@ -953,6 +963,7 @@ mod tests {
             rundeps: &[], // missing zlib!
             sonames: &sonames,
             host_builddir: Some("/home/z/big-build"),
+            extra_leak_paths: Vec::new(),
         };
         // a real (fixture) ELF linking libz goes through the parser path
         let elf = elf64_fixture(&["libz.so.1"], None, None);
@@ -969,6 +980,45 @@ mod tests {
             "leaked build path: {:?}",
             rep.errors
         );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// §5.3: recipes that declare [assets] also leak-check against
+    /// `<build_inside>/assets`.
+    #[test]
+    fn asset_recipes_leak_check_against_build_assets() {
+        let base = std::env::temp_dir().join(format!("nawa-lint-assets-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let pkg = base.join("pkg");
+        std::fs::create_dir_all(pkg.join("usr/share")).unwrap();
+        std::fs::write(
+            pkg.join("usr/share/config.mk"),
+            b"KCONFIG = /build/assets/files/config/default.fragment\n",
+        )
+        .unwrap();
+
+        let ctx = LintCtx {
+            pkgdir: &pkg,
+            rundeps: &[],
+            sonames: &BTreeMap::new(),
+            host_builddir: None,
+            extra_leak_paths: vec!["/build/assets"],
+        };
+        let rep = run(&ctx);
+        assert!(
+            rep.errors.iter().any(|e| e.contains("/build/assets")),
+            "leaked assets path: {:?}",
+            rep.errors
+        );
+        // the needle is opt-in: the same string passes without it
+        let plain = run(&LintCtx {
+            pkgdir: &pkg,
+            rundeps: &[],
+            sonames: &BTreeMap::new(),
+            host_builddir: None,
+            extra_leak_paths: Vec::new(),
+        });
+        assert!(plain.ok(), "no needle, no error: {:?}", plain.errors);
         let _ = std::fs::remove_dir_all(&base);
     }
 }
