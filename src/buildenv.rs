@@ -93,6 +93,13 @@ pub struct EnvSpec<'a> {
     /// `$HOME` inside the sandbox (the bind of an empty dir).
     pub home: &'a str,
     pub source_date_epoch: u64,
+    /// `NAWA_SRCROOT` for recipes using `[[package.sources]]`
+    /// (fetch-phase.md §4.3). `None` for legacy recipes — the whitelist
+    /// must stay exactly today's set for them.
+    pub srcroot: Option<&'a Path>,
+    /// `NAWA_ASSETSDIR` for recipes that declare `[assets]`
+    /// (fetch-phase.md §5.3). Same legacy rule as `srcroot`.
+    pub assetsdir: Option<&'a Path>,
 }
 
 /// The whitelist for `env` and above — nothing else is inherited.
@@ -115,6 +122,14 @@ pub fn whitelist(spec: &EnvSpec) -> Vec<(String, String)> {
     v.push(("NAWA_JOBS".into(), spec.jobs.to_string()));
     v.push(("NAWA_SRCDIR".into(), spec.srcdir.display().to_string()));
     v.push(("NAWA_PKGDIR".into(), spec.pkgdir.display().to_string()));
+    // new-schema names join the whitelist only when the recipe enables
+    // them (§4.3/§5.3): a legacy recipe's whitelist is unchanged
+    if let Some(p) = spec.srcroot {
+        v.push(("NAWA_SRCROOT".into(), p.display().to_string()));
+    }
+    if let Some(p) = spec.assetsdir {
+        v.push(("NAWA_ASSETSDIR".into(), p.display().to_string()));
+    }
     v.sort_by(|a, b| a.0.cmp(&b.0));
     v
 }
@@ -188,6 +203,8 @@ mod tests {
             pkgdir: Path::new(SANDBOX_PKG),
             home: SANDBOX_HOME,
             source_date_epoch: 1_700_000_000,
+            srcroot: None,
+            assetsdir: None,
         };
         let env = whitelist(&spec);
         let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
@@ -211,6 +228,58 @@ mod tests {
         assert_eq!(get("NAWA_JOBS"), "8");
         assert_eq!(get("SOURCE_DATE_EPOCH"), "1700000000");
         assert_eq!(get("CFLAGS"), "-O2 -pipe");
+    }
+
+    /// The two new-schema names join the whitelist only when the recipe
+    /// enables them — and then extend, never replace, today's set.
+    #[test]
+    fn whitelist_gains_srcroot_and_assetsdir_only_when_enabled() {
+        let profile = profile();
+        let mk = |srcroot: Option<&Path>, assetsdir: Option<&Path>| {
+            let spec = EnvSpec {
+                isolation: Isolation::Env,
+                profile_env: &profile,
+                jobs: 8,
+                srcdir: Path::new(SANDBOX_SRC),
+                pkgdir: Path::new(SANDBOX_PKG),
+                home: SANDBOX_HOME,
+                source_date_epoch: 1_700_000_000,
+                srcroot,
+                assetsdir,
+            };
+            whitelist(&spec)
+        };
+        // enabled: exactly the legacy set plus the two names, sorted in
+        let env = mk(Some(Path::new("/build/src/kernel")), Some(Path::new("/build/assets")));
+        let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "CFLAGS", "HOME", "LANG", "LC_ALL", "LDFLAGS", "NAWA_ASSETSDIR", "NAWA_JOBS",
+                "NAWA_PKGDIR", "NAWA_SRCDIR", "NAWA_SRCROOT", "PATH", "SHELL",
+                "SOURCE_DATE_EPOCH", "TMPDIR", "TZ",
+            ],
+            "new-schema whitelist = legacy set + NAWA_SRCROOT + NAWA_ASSETSDIR"
+        );
+        let get = |k: &str| {
+            env.iter().find(|(ek, _)| *ek == k).map(|(_, v)| v.clone()).unwrap()
+        };
+        assert_eq!(get("NAWA_SRCROOT"), "/build/src/kernel");
+        assert_eq!(get("NAWA_ASSETSDIR"), "/build/assets");
+        // each name alone is possible (sources-only or assets-only recipe)
+        for (srcroot, assetsdir) in
+            [(Some(Path::new("/r")), None), (None, Some(Path::new("/a")))]
+        {
+            let keys: Vec<String> = mk(srcroot, assetsdir).into_iter().map(|(k, _)| k).collect();
+            assert!(
+                keys.iter().any(|k| k == "NAWA_SRCROOT") == srcroot.is_some(),
+                "NAWA_SRCROOT presence must follow the field"
+            );
+            assert!(
+                keys.iter().any(|k| k == "NAWA_ASSETSDIR") == assetsdir.is_some(),
+                "NAWA_ASSETSDIR presence must follow the field"
+            );
+        }
     }
 
     #[test]

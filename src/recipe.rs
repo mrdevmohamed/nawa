@@ -130,6 +130,17 @@ pub struct ExpandCtx {
     pub pkgdir: PathBuf,
     pub srcdir: PathBuf,
     pub arch: String,
+    /// `%{srcroot}` / `NAWA_SRCROOT` — the source workspace root, the parent
+    /// of the working directory, where additional `[[package.sources]]`
+    /// land (fetch-phase.md §4.3). Set only for new-schema recipes; `None`
+    /// keeps legacy recipes' environment byte-for-byte unchanged.
+    #[allow(dead_code)] // consumed when %{srcroot} expansion lands (Phase 1)
+    pub srcroot: Option<PathBuf>,
+    /// `%{assetsdir}` / `NAWA_ASSETSDIR` — the read-only snapshot of the
+    /// recipe-declared `[assets]` files (fetch-phase.md §5.3). Same rule
+    /// as above: legacy recipes never see the name.
+    #[allow(dead_code)] // consumed when %{assetsdir} expansion lands (Phase 2)
+    pub assetsdir: Option<PathBuf>,
 }
 
 impl Recipe {
@@ -408,6 +419,8 @@ mod tests {
             pkgdir: PathBuf::from("/tmp/pkg"),
             srcdir: PathBuf::from("/tmp/src"),
             arch: "x86_64".into(),
+            srcroot: None,
+            assetsdir: None,
         };
         let out = rec.expand("make -j%{jobs} DESTDIR=%{pkgdir}", &ctx);
         assert_eq!(out, "make -j8 DESTDIR=/tmp/pkg");

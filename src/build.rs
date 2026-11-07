@@ -140,6 +140,9 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
         pkgdir: pkg.clone(),
         srcdir: src.clone(),
         arch: rec.arch(),
+        // new-schema fields (§4.3/§5.3); wired up with the sources schema
+        srcroot: None,
+        assetsdir: None,
     };
 
     let source = &rec.package.source;
@@ -356,6 +359,10 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
             pkgdir: &view_pkg,
             home: &home,
             source_date_epoch: sde,
+            // new-schema names (§4.3/§5.3); joined to the whitelist only
+            // when the recipe enables them
+            srcroot: None,
+            assetsdir: None,
         };
         (buildenv::whitelist(&spec_env), opts.isolation.script_prefix())
     } else {
@@ -368,6 +375,8 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
         pkgdir: view_pkg.clone(),
         srcdir: view_src.clone(),
         arch: rec.arch(),
+        srcroot: None,
+        assetsdir: None,
     };
     let arch = rec.arch();
     let sandbox_cfg = if sandboxed {
