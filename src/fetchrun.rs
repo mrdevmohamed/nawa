@@ -648,57 +648,44 @@ fn cargo_version_query(r: &FetchRun, plan: &CargoPlan) -> Result<String> {
     let timeout_secs = fetch_timeout_secs()?;
     let label = "fetch-cargo-version";
     let out_dir = r.work.join("fetch").join("verq");
-    std::fs::create_dir_all(&out_dir)
-        .with_context(|| format!("create {}", out_dir.display()))?;
+    std::fs::create_dir_all(&out_dir).with_context(|| format!("create {}", out_dir.display()))?;
     let out_host = out_dir.join("version");
-    let script = format!("exec 2>&1\n{CARGO_VERSION_SCRIPT}");
-
-    let mut child = if r.sandboxed {
-        let base = r.build_inside.trim_end_matches('/');
-        let env = [
-            cargo_fetch_base_env(&format!("{base}/home")),
-            vec![(
-                "NAWA_CARGO_VER_OUT".into(),
-                format!("{base}/fetch-out/version"),
-            )],
-        ]
-        .concat();
-        spawn_fetch_child(r, &script, env, &plan.dir, Some(&out_dir), timeout_secs)?
-    } else {
-        let home_host = r.work.join("sb").join("home");
-        std::fs::create_dir_all(&home_host)
-            .with_context(|| format!("create {}", home_host.display()))?;
-        let env = [
-            cargo_fetch_base_env(&home_host.to_string_lossy()),
-            vec![(
-                "NAWA_CARGO_VER_OUT".into(),
-                out_host.to_string_lossy().into_owned(),
-            )],
-        ]
-        .concat();
-        spawn_fetch_child(r, &script, env, &plan.dir, None, timeout_secs)?
-    };
-
-    let status = stream_and_wait(&mut child, None, timeout_secs, label, !r.sandboxed)
-        .with_context(|| "the cargo --version probe failed (fetch-phase.md §11)")?;
-    if !status.success() {
-        bail!("fetch run ({label}) failed with status {status}");
-    }
-    let Ok(version) = std::fs::read_to_string(&out_host) else {
-        bail!(
-            "the cargo --version probe wrote no version file at {} — is there a \
-             runnable `cargo` on the fetch PATH? (fetch-phase.md §11)",
-            out_host.display()
-        );
-    };
-    let version = version.trim().to_string();
-    if version.is_empty() {
-        bail!(
-            "the cargo --version probe produced an empty version string \
-             (fetch-phase.md §11)"
-        );
-    }
-    Ok(version)
+    let script = format!("exec 2>&1\\n{CARGO_VERSION_SCRIPT}");
+    let (cargo_home_host, cwd_host) = isolated_cargo_paths(&out_dir)?;
+    let result = (|| -> Result<String> {
+        let mut child = if r.sandboxed {
+            let base = r.build_inside.trim_end_matches('/');
+            let env = [
+                cargo_fetch_base_env(&format!("{base}/home")),
+                vec![
+                    ("CARGO_HOME".into(), format!("{base}/fetch-out/cargo-home")),
+                    ("NAWA_CARGO_VER_OUT".into(), format!("{base}/fetch-out/version")),
+                ],
+            ].concat();
+            spawn_fetch_child(r, &script, env, &cwd_host, Some(&out_dir), timeout_secs)?
+        } else {
+            let home_host = r.work.join("sb").join("home");
+            std::fs::create_dir_all(&home_host).with_context(|| format!("create {}", home_host.display()))?;
+            let env = [
+                cargo_fetch_base_env(&home_host.to_string_lossy()),
+                vec![
+                    ("CARGO_HOME".into(), cargo_home_host.to_string_lossy().into_owned()),
+                    ("NAWA_CARGO_VER_OUT".into(), out_host.to_string_lossy().into_owned()),
+                ],
+            ].concat();
+            spawn_fetch_child(r, &script, env, &cwd_host, None, timeout_secs)?
+        };
+        let status = stream_and_wait(&mut child, None, timeout_secs, label, !r.sandboxed)
+            .with_context(|| "the cargo --version probe failed (fetch-phase.md §11)")?;
+        if !status.success() { bail!("fetch run ({label}) failed with status {status}"); }
+        let version = std::fs::read_to_string(&out_host)
+            .with_context(|| format!("the cargo --version probe wrote no version file at {}", out_host.display()))?;
+        let version = version.trim().to_string();
+        if version.is_empty() { bail!("the cargo --version probe produced an empty version string (fetch-phase.md §11)"); }
+        Ok(version)
+    })();
+    let _ = std::fs::remove_dir_all(&cwd_host);
+    result
 }
 
 /// The §8 fetch base allowlist ("from scratch, same base as §7"): the Go
