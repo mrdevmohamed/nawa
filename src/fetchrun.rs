@@ -674,7 +674,7 @@ fn cargo_version_query(r: &FetchRun, _plan: &CargoPlan) -> Result<String> {
             let env = [
                 cargo_fetch_base_env(&format!("{base}/home")),
                 vec![
-                    ("CARGO_HOME".into(), format!("{base}/fetch-out/cargo-home")),
+                    ("CARGO_HOME".into(), format!("{base}/fetch-out")),
                     ("NAWA_CARGO_VER_OUT".into(), format!("{base}/fetch-out/version")),
                 ],
             ].concat();
