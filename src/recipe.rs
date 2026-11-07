@@ -15,6 +15,12 @@ pub struct Recipe {
     /// `[[package.sources]]`.
     #[serde(default)]
     pub assets: AssetSpec,
+    /// Recipe-local ecosystem fetch declarations (fetch-phase.md §7–§9).
+    /// A top-level table (`[fetch.go]` / `[fetch.cargo]`); any use makes the
+    /// recipe a new-schema recipe whose `package.source` must carry the
+    /// schema marker (§19).
+    #[serde(default)]
+    pub fetch: Fetch,
     #[serde(default)]
     pub depends: Depends,
     #[serde(default)]
@@ -146,6 +152,54 @@ pub struct AssetSpec {
     #[serde(default)]
     pub include: Vec<String>,
 }
+
+/// Ecosystem fetch declarations (fetch-phase.md §7–§9): `[fetch.go]` and/or
+/// `[fetch.cargo]` declare the directory whose `go.mod`/`Cargo.toml` Nawa
+/// runs the ecosystem fetch for. A top-level table like `[sandbox]`; any use
+/// makes the recipe a new-schema recipe whose `package.source` must carry
+/// the schema marker (§19). `deny_unknown_fields`: `[fetch.cago]` is a
+/// parse-time error (§9).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Fetch {
+    #[serde(default)]
+    pub go: Option<FetchSpec>,
+    #[serde(default)]
+    pub cargo: Option<FetchSpec>,
+}
+
+impl Fetch {
+    /// Whether the recipe declares any fetch backend.
+    pub fn any(&self) -> bool {
+        self.go.is_some() || self.cargo.is_some()
+    }
+}
+
+/// One backend declaration (`[fetch.go]` / `[fetch.cargo]`, §9).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FetchSpec {
+    /// The workspace-relative directory holding `go.mod`/`go.sum` (or
+    /// `Cargo.toml`/`Cargo.lock`). Defaults to the workspace root (`.`).
+    /// Never absolute, never borrowing `..` — parsed like `into`/`workdir`.
+    #[serde(default = "default_fetch_dir")]
+    pub dir: String,
+}
+
+fn default_fetch_dir() -> String {
+    ".".to_string()
+}
+
+/// Implicit package providing the Go toolchain, added by `[fetch.go]`
+/// (fetch-phase.md §9). The toolchain names live here in **one** place and
+/// must be verified against faseela-repo before release; this tree does not
+/// contain them.
+pub const GO_TOOLCHAIN: &str = "go";
+/// Implicit package providing the Rust toolchain, added by `[fetch.cargo]`.
+pub const CARGO_TOOLCHAIN: &str = "rust";
+/// The closure must provide a CA bundle for the fetch toolchain's TLS (§9);
+/// the name must be verified against faseela-repo before release.
+pub const CA_BUNDLE: &str = "ca-certificates";
 
 fn default_rel() -> u32 {
     1
@@ -370,6 +424,25 @@ impl Recipe {
                 })?;
             }
         }
+        // fetch.go / fetch.cargo (§9): `dir` is parsed like
+        // `into`/`workdir`, and the toolchain recipes themselves must not
+        // declare their own table (an implicit self-dependency).
+        for (table, spec, toolchain, eco) in [
+            ("[fetch.go]", self.fetch.go.as_ref(), GO_TOOLCHAIN, "go"),
+            ("[fetch.cargo]", self.fetch.cargo.as_ref(), CARGO_TOOLCHAIN, "cargo"),
+        ] {
+            let Some(spec) = spec else { continue };
+            check_rel_path(&format!("{table} dir"), &spec.dir).with_context(|| {
+                format!("recipe {}", self.package.name)
+            })?;
+            if self.package.name == toolchain {
+                bail!(
+                    "recipe {} is the {eco} toolchain package and must not declare \
+                     {table} — the table would depend on itself (fetch-phase.md §9)",
+                    self.package.name
+                );
+            }
+        }
         if !self.package.mirrors.is_empty() {
             let src = self.package.source.as_str();
             if src.is_empty() || src.starts_with("local:") {
@@ -408,13 +481,15 @@ impl Recipe {
     }
 
     /// Whether the recipe uses new-schema tables (fetch-phase.md §4, §19).
-    /// In this revision: `[[package.sources]]` and `[assets]` (`[fetch.*]`
-    /// comes with the ecosystem phases). On a new-schema recipe
+    /// In this revision: `[[package.sources]]`, `[assets]` and `[fetch.*]`.
+    /// On a new-schema recipe
     /// `package.source` carries [`SCHEMA_MARKER`], `[[package.sources]]`
     /// takes the staging engine in `sources.rs` instead of the legacy path,
     /// and `[assets]` takes `assets.rs`.
     pub fn is_new_schema(&self) -> bool {
-        !self.package.sources.is_empty() || !self.assets.include.is_empty()
+        !self.package.sources.is_empty()
+            || !self.assets.include.is_empty()
+            || self.fetch.any()
     }
 
     /// §14C: `%{srcroot}` / `NAWA_SRCROOT` and `%{assetsdir}` /
@@ -466,9 +541,25 @@ impl Recipe {
     /// this one method, so an implicit dependency becomes visible everywhere
     /// at once instead of only in the build root.
     pub fn build_deps(&self) -> Vec<String> {
-        // implicit fetch toolchains are appended here when the new schema
-        // lands; until then this is exactly the declared list
-        self.depends.build.clone()
+        let mut v = self.depends.build.clone();
+        let push = |name: &str, v: &mut Vec<String>| {
+            if !v.iter().any(|d| d == name) {
+                v.push(name.to_string());
+            }
+        };
+        // `[fetch.go]`/`[fetch.cargo]` imply their toolchain package; a
+        // fetch table implies TLS support in the closure (§9). Declared
+        // entries win — a recipe may already list the toolchain itself.
+        if self.fetch.go.is_some() {
+            push(GO_TOOLCHAIN, &mut v);
+        }
+        if self.fetch.cargo.is_some() {
+            push(CARGO_TOOLCHAIN, &mut v);
+        }
+        if self.fetch.any() {
+            push(CA_BUNDLE, &mut v);
+        }
+        v
     }
 
     /// Expand placeholders inside a build/hook script.
@@ -680,6 +771,127 @@ mod tests {
         let with = SAMPLE.replace("build = []", "build = [\"zlib\"]");
         let rec: Recipe = toml::from_str(&with).unwrap();
         assert_eq!(rec.build_deps(), vec!["zlib".to_string()]);
+    }
+
+    /// A minimal new-schema recipe with the given extra table text. The
+    /// sha256 is exactly 64 lowercase hex characters (parse-time checked).
+    fn new_schema_with_fetch(table: &str, name: &str) -> Recipe {
+        toml::from_str(&format!(
+            r#"
+            [package]
+            name = "{name}"
+            version = "1.0"
+            rel = 1
+            arch = ["x86_64"]
+            summary = "t"
+            license = ["MIT"]
+            source = "{marker}"
+            source_date_epoch = 1
+
+            [[package.sources]]
+            name = "src"
+            url = "https://example/src.tar"
+            sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            {table}
+            "#,
+            marker = SCHEMA_MARKER,
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn fetch_table_is_new_schema_and_implies_toolchain_deps() {
+        let rec = new_schema_with_fetch("[fetch.go]\ndir = \"cmd/server\"", "hello");
+        assert!(rec.is_new_schema());
+        assert_eq!(rec.fetch.go.as_ref().unwrap().dir, "cmd/server");
+        let deps = rec.build_deps();
+        assert!(
+            deps.iter().any(|d| d == GO_TOOLCHAIN),
+            "[fetch.go] implies the Go toolchain (§9)"
+        );
+        assert!(deps.iter().any(|d| d == CA_BUNDLE));
+        // both tables in one recipe (§9)
+        let both = new_schema_with_fetch("[fetch.go]\n\n[fetch.cargo]\ndir = \"lib\"", "both");
+        let deps = both.build_deps();
+        assert!(deps.iter().any(|d| d == CARGO_TOOLCHAIN));
+        assert!(deps.iter().any(|d| d == GO_TOOLCHAIN));
+        // implicit deps dedup against the declared list
+        let rec = new_schema_with_fetch(
+            &format!("[fetch.go]\n\n[depends]\nbuild = [\"{GO_TOOLCHAIN}\"]\n"),
+            "dedup",
+        );
+        assert_eq!(
+            rec.build_deps().iter().filter(|d| **d == GO_TOOLCHAIN).count(),
+            1,
+            "a declared toolchain dep must not be duplicated"
+        );
+    }
+
+    #[test]
+    fn fetch_dir_is_parsed_like_into_and_workdir() {
+        for bad in ["../x", "/abs", "trailing/"] {
+            let rec = new_schema_with_fetch(&format!("[fetch.go]\ndir = \"{bad}\""), "dir");
+            // to_string() shows only the "recipe X" context; the debug form
+            // carries the caused-by chain with the real message
+            let err = format!("{:?}", rec.validate().unwrap_err());
+            assert!(
+                err.contains("fetch"),
+                "`{bad}` must be rejected as a fetch dir, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn fetch_unknown_keys_and_tables_are_parse_errors() {
+        let err = toml::from_str::<Recipe>(
+            r#"
+            [package]
+            name = "x"
+            version = "1"
+            rel = 1
+            source = "https://e/x.tar"
+            sha256 = "1"
+            [fetch.cago]
+            dir = "."
+        "#,
+        )
+        .expect_err("[fetch.cago] must be a parse-time error (§9)");
+        assert!(err.to_string().contains("cago"), "got: {err}");
+        let err = toml::from_str::<Recipe>(
+            r#"
+            [package]
+            name = "x"
+            version = "1"
+            rel = 1
+            source = "https://e/x.tar"
+            sha256 = "1"
+            [fetch.go]
+            dr = "."
+        "#,
+        )
+        .expect_err("unknown key under [fetch.go] must be a parse error");
+        assert!(err.to_string().contains("dr"), "got: {err}");
+    }
+
+    #[test]
+    fn toolchain_recipes_must_not_declare_their_own_table() {
+        let rec = new_schema_with_fetch("[fetch.cargo]\ndir = \".\"", "rust");
+        let err = rec.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("self-dependency") || err.contains("itself"),
+            "the Rust toolchain must not declare [fetch.cargo], got: {err}"
+        );
+        let rec = new_schema_with_fetch("[fetch.go]\ndir = \".\"", "go");
+        assert!(rec.validate().is_err(), "[fetch.go] in the Go toolchain recipe");
+    }
+
+    #[test]
+    fn fetch_defaults_dir_to_the_workspace_root() {
+        let rec = new_schema_with_fetch("[fetch.go]\n[fetch.cargo]\ndir = \"lib\"", "def");
+        let go = rec.fetch.go.as_ref().unwrap();
+        assert_eq!(go.dir, ".");
+        let cargo = rec.fetch.cargo.as_ref().unwrap();
+        assert_eq!(cargo.dir, "lib");
     }
 
     #[test]

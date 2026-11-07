@@ -100,6 +100,11 @@ pub struct EnvSpec<'a> {
     /// `NAWA_ASSETSDIR` for recipes that declare `[assets]`
     /// (fetch-phase.md §5.3). Same legacy rule as `srcroot`.
     pub assetsdir: Option<&'a Path>,
+    /// Extra whitelist entries a recipe's `[fetch.*]` tables require
+    /// (fetch-phase.md §7: GOMODCACHE, GOPROXY=off, GOFLAGS, GOTOOLCHAIN,
+    /// GOWORK, GOCACHE; §8 adds the Cargo names). Empty for every legacy
+    /// recipe, so the whitelist stays exactly today's set for them.
+    pub fetch_env: Vec<(String, String)>,
 }
 
 /// The whitelist for `env` and above — nothing else is inherited.
@@ -130,6 +135,9 @@ pub fn whitelist(spec: &EnvSpec) -> Vec<(String, String)> {
     if let Some(p) = spec.assetsdir {
         v.push(("NAWA_ASSETSDIR".into(), p.display().to_string()));
     }
+    // [fetch.*] whitelist additions (§7): joined only when the backend is
+    // declared; the paths they carry are already in the frame the build sees
+    v.extend(spec.fetch_env.iter().cloned());
     v.sort_by(|a, b| a.0.cmp(&b.0));
     v
 }
@@ -255,6 +263,7 @@ mod tests {
             source_date_epoch: 1_700_000_000,
             srcroot: None,
             assetsdir: None,
+            fetch_env: Vec::new(),
         };
         let env = whitelist(&spec);
         let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
@@ -285,7 +294,7 @@ mod tests {
     #[test]
     fn whitelist_gains_srcroot_and_assetsdir_only_when_enabled() {
         let profile = profile();
-        let mk = |srcroot: Option<&Path>, assetsdir: Option<&Path>| {
+        let mk = |srcroot: Option<&Path>, assetsdir: Option<&Path>, fetch_env: &[(String, String)]| {
             let spec = EnvSpec {
                 isolation: Isolation::Env,
                 profile_env: &profile,
@@ -296,31 +305,38 @@ mod tests {
                 source_date_epoch: 1_700_000_000,
                 srcroot,
                 assetsdir,
+                fetch_env: fetch_env.to_vec(),
             };
             whitelist(&spec)
         };
         // enabled: exactly the legacy set plus the two names, sorted in
-        let env = mk(Some(Path::new("/build/src/kernel")), Some(Path::new("/build/assets")));
+        let env = mk(
+            Some(Path::new("/build/src/kernel")),
+            Some(Path::new("/build/assets")),
+            &[("GOMODCACHE".to_string(), "/build/fetch/go".to_string())],
+        );
         let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(
             keys,
             vec![
-                "CFLAGS", "HOME", "LANG", "LC_ALL", "LDFLAGS", "NAWA_ASSETSDIR", "NAWA_JOBS",
-                "NAWA_PKGDIR", "NAWA_SRCDIR", "NAWA_SRCROOT", "PATH", "SHELL",
+                "CFLAGS", "GOMODCACHE", "HOME", "LANG", "LC_ALL", "LDFLAGS", "NAWA_ASSETSDIR",
+                "NAWA_JOBS", "NAWA_PKGDIR", "NAWA_SRCDIR", "NAWA_SRCROOT", "PATH", "SHELL",
                 "SOURCE_DATE_EPOCH", "TMPDIR", "TZ",
             ],
-            "new-schema whitelist = legacy set + NAWA_SRCROOT + NAWA_ASSETSDIR"
+            "new-schema whitelist = legacy set + NAWA_SRCROOT + NAWA_ASSETSDIR + [fetch] env"
         );
         let get = |k: &str| {
             env.iter().find(|(ek, _)| *ek == k).map(|(_, v)| v.clone()).unwrap()
         };
         assert_eq!(get("NAWA_SRCROOT"), "/build/src/kernel");
         assert_eq!(get("NAWA_ASSETSDIR"), "/build/assets");
+        assert_eq!(get("GOMODCACHE"), "/build/fetch/go");
         // each name alone is possible (sources-only or assets-only recipe)
         for (srcroot, assetsdir) in
             [(Some(Path::new("/r")), None), (None, Some(Path::new("/a")))]
         {
-            let keys: Vec<String> = mk(srcroot, assetsdir).into_iter().map(|(k, _)| k).collect();
+            let keys: Vec<String> =
+                mk(srcroot, assetsdir, &[]).into_iter().map(|(k, _)| k).collect();
             assert!(
                 keys.iter().any(|k| k == "NAWA_SRCROOT") == srcroot.is_some(),
                 "NAWA_SRCROOT presence must follow the field"
@@ -329,7 +345,49 @@ mod tests {
                 keys.iter().any(|k| k == "NAWA_ASSETSDIR") == assetsdir.is_some(),
                 "NAWA_ASSETSDIR presence must follow the field"
             );
+            // fetch entries are absent without them — legacy recipes keep
+            // exactly today's whitelist (§16 backward compatibility 3)
+            assert!(
+                !keys.iter().any(|k| k == "GOMODCACHE"),
+                "a legacy whitelist must not gain Go names"
+            );
         }
+    }
+
+    /// The `[fetch.*]` whitelist extensions (fetch-phase.md §7): they ride
+    /// the same allowlist — nothing Go-related is inherited from nawa's own
+    /// environment.
+    #[test]
+    fn fetch_env_joins_the_whitelist_only_when_present() {
+        let profile = profile();
+        let base = |fetch_env: Vec<(String, String)>| {
+            let spec = EnvSpec {
+                isolation: Isolation::Env,
+                profile_env: &profile,
+                jobs: 8,
+                srcdir: Path::new(SANDBOX_SRC),
+                pkgdir: Path::new(SANDBOX_PKG),
+                home: SANDBOX_HOME,
+                source_date_epoch: 1_700_000_000,
+                srcroot: None,
+                assetsdir: None,
+                fetch_env,
+            };
+            whitelist(&spec)
+        };
+        let env = base(Vec::new());
+        assert!(
+            !env.iter().any(|(k, _)| k == "GOMODCACHE" || k == "GOCACHE"),
+            "an empty fetch table must not add build-time env"
+        );
+        let env = base(vec![
+            ("GOMODCACHE".into(), "/build/fetch/go".into()),
+            ("GOCACHE".into(), "/build/home/gocache".into()),
+        ]);
+        let get = |k: &str| env.iter().find(|(ek, _)| *ek == k).map(|(_, v)| v.clone()).unwrap();
+        assert_eq!(get("GOMODCACHE"), "/build/fetch/go");
+        assert_eq!(get("GOCACHE"), "/build/home/gocache");
+        assert_eq!(env.len(), 15, "two extra keys, rest identical to legacy");
     }
 
     #[test]

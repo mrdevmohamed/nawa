@@ -555,14 +555,17 @@ pub fn digest_cache_dir(src_cache: &Path) -> PathBuf {
 
 /// Hold-open lock file: closing the descriptor (on drop or process exit)
 /// releases the `flock`, the way `lock.rs` does it.
-struct CacheLock {
+pub(crate) struct CacheLock {
     _file: File,
 }
 
 /// Take the advisory exclusive `flock` for one digest. Waiting (not
 /// `try_*`): a concurrent build is *publishing* the entry we want, so
 /// waiting is the fast path and a timeout cannot be reported by flock.
-fn lock_digest_entry(path: &Path) -> Result<CacheLock> {
+///
+/// Shared with `fetchrun.rs` (§11): the ecosystem cache entries use the
+/// same hold-open `flock` discipline on `<key>.lock`.
+pub(crate) fn lock_digest_entry(path: &Path) -> Result<CacheLock> {
     use rustix::fs::{flock, FlockOperation};
     let file = OpenOptions::new()
         .create(true)

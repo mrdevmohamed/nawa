@@ -447,6 +447,40 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
         });
     }
 
+    // ---- ecosystem fetch (fetch-phase.md §7, §11, §12) --------------------
+    // Runs after the closure assembly (the fetch sandbox reuses the same
+    // build root: the toolchain lives in it) and before the build
+    // environment is computed (the whitelist and the sandbox spec need the
+    // per-build fetch view paths).
+    let fetch_env: Vec<(String, String)> = if rec.fetch.any() {
+        let srccache = std::env::var_os("NAWA_SRCCACHE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| builddir.join("distfiles"));
+        // GOCACHE lives "under the HOME scratch" (§7): inside the sandbox
+        // that is the mounted per-build home; at `env` the build runs on
+        // the host and sees host paths (like NAWA_SRCDIR), so the scratch
+        // is the real workspace one.
+        let whitelist_home = if sandboxed {
+            format!("{}/home", sandbox_base.trim_end_matches('/'))
+        } else {
+            work.join("sb").join("home").to_string_lossy().into_owned()
+        };
+        let fr = crate::fetchrun::FetchRun {
+            rec,
+            opts,
+            work: &work,
+            src: &src,
+            srccache: &srccache,
+            sandboxed,
+            build_inside: &sandbox_base,
+            whitelist_home: &whitelist_home,
+            assembled: assembled.as_ref(),
+        };
+        crate::fetchrun::run(&fr)?
+    } else {
+        Vec::new()
+    };
+
     // ---- environment ------------------------------------------------------
     let (env_vars, env_prefix) = if opts.isolation >= Isolation::Env {
         let home = if sandboxed {
@@ -473,6 +507,9 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
             // when the recipe enables them
             srcroot: spec_srcroot.as_deref(),
             assetsdir: spec_assetsdir.as_deref(),
+            // [fetch.*] whitelist additions (§7): paths already phrased in
+            // the build's frame by the fetch runner
+            fetch_env: fetch_env.clone(),
         };
         (buildenv::whitelist(&spec_env), opts.isolation.script_prefix())
     } else {
@@ -597,11 +634,19 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
             rundeps: &rec.depends.run,
             sonames: &sonames,
             host_builddir: host_builddir.as_deref(),
-            // §5.3: the staged snapshot is /build/assets inside the sandbox
-            extra_leak_paths: if staged_assets.is_some() {
-                vec!["/build/assets"]
-            } else {
-                Vec::new()
+            // §5.3/§6: the staged snapshot and the per-build fetch views
+            // are <build_inside>/assets and <build_inside>/fetch/… inside
+            // the sandbox; recipes that enable them must not leak those
+            // paths into the archive
+            extra_leak_paths: {
+                let mut leaks: Vec<&'static str> = Vec::new();
+                if staged_assets.is_some() {
+                    leaks.push("/build/assets");
+                }
+                if rec.fetch.any() {
+                    leaks.push("/build/fetch");
+                }
+                leaks
             },
         };
         let rep = crate::lint::run(&ctx);
@@ -844,12 +889,19 @@ fn build_id_for(
         pairs.sort();
         pairs.join(",")
     };
-    // §10.3 extras, in the pinned order (assets, then the later fetch
-    // backends): only appended when the table exists, so legacy ids are
-    // identical by construction
-    let extras: Vec<(&str, &str)> = asset_digest
+    // §10.3 extras, in the pinned order (assets, then the fetch backends):
+    // only appended when the table exists, so legacy ids are identical by
+    // construction. The fetch extras are per-backend schema *constants* —
+    // the id stays computable before any download (no lockfile bytes in it).
+    let mut extras: Vec<(&str, &str)> = asset_digest
         .map(|d| vec![("assets", d)])
         .unwrap_or_default();
+    if rec.fetch.go.is_some() {
+        extras.push(("fetch-go", crate::fetchrun::FETCH_GO_SCHEMA_VERSION));
+    }
+    if rec.fetch.cargo.is_some() {
+        extras.push(("fetch-cargo", crate::fetchrun::FETCH_CARGO_SCHEMA_VERSION));
+    }
     if extras.is_empty() {
         crate::lint::build_id(
             rec.raw.as_bytes(),
@@ -866,6 +918,20 @@ fn build_id_for(
             &extras,
         )
     }
+}
+
+/// The per-build fetch views the recipe's `[fetch.*]` tables bring into
+/// the sandbox as writable extra binds (§8/§11): `<work>/fetch/<eco>` →
+/// `<build_inside>/fetch/<eco>`, in ecosystem-table order for determinism.
+fn fetch_ecosystems(rec: &Recipe) -> Vec<&'static str> {
+    let mut v: Vec<&'static str> = Vec::new();
+    if rec.fetch.go.is_some() {
+        v.push("go");
+    }
+    if rec.fetch.cargo.is_some() {
+        v.push("cargo");
+    }
+    v
 }
 
 /// `<out>/<archive>.buildid` — the sidecar `--use-cache` compares against.
@@ -1178,16 +1244,29 @@ fn prepare_sandbox(
         // §5.3: scripts see the snapshot at <build_inside>/assets — the
         // same dir NAWA_ASSETSDIR/%{assetsdir} name. `<work>/assets` was
         // filled by assets::snapshot before the sandbox is prepared, so
-        // the O_PATH handles resolve.
-        extra_binds: if rec.assets.include.is_empty() {
-            Vec::new()
-        } else {
-            vec![crate::sandbox::spec::ExtraBind {
-                host: work.join("assets").to_string_lossy().into_owned(),
-                inside: format!("{}/assets", build_inside),
-                readonly: true,
-                kind: "dir".into(),
-            }]
+        // the O_PATH handles resolve. §8/§11: the per-build fetch views
+        // join as writable binds at <build_inside>/fetch/<eco> — the same
+        // dirs NAWA_GOMODCACHE/… name (created by the fetch step before
+        // the sandbox is prepared, vendored recipes included).
+        extra_binds: {
+            let mut binds: Vec<crate::sandbox::spec::ExtraBind> = Vec::new();
+            if !rec.assets.include.is_empty() {
+                binds.push(crate::sandbox::spec::ExtraBind {
+                    host: work.join("assets").to_string_lossy().into_owned(),
+                    inside: format!("{}/assets", build_inside),
+                    readonly: true,
+                    kind: "dir".into(),
+                });
+            }
+            for eco in fetch_ecosystems(rec) {
+                binds.push(crate::sandbox::spec::ExtraBind {
+                    host: work.join("fetch").join(eco).to_string_lossy().into_owned(),
+                    inside: format!("{}/fetch/{eco}", build_inside),
+                    readonly: false,
+                    kind: "dir".into(),
+                });
+            }
+            binds
         },
         strict_readonly_root: false,
         writable_paths: Vec::new(),

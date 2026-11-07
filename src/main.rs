@@ -15,6 +15,7 @@ mod confirm;
 mod db;
 mod deps;
 mod fetch;
+mod fetchrun;
 mod groups;
 mod humanize;
 mod install;
