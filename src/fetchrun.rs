@@ -651,7 +651,7 @@ fn cargo_version_query(r: &FetchRun, plan: &CargoPlan) -> Result<String> {
     std::fs::create_dir_all(&out_dir).with_context(|| format!("create {}", out_dir.display()))?;
     std::fs::set_permissions(&out_dir, std::fs::Permissions::from_mode(0o777))?;
     let out_host = out_dir.join("version");
-    let script = format!("exec 2>&1\\n{CARGO_VERSION_SCRIPT}");
+    let script = format!("exec 2>&1\n{CARGO_VERSION_SCRIPT}");
     let (cargo_home_host, cwd_host) = isolated_cargo_paths(&out_dir)?;
     let result = (|| -> Result<String> {
         let mut child = if r.sandboxed {
