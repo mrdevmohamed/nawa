@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — fix sandbox device staging mounts
+
+- Keep the temporary bind mounts under the sandbox build scratch `devnodes/`
+  writable, just like their final `/dev/*` mounts. They are device interfaces,
+  not ordinary build-root files; strict read-only setup must not try to remount
+  them read-only. Add a regression test for staged device paths and nearby
+  paths that must remain subject to normal read-only handling.
+
 ## Unreleased — build: remove checked-in Cargo vendor tree
 
 - Remove `vendor/`, the Cargo source-replacement config, and the obsolete
