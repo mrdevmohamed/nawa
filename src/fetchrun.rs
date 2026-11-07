@@ -266,12 +266,12 @@ use std::os::unix::fs::PermissionsExt;
 /// in a 0777 sibling temporary directory, validate, mark, rename (§11/§12).
 fn ensure_go_entry(r: &FetchRun, plan: &GoPlan, key: &str) -> Result<()> {
     let cache = go_cache_dir(r, "go");
-    std::fs::create_dir_all(&cache)
-        .with_context(|| format!("create the Go fetch cache {}", cache.display()))?;
     let entry = cache.join(key);
     if entry_complete(&entry) {
         return Ok(());
     }
+    // the offline guard comes before anything is created: a miss offline
+    // must name the entry and touch nothing (§12)
     if crate::fetch::offline() {
         bail!(
             "offline: the Go module cache entry is not populated: {} — run a \
@@ -279,6 +279,8 @@ fn ensure_go_entry(r: &FetchRun, plan: &GoPlan, key: &str) -> Result<()> {
             entry.display()
         );
     }
+    std::fs::create_dir_all(&cache)
+        .with_context(|| format!("create the Go fetch cache {}", cache.display()))?;
     let lock_path = cache.join(format!("{key}.lock"));
     let _guard = crate::fetch::lock_digest_entry(&lock_path)?;
     // runner-up recheck: the other build may have published while we waited
@@ -663,8 +665,9 @@ fn copy_into_view(entry: &Path, view: &Path) -> Result<()> {
                 .with_context(|| format!("copy {} -> {}", e.path().display(), dst.display()))?;
             let md = std::fs::symlink_metadata(e.path())?;
             let mode = md.permissions().mode() & 0o7777;
-            // strip the read-only bits the publication stamped on
-            let want = if mode & 0o111 != 0 { mode | 0o222 | 0o755 } else { mode | 0o222 | 0o644 };
+            // the view is normalised writable (§11: the published entry is
+            // 0444/0555): dirs and set executables 0755, plain files 0644
+            let want = if mode & 0o111 != 0 { 0o755 } else { 0o644 };
             std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(want))
                 .with_context(|| format!("mode {}", dst.display()))?;
         }
