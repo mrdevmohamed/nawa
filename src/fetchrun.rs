@@ -1175,6 +1175,7 @@ fn normalize_resolver_path(path: &Path) -> Result<PathBuf> {
 /// target is allowed: bind_at creates it after /run has been masked.
 fn resolver_target_inside(root: &Path, name: &str) -> Result<PathBuf> {
     let mut inside = PathBuf::from("/etc").join(name);
+    let mut resolved = false;
     for _ in 0..40 {
         let host_path = if root == Path::new("/") {
             inside.clone()
@@ -1191,10 +1192,13 @@ fn resolver_target_inside(root: &Path, name: &str) -> Result<PathBuf> {
                     normalize_resolver_path(&inside.parent().unwrap_or(Path::new("/")).join(target))?
                 };
             }
-            Ok(_) => break,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+            Ok(_) => { resolved = true; break; }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => { resolved = true; break; }
             Err(e) => return Err(e).with_context(|| format!("inspect resolver path {}", host_path.display())),
         }
+    }
+    if !resolved {
+        bail!("resolver symlink chain exceeds 40 links inside {}", root.display());
     }
     if root == Path::new("/") {
         if let Ok(real) = std::fs::canonicalize(&inside) {
@@ -1523,6 +1527,37 @@ mod resolver_path_tests {
         std::fs::write(root.join("etc/resolv.conf"), b"nameserver 127.0.0.1\n").unwrap();
         let inside = resolver_target_inside(&root, "resolv.conf").unwrap();
         assert_eq!(inside, PathBuf::from("/etc/resolv.conf"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+    
+    #[test]
+    fn resolver_symlink_chain_is_resolved_inside_the_supplied_root() {
+        let root = scratch();
+        std::fs::create_dir_all(root.join("run/systemd/resolve")).unwrap();
+        std::fs::write(root.join("run/systemd/resolve/resolv.conf"), b"nameserver 192.0.2.53\\n").unwrap();
+        std::os::unix::fs::symlink("/run/systemd/resolve/resolv.conf", root.join("etc/resolv.conf")).unwrap();
+        let inside = resolver_target_inside(&root, "resolv.conf").unwrap();
+        assert_eq!(inside, PathBuf::from("/run/systemd/resolve/resolv.conf"));
+        assert!(root.join(inside.strip_prefix("/").unwrap()).is_file());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolver_symlink_loop_is_rejected_instead_of_silently_accepted() {
+        let root = scratch();
+        std::os::unix::fs::symlink("hosts", root.join("etc/resolv.conf")).unwrap();
+        std::os::unix::fs::symlink("resolv.conf", root.join("etc/hosts")).unwrap();
+        let error = resolver_target_inside(&root, "resolv.conf").expect_err("symlink loop must fail");
+        assert!(error.to_string().contains("exceeds 40 links"), "{error}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolver_symlink_cannot_escape_root_with_parent_components() {
+        let root = scratch();
+        std::os::unix::fs::symlink("../../../../etc/passwd", root.join("etc/resolv.conf")).unwrap();
+        let error = resolver_target_inside(&root, "resolv.conf").expect_err("must remain inside root");
+        assert!(error.to_string().contains("escapes the sandbox root"), "{error}");
         let _ = std::fs::remove_dir_all(root);
     }
 }
