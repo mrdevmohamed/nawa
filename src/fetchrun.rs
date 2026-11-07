@@ -832,8 +832,6 @@ fn fetch_path() -> String {
     }
 }
 
-}
-
 /// Toolchain identity used by the build cache. Closure builds already hash
 /// the exact toolchain package archives in their dependency closure; other
 /// isolation modes must pin the executable versions found through the exact
