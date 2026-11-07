@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — fix: fetch-phase env lost at isolation none
+
+- At `--isolation none` (the default) the `[fetch.*]` build-time environment
+  (`CARGO_HOME`, `CARGO_NET_OFFLINE`, `GOFLAGS`, ...) was computed but dropped,
+  so an offline `cargo build` looked in the default, empty Cargo home and failed
+  with `no matching package named ...` although the fetch had succeeded. The
+  additions are now appended to the profile env at `none`. Add a regression test.
+
 ## Unreleased — fix sandbox device staging mounts
 
 - Keep the temporary bind mounts under the sandbox build scratch `devnodes/`
