@@ -32,7 +32,6 @@ pub struct MembershipRecord {
     pub packages: Vec<String>,
 }
 
-#[allow(dead_code)]
 pub fn groups_dir(root: &Path) -> PathBuf {
     root.join("var/lib/nawa/groups")
 }
@@ -74,7 +73,6 @@ pub fn save(root: &Path, record: &MembershipRecord) -> Result<()> {
 }
 
 /// Load one group's membership, when the group is installed locally.
-#[allow(dead_code)]
 pub fn load(root: &Path, group_id: &str) -> Result<Option<MembershipRecord>> {
     let path = record_path(root, group_id)?;
     if !path.exists() {
@@ -92,7 +90,6 @@ pub fn load(root: &Path, group_id: &str) -> Result<Option<MembershipRecord>> {
 
 /// Remove a membership record (the group is no longer installed). The
 /// packages themselves are removed by the group-remove plan, not here.
-#[allow(dead_code)]
 pub fn remove(root: &Path, group_id: &str) -> Result<()> {
     let path = record_path(root, group_id)?;
     if path.exists() {
@@ -103,7 +100,6 @@ pub fn remove(root: &Path, group_id: &str) -> Result<()> {
 }
 
 /// Every installed group's membership, ordered by group id.
-#[allow(dead_code)]
 pub fn load_all(root: &Path) -> Result<Vec<MembershipRecord>> {
     let dir = installed_dir(root);
     let mut out = Vec::new();
@@ -129,7 +125,6 @@ pub fn load_all(root: &Path) -> Result<Vec<MembershipRecord>> {
 
 /// Every package still owned by at least one installed group (after
 /// excluding `exclude`, used while removing one group).
-#[allow(dead_code)]
 pub fn group_owned_packages(root: &Path, exclude: Option<&str>) -> Result<BTreeSet<String>> {
     let mut out = BTreeSet::new();
     for r in load_all(root)? {

@@ -66,7 +66,6 @@ impl Isolation {
 
 /// Where `HOME` points inside a sandboxed build (bound to an empty dir);
 /// the §4.2 default when the build base is the pinned `/build`.
-#[allow(dead_code)] // referenced by the whitelist test and the docs
 pub const SANDBOX_HOME: &str = "/build/home";
 /// Where the sources live inside a sandboxed build.
 #[allow(dead_code)] // referenced by the whitelist test and the docs
