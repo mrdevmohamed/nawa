@@ -931,6 +931,7 @@ fn an_offline_cargo_miss_names_the_expected_entry() {
 
 #[test]
 fn inherited_cargo_home_config_is_ignored_by_fetch()
+{
     let s = scratch("ambient-config");
     let repo = s.join("dep");
     let cargo = cargo_dir();
