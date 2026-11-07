@@ -323,6 +323,16 @@ fn run_fetch_build(
     extra_env: &[(&str, &str)],
     extra_args: &[&str],
 ) -> (String, String, bool) {
+    run_fetch_build_with_isolation(s, "env", proxy, extra_env, extra_args)
+}
+
+fn run_fetch_build_with_isolation(
+    s: &Path,
+    isolation: &str,
+    proxy: Option<&Path>,
+    extra_env: &[(&str, &str)],
+    extra_args: &[&str],
+) -> (String, String, bool) {
     let gopath = toolchain_dir();
     let out = nawa()
         .args([
@@ -332,7 +342,7 @@ fn run_fetch_build(
             s.join("build").to_str().unwrap(),
             "build",
             "--isolation",
-            "env",
+            isolation,
         ])
         .args(extra_args)
         .arg("go-b")
@@ -774,4 +784,57 @@ fn a_missing_go_sum_is_a_hard_error() {
         e.contains("go.sum"),
         "the error must name the missing lockfile:\n{e}"
     );
+}
+
+
+// ---------------------------------------------------------------------------
+// Fetch integration across the strict build-isolation modes
+// ---------------------------------------------------------------------------
+
+#[test]
+fn go_fetch_and_offline_build_work_under_sandbox_and_closure() {
+    for isolation in ["sandbox", "closure"] {
+        let s = scratch(&format!("isolation-{isolation}"));
+        let recipes = s.join("recipes");
+        let pkg = recipes.join("go-b");
+        fs::create_dir_all(&pkg).unwrap();
+
+        let proxy = s.join("proxy");
+        write_proxy_fixture(&proxy);
+        let source = fixture_tar_gz("main-1.0", &main_fixture(&[], ""));
+        let source_sha = sha256(&source);
+        let (addr, _) = route_server(vec![("/src.tar.gz", Some(source))]);
+        let gobin = toolchain_dir();
+        let install = format!(
+            "{gobin}/go build -mod=readonly -o %{{pkgdir}}/m ./... \
+             && %{{pkgdir}}/m"
+        );
+        fs::write(
+            pkg.join("recipe.toml"),
+            recipe(
+                &source_sha,
+                &install,
+                "[fetch.go]\ndir = \"m\"\n",
+            )
+            .replace("%URL%", &addr)
+            .replace("%{GO}", &gobin),
+        )
+        .unwrap();
+
+        let (out, err, ok) =
+            run_fetch_build_with_isolation(&s, isolation, Some(&proxy), &[], &[]);
+        assert!(
+            ok,
+            "Go fetch/build failed at isolation={isolation}\nstdout:\n{out}\nstderr:\n{err}"
+        );
+        assert!(
+            out.contains("hi-from-dep"),
+            "offline Go build did not resolve its pinned module at {isolation}:\n{out}\n{err}"
+        );
+        assert!(
+            s.join("build/go-b-1.0-1/fetch-go.log").is_file(),
+            "Go fetch phase did not run at isolation={isolation}"
+        );
+        let _ = fs::remove_dir_all(&s);
+    }
 }
