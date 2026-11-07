@@ -171,6 +171,56 @@ pub fn source_date_epoch(srcdir: &Path, pinned: Option<u64>) -> Result<u64> {
     Ok(newest.max(1))
 }
 
+/// The new-schema variant (fetch-phase.md §6): only **regular files** feed
+/// the epoch. Directories are ignored — merging and later child creation
+/// bump them — and symlinks/special files never carry a trustworthy mtime.
+///
+/// The caller must have already created every source in the workspace and
+/// must compute this *before* stamping `unpack = false` files (their copy
+/// carries the staging time, §6). Unlike the legacy variant this errors
+/// when the workspace has no regular file at all: with no tarball there is
+/// nothing reproducible to derive the epoch from, and the recipe must pin
+/// `package.source_date_epoch` instead.
+pub fn source_date_epoch_from_files(srcdir: &Path) -> Result<u64> {
+    let mut newest: Option<u64> = None;
+    for e in walkdir::WalkDir::new(srcdir).max_depth(usize::MAX) {
+        let e = match e {
+            Ok(e) => e,
+            // dangling symlinks have no metadata to read
+            Err(_) => continue,
+        };
+        // the workspace root itself was just created by the staging engine,
+        // never by the sources
+        if e.depth() == 0 {
+            continue;
+        }
+        let Ok(md) = e.metadata() else { continue };
+        // WalkDir without follow_links returns symlink_metadata: a symlink
+        // to a regular file does not pass the is_file test either
+        if !md.is_file() {
+            continue;
+        }
+        let mtime = md
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
+        newest = match (newest, mtime) {
+            (_, Some(m)) => Some(newest.unwrap_or(m).max(m)),
+            (n, None) => n,
+        };
+    }
+    match newest {
+        Some(t) => Ok(t.max(1)),
+        None => bail!(
+            "no regular source files under {} to derive SOURCE_DATE_EPOCH from — \
+             a recipe with no archive sources must pin package.source_date_epoch \
+             (fetch-phase.md §6)",
+            srcdir.display()
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,6 +365,42 @@ mod tests {
         let empty = d.join("empty");
         std::fs::create_dir_all(&empty).unwrap();
         assert_eq!(source_date_epoch(&empty, None).unwrap(), 1);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// §6 new-schema rules: directories and symlinks are ignored — only
+    /// regular files count — and a workspace with none is a hard error
+    /// (the recipe must pin the epoch).
+    #[test]
+    fn epoch_from_files_counts_regular_files_only() {
+        let d = std::env::temp_dir().join(format!("nawa-sdef-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("only-dirs").join("deep")).unwrap();
+        std::os::unix::fs::symlink("elsewhere", d.join("link")).unwrap();
+
+        // nothing regular: the pinned-epoch demand (§6)
+        let err = source_date_epoch_from_files(&d).unwrap_err();
+        assert!(
+            err.to_string().contains("source_date_epoch"),
+            "got: {err}"
+        );
+
+        // one regular file makes the epoch — the newest regular-file mtime
+        let f = d.join("x");
+        std::fs::write(&f, b"data").unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::File::open(&f).unwrap().set_modified(old).unwrap();
+        let newest = d.join("only-dirs").join("deep").join("f");
+        std::fs::write(&newest, b"data").unwrap();
+        let expect = newest
+            .metadata()
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!(source_date_epoch_from_files(&d).unwrap(), expect);
         let _ = std::fs::remove_dir_all(&d);
     }
 }

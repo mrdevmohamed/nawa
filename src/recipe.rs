@@ -124,7 +124,6 @@ pub struct SourceSpec {
     /// Leading archive path components to remove (default 0). Applied
     /// **before** path sanitisation and also to hard-link targets; entries
     /// with fewer components are skipped (GNU tar semantics, §4.2).
-    #[allow(dead_code)] // consumed by the strip-aware extraction (sources engine)
     #[serde(default)]
     pub strip_components: u32,
 }

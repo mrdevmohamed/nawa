@@ -31,6 +31,7 @@ mod sandbox;
 mod service;
 mod sign;
 mod slim;
+mod sources;
 mod suggest;
 mod sync;
 mod sys;

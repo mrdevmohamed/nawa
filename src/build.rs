@@ -169,7 +169,22 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
     };
 
     let source = &rec.package.source;
-    let srcdir: PathBuf = if source.is_empty() {
+    let mut staged: Option<crate::sources::SourcesStaged> = None;
+    let srcdir: PathBuf = if rec.is_new_schema() {
+        // ---- new-schema staging (fetch-phase.md §4.2, §6, §11) -----------
+        // All sources are downloaded, verified and extracted by the sources
+        // engine; the workspace is `<work>/src` and `[package] workdir`
+        // selects the section cwd through `staged.srcdir`.
+        let cache_dir = std::env::var_os("NAWA_SRCCACHE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| builddir.join("distfiles"));
+        let s = crate::sources::stage_sources(rec, &work, &src, &cache_dir, opts.jobs)?;
+        // normalise ownership/permissions for the sandbox's mapped identity
+        grant_source_write(&s.srcroot);
+        let sub_srcdir = s.srcdir.clone();
+        staged = Some(s);
+        sub_srcdir
+    } else if source.is_empty() {
         src.clone() // meta package: run scripts directly in src
     } else if let Some(local) = source.strip_prefix("local:") {
         let p = PathBuf::from(local);
@@ -233,7 +248,13 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
     };
 
     // ---- isolation prep (docs/design/build-isolation.md) -----------------
-    let sde = buildenv::source_date_epoch(&srcdir, rec.package.source_date_epoch)?;
+    // §6: new-schema recipes carry the epoch from the sources engine (the
+    // newest regular-file mtime from the archives, checked before plain
+    // files are stamped); legacy recipes keep the full-tree walk
+    let sde = match &staged {
+        Some(s) => s.source_date_epoch,
+        None => buildenv::source_date_epoch(&srcdir, rec.package.source_date_epoch)?,
+    };
     let sandboxed = opts.isolation >= Isolation::Sandbox;
 
     // the design pins /build as the inside build base (§4.2): it exists in
@@ -257,10 +278,18 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
 
     // the build sees sandbox paths for %{srcdir}/%{pkgdir}; the spec carries
     // the host paths for the bind mounts
+    // §4.3: %{srcroot} is the workspace root — the parent of the working
+    // directory; inside the sandbox the whole staging dir is bound at
+    // <base>/src, so the view of both is the same bind root
+    let view_srcroot = if sandboxed {
+        PathBuf::from(format!("{}/src", sandbox_base.trim_end_matches('/')))
+    } else {
+        src.clone()
+    };
     let view_src = if sandboxed {
         // `srcdir` is the unpacked source dir (e.g. src/m4-1.4.19); the sandbox
         // binds the whole staging dir at <base>/src, so keep the sub-path
-        let mut v = PathBuf::from(format!("{}/src", sandbox_base.trim_end_matches('/')));
+        let mut v = view_srcroot.clone();
         if let Ok(rel) = srcdir.strip_prefix(&src) {
             v.push(rel);
         }
@@ -374,6 +403,7 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
         } else {
             buildenv::SANDBOX_HOME.to_string()
         };
+        let spec_srcroot = staged.as_ref().map(|_| view_srcroot.clone());
         let spec_env = buildenv::EnvSpec {
             isolation: opts.isolation,
             profile_env: &opts.env,
@@ -384,7 +414,7 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
             source_date_epoch: sde,
             // new-schema names (§4.3/§5.3); joined to the whitelist only
             // when the recipe enables them
-            srcroot: None,
+            srcroot: spec_srcroot.as_deref(),
             assetsdir: None,
         };
         (buildenv::whitelist(&spec_env), opts.isolation.script_prefix())
@@ -398,7 +428,9 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
         pkgdir: view_pkg.clone(),
         srcdir: view_src.clone(),
         arch: rec.arch(),
-        srcroot: None,
+        // §4.3: %{srcroot} exists for new-schema recipes only — legacy
+        // expansions and environments stay byte-for-byte unchanged
+        srcroot: staged.as_ref().map(|_| view_srcroot.clone()),
         assetsdir: None,
     };
     let arch = rec.arch();
