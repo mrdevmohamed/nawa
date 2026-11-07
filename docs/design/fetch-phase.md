@@ -1,6 +1,6 @@
 # Nawa build inputs and fetch phase — design
 
-**Status:** Revision 3, implemented in this PR for delivery phases 0–5 (§16). Phase 6, the bootstrap switch (§13), is not part of it. Open decisions in §17 that the implementation has since settled have not been back-filled yet.
+**Status:** Revision 3, implemented in this PR for delivery phases 0–5 (§16). Phase 6, the bootstrap switch (§13), is not part of it. §17 records which open decisions the implementation settled and which are still open.
 **Project:** Nawa
 **Baseline:** the Nawa 1.0.0 tree (`src/recipe.rs`, `src/build.rs`, `src/buildenv.rs`, `src/sandbox/`, `src/fetch.rs`, `src/lint.rs`)
 **Review:** revision 2 was checked claim by claim against the 1.0.0 tree; every correction is listed in Appendix B
@@ -235,7 +235,7 @@ Rules for v1:
 
 ### 5.4 Trust
 
-The recipe tree is distributed as one tarball whose sha256 is in the signed repository index, and `pack_recipes` includes every file in the tree (§1.1). Assets are therefore already covered by the existing trust chain. No new signature format and no index change are needed. Consequence: assets are downloaded by every `nawa sync`, so they must stay small. `nawa recipe check` (§14) warns above 1 MiB per file or 5 MiB per recipe (proposed thresholds, adjustable). Large blobs belong in `package.sources` with their own sha256.
+The recipe tree is distributed as one tarball whose sha256 is in the signed repository index, and `pack_recipes` includes every file in the tree (§1.1). Assets are therefore already covered by the existing trust chain. No new signature format and no index change are needed. Consequence: assets are downloaded by every `nawa sync`, so they must stay small. `nawa recipe check` (§14) warns about large assets. *Implemented:* a per-file warning above 32 MiB (`ASSET_SIZE_WARN` in `src/commands/recipes.rs`) and no per-recipe total; the 1 MiB per file / 5 MiB per recipe thresholds proposed in revision 3 were not adopted, so the check is much looser than the "must stay small" intent above. Large blobs belong in `package.sources` with their own sha256.
 
 ## 6. Source workspace layout
 
@@ -278,7 +278,7 @@ GOPROXY=<proxy>                     GOSUMDB=sum.golang.org
 ~~~
 
 - `<proxy>` defaults to `https://proxy.golang.org` **without** a `,direct` fallback: `direct` would make Go run VCS tools against arbitrary hosts. `NAWA_GOPROXY` may override it and accepts `https://` or `file://` (the latter keeps tests hermetic).
-- Command: `go mod download` in `dir`.
+- Command: `go mod download && go mod verify` in `dir`. The verify step is the offline validation that gates publication (see Rules below).
 - `go.work` / `go.work.sum` in `dir` or any ancestor inside the workspace is an error (never silently ignored); `GOWORK=off` additionally keeps a workspace file from outside the tree from applying.
 
 Build-time environment (added to the whitelist only for recipes with `[fetch.go]`):
@@ -296,8 +296,8 @@ Rules:
 - Missing `go.mod` or `go.sum` is a hard error. A `go`/`toolchain` directive newer than the local toolchain fails clearly under `GOTOOLCHAIN=local`; no toolchain is ever downloaded.
 - Project sources and lockfiles are not modified.
 - After a fetch, the entry is validated offline (for example with `go mod verify`) before it is published.
-- Whether a read-only `GOMODCACHE` works for the offline build is a prototype question. The fallback is a per-build writable copy (§11).
-- The fetch run adds `-modcacherw` to `GOFLAGS`: Go otherwise makes the module cache read-only, and a failed or interrupted populate could not be removed without restoring write permission first. Nawa strips write permission from the published entry itself (§11). The prototype confirms that `go mod download` honours the flag through `GOFLAGS`. A hermetic test with a `file://` proxy sets `GOSUMDB=off`.
+- **Implemented:** the build gets a per-build writable **copy** of the published entry at `<work>/fetch/go` (never hard-linked), and `GOMODCACHE` points there. A read-only `GOMODCACHE` was not evaluated; the copy keeps the published entry pristine whatever the build does (§11).
+- The fetch run adds `-modcacherw` to `GOFLAGS`: Go otherwise makes the module cache read-only, and a failed or interrupted populate could not be removed without restoring write permission first. Nawa strips write permission from the published entry itself (§11). The fetch environment carries the flag (`GOFLAGS=-mod=readonly -modcacherw`). A hermetic test with a `file://` proxy sets `GOSUMDB=off`.
 
 ## 8. Cargo backend
 
@@ -313,7 +313,7 @@ Rules:
 - **Targets:** v1 fetches all targets of the lockfile (no `--target`). It is the simplest deterministic choice, at the cost of a larger cache. A target filter can come later.
 - **Source-tree Cargo config:** Cargo reads `.cargo/config.toml` from the working directory upwards, so a hostile or accidental config could redirect the registry. Rule: if the tree replaces `crates-io` with a `directory` source that exists in the tree, the project is vendored; skip the fetch and build as today (symmetric to Go's vendor rule). Any *other* `[source.*]`, `[registries]`, `[http]` or `[net]` setting in a source-tree config is an error in v1.
 - **Git dependencies:** pinned by commit in `Cargo.lock` but without registry checksums. They need `git` in the build root; Nawa warns at fetch time. Registry and git dependencies are tested separately.
-- **Cache mutation:** Cargo may write `.package-cache` even offline. Options, in order of preference, decided by the prototype: (1) read-only bind if Cargo tolerates it; (2) overlayfs, only where `nawa sandbox-probe overlay` passes; (3) a per-build **copy**. Never hard-link clones: a Cargo write would modify the shared cache entry.
+- **Cache mutation:** Cargo may write `.package-cache` even offline. **Implemented: option (3), a per-build copy** of the published entry at `<work>/fetch/cargo`, used as `CARGO_HOME`; Cargo's writes land in that disposable copy. Options (1) read-only bind and (2) overlayfs were not evaluated. Never hard-link clones: a Cargo write would modify the shared cache entry.
 
 ## 9. Fetch declarations and dependency resolution
 
@@ -380,7 +380,7 @@ Rules:
 
 - **Migration:** a lookup tries the new path first, then the legacy `<sha16>-<file>` path (verified against the full sha256, then copied or linked into the new path). Legacy recipes keep writing the legacy path in v1; nothing is rewritten.
 - The sha256 is validated as 64 lowercase hex before it is used as a path component.
-- **Ecosystem key:** sha256 over a versioned, unambiguous encoding (length-prefixed fields): `nawa-fetch-v1`, ecosystem, then Go: `go.mod` bytes and `go.sum` bytes; Cargo: `Cargo.lock` bytes **and the Cargo version string**. The Cargo registry directory names embed a hash that has changed between Cargo releases, so a cache from another Cargo is a miss, not a bug. The Go module cache layout is stable, so the Go key does not include the Go version (the prototype must confirm).
+- **Ecosystem key:** sha256 over a versioned, unambiguous encoding (length-prefixed fields): `nawa-fetch-v1`, ecosystem, then Go: `go.mod` bytes and `go.sum` bytes; Cargo: `Cargo.lock` bytes **and the Cargo version string**. The Cargo registry directory names embed a hash that has changed between Cargo releases, so a cache from another Cargo is a miss, not a bug. The Go module cache layout is stable, so the Go key does not include the Go version. **Implemented that way;** it has not been confirmed across Go releases, so a layout change in a future Go would need a key-version bump (`FETCH_GO_SCHEMA_VERSION`).
 - **Publication:** populate in a sibling temporary directory, validate, write a completion marker last, then `rename` atomically. A directory without the marker is never a hit.
 - **Concurrency:** an advisory `flock` on `<key>.lock` serialises fetches for the same key. The legacy downloader has no lock and every build of the same file shares one `<file>.part`; new-form source downloads take `sha256/<digest>.lock` and use a unique `.part` name, so two concurrent builds cannot corrupt each other.
 - **Immutability:** a published entry is never modified, and Nawa strips write permission from it after publication. Writable state belongs in the per-build view under `<work>/fetch/` (§8).
@@ -414,7 +414,7 @@ Rules:
 - **Mounts.** `src/` and `assets/` are bound read-only (extra binds, §5.3). Writable: `/tmp`, the existing `home` bind (the per-build scratch), and the cache entry being populated, which is an extra bind from the host directory to `<build_inside>/fetch-out`. `writable_paths` names *inside* paths, so both `home` and `<build_inside>/fetch-out` are listed there; strict mode remounts everything else read-only. When Nawa runs as root the dropped identity must be able to write the entry, so the populate directory is a private temporary with mode 0777 (the plugin sandbox does the same for its home). Before publication Nawa normalises ownership and modes and strips write permission (§11).
 - **Network.** `network = true` in the spec skips the network namespace entirely. This is an **accepted v1 risk**, stated completely: the fetch process shares the host network namespace. It can reach loopback services and the LAN, **and abstract `AF_UNIX` sockets** (D-Bus and X11 abstract sockets belong to the network namespace; the `/run` mask hides filesystem sockets only). The residual risk is bounded by: fixed commands only, no recipe scripts, a sanitized environment, a read-only root, and the dropped identity when root. An egress proxy is a possible later hardening.
 - **DNS and TLS.** Nawa follows the symlink chain of the host's `/etc/resolv.conf` and copies the content, together with `/etc/hosts`, into `<work>/fetch/etc/`, then binds the copies read-only as `file` binds. Binding the host path directly is wrong twice over: an assembled closure root has no `/etc/resolv.conf`, and on systemd-resolved hosts it is a symlink into `/run`, which the mask hides. A stub nameserver such as 127.0.0.53 works only because the network namespace is shared. TLS roots come from the build root (§9); at `sandbox` isolation, from the host.
-- **Root modes.** Strict mode has only been exercised with a `live` root (plugins). Strict + `dir`/overlay root + shared network + extra binds is untested and is the first item of the Phase 3 spike (§16). In `dir` mode the placeholders for the resolv.conf/hosts binds must exist before the pivot.
+- **Root modes.** *Status:* the sandboxed fetch is implemented for `sandbox` and `closure`, but no automated test runs it end to end: every fetch test uses `--isolation env`, and CI has no job that runs `nawa fetch` under a sandbox. Strict mode itself is covered by the sandbox and plugin tests. Strict mode has only been exercised with a `live` root (plugins). Strict + `dir`/overlay root + shared network + extra binds is untested and is the first item of the Phase 3 spike (§16). In `dir` mode the placeholders for the resolv.conf/hosts binds must exist before the pivot.
 - At `none`/`env` isolation there is no sandbox. The fetch runs as a subprocess with a cleared environment and the host toolchain. This provides no network or filesystem isolation and must not be described as if it did.
 - The fetch run's network permission comes only from "a fetch backend is running". It is independent of `--allow-network` and `[sandbox] network`, in both directions.
 - **`--offline`.** `fetch.rs` is the only user of `ureq`, so the guard lives in `fetch::download` and `download_opt`: a process-wide flag, set from `--offline` or `NAWA_OFFLINE`, makes them fail with the missing entry and the command that populates it. That covers legacy recipes, mirrors, index downloads and new sources without touching the legacy staging code. Ecosystem backends are not started when offline; missing or incomplete entries are hard errors that name them.
@@ -559,19 +559,25 @@ Resolved in revision 2: Cargo targets (fetch all in v1, §8); whether assets nee
 
 Resolved in revision 3: the meaning of `%{srcdir}` and the new `%{srcroot}` (§4.3); the `SOURCE_DATE_EPOCH` rule for multi-source recipes (§6); where `--offline` is enforced (§12); the fetch resource profile's shape (§12; the numbers stay open); a fail-closed marker for old binaries (§19).
 
+Settled by the implementation in this PR (recorded, not re-litigated):
+
+- Cache view for Go and Cargo (old item 3; §7, §8): a per-build **copy** of the published entry. Read-only and overlay views were not evaluated.
+- Name of the recipe lint command (part of old item 7; §14): `nawa recipe check`. The asset size threshold in the code differs from the proposal, see §5.4.
+- Go cache key without the Go version (old item 4; §11): implemented that way. It is still unconfirmed across Go releases, see open item 3 below.
+- Fetch resource profile (old item 9; §12): the code uses the starting values of the §12 table. They have not been retuned against real large builds.
+
 Still open:
 
-1. Exact toolchain and CA-bundle package names in faseela-repo (§9).
-2. The Seed / bootstrap implementation (§13).
-3. Read-only vs overlay vs copy for the Cargo and Go cache views (§7, §8).
-4. Whether the Go cache key may omit the Go version (§11).
-5. Whether to restrict fetch-phase egress later (§12).
-6. Whether and when to move legacy recipes onto the new engine (§4.1).
-7. Name of the recipe lint command and the asset size thresholds (§14, §5.4).
-8. Whether an optional fetched-tree output hash is useful after the first implementation.
-
-9. Final numbers of the fetch resource profile (§12), after the Phase 3 spike.
-10. Whether `load_all` / `locate` should treat a directory that contains a `recipe.toml` as a leaf, so asset files can never be parsed as recipes. It needs a check of faseela-repo for recipes nested under other recipes; until then the §5.2 rule applies.
+1. Exact toolchain and CA-bundle package names in faseela-repo (§9). `GO_TOOLCHAIN = "go"`, `CARGO_TOOLCHAIN = "rust"` and `CA_BUNDLE = "ca-certificates"` in `src/recipe.rs` are placeholders that still have to be checked before release.
+2. The Seed / bootstrap implementation (§13), delivery phase 6; not in this PR.
+3. Confirming that the Go cache key may omit the Go version (§11).
+4. Whether to restrict fetch-phase egress later (§12).
+5. Whether and when to move legacy recipes onto the new engine (§4.1).
+6. Asset size thresholds (§5.4): the per-file warning is 32 MiB and there is no per-recipe total, against the 1 MiB / 5 MiB proposal.
+7. Whether an optional fetched-tree output hash is useful after the first implementation (not implemented).
+8. Retuning the fetch resource profile (§12) against real large builds.
+9. Whether `load_all` / `locate` should treat a directory that contains a `recipe.toml` as a leaf, so asset files can never be parsed as recipes. Both still match `recipe.toml` at any depth; until faseela-repo is checked for recipes nested under other recipes, the §5.2 rule applies (staging and `nawa recipe check` refuse one inside an asset path).
+10. Automated coverage of the sandboxed fetch (`sandbox` and `closure`): the fetch tests use `--isolation env`, and CI has no job that runs `nawa fetch` under a sandbox (§12, "Root modes").
 
 None of these may block legacy compatibility. Unresolved details are documented and tested, not guessed.
 
