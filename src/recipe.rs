@@ -9,6 +9,18 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Deserialize)]
 pub struct Recipe {
     pub package: Package,
+    /// Recipe-local assets (fetch-phase.md §5). A top-level table, like
+    /// `[sandbox]`; any use makes the recipe a new-schema recipe whose
+    /// `package.source` must carry the schema marker (§19), like
+    /// `[[package.sources]]`.
+    #[serde(default)]
+    pub assets: AssetSpec,
+    /// Recipe-local ecosystem fetch declarations (fetch-phase.md §7–§9).
+    /// A top-level table (`[fetch.go]` / `[fetch.cargo]`); any use makes the
+    /// recipe a new-schema recipe whose `package.source` must carry the
+    /// schema marker (§19).
+    #[serde(default)]
+    pub fetch: Fetch,
     #[serde(default)]
     pub depends: Depends,
     #[serde(default)]
@@ -25,7 +37,22 @@ pub struct Recipe {
     /// (§7 of docs/design/build-isolation.md). Not part of the TOML.
     #[serde(skip)]
     pub raw: String,
+    /// The directory this recipe.toml lives in: the base for recipe-local
+    /// assets (fetch-phase.md §5.2). Not part of the TOML; empty when the
+    /// recipe was parsed straight from TOML rather than loaded from disk.
+    #[serde(skip)]
+    pub dir: PathBuf,
 }
+
+/// The fail-closed schema marker (fetch-phase.md §19): a recipe that uses
+/// any new-schema table must set
+/// `source = "local:/nawa-schema-2-requires-a-newer-nawa"`, so an *older*
+/// nawa binary stops with a message that names the problem — its legacy
+/// staging treats `local:<path>` as a host path and fails when it does not
+/// exist, before any download or closure work. The new nawa treats exactly
+/// this value as the marker: required with the new tables, rejected
+/// without them, and never staged.
+pub const SCHEMA_MARKER: &str = "local:/nawa-schema-2-requires-a-newer-nawa";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Package {
@@ -61,7 +88,118 @@ pub struct Package {
     /// source mtime (docs/design/build-isolation.md §6). Optional.
     #[serde(default)]
     pub source_date_epoch: Option<u64>,
+    /// New-schema external sources (fetch-phase.md §4.2). Empty = legacy
+    /// recipe: staging keeps using `source` / `sha256` / `mirrors` /
+    /// `source_dir` exactly as today. A non-empty array refuses to mix with
+    /// the legacy fields and requires `package.source = SCHEMA_MARKER` (§19).
+    #[serde(default)]
+    pub sources: Vec<SourceSpec>,
+    /// Working directory of every build section, relative to the source
+    /// workspace root (fetch-phase.md §4.3). Empty = the workspace root.
+    /// Valid only together with `[[package.sources]]`.
+    #[serde(default)]
+    pub workdir: String,
 }
+
+/// One external source artifact of a new-schema recipe (§4.2). The struct
+/// uses `deny_unknown_fields`: unknown keys are a parse-time error, part of
+/// the forward-compatibility rules of §19.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceSpec {
+    /// Unique within the recipe; `[a-z0-9][a-z0-9._-]*`, at most 64
+    /// characters. Names appear in paths (stage trees, build-id key, errors).
+    pub name: String,
+    /// `https://` URL; `%{version}`, `%{name}`, `%{rel}`, `%{arch}` are
+    /// expanded as in legacy recipes.
+    pub url: String,
+    /// Exactly 64 lowercase hex characters — validated at parse time
+    /// because the digest doubles as a cache path component (`<srccache>/
+    /// sha256/<digest>`), so it must never carry `/` or `..` (§4.2, §11).
+    pub sha256: String,
+    /// Fallback URLs for this artifact only, tried after `url` and the
+    /// built-in GNU mirrors. They need no trust: the bytes must still match
+    /// `sha256`.
+    #[serde(default)]
+    pub mirrors: Vec<String>,
+    /// `true` = must be an archive (error otherwise); `false` = copy the
+    /// file as-is into `into`; omitted = detect by content, like today. A
+    /// detected plain file is staged like `unpack = false`, so it is stamped
+    /// with `SOURCE_DATE_EPOCH` and excluded from its derivation (§6).
+    #[serde(default)]
+    pub unpack: Option<bool>,
+    /// Workspace-relative destination: the extraction directory for
+    /// archives (default `.`), the destination file path for plain files
+    /// (default: the URL's file name in the workspace root).
+    #[serde(default)]
+    pub into: String,
+    /// Leading archive path components to remove (default 0). Applied
+    /// **before** path sanitisation and also to hard-link targets; entries
+    /// with fewer components are skipped (GNU tar semantics, §4.2).
+    #[serde(default)]
+    pub strip_components: u32,
+}
+
+/// Recipe-local assets (fetch-phase.md §5.2): files that live beside the
+/// recipe — patches, config fragments, scripts — snapshotted into
+/// `<work>/assets` and exposed read-only as `%{assetsdir}` (§5.3). They are
+/// declared, versioned and published *with* the recipe tree (the signed
+/// tarball already covers them), so they need no checksum in the recipe.
+/// `deny_unknown_fields`: a misspelled key is a parse-time error (§9).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssetSpec {
+    #[serde(default)]
+    pub include: Vec<String>,
+}
+
+/// Ecosystem fetch declarations (fetch-phase.md §7–§9): `[fetch.go]` and/or
+/// `[fetch.cargo]` declare the directory whose `go.mod`/`Cargo.toml` Nawa
+/// runs the ecosystem fetch for. A top-level table like `[sandbox]`; any use
+/// makes the recipe a new-schema recipe whose `package.source` must carry
+/// the schema marker (§19). `deny_unknown_fields`: `[fetch.cago]` is a
+/// parse-time error (§9).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Fetch {
+    #[serde(default)]
+    pub go: Option<FetchSpec>,
+    #[serde(default)]
+    pub cargo: Option<FetchSpec>,
+}
+
+impl Fetch {
+    /// Whether the recipe declares any fetch backend.
+    pub fn any(&self) -> bool {
+        self.go.is_some() || self.cargo.is_some()
+    }
+}
+
+/// One backend declaration (`[fetch.go]` / `[fetch.cargo]`, §9).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FetchSpec {
+    /// The workspace-relative directory holding `go.mod`/`go.sum` (or
+    /// `Cargo.toml`/`Cargo.lock`). Defaults to the workspace root (`.`).
+    /// Never absolute, never borrowing `..` — parsed like `into`/`workdir`.
+    #[serde(default = "default_fetch_dir")]
+    pub dir: String,
+}
+
+fn default_fetch_dir() -> String {
+    ".".to_string()
+}
+
+/// Implicit package providing the Go toolchain, added by `[fetch.go]`
+/// (fetch-phase.md §9). The toolchain names live here in **one** place and
+/// are kept here in one place and must match the package names published
+/// by faseela-repo. Go is `golang`; Rust is `rust`.
+pub const GO_TOOLCHAIN: &str = "golang";
+/// Implicit package providing the Rust toolchain, added by `[fetch.cargo]`.
+pub const CARGO_TOOLCHAIN: &str = "rust";
+/// The closure must provide a CA bundle for the fetch toolchain's TLS (§9);
+/// the name must be verified against faseela-repo before release.
+pub const CA_BUNDLE: &str = "ca-certificates";
 
 fn default_rel() -> u32 {
     1
@@ -125,6 +263,16 @@ pub struct ExpandCtx {
     pub pkgdir: PathBuf,
     pub srcdir: PathBuf,
     pub arch: String,
+    /// `%{srcroot}` / `NAWA_SRCROOT` — the source workspace root, the parent
+    /// of the working directory, where additional `[[package.sources]]`
+    /// land (fetch-phase.md §4.3). Expanded by `Recipe::expand` for
+    /// new-schema recipes only; `None` keeps legacy recipes' environment
+    /// byte-for-byte unchanged.
+    pub srcroot: Option<PathBuf>,
+    /// `%{assetsdir}` / `NAWA_ASSETSDIR` — the read-only snapshot of the
+    /// recipe-declared `[assets]` files (fetch-phase.md §5.3). Same rule
+    /// as above: recipes without `[assets]` never see the name.
+    pub assetsdir: Option<PathBuf>,
 }
 
 impl Recipe {
@@ -136,6 +284,9 @@ impl Recipe {
         recipe.validate()?;
         let mut recipe = recipe;
         recipe.raw = raw;
+        // the recipe's own directory: the base for recipe-local assets
+        // (file paths are resolved relative to it, never to the cwd)
+        recipe.dir = path.parent().unwrap_or(path).to_path_buf();
         Ok(recipe)
     }
 
@@ -145,6 +296,152 @@ impl Recipe {
         }
         if self.package.version.is_empty() {
             bail!("recipe {} has empty package.version", self.package.name);
+        }
+        // ---- new schema vs legacy (§4.1/§4.2, §19) — checked first, so
+        // a mixed recipe reports the real problem instead of a legacy one
+        let new_schema = self.is_new_schema();
+        let marker = self.package.source == SCHEMA_MARKER;
+        if !self.package.workdir.is_empty() && self.package.sources.is_empty() {
+            bail!(
+                "recipe {} sets [package] workdir, which is valid only together with \
+                 [[package.sources]] (fetch-phase.md §4.3)",
+                self.package.name
+            );
+        }
+        if new_schema && !marker {
+            bail!(
+                "recipe {} uses new-schema tables but package.source does not carry the \
+                 fail-closed schema marker (fetch-phase.md §19):\n  {}",
+                self.package.name,
+                SCHEMA_MARKER
+            );
+        }
+        if marker && !new_schema {
+            bail!(
+                "recipe {} sets the schema marker in package.source without using any \
+                 new-schema table — either add [[package.sources]] or drop the marker \
+                 (fetch-phase.md §19)",
+                self.package.name
+            );
+        }
+        if new_schema {
+            if !self.package.sha256.is_empty()
+                || !self.package.mirrors.is_empty()
+                || !self.package.source_dir.is_empty()
+            {
+                bail!(
+                    "recipe {} must not mix the new [[package.sources]] form with legacy \
+                     `source`, `sha256`, `mirrors` or `source_dir` (fetch-phase.md §4.2)",
+                    self.package.name
+                );
+            }
+            let mut seen: Vec<&str> = Vec::new();
+            for src in &self.package.sources {
+                if !valid_source_name(&src.name) {
+                    bail!(
+                        "recipe {} has an invalid source name `{}` — expected \
+                         [a-z0-9][a-z0-9._-]*{{,64}} (fetch-phase.md §4.2)",
+                        self.package.name,
+                        src.name
+                    );
+                }
+                if seen.contains(&src.name.as_str()) {
+                    bail!(
+                        "recipe {} has duplicate [[package.sources]] name `{}`",
+                        self.package.name,
+                        src.name
+                    );
+                }
+                seen.push(&src.name);
+                if src.url.trim().is_empty() {
+                    bail!("recipe {} source `{}` has no url", self.package.name, src.name);
+                }
+                if !is_lower_hex64(&src.sha256) {
+                    bail!(
+                        "recipe {} source `{}` has an invalid sha256 `{}` — expected exactly \
+                         64 lowercase hex characters (fetch-phase.md §4.2)",
+                        self.package.name,
+                        src.name,
+                        src.sha256
+                    );
+                }
+                if src.mirrors.iter().any(|m| m.trim().is_empty()) {
+                    bail!(
+                        "recipe {} source `{}` has an empty entry in mirrors",
+                        self.package.name,
+                        src.name
+                    );
+                }
+                check_rel_path(
+                    "[[package.sources]] into",
+                    &src.into,
+                )
+                .with_context(|| {
+                    format!("recipe {} source `{}`", self.package.name, src.name)
+                })?;
+            }
+            check_rel_path("[package] workdir", &self.package.workdir)?;
+            // a build whose every input is a stamped plain file has no
+            // reproducible mtime to derive the epoch from (§6)
+            if !self.package.sources.is_empty()
+                && self
+                    .package
+                    .sources
+                    .iter()
+                    .all(|s| s.unpack == Some(false))
+                && self.package.source_date_epoch.is_none()
+            {
+                bail!(
+                    "recipe {} has only `unpack = false` sources and no source_date_epoch — \
+                     a plain file's staging time would reach the archive; pin \
+                     package.source_date_epoch (fetch-phase.md §6)",
+                    self.package.name
+                );
+            }
+            // and with no external sources at all there is nothing the epoch
+            // could be derived from: assets never feed it (§6 makes them
+            // invisible to the derivation on purpose)
+            if self.package.sources.is_empty() && self.package.source_date_epoch.is_none() {
+                bail!(
+                    "recipe {} has no external sources to derive SOURCE_DATE_EPOCH from — \
+                     assets and fetch views are excluded on purpose; pin \
+                     package.source_date_epoch (fetch-phase.md §6)",
+                    self.package.name
+                );
+            }
+        }
+        // assets: declared paths must stay inside the recipe directory
+        // (never absolute, no `..`, no trailing `/`) — checked at parse time
+        // for the same reason as `into`/`workdir` (§5.2, §14)
+        if !self.assets.include.is_empty() {
+            for p in &self.assets.include {
+                let kind = "[assets] include";
+                if p.trim().is_empty() {
+                    bail!("recipe {} has an empty entry in [assets] include", self.package.name);
+                }
+                check_rel_path(kind, p).with_context(|| {
+                    format!("recipe {}", self.package.name)
+                })?;
+            }
+        }
+        // fetch.go / fetch.cargo (§9): `dir` is parsed like
+        // `into`/`workdir`, and the toolchain recipes themselves must not
+        // declare their own table (an implicit self-dependency).
+        for (table, spec, toolchain, eco) in [
+            ("[fetch.go]", self.fetch.go.as_ref(), GO_TOOLCHAIN, "go"),
+            ("[fetch.cargo]", self.fetch.cargo.as_ref(), CARGO_TOOLCHAIN, "cargo"),
+        ] {
+            let Some(spec) = spec else { continue };
+            check_rel_path(&format!("{table} dir"), &spec.dir).with_context(|| {
+                format!("recipe {}", self.package.name)
+            })?;
+            if self.package.name == toolchain {
+                bail!(
+                    "recipe {} is the {eco} toolchain package and must not declare \
+                     {table} — the table would depend on itself (fetch-phase.md §9)",
+                    self.package.name
+                );
+            }
         }
         if !self.package.mirrors.is_empty() {
             let src = self.package.source.as_str();
@@ -183,17 +480,157 @@ impl Recipe {
             .unwrap_or_else(|| "x86_64".to_string())
     }
 
+    /// Whether the recipe uses new-schema tables (fetch-phase.md §4, §19).
+    /// In this revision: `[[package.sources]]`, `[assets]` and `[fetch.*]`.
+    /// On a new-schema recipe
+    /// `package.source` carries [`SCHEMA_MARKER`], `[[package.sources]]`
+    /// takes the staging engine in `sources.rs` instead of the legacy path,
+    /// and `[assets]` takes `assets.rs`.
+    pub fn is_new_schema(&self) -> bool {
+        !self.package.sources.is_empty()
+            || !self.assets.include.is_empty()
+            || self.fetch.any()
+    }
+
+    /// §14C: `%{srcroot}` / `NAWA_SRCROOT` and `%{assetsdir}` /
+    /// `NAWA_ASSETSDIR` used by a recipe that does not enable the
+    /// corresponding table are hard build-time errors, not silent
+    /// expansions — legacy recipes keep their environment exactly as
+    /// today, so the names never enter it. Scanned over the raw recipe
+    /// bytes, so build sections *and* hooks are covered; a test that wants
+    /// to check the environment names must spell them through shell string
+    /// concatenation, or it trips this scan itself.
+    pub fn check_schema_placeholders(&self) -> Result<()> {
+        let enabled = [
+            ("%{srcroot}", !self.package.sources.is_empty()),
+            ("NAWA_SRCROOT", !self.package.sources.is_empty()),
+            ("%{assetsdir}", !self.assets.include.is_empty()),
+            ("NAWA_ASSETSDIR", !self.assets.include.is_empty()),
+        ];
+        for (needle, on) in enabled {
+            if on {
+                continue;
+            }
+            let is_srcroot = needle == "%{srcroot}" || needle == "NAWA_SRCROOT";
+            let why = if is_srcroot {
+                "the workspace-root placeholder only exists for recipes with \
+                 [[package.sources]] (fetch-phase.md §4.3)"
+            } else {
+                "the assets snapshot placeholder only exists for recipes that declare \
+                 [assets] (fetch-phase.md §5.3)"
+            };
+            if self.raw.contains(needle) {
+                bail!(
+                    "recipe {} uses `{needle}` but does not enable it — {why}; \
+                     enable the table or drop the reference",
+                    self.package.name
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// The build dependency list: the declared `depends.build` plus every
+    /// implicit dependency the recipe's own tables require (e.g. the Go/Rust
+    /// toolchains implied by a `[fetch.*]` table — fetch-phase.md §9),
+    /// deduplicated.
+    ///
+    /// Every consumer of build dependencies — dependency resolution
+    /// (`deps.rs`), closure assembly (`closure.rs`), install planning
+    /// (`plan.rs`) and the `info`/`why`/`deps` queries — reads them through
+    /// this one method, so an implicit dependency becomes visible everywhere
+    /// at once instead of only in the build root.
+    pub fn build_deps(&self) -> Vec<String> {
+        let mut v = self.depends.build.clone();
+        let push = |name: &str, v: &mut Vec<String>| {
+            if !v.iter().any(|d| d == name) {
+                v.push(name.to_string());
+            }
+        };
+        // `[fetch.go]`/`[fetch.cargo]` imply their toolchain package; a
+        // fetch table implies TLS support in the closure (§9). Declared
+        // entries win — a recipe may already list the toolchain itself.
+        if self.fetch.go.is_some() {
+            push(GO_TOOLCHAIN, &mut v);
+        }
+        if self.fetch.cargo.is_some() {
+            push(CARGO_TOOLCHAIN, &mut v);
+        }
+        if self.fetch.any() {
+            push(CA_BUNDLE, &mut v);
+        }
+        v
+    }
+
     /// Expand placeholders inside a build/hook script.
+    ///
+    /// `%{srcroot}` and `%{assetsdir}` expand only on recipes that enable
+    /// the corresponding table (§4.3/§5.3): for every other recipe the
+    /// placeholder is left alone — `build()` already refuses any raw recipe
+    /// that references it (§14C) — so their environment and scripts stay
+    /// byte-for-byte unchanged.
     pub fn expand(&self, script: &str, ctx: &ExpandCtx) -> String {
-        script
+        let out = script
             .replace("%{name}", &self.package.name)
             .replace("%{version}", &self.package.version)
             .replace("%{rel}", &self.package.rel.to_string())
             .replace("%{arch}", &ctx.arch)
             .replace("%{jobs}", &ctx.jobs.to_string())
             .replace("%{pkgdir}", &ctx.pkgdir.to_string_lossy())
-            .replace("%{srcdir}", &ctx.srcdir.to_string_lossy())
+            .replace("%{srcdir}", &ctx.srcdir.to_string_lossy());
+        let out = match &ctx.srcroot {
+            Some(root) => out.replace("%{srcroot}", &root.to_string_lossy()),
+            None => out,
+        };
+        match &ctx.assetsdir {
+            Some(dir) => out.replace("%{assetsdir}", &dir.to_string_lossy()),
+            None => out,
+        }
     }
+}
+
+/// Source names must match `[a-z0-9][a-z0-9._-]*` and are at most 64
+/// characters (§4.2). Hand-rolled — the name greps cleanly out of error
+/// messages, double-slashes and other path traps are caught here, and no
+/// regex engine joins the dependency tree over this.
+fn valid_source_name(name: &str) -> bool {
+    let head_ok = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit();
+    let tail_ok = |c: char| head_ok(c) || matches!(c, '.' | '_' | '-');
+    match name.chars().next() {
+        Some(c) if head_ok(c) => {
+            name.chars().count() <= 64 && name.chars().skip(1).all(tail_ok)
+        }
+        _ => false,
+    }
+}
+
+/// Exactly 64 lowercase hex characters (§4.2): the digest doubles as a cache
+/// path component, so it must never carry `/` or `..` or any other shape.
+pub fn is_lower_hex64(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// `into` / `workdir` are workspace-relative destinations (§4.2): never
+/// absolute, never ending in `/`, never escaping with a `..` component.
+/// Empty means the field's default.
+fn check_rel_path(kind: &str, value: &str) -> Result<()> {
+    if value.is_empty() {
+        return Ok(());
+    }
+    if value.starts_with('/') {
+        bail!("{kind} `{value}` must be relative to the source workspace (no leading `/`)");
+    }
+    if value.ends_with('/') {
+        bail!("{kind} `{value}` must not end in `/`");
+    }
+    for c in value.split('/') {
+        if c == ".." {
+            bail!("{kind} `{value}` must not escape the source workspace");
+        }
+    }
+    Ok(())
 }
 
 /// Discover every recipe under a recipes root (`recipes/**/recipe.toml`).
@@ -307,6 +744,157 @@ mod tests {
     }
 
     #[test]
+    fn load_records_the_recipe_directory() {
+        // Recipe::load remembers where recipe.toml lives (the base for
+        // recipe-local assets, fetch-phase.md §5.2); byte-parsing does not
+        let dir = std::env::temp_dir().join(format!("nawa-recipe-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("recipe.toml");
+        std::fs::write(&path, SAMPLE).unwrap();
+        let rec = Recipe::load(&path).unwrap();
+        assert_eq!(rec.dir, dir);
+        assert!(!rec.raw.is_empty(), "raw bytes remembered too");
+        let parsed: Recipe = toml::from_str(SAMPLE).unwrap();
+        assert!(parsed.dir.as_os_str().is_empty());
+        assert!(parsed.raw.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn build_deps_is_the_declared_list_for_legacy_recipes() {
+        let rec: Recipe = toml::from_str(SAMPLE).unwrap();
+        assert!(
+            rec.build_deps().is_empty(),
+            "legacy recipes must not gain implicit deps yet"
+        );
+        let with = SAMPLE.replace("build = []", "build = [\"zlib\"]");
+        let rec: Recipe = toml::from_str(&with).unwrap();
+        assert_eq!(rec.build_deps(), vec!["zlib".to_string()]);
+    }
+
+    /// A minimal new-schema recipe with the given extra table text. The
+    /// sha256 is exactly 64 lowercase hex characters (parse-time checked).
+    fn new_schema_with_fetch(table: &str, name: &str) -> Recipe {
+        toml::from_str(&format!(
+            r#"
+            [package]
+            name = "{name}"
+            version = "1.0"
+            rel = 1
+            arch = ["x86_64"]
+            summary = "t"
+            license = ["MIT"]
+            source = "{marker}"
+            source_date_epoch = 1
+
+            [[package.sources]]
+            name = "src"
+            url = "https://example/src.tar"
+            sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            {table}
+            "#,
+            marker = SCHEMA_MARKER,
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn fetch_table_is_new_schema_and_implies_toolchain_deps() {
+        let rec = new_schema_with_fetch("[fetch.go]\ndir = \"cmd/server\"", "hello");
+        assert!(rec.is_new_schema());
+        assert_eq!(rec.fetch.go.as_ref().unwrap().dir, "cmd/server");
+        let deps = rec.build_deps();
+        assert!(
+            deps.iter().any(|d| d == GO_TOOLCHAIN),
+            "[fetch.go] implies the Go toolchain (§9)"
+        );
+        assert!(deps.iter().any(|d| d == CA_BUNDLE));
+        // both tables in one recipe (§9)
+        let both = new_schema_with_fetch("[fetch.go]\n\n[fetch.cargo]\ndir = \"lib\"", "both");
+        let deps = both.build_deps();
+        assert!(deps.iter().any(|d| d == CARGO_TOOLCHAIN));
+        assert!(deps.iter().any(|d| d == GO_TOOLCHAIN));
+        // implicit deps dedup against the declared list
+        let rec = new_schema_with_fetch(
+            &format!("[fetch.go]\n\n[depends]\nbuild = [\"{GO_TOOLCHAIN}\"]\n"),
+            "dedup",
+        );
+        assert_eq!(
+            rec.build_deps().iter().filter(|d| **d == GO_TOOLCHAIN).count(),
+            1,
+            "a declared toolchain dep must not be duplicated"
+        );
+    }
+
+    #[test]
+    fn fetch_dir_is_parsed_like_into_and_workdir() {
+        for bad in ["../x", "/abs", "trailing/"] {
+            let rec = new_schema_with_fetch(&format!("[fetch.go]\ndir = \"{bad}\""), "dir");
+            // to_string() shows only the "recipe X" context; the debug form
+            // carries the caused-by chain with the real message
+            let err = format!("{:?}", rec.validate().unwrap_err());
+            assert!(
+                err.contains("fetch"),
+                "`{bad}` must be rejected as a fetch dir, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn fetch_unknown_keys_and_tables_are_parse_errors() {
+        let err = toml::from_str::<Recipe>(
+            r#"
+            [package]
+            name = "x"
+            version = "1"
+            rel = 1
+            source = "https://e/x.tar"
+            sha256 = "1"
+            [fetch.cago]
+            dir = "."
+        "#,
+        )
+        .expect_err("[fetch.cago] must be a parse-time error (§9)");
+        assert!(err.to_string().contains("cago"), "got: {err}");
+        let err = toml::from_str::<Recipe>(
+            r#"
+            [package]
+            name = "x"
+            version = "1"
+            rel = 1
+            source = "https://e/x.tar"
+            sha256 = "1"
+            [fetch.go]
+            dr = "."
+        "#,
+        )
+        .expect_err("unknown key under [fetch.go] must be a parse error");
+        assert!(err.to_string().contains("dr"), "got: {err}");
+    }
+
+    #[test]
+    fn toolchain_recipes_must_not_declare_their_own_table() {
+        let rec = new_schema_with_fetch("[fetch.cargo]\ndir = \".\"", CARGO_TOOLCHAIN);
+        let err = rec.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("self-dependency") || err.contains("itself"),
+            "the Rust toolchain must not declare [fetch.cargo], got: {err}"
+        );
+        let rec = new_schema_with_fetch("[fetch.go]\ndir = \".\"", GO_TOOLCHAIN);
+        assert!(rec.validate().is_err(), "[fetch.go] in the Go toolchain recipe");
+    }
+
+    #[test]
+    fn fetch_defaults_dir_to_the_workspace_root() {
+        let rec = new_schema_with_fetch("[fetch.go]\n[fetch.cargo]\ndir = \"lib\"", "def");
+        let go = rec.fetch.go.as_ref().unwrap();
+        assert_eq!(go.dir, ".");
+        let cargo = rec.fetch.cargo.as_ref().unwrap();
+        assert_eq!(cargo.dir, "lib");
+    }
+
+    #[test]
     fn parses_sample_recipe() {
         let rec: Recipe = toml::from_str(SAMPLE).unwrap();
         assert_eq!(rec.package.name, "gzip");
@@ -354,8 +942,438 @@ mod tests {
             pkgdir: PathBuf::from("/tmp/pkg"),
             srcdir: PathBuf::from("/tmp/src"),
             arch: "x86_64".into(),
+            srcroot: None,
+            assetsdir: None,
         };
         let out = rec.expand("make -j%{jobs} DESTDIR=%{pkgdir}", &ctx);
         assert_eq!(out, "make -j8 DESTDIR=/tmp/pkg");
+        // %{srcroot} without the schema: left alone at expansion, refused at
+        // build time (§14C). Recipe::load fills `raw`, which the check scans.
+        let out = rec.expand("cd %{srcroot}/patches", &ctx);
+        assert_eq!(out, "cd %{srcroot}/patches");
+        let mut rec: Recipe = toml::from_str(SAMPLE).unwrap();
+        rec.raw = SAMPLE.to_string();
+        rec.raw.push_str("\ncompile = \"cd %{srcroot}/patches\"");
+        let err = rec.check_schema_placeholders().unwrap_err().to_string();
+        assert!(err.contains("%{srcroot}"), "got: {err}");
+        // the environment name is caught the same way, in any field
+        let mut rec: Recipe = toml::from_str(SAMPLE).unwrap();
+        rec.raw = "install = \"ls $NAWA_SRCROOT\"".to_string();
+        let err = rec.check_schema_placeholders().unwrap_err().to_string();
+        assert!(err.contains("NAWA_SRCROOT"), "got: {err}");
+        // ...and a new-schema recipe passes
+        let mut rec: Recipe = toml::from_str(NEW_SCHEMA).unwrap();
+        rec.raw = NEW_SCHEMA.to_string();
+        rec.check_schema_placeholders().unwrap();
+    }
+
+    // ---- new-schema [[package.sources]] (fetch-phase.md §4.2) ---------------
+
+    /// A valid new-schema recipe: marker + two archives differing in shape.
+    const NEW_SCHEMA: &str = r#"
+        [package]
+        name = "example"
+        version = "1.0.0"
+        rel = 1
+        source = "local:/nawa-schema-2-requires-a-newer-nawa"
+        workdir = "kernel"
+
+        [[package.sources]]
+        name = "main"
+        url = "https://example.org/example-%{version}.tar.xz"
+        sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        into = "kernel"
+        strip_components = 1
+
+        [[package.sources]]
+        name = "bootstrap-data"
+        url = "https://example.org/example-bootstrap.dat"
+        sha256 = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+        unpack = false
+        into = "data/bootstrap.dat"
+    "#;
+
+    fn new_schema_ctx() -> ExpandCtx {
+        ExpandCtx {
+            jobs: 4,
+            pkgdir: PathBuf::from("/pkg"),
+            srcdir: PathBuf::from("/src/kernel"),
+            arch: "x86_64".into(),
+            srcroot: Some(PathBuf::from("/src")),
+            assetsdir: None,
+        }
+    }
+
+    #[test]
+    fn parses_sources_workdir_and_marker() {
+        let rec: Recipe = toml::from_str(NEW_SCHEMA).unwrap();
+        rec.validate().unwrap();
+        assert!(rec.is_new_schema());
+        assert_eq!(rec.package.sources.len(), 2);
+        assert_eq!(rec.package.sources[0].name, "main");
+        assert_eq!(rec.package.sources[0].strip_components, 1);
+        assert_eq!(rec.package.sources[0].into, "kernel");
+        assert_eq!(rec.package.sources[0].unpack, None);
+        assert_eq!(rec.package.sources[1].unpack, Some(false));
+        assert_eq!(rec.package.workdir, "kernel");
+        assert!(rec.package.mirrors.is_empty());
+        // health check: deny_unknown_fields rejects a typo'd key (§19)
+        let typo = NEW_SCHEMA.replace("into = \"kernel\"", "intto = \"kernel\"");
+        assert!(toml::from_str::<Recipe>(&typo).is_err());
+    }
+
+    #[test]
+    fn expands_srcroot_for_new_schema_but_not_for_legacy() {
+        let rec: Recipe = toml::from_str(NEW_SCHEMA).unwrap();
+        assert_eq!(
+            rec.expand("cd %{srcroot}/patches && cd %{srcdir}", &new_schema_ctx()),
+            "cd /src/patches && cd /src/kernel"
+        );
+        let ctx = new_schema_ctx();
+        let with = NEW_SCHEMA.replace("workdir = \"kernel\"", "workdir = \"\"");
+        let rec: Recipe = toml::from_str(&with).unwrap();
+        // default workdir = the workspace root: %{srcdir} == %{srcroot}
+        let ctx = ExpandCtx {
+            srcdir: ctx.srcroot.clone().unwrap(),
+            ..new_schema_ctx()
+        };
+        let out = rec.expand("p=%{srcdir} r=%{srcroot}", &ctx);
+        assert_eq!(out, "p=/src r=/src");
+        let legacy: Recipe = toml::from_str(SAMPLE).unwrap();
+        let legacy_ctx = ExpandCtx {
+            jobs: 8,
+            pkgdir: PathBuf::from("/tmp/pkg"),
+            srcdir: PathBuf::from("/tmp/src"),
+            arch: "x86_64".into(),
+            srcroot: None,
+            assetsdir: None,
+        };
+        let out = legacy.expand("cd %{srcdir}", &legacy_ctx);
+        assert_eq!(out, "cd /tmp/src");
+        assert!(legacy_ctx.srcroot.is_none() && legacy_ctx.assetsdir.is_none());
+    }
+
+    #[test]
+    fn marker_is_required_with_new_tables() {
+        let missing = NEW_SCHEMA.replace(
+            "source = \"local:/nawa-schema-2-requires-a-newer-nawa\"\n        ",
+            "",
+        );
+        let rec: Recipe = toml::from_str(&missing).unwrap();
+        let err = rec.validate().unwrap_err().to_string();
+        assert!(err.contains("marker"), "got: {err}");
+    }
+
+    #[test]
+    fn marker_is_rejected_without_new_tables() {
+        // the marker value on an otherwise-legacy recipe is refused: it can
+        // only appear together with the new tables (§19)
+        let bad = SAMPLE.replace(
+            "source = \"https://ftp.gnu.org/gnu/gzip/gzip-%{version}.tar.xz\"",
+            "source = \"local:/nawa-schema-2-requires-a-newer-nawa\"",
+        );
+        let rec: Recipe = toml::from_str(&bad).unwrap();
+        let err = rec.validate().unwrap_err().to_string();
+        assert!(err.contains("new-schema table"), "got: {err}");
+    }
+
+    #[test]
+    fn legacy_mirrors_and_source_dir_may_not_mix_with_sources() {
+        for (label, patch) in [
+            (
+                "sha256",
+                "sha256 = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"",
+            ),
+            ("source_dir", "source_dir = \"kernel\""),
+            (
+                "mirrors",
+                "mirrors = [\"https://example.org/mirror.tar.xz\"]",
+            ),
+        ] {
+            let mixed = NEW_SCHEMA.replace(
+                "workdir = \"kernel\"",
+                format!("workdir = \"kernel\"\n        {patch}").as_str(),
+            );
+            let rec: Recipe = toml::from_str(&mixed).unwrap_or_else(|e| {
+                panic!("{label}: {e}")
+            });
+            let err = rec.validate().unwrap_err().to_string();
+            assert!(
+                err.contains("mix") && err.contains(label),
+                "{label}: got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_and_bad_source_names_are_rejected() {
+        let dup = format!(
+            "{NEW_SCHEMA}\n\n        [[package.sources]]\n        name = \"main\"\n        \
+             url = \"https://example.org/x\"\n        \
+             sha256 = \"{}\"\n",
+            "0".repeat(64)
+        );
+        let rec: Recipe = toml::from_str(&dup).unwrap();
+        let err = rec.validate().unwrap_err().to_string();
+        assert!(err.contains("duplicate"), "got: {err}");
+
+        for bad in [
+            "UPPER",    // case
+            "",         // empty
+            "a/b",      // path separator
+            "-a",       // head not [a-z0-9]
+            "_a",       // head not [a-z0-9]
+            "a b",      // space
+            "a-b-c!",   // non-name char
+        ] {
+            let bad_name = NEW_SCHEMA.replace("name = \"main\"", &format!("name = \"{bad}\""));
+            let rec: Recipe = toml::from_str(&bad_name).unwrap();
+            let err = rec.validate().unwrap_err().to_string();
+            assert!(err.contains("invalid source name"), "{bad:?}: got: {err}");
+        }
+        // the 64-character cap
+        let too_long = format!("a{}", "b".repeat(64));
+        let bad_name = NEW_SCHEMA.replace("name = \"main\"", &format!("name = \"{too_long}\""));
+        let rec: Recipe = toml::from_str(&bad_name).unwrap();
+        let err = rec.validate().unwrap_err().to_string();
+        assert!(err.contains("invalid source name"), "got: {err}");
+        // valid names pass: ., _, - and digits are allowed after the first
+        for good in ["a", "main", "bootstrap-2.data", "x_y.z-1"] {
+            let ok_name = NEW_SCHEMA.replace("name = \"main\"", &format!("name = \"{good}\""));
+            let rec: Recipe = toml::from_str(&ok_name).unwrap();
+            rec.validate().unwrap_or_else(|e| panic!("`{good}` should be valid: {e}"));
+        }
+    }
+
+    #[test]
+    fn sha256_must_be_64_lowercase_hex() {
+        for bad in [
+            "ABCDEF",
+            "0123456789abcde",
+            "0g23456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ] {
+            let mixed = NEW_SCHEMA.replace(
+                "sha256 = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"",
+                &format!("sha256 = \"{bad}\""),
+            );
+            let rec: Recipe = toml::from_str(&mixed).unwrap();
+            let err = rec.validate().unwrap_err().to_string();
+            assert!(err.contains("64 lowercase hex"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn into_and_workdir_must_be_relative_and_safe() {
+        for into in ["/abs", "../escape", "a/../b", "trailing/"] {
+            let mixed = NEW_SCHEMA.replace(
+                "into = \"kernel\"",
+                &format!("into = \"{into}\""),
+            );
+            let rec: Recipe = toml::from_str(&mixed).unwrap();
+            let err = rec.validate().unwrap_err();
+            // the long-form error reports the failing field through the
+            // context chain (`recipe X source `main`: ...`)
+            assert!(format!("{err:?}").contains("into"), "{into}: {err:?}");
+        }
+        for workdir in ["/usr", "../x", "a/../b", "end/"] {
+            let mixed = NEW_SCHEMA.replace(
+                "workdir = \"kernel\"",
+                &format!("workdir = \"{workdir}\""),
+            );
+            let rec: Recipe = toml::from_str(&mixed).unwrap();
+            let err = rec.validate().unwrap_err().to_string();
+            assert!({ let e = format!("{err:#}"); e.contains("workdir") }, "{workdir}: {err}");
+        }
+    }
+
+    #[test]
+    fn workdir_requires_sources() {
+        let no_sources = SAMPLE.replace(
+            "source = \"https://ftp.gnu.org/gnu/gzip/gzip-%{version}.tar.xz\"\n        sha256 = \"abc\"",
+            "workdir = \"kernel\"",
+        );
+        let rec: Recipe = toml::from_str(&no_sources).unwrap();
+        let err = rec.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("workdir") && err.contains("[[package.sources]]"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn all_plain_sources_without_pinned_epoch_are_rejected() {
+        // both sources become plain files: the first archive loses its
+        // archive marker entirely
+        let plain = NEW_SCHEMA
+            .replace(
+                "into = \"kernel\"\n        strip_components = 1",
+                "unpack = false",
+            )
+            .replace(
+                "unpack = false\n        into = \"data/bootstrap.dat\"",
+                "unpack = false",
+            );
+        let rec: Recipe = toml::from_str(&plain).unwrap();
+        assert_eq!(rec.package.sources.len(), 2);
+        assert!(rec
+            .package
+            .sources
+            .iter()
+            .all(|s| s.unpack == Some(false)));
+        let err = rec.validate().unwrap_err().to_string();
+        assert!(err.contains("unpack = false"), "got: {err}");
+        // ...and pinning it makes the recipe valid
+        let pinned = plain
+            .replace("rel = 1", "rel = 1\n        source_date_epoch = 1700000000");
+        let rec: Recipe = toml::from_str(&pinned).unwrap();
+        rec.validate().unwrap();
+    }
+
+    // ---- [assets] (fetch-phase.md §5.2) -----------------------------------
+
+    /// The `[assets]` table parses and denies misspelled keys (§9/§14: a
+    /// typo'd `include` must not silently stage nothing).
+    #[test]
+    fn assets_parse_and_deny_unknown_fields() {
+        let with = NEW_SCHEMA
+            .replace("    \"#;", "")
+            .replace("</沉默>", "")
+            + r#"
+        [assets]
+        include = ["patches/fix-build.patch", "config/x86_64.fragment"]
+    "#;
+        let rec: Recipe = toml::from_str(&with).unwrap();
+        assert_eq!(rec.assets.include.len(), 2);
+        assert_eq!(rec.assets.include[1], "config/x86_64.fragment");
+        // deny_unknown_fields: a typo'd key is a parse error
+        assert!(toml::from_str::<Recipe>(&with.replace("include =", "incude =")).is_err());
+        // ...and so is a scalar `assets` (string instead of table)
+        assert!(toml::from_str::<Recipe>(&with.replace(
+            "[assets]\n        include = [\"patches/fix-build.patch\", \"config/x86_64.fragment\"]",
+            "assets = \"patches\""
+        )).is_err());
+    }
+
+    /// An `[assets]` table alone is a new-schema table: the marker is
+    /// required (§19), and a markered recipe without any new table is
+    /// rejected — including assets-only, where the table is the whole point.
+    #[test]
+    fn assets_only_recipe_needs_marker_and_is_new_schema() {
+        let assets_only = r#"
+        [package]
+        name = "assets-only"
+        version = "1.0.0"
+        rel = 1
+        source = "local:/nawa-schema-2-requires-a-newer-nawa"
+        source_date_epoch = 1700000000
+
+        [assets]
+        include = ["kernel.config"]
+    "#;
+        let rec: Recipe = toml::from_str(assets_only).unwrap();
+        assert!(rec.is_new_schema());
+        rec.validate().unwrap();
+
+        // same recipe without the marker is refused
+        let unmarked = assets_only.replace(SCHEMA_MARKER, "local:/nowhere");
+        let rec: Recipe = toml::from_str(&unmarked).unwrap();
+        assert!(rec.is_new_schema());
+        let err = rec.validate().unwrap_err().to_string();
+        assert!(err.contains("schema marker"), "got: {err}");
+
+        // ...and an assets-only recipe with the marker but no epoch is
+        // refused too (§6: assets never feed the epoch)
+        let no_epoch = assets_only.replace("source_date_epoch = 1700000000\n", "");
+        let rec: Recipe = toml::from_str(&no_epoch).unwrap();
+        assert!(rec.package.source_date_epoch.is_none());
+        let err = rec.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("derive SOURCE_DATE_EPOCH"),
+            "assets-only without epoch: {err}"
+        );
+        // percent-expansion of %{srcroot} is refused for it too (no sources)
+        let mut rec: Recipe = toml::from_str(&no_epoch).unwrap();
+        rec.raw = no_epoch.to_string();
+        rec.raw.push_str("\nconfigure = \"ls %{srcroot}\"");
+        let err = rec.check_schema_placeholders().unwrap_err().to_string();
+        assert!(err.contains("%{srcroot}"), "got: {err}");
+    }
+
+    /// `[assets]` include entries must be relative, non-`..`, non-trailing-slash
+    /// paths (§5.2, same rules as `into`/`workdir`).
+    #[test]
+    fn assets_include_paths_are_validated() {
+        for bad in ["", "  ", "/abs/config", "../escape", "kernel.config/"] {
+            let bad_line = format!("include = [\"{bad}\"]");
+            let with = NEW_SCHEMA.replace("    \"#;", "") + format!(
+                "\n        [assets]\n        {bad_line}\n    "
+            ).as_str();
+            let rec: Recipe = toml::from_str(&with).unwrap();
+            let err = format!("{:#}", rec.validate().unwrap_err());
+            assert!(
+                err.contains("[assets] include"),
+                "{bad:?}: {err}"
+            );
+        }
+    }
+
+    /// §14C per-name: a recipe that declares `[[package.sources]]` but no
+    /// `[assets]` must be refused when its bytes reference `%{assetsdir}`
+    /// or `NAWA_ASSETSDIR` — and the reverse combination too.
+    #[test]
+    fn assets_placeholders_are_enabled_per_name() {
+        // sources but no assets: %{assetsdir} is refused
+        let mut rec: Recipe = toml::from_str(NEW_SCHEMA).unwrap();
+        rec.raw = NEW_SCHEMA.to_string();
+        rec.raw.push_str("\nconfigure = \"cp %{assetsdir}/conf .\"");
+        let err = rec.check_schema_placeholders().unwrap_err().to_string();
+        assert!(err.contains("%{assetsdir}"), "got: {err}");
+        // the env name, same refusal
+        rec.raw = "install = \"ls $NAWA_ASSETSDIR\"".to_string();
+        let rec: Recipe = toml::from_str(NEW_SCHEMA).unwrap();
+        let mut rec = rec;
+        rec.raw = format!("{}install = \"ls $NAWA_ASSETSDIR\"", "\n");
+        let err = rec.check_schema_placeholders().unwrap_err().to_string();
+        assert!(err.contains("NAWA_ASSETSDIR"), "got: {err}");
+        // assets but no sources: %{srcroot} is refused (see above) and the
+        // combined recipe passes
+        let both = NEW_SCHEMA.replace("    \"#;", "") + r#"
+        [assets]
+        include = ["config/x86_64.fragment"]
+    "#;
+        let mut rec: Recipe = toml::from_str(&both).unwrap();
+        rec.raw = both.to_string();
+        rec.check_schema_placeholders().unwrap();
+    }
+
+    #[test]
+    fn fetch_toolchain_names_match_faseela_recipe_ids() {
+        // Verified against the current recipe paths in mrdevmohamed/faseela-repo.
+        assert_eq!(GO_TOOLCHAIN, "golang");
+        assert_eq!(CARGO_TOOLCHAIN, "rust");
+        assert_eq!(CA_BUNDLE, "ca-certificates");
+    }
+
+    #[test]
+    fn fetch_backends_add_toolchain_and_ca_bundle_to_build_dependencies() {
+        let raw = r#"
+[package]
+name = "fetch-deps-test"
+version = "1.0"
+rel = 1
+arch = ["x86_64"]
+source = "local:/nawa-schema-2-requires-a-newer-nawa"
+
+[fetch.go]
+dir = "go"
+
+[fetch.cargo]
+dir = "rust"
+"#;
+        let rec: Recipe = toml::from_str(raw).unwrap();
+        let deps = rec.build_deps();
+        assert!(deps.contains(&"golang".to_string()), "{deps:?}");
+        assert!(deps.contains(&"rust".to_string()), "{deps:?}");
+        assert!(deps.contains(&"ca-certificates".to_string()), "{deps:?}");
     }
 }

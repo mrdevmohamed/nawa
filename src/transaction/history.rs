@@ -2,7 +2,6 @@
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::db::{self, Entry};
@@ -490,7 +489,6 @@ pub fn list_records(root: &Path) -> Result<Vec<TransactionRecord>> {
 
 /// Collect every artifact digest referenced by any record (mark phase of
 /// the clean/retention model, roadmap §5.10 / §8.11).
-#[allow(dead_code)]
 pub fn referenced_artifacts(root: &Path) -> Result<std::collections::BTreeSet<String>> {
     let mut out = std::collections::BTreeSet::new();
     for r in list_records(root)? {
@@ -501,17 +499,6 @@ pub fn referenced_artifacts(root: &Path) -> Result<std::collections::BTreeSet<St
                 }
             }
         }
-    }
-    Ok(out)
-}
-
-/// Snapshots of the current db, keyed by name (used by the operation context).
-#[allow(dead_code)]
-pub fn installed_snapshot(root: &Path) -> Result<BTreeMap<String, Entry>> {
-    let db = db::Db::new(root);
-    let mut out = BTreeMap::new();
-    for e in db.installed()? {
-        out.insert(e.name.clone(), e);
     }
     Ok(out)
 }

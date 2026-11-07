@@ -125,6 +125,7 @@ pub(super) fn spawn(executable: &Path, protected_paths: &[PathBuf]) -> Result<Sa
         file_size_limit_bytes: 64 * 1024 * 1024,
         open_files_limit: 64,
         readonly_paths: vec![plugin_src_inside],
+        extra_binds: Vec::new(),
         strict_readonly_root: true,
         // /dev is a private tmpfs populated by setup_dev; leave its mount
         // writable for normal device-node opens while directory permissions

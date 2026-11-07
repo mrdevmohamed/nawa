@@ -52,8 +52,8 @@ fn visit(
             crate::suggest::hint(name, &known.keys().cloned().collect::<Vec<_>>())
         ),
     };
-    for dep in &rec.depends.build {
-        visit(dep, known, done, visiting, order)?;
+    for dep in rec.build_deps() {
+        visit(&dep, known, done, visiting, order)?;
     }
     visiting.remove(name);
     done.insert(name.to_string());
@@ -86,8 +86,8 @@ pub fn resolve_target(
     let mut order = Vec::new();
     let mut visiting: HashSet<String> = HashSet::new();
     let mut done: HashSet<String> = installed.clone();
-    for dep in &rec.depends.build {
-        visit(dep, known, &mut done, &mut visiting, &mut order)?;
+    for dep in rec.build_deps() {
+        visit(&dep, known, &mut done, &mut visiting, &mut order)?;
     }
     order.push(rec.clone());
     Ok(order)

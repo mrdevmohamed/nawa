@@ -22,7 +22,7 @@ use rustix::process::{chdir, chroot, pivot_root};
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
 
-use super::spec::{BuildPaths, SandboxSpec};
+use super::spec::{ExtraBind, SandboxSpec};
 
 // ---------------------------------------------------------------------------
 // shared mount helpers with precise failure reporting
@@ -199,9 +199,13 @@ fn remount_spec_paths_ro(spec: &SandboxSpec) -> Result<()> {
     Ok(())
 }
 
-/// In strict plugin mode remount every existing mount read-only, including
-/// separate host filesystems beneath / (for example /var or /home). Only
-/// private tmpfs and the explicit scratch HOME remain writable.
+/// In strict mode remount every existing mount read-only, including separate
+/// host filesystems beneath / (for example /var or /home).
+///
+/// The sandbox-owned /dev hierarchy is deliberately excluded: setup_dev()
+/// replaces it with a private tmpfs containing only the required device nodes,
+/// devpts and shm. Those device interfaces need their normal writable semantics;
+/// they are not the host's /dev tree.
 fn remount_mount_tree_ro(spec: &SandboxSpec) -> Result<()> {
     if !spec.strict_readonly_root {
         return Ok(());
@@ -227,11 +231,16 @@ fn remount_mount_tree_ro(spec: &SandboxSpec) -> Result<()> {
         let hidden = spec.mask.iter().any(|masked| {
             mount == Path::new(masked) || mount.starts_with(masked)
         });
+        // setup_dev() has replaced /dev and everything beneath it with
+        // sandbox-private mounts. Keep /dev/null, devpts and shm writable;
+        // these are ephemeral device interfaces, not host filesystem paths.
+        let private_dev = mount.starts_with("/dev");
         // mountinfo can retain entries for mounts absent in restricted
         // containers (notably EFI variables). Skip only ENOENT; permission
         // or lookup errors must fail closed rather than weaken read-only mode.
         if !writable
             && !hidden
+            && !private_dev
             && mount
                 .try_exists()
                 .with_context(|| format!("inspect sandbox mount point {path}"))?
@@ -331,7 +340,7 @@ fn overlay_scratch(spec: &SandboxSpec) -> Result<()> {
     // `/build`, which is also where the bootstrap stages keep their build
     // tree) makes those host paths unresolvable afterwards, and plain path
     // binds would fail with ENOENT. The fd holds the mount reference.
-    let staging = StagingHandles::open(&spec.build)?;
+    let staging = StagingHandles::open(spec)?;
     // fresh /tmp first: an unprivileged host cannot create `/build` on the
     // live root, and the fallback base then lives on this tmpfs
     tmpfs("/tmp", "size=2048m,mode=1777")?;
@@ -341,12 +350,27 @@ fn overlay_scratch(spec: &SandboxSpec) -> Result<()> {
     std::fs::create_dir_all(base_p)
         .with_context(|| format!("create the sandbox build base {}", spec.build_inside))?;
     tmpfs_at(base_p, "size=1m,mode=755")?;
-    staging.bind_at(base_p)?;
+    // Mask /run BEFORE extra resolver binds. A host resolv.conf commonly
+    // points into /run/systemd/resolve; the bind then lands on the empty
+    // private tmpfs target rather than being hidden by a later mask.
+    let run_is_masked = spec.mask.iter().any(|p| p == "/run");
+    if run_is_masked {
+        // Keep the private /run empty but searchable so the dropped fetch uid
+        // can read the resolver file mounted below /run/systemd/resolve.
+        tmpfs_at(Path::new("/run"), "size=1m,mode=755")?;
+    }
+    staging.bind_at(base_p, None, spec)?;
+    if run_is_masked {
+        remount_ro("/run", spec, "the empty /run resolver staging mount")?;
+    }
     drop(staging);
     setup_dev(Path::new("/dev"), Path::new(&spec.build.scratch))?;
     fresh_proc_or_mask(spec, Path::new("/proc"))?;
     setup_sys(spec, Path::new("/sys"))?;
     for p in &spec.mask {
+        if p == "/run" {
+            continue; // already masked before resolver binds above
+        }
         if Path::new(p).exists() {
             tmpfs_mask(p)?;
         }
@@ -361,11 +385,11 @@ fn overlay_scratch_at(spec: &SandboxSpec, root: &Path) -> Result<()> {
     // same fd-first pattern: the base tmpfs covers the bind targets, and the
     // handles keep the (host-side) bind sources reachable no matter what
     // covers what below
-    let staging = StagingHandles::open(&spec.build)?;
+    let staging = StagingHandles::open(spec)?;
     tmpfs_at(&at("tmp"), "size=2048m,mode=1777")?;
     let base = root.join(spec.build_inside.trim_start_matches('/'));
     tmpfs_at(&base, "size=1m,mode=755")?;
-    staging.bind_at(&base)?;
+    staging.bind_at(&base, Some(root), spec)?;
     drop(staging);
     setup_dev(&at("dev"), Path::new(&spec.build.scratch))?;
     fresh_proc_or_mask(spec, &at("proc"))?;
@@ -373,18 +397,27 @@ fn overlay_scratch_at(spec: &SandboxSpec, root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// O_PATH descriptors of the staged dirs (`src`, `pkg`, `home`) and the logic
-/// that binds them into the sandbox build base. The descriptors are taken
-/// *before* any mount covers their host paths: a bind source resolved by path
-/// after a cover yields ENOENT, while the open file the fd refers to stays
-/// mounted in the kernel even through the shadowing mount. Closed on drop
-/// (`OwnedFd` — no manual close, no unsafe).
+/// O_PATH descriptors of the staged dirs (`src`, `pkg`, `home`) plus every
+/// `extra_bind` (§5.3), and the logic that binds them into the sandbox
+/// build base. The descriptors are taken *before* any mount covers their
+/// host paths: a bind source resolved by path after a cover yields ENOENT,
+/// while the open file the fd refers to stays mounted in the kernel even
+/// through the shadowing mount. Closed on drop (`OwnedFd` — no manual
+/// close, no unsafe).
 struct StagingHandles {
     fds: [rustix::fd::OwnedFd; 3],
+    extra: Vec<ExtraFd>,
+}
+
+/// One extra bind (§5.3) with its handle.
+struct ExtraFd {
+    fd: rustix::fd::OwnedFd,
+    bind: ExtraBind,
 }
 
 impl StagingHandles {
-    fn open(build: &BuildPaths) -> Result<Self> {
+    fn open(spec: &SandboxSpec) -> Result<Self> {
+        let build = &spec.build;
         let hosts = [&build.src_host, &build.pkg_host, &build.home_host];
         let mut fds: [Option<rustix::fd::OwnedFd>; 3] = [None, None, None];
         for (i, host) in hosts.iter().enumerate() {
@@ -401,20 +434,87 @@ impl StagingHandles {
             .map_err(|e| anyhow::Error::msg(format!("open sandbox bind source {host}: {e}")))?;
             fds[i] = Some(fd);
         }
-        Ok(Self { fds: fds.map(Option::unwrap) })
+        let mut extra = Vec::new();
+        for bind in &spec.extra_binds {
+            let host = Path::new(&bind.host);
+            let is_dir = bind.kind == "dir";
+            if (is_dir && !host.is_dir()) || (!is_dir && !host.is_file()) {
+                bail!("sandbox extra bind source {} does not exist as a {is_dir}", bind.host);
+            }
+            let flags = if is_dir {
+                OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW
+            } else {
+                // an O_PATH open of a file may still need the file type;
+                // PATH alone opens it without access checks
+                OFlags::PATH | OFlags::NOFOLLOW
+            };
+            let fd = rustix::fs::open(bind.host.as_str(), flags, Mode::empty()).map_err(|e| {
+                anyhow::Error::msg(format!("open sandbox extra bind {}: {e}", bind.host))
+            })?;
+            extra.push(ExtraFd { fd, bind: bind.clone() });
+        }
+        Ok(Self { fds: fds.map(Option::unwrap), extra })
     }
 
     /// Create the three bind targets under `base` and bind the handles
     /// through their `/proc/self/fd` aliases. `/proc` must be resolvable
     /// (the host's procfs is still mounted here — the fresh one mounts after).
-    fn bind_at(&self, base: &Path) -> Result<()> {
+    ///
+    /// Extra binds (§5.3) bind at `root + inside` in `dir` mode (the spec's
+    /// `inside` lives inside the new root) and at `inside` as-is in `live`
+    /// mode; a read-only bind is remounted at once.
+    fn bind_at(&self, base: &Path, root: Option<&Path>, spec: &SandboxSpec) -> Result<()> {
         let names = ["src", "pkg", "home"];
         for (i, name) in names.iter().enumerate() {
             let dst = base.join(name);
             std::fs::create_dir_all(&dst)?;
             let link = format!("/proc/self/fd/{}", self.fds[i].as_raw_fd());
             mbind(&link, &dst.to_string_lossy(), false)
-                .with_context(|| format!("bind staging {} -> {}", names[i], dst.display()))?;
+                .with_context(|| format!("bind staging {name} -> {}", dst.display()))?;
+        }
+        for x in &self.extra {
+            // `inside` is an absolute in-sandbox path: under a `dir` root it
+            // lives inside the tree we are about to enter, so prefix it the
+            // same way the build base is resolved
+            let target: std::path::PathBuf = match root {
+                Some(r) => r.join(x.bind.inside.trim_start_matches('/')),
+                None => Path::new(&x.bind.inside).to_path_buf(),
+            };
+            if x.bind.kind == "file" {
+                // Never follow a final symlink while preparing a file bind:
+                // resolver binds have already resolved it within the sandbox
+                // root. Create missing parents after /run has been masked.
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                match std::fs::symlink_metadata(&target) {
+                    Ok(md) if md.file_type().is_file() => {}
+                    Ok(md) if md.file_type().is_symlink() => {
+                        bail!("extra file bind target {} is still a symlink; refusing to follow it", target.display());
+                    }
+                    Ok(_) => bail!("extra file bind target {} is not a regular file", target.display()),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        std::fs::File::create(&target).with_context(|| {
+                            format!("create extra bind placeholder {}", target.display())
+                        })?;
+                    }
+                    Err(e) => return Err(e).with_context(|| format!("inspect extra bind target {}", target.display())),
+                }
+            } else if !target.is_dir() {
+                std::fs::create_dir_all(&target).with_context(|| {
+                    format!("create extra bind target {}", target.display())
+                })?;
+            }
+            let link = format!("/proc/self/fd/{}", x.fd.as_raw_fd());
+            mbind(&link, &target.to_string_lossy(), false)
+                .with_context(|| format!("bind extra {} -> {}", x.bind.inside, target.display()))?;
+            if x.bind.readonly {
+                remount_ro(
+                    &target.to_string_lossy(),
+                    spec,
+                    &format!("the extra bind {}", x.bind.inside),
+                )?;
+            }
         }
         Ok(())
     }
@@ -581,6 +681,7 @@ mod tests {
             file_size_limit_bytes: 0,
             open_files_limit: 0,
             readonly_paths: Vec::new(),
+            extra_binds: Vec::new(),
         strict_readonly_root: false,
         writable_paths: Vec::new(),
         };

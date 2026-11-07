@@ -156,7 +156,6 @@ impl OperationHandle {
     }
 
     /// Record a group membership change in this transaction (Phase 5).
-    #[allow(dead_code)]
     pub fn record_group(&mut self, group_id: &str) {
         if !self.groups.iter().any(|g| g == group_id) {
             self.groups.push(group_id.to_string());
