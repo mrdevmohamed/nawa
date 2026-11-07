@@ -85,3 +85,28 @@ The implementation changes and targeted regressions are now committed on the PR 
 **CI:** workflow run 42388626721 was created for the earlier code head 897e208 and was cancelled before jobs returned. No workflow run is currently associated with final code head ea1077c. The latest code therefore remains unverified; do not treat the earlier green PR checks as coverage for these remediation commits.
 
 **Recommendation:** keep the PR Draft and do not merge yet. In particular, confirm the process-group test, Cargo integration test, and sandbox/closure resolver behavior in CI.
+
+## Additional resolver regression tests (2026-11-07)
+
+Added to `src/fetchrun.rs::resolver_path_tests`:
+
+- `resolver_symlink_chain_is_resolved_inside_the_supplied_root`: proves an absolute resolver symlink is resolved against the supplied closure/root tree, not the host filesystem.
+- `resolver_symlink_loop_is_rejected_instead_of_silently_accepted`: proves cyclic symlink chains fail after the bounded traversal rather than returning an unresolved path.
+- `resolver_symlink_cannot_escape_root_with_parent_components`: proves `..` traversal in a symlink target cannot escape the sandbox root.
+
+The implementation now returns an explicit error when the 40-link traversal limit is exhausted. These are path-resolution unit tests, not a substitute for an end-to-end privileged sandbox/closure fetch test.
+
+### Existing ecosystem/source coverage confirmed on this branch
+
+- Go: real module download, offline build, cache hit, lockfile-key changes, vendored mode, missing `go.sum`, and unsupported `go.work` rejection.
+- Cargo: pinned Git dependency fetch and offline build, cache hit, lockfile/Cargo-version key changes, vendored directory mode, missing lockfile, replacement-source failure, and Cargo config isolation.
+- Sources: multiple archives plus a plain local asset, SHA-256 rejection before extraction, mirror fallback, destination collision rejection, and rebuild-check determinism.
+- Offline: cold-cache failure and seeded-cache build both assert that no socket is opened during offline build.
+
+### Remaining integration gaps
+
+- Cargo registry-crate resolution through a hermetic local registry is not yet covered; current Cargo end-to-end fixture exercises a pinned local Git dependency.
+- Go workspace/multi-module behavior is not implemented as a success case; `go.work` is deliberately rejected and tested as a hard error.
+- A real Fetch recipe still needs to run under sandbox and closure isolation in CI. Resolver unit tests do not prove mount ordering or DNS reachability in a live namespace.
+
+Do not mark PR #16 fully verified until these remaining integration gaps and the new resolver tests pass in CI.
