@@ -54,6 +54,7 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, ExitStatus, Stdio};
+use std::os::unix::process::CommandExt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -613,7 +614,7 @@ fn run_populate_cargo(r: &FetchRun, plan: &CargoPlan, temp: &Path) -> Result<()>
         spawn_fetch_child(r, &script, env, &plan.dir, None, timeout_secs)?
     };
 
-    let status = stream_and_wait(&mut child, Some(&log_path), timeout_secs, label)?;
+    let status = stream_and_wait(&mut child, Some(&log_path), timeout_secs, label, !r.sandboxed)?;
     if !status.success() {
         bail!("fetch run ({label}) failed with status {status} — log: {}", log_path.display());
     }
@@ -659,7 +660,7 @@ fn cargo_version_query(r: &FetchRun, plan: &CargoPlan) -> Result<String> {
         spawn_fetch_child(r, &script, env, &plan.dir, None, timeout_secs)?
     };
 
-    let status = stream_and_wait(&mut child, None, timeout_secs, label)
+    let status = stream_and_wait(&mut child, None, timeout_secs, label, !r.sandboxed)
         .with_context(|| "the cargo --version probe failed (fetch-phase.md §11)")?;
     if !status.success() {
         bail!("fetch run ({label}) failed with status {status}");
@@ -919,6 +920,7 @@ fn spawn_fetch_child(
             .current_dir(workdir)
             .env_clear()
             .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+            .process_group(0)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -1183,65 +1185,73 @@ fn stream_and_wait(
     log_path: Option<&Path>,
     timeout_secs: u64,
     label: &str,
+    kill_process_group: bool,
 ) -> Result<ExitStatus> {
     let mut log = match log_path {
         Some(p) => Some(std::fs::File::create(p).with_context(|| format!("create {}", p.display()))?),
         None => None,
     };
 
-    // the reader thread owns the pipe so the main thread can poll the
-    // child's status while output keeps flowing
+    // Keep the reader independent so a descendant retaining stdout cannot
+    // make join() block beyond the fetch timeout after the shell exits.
     let stdout: ChildStdout = child.stdout.take().context("no stdout pipe")?;
     let tail = std::sync::Arc::new(std::sync::Mutex::new(
         std::collections::VecDeque::<String>::with_capacity(FAIL_TAIL_LINES + 1),
     ));
     let tail_writer = std::sync::Arc::clone(&tail);
+    let (reader_done_tx, reader_done_rx) = std::sync::mpsc::channel();
     let reader = std::thread::spawn(move || {
         let mut r = std::io::BufReader::new(stdout);
         let mut buf = Vec::new();
-        // read_until is tolerant of non-UTF-8 bytes and of very long lines
         while r.read_until(b'\n', &mut buf).unwrap_or(0) > 0 {
-            if let Some(f) = log.as_mut() {
-                let _ = f.write_all(&buf);
-            }
+            if let Some(f) = log.as_mut() { let _ = f.write_all(&buf); }
             {
                 let mut out = std::io::stdout().lock();
                 let _ = out.write_all(&buf);
                 let _ = out.flush();
             }
             let mut t = tail_writer.lock().unwrap();
-            if t.len() == FAIL_TAIL_LINES {
-                t.pop_front();
-            }
+            if t.len() == FAIL_TAIL_LINES { t.pop_front(); }
             t.push_back(String::from_utf8_lossy(&buf).trim_end().to_string());
             buf.clear();
         }
+        let _ = reader_done_tx.send(());
     });
 
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     loop {
         if let Some(status) = child.try_wait().context("waiting for the fetch run")? {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if reader_done_rx.recv_timeout(remaining).is_err() {
+                terminate_fetch_process(child, kill_process_group);
+                let _ = reader.join();
+                let t: Vec<String> = tail.lock().unwrap().drain(..).collect();
+                bail!("{label} exceeded NAWA_FETCH_TIMEOUT ({timeout_secs}s); a descendant retained stdout and the process tree was killed\n--- last output ---\n{}", t.join("\n"));
+            }
             reader.join().map_err(|_| anyhow::Error::msg("fetch log reader crashed"))?;
             let t: Vec<String> = tail.lock().unwrap().drain(..).collect();
             if !status.success() {
-                bail!(
-                    "{label} failed with status {status}\n--- last output ---\n{}",
-                    t.join("\n")
-                );
+                bail!("{label} failed with status {status}\n--- last output ---\n{}", t.join("\n"));
             }
             return Ok(status);
         }
-        if Instant::now() > deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            reader.join().map_err(|_| anyhow::Error::msg("fetch log reader crashed"))?;
+        if Instant::now() >= deadline {
+            terminate_fetch_process(child, kill_process_group);
+            let _ = reader.join();
             let t: Vec<String> = tail.lock().unwrap().drain(..).collect();
-            bail!(
-                "{label} exceeded NAWA_FETCH_TIMEOUT ({timeout_secs}s) and was killed\n\
-                 --- last output ---\n{}",
-                t.join("\n")
-            );
+            bail!("{label} exceeded NAWA_FETCH_TIMEOUT ({timeout_secs}s) and was killed\n--- last output ---\n{}", t.join("\n"));
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// Kill the plain fetch process group, including Go/Cargo descendants. Sandboxed
+/// runs are supervised by the PID namespace and must not signal the caller.
+fn terminate_fetch_process(child: &mut Child, kill_process_group: bool) {
+    if kill_process_group {
+        unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL); }
+    } else {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
 }
