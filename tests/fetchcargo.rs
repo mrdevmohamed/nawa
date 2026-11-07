@@ -56,6 +56,14 @@ fn scratch(tag: &str) -> PathBuf {
     d
 }
 
+// Strict sandbox tests need a build directory outside the sandbox's private /tmp.
+fn scratch_outside_tmp(tag: &str) -> PathBuf {
+    let d = PathBuf::from("/var/tmp").join(format!("nawa-fetchcargo-{tag}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&d);
+    fs::create_dir_all(&d).unwrap();
+    d
+}
+
 fn sha256(bytes: &[u8]) -> String {
     use sha2::Digest;
     hex::encode(sha2::Sha256::digest(bytes))
@@ -1225,7 +1233,7 @@ install -Dm755 {target_q}/release/nawa %{{pkgdir}}/usr/bin/nawa
 #[test]
 fn cargo_fetch_and_offline_build_work_under_sandbox_and_closure() {
     for isolation in ["sandbox", "closure"] {
-        let s = scratch(&format!("isolation-{isolation}"));
+        let s = scratch_outside_tmp(&format!("isolation-{isolation}"));
         let repo = s.join("dep");
         let rev = git_dep_repo(&repo, isolation);
         let cg_home = s.join("cg-setup");
