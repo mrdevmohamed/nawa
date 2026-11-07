@@ -234,7 +234,12 @@ fn remount_mount_tree_ro(spec: &SandboxSpec) -> Result<()> {
         // setup_dev() has replaced /dev and everything beneath it with
         // sandbox-private mounts. Keep /dev/null, devpts and shm writable;
         // these are ephemeral device interfaces, not host filesystem paths.
-        let private_dev = mount.starts_with("/dev");
+        //
+        // setup_dev() first bind-mounts the host device nodes into
+        // <scratch>/devnodes, then binds those staged mounts into /dev.
+        // The staging mountpoints are also present in mountinfo, but are not
+        // part of the build root and must remain writable just like /dev/null.
+        let private_dev = is_private_dev_mount(mount, Path::new(&spec.build.scratch));
         // mountinfo can retain entries for mounts absent in restricted
         // containers (notably EFI variables). Skip only ENOENT; permission
         // or lookup errors must fail closed rather than weaken read-only mode.
@@ -256,6 +261,16 @@ fn remount_mount_tree_ro(spec: &SandboxSpec) -> Result<()> {
         remount_ro(&path, spec, &path)?;
     }
     Ok(())
+}
+
+/// True for the private device interfaces assembled by setup_dev.
+///
+/// The staging binds under <scratch>/devnodes are as essential as their
+/// final /dev/* binds: both paths refer to character devices whose normal
+/// read/write semantics must be preserved inside the sandbox. Do not confuse
+/// them with ordinary files elsewhere in the writable build scratch tree.
+fn is_private_dev_mount(mount: &Path, scratch: &Path) -> bool {
+    mount.starts_with("/dev") || mount.starts_with(scratch.join("devnodes"))
 }
 
 fn unescape_mountinfo(path: &str) -> String {
@@ -647,6 +662,37 @@ pub(crate) fn setup_sys(spec: &SandboxSpec, at: &Path) -> Result<()> {
 mod tests {
     use super::super::spec::{BuildPaths, RootSpec};
     use super::*;
+
+    #[test]
+    fn staged_device_bind_mounts_are_not_marked_read_only() {
+        let scratch = Path::new("/build/nawa-1.0.0-18/sb");
+
+        for path in [
+            "/dev/null",
+            "/dev/pts",
+            "/dev/shm",
+            "/build/nawa-1.0.0-18/sb/devnodes/null",
+            "/build/nawa-1.0.0-18/sb/devnodes/urandom",
+        ] {
+            assert!(
+                is_private_dev_mount(Path::new(path), scratch),
+                "{path} is a private device mount"
+            );
+        }
+
+        for path in [
+            "/device/null",
+            "/build/nawa-1.0.0-18/sb/devnodes-backup/null",
+            "/build/nawa-1.0.0-18/sb/src",
+            "/build/nawa-1.0.0-18/sb/pkg",
+            "/etc",
+        ] {
+            assert!(
+                !is_private_dev_mount(Path::new(path), scratch),
+                "{path} is not a private device mount"
+            );
+        }
+    }
 
     #[test]
     fn overlay_data_string_is_built_in_layer_order() {
