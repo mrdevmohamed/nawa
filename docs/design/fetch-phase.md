@@ -352,10 +352,11 @@ Constraint: the id must be computable **before any download**, because `--use-ca
   - the asset-tree digest, when `[assets]` is present;
   - a per-backend fetch-schema version constant, when `[fetch.*]` is present (so a change in how Nawa fetches invalidates old results);
   - the implicit toolchain dependencies, which already enter through the closure archive names.
+  - in non-closure modes, the actual Go / Cargo version strings reported by the executables found through the exact fetch PATH.
 
 For recipes with `package.sources`, the existing `source_sha256` argument becomes the sorted list of `name=sha256`.
 
-**Implementation.** `lint::build_id` keeps its signature and its bytes. A sibling `build_id_with(..., extras: &[(&str, &str)])` appends `\0label=value` for each extra after the flags, and `build_id` calls it with an empty slice. Legacy ids are therefore identical by construction, and the golden test pins that. Extras, in this order: `assets`, `fetch-go`, `fetch-cargo`. The probe/snapshot rule for `assets` is in §5.3.
+**Implementation.** `lint::build_id` keeps its signature and its bytes. A sibling `build_id_with(..., extras: &[(&str, &str)])` appends `\0label=value` for each extra after the flags, and `build_id` calls it with an empty slice. Legacy ids are therefore identical by construction, and the golden test pins that. Extras, in this order: `assets`, `fetch-go`, `fetch-cargo`, then `toolchain-go` / `toolchain-cargo` for non-closure builds. Closure builds use the exact toolchain package archive names already present in the closure identity. The version probes use the same cleared environment and PATH as the fetch runner. The probe/snapshot rule for `assets` is in §5.3.
 
 **Legacy ids must not move.** The new components are appended only when the corresponding table exists; a recipe without `[assets]`, `[[package.sources]]` or `[fetch.*]` hashes exactly the same bytes as today. A golden-id test on a legacy recipe is mandatory (§16). Otherwise one release would invalidate every `--use-cache` sidecar.
 
@@ -563,12 +564,12 @@ Settled by the implementation in this PR (recorded, not re-litigated):
 
 - Cache view for Go and Cargo (old item 3; §7, §8): a per-build **copy** of the published entry. Read-only and overlay views were not evaluated.
 - Name of the recipe lint command (part of old item 7; §14): `nawa recipe check`. The asset size threshold in the code differs from the proposal, see §5.4.
-- Go cache key without the Go version (old item 4; §11): implemented that way. It is still unconfirmed across Go releases, see open item 3 below.
+- Go ecosystem cache key without the Go version (old item 4; §11): implemented that way. It is still unconfirmed across Go releases, see open item 3 below. The build archive identity separately includes the actual Go version in non-closure modes.
 - Fetch resource profile (old item 9; §12): the code uses the starting values of the §12 table. They have not been retuned against real large builds.
 
 Still open:
 
-1. Exact toolchain and CA-bundle package names in faseela-repo (§9). `GO_TOOLCHAIN = "go"`, `CARGO_TOOLCHAIN = "rust"` and `CA_BUNDLE = "ca-certificates"` in `src/recipe.rs` are placeholders that still have to be checked before release.
+1. None for package naming: verified against the current faseela-repo recipes that the implicit package IDs are `golang`, `rust` and `ca-certificates`; `src/recipe.rs` and a regression test now pin those exact names.
 2. The Seed / bootstrap implementation (§13), delivery phase 6; not in this PR.
 3. Confirming that the Go cache key may omit the Go version (§11).
 4. Whether to restrict fetch-phase egress later (§12).
