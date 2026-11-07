@@ -660,6 +660,6 @@ Unverified, to be checked in the spike or Phase 0: that `go mod download` honour
 
 ## 20. Verification snapshot for PR #16 (2026-11-07)
 
-The PR head `a1144ccb55f22866ed229088c94890c742f435cd` completed GitHub Actions run [42391105667](https://github.com/mrdevmohamed/nawa/actions/runs/42391105667) with conclusion **success**. The run included the build/Clippy/test job, user and root test jobs on Ubuntu 22.04/24.04, ordinary build jobs at `none`, `env`, `sandbox`, and `closure` isolation, the static musl binary, and CLI smoke tests.
+The implementation commit `a1144ccb55f22866ed229088c94890c742f435cd` completed GitHub Actions run [42391105667](https://github.com/mrdevmohamed/nawa/actions/runs/42391105667) with conclusion **success**. Documentation-only commits have since been added to the PR branch; this workflow result is for the implementation commit, not those later documentation commits. The run included the build/Clippy/test job, user and root test jobs on Ubuntu 22.04/24.04, ordinary build jobs at `none`, `env`, `sandbox`, and `closure` isolation, the static musl binary, and CLI smoke tests.
 
 This is a green CI result for that exact head. It must not be overstated: the Go/Cargo fetch integration fixtures still use `--isolation env`; the isolation matrix validates ordinary builds, not the fetch runner under `sandbox` or `closure`. The remaining fetch-specific integration gap is tracked in §17 and `docs/reviews/PR-16-REVIEW.md`.
