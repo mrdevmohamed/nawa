@@ -199,9 +199,13 @@ fn remount_spec_paths_ro(spec: &SandboxSpec) -> Result<()> {
     Ok(())
 }
 
-/// In strict plugin mode remount every existing mount read-only, including
-/// separate host filesystems beneath / (for example /var or /home). Only
-/// private tmpfs and the explicit scratch HOME remain writable.
+/// In strict mode remount every existing mount read-only, including separate
+/// host filesystems beneath / (for example /var or /home).
+///
+/// The sandbox-owned /dev hierarchy is deliberately excluded: setup_dev()
+/// replaces it with a private tmpfs containing only the required device nodes,
+/// devpts and shm. Those device interfaces need their normal writable semantics;
+/// they are not the host's /dev tree.
 fn remount_mount_tree_ro(spec: &SandboxSpec) -> Result<()> {
     if !spec.strict_readonly_root {
         return Ok(());
@@ -227,11 +231,16 @@ fn remount_mount_tree_ro(spec: &SandboxSpec) -> Result<()> {
         let hidden = spec.mask.iter().any(|masked| {
             mount == Path::new(masked) || mount.starts_with(masked)
         });
+        // setup_dev() has replaced /dev and everything beneath it with
+        // sandbox-private mounts. Keep /dev/null, devpts and shm writable;
+        // these are ephemeral device interfaces, not host filesystem paths.
+        let private_dev = mount.starts_with("/dev");
         // mountinfo can retain entries for mounts absent in restricted
         // containers (notably EFI variables). Skip only ENOENT; permission
         // or lookup errors must fail closed rather than weaken read-only mode.
         if !writable
             && !hidden
+            && !private_dev
             && mount
                 .try_exists()
                 .with_context(|| format!("inspect sandbox mount point {path}"))?
