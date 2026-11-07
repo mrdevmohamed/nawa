@@ -845,31 +845,54 @@ pub(crate) fn build_toolchain_identity(
         if !enabled {
             continue;
         }
-        let probe_root = std::env::temp_dir().join(format!(
-            "nawa-toolchain-id-{}-{}",
-            std::process::id(),
-            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir(&probe_root)
-            .with_context(|| format!("create toolchain identity scratch {}", probe_root.display()))?;
-        let (cargo_home, cwd) = match isolated_cargo_paths(&probe_root) {
-            Ok(paths) => paths,
-            Err(e) => {
-                let _ = std::fs::remove_dir_all(&probe_root);
-                return Err(e);
-            }
+        let output = if label == "cargo" {
+            // Cargo can read config from cwd ancestors even for a version
+            // probe. Reuse the same isolated cwd/CARGO_HOME policy as fetch.
+            let probe_root = std::env::temp_dir().join(format!(
+                "nawa-toolchain-id-{}-{}",
+                std::process::id(),
+                TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&probe_root)
+                .with_context(|| format!("create toolchain identity scratch {}", probe_root.display()))?;
+            let (cargo_home, cwd) = match isolated_cargo_paths(&probe_root) {
+                Ok(paths) => paths,
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(&probe_root);
+                    return Err(e);
+                }
+            };
+            let result = std::process::Command::new(name)
+                .args(args)
+                .current_dir(&cwd)
+                .env_clear()
+                .env("PATH", fetch_path())
+                .env("CARGO_HOME", &cargo_home)
+                .output()
+                .with_context(|| format!("query {name} version using the fetch PATH"));
+            let _ = std::fs::remove_dir_all(&cwd);
+            let _ = std::fs::remove_dir_all(&probe_root);
+            result?
+        } else {
+            // Go does not consume Cargo config; use an empty cwd without
+            // making unrelated Cargo configuration a prerequisite.
+            let cwd = std::env::temp_dir().join(format!(
+                "nawa-go-version-{}-{}",
+                std::process::id(),
+                TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&cwd)
+                .with_context(|| format!("create Go version probe cwd {}", cwd.display()))?;
+            let result = std::process::Command::new(name)
+                .args(args)
+                .current_dir(&cwd)
+                .env_clear()
+                .env("PATH", fetch_path())
+                .output()
+                .with_context(|| format!("query {name} version using the fetch PATH"));
+            let _ = std::fs::remove_dir_all(&cwd);
+            result?
         };
-        let output = std::process::Command::new(name)
-            .args(args)
-            .current_dir(&cwd)
-            .env_clear()
-            .env("PATH", fetch_path())
-            .env("CARGO_HOME", &cargo_home)
-            .output()
-            .with_context(|| format!("query {name} version using the fetch PATH"));
-        let _ = std::fs::remove_dir_all(&cwd);
-        let _ = std::fs::remove_dir_all(&probe_root);
-        let output = output?;
         if !output.status.success() {
             bail!(
                 "cannot determine {name} toolchain identity: {name} version exited with {}",
