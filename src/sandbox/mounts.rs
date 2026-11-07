@@ -344,10 +344,16 @@ fn overlay_scratch(spec: &SandboxSpec) -> Result<()> {
     // Mask /run BEFORE extra resolver binds. A host resolv.conf commonly
     // points into /run/systemd/resolve; the bind then lands on the empty
     // private tmpfs target rather than being hidden by a later mask.
-    if spec.mask.iter().any(|p| p == "/run") {
-        tmpfs_mask("/run")?;
+    let run_is_masked = spec.mask.iter().any(|p| p == "/run");
+    if run_is_masked {
+        // Keep the private /run empty but searchable so the dropped fetch uid
+        // can read the resolver file mounted below /run/systemd/resolve.
+        tmpfs_at(Path::new("/run"), "size=1m,mode=755")?;
     }
     staging.bind_at(base_p, None, spec)?;
+    if run_is_masked {
+        remount_ro("/run", spec, "the empty /run resolver staging mount")?;
+    }
     drop(staging);
     setup_dev(Path::new("/dev"), Path::new(&spec.build.scratch))?;
     fresh_proc_or_mask(spec, Path::new("/proc"))?;
