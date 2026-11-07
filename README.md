@@ -6,7 +6,7 @@ Nawa (نواة) is a source-based package manager for Linux distributions, writt
 
 - Declarative package recipes and dependency resolution.
 - Multiple SHA-256-verified sources and recipe-local assets.
-- Go Modules and Rust/Cargo dependency fetching, followed by offline builds.
+- Lockfile-driven Go Modules and Rust/Cargo dependency fetching, followed by offline builds.
 - Build isolation: `none`, `env`, `sandbox`, and `closure`.
 - Binary repositories, signed indexes, package caching, and reproducible builds.
 - Atomic installation, upgrade, removal, and rollback.
@@ -20,12 +20,15 @@ Download a release binary from [GitHub Releases](https://github.com/mrdevmohamed
 
 ## Build and test
 
-The Rust dependencies are vendored, so these commands do not need network access:
+Dependencies are resolved from `Cargo.lock`. Fetch them once, then build and test offline:
 
 ```sh
+cargo fetch --locked
 cargo build --release --offline --locked
 cargo test --release --offline --locked
 ```
+
+For package recipes, declare `[fetch.cargo]` so Nawa fetches the locked crates into its content-addressed cache before the offline build.
 
 ## Quick start
 
@@ -57,4 +60,3 @@ Start at the [documentation index](docs/README.md).
 - `tests/` — unit and integration tests
 - `scripts/` — CI helpers and smoke tests
 - `docs/` — design, operational, and review documentation
-- `vendor/` — vendored Rust dependencies
