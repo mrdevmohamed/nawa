@@ -3,7 +3,7 @@
 **Pull request:** https://github.com/mrdevmohamed/nawa/pull/16  
 **Branch:** docs/fetch-phase-design  
 **Implementation commit verified by CI:** a1144ccb55f22866ed229088c94890c742f435cd  
-**Current docs head:** 3feb4c27a97be36dfea1101631e991d172ff2094 (documentation-only commits after the verified implementation commit)  
+**Branch state:** documentation-only follow-up commits are newer than the implementation commit verified by CI  
 **Review date:** 2026-11-07  
 **Initial recommendation:** Request changes before remediation; keep Draft until all required checks and remaining integration work are resolved.
 
@@ -49,7 +49,7 @@ Non-closure build IDs include the actual Go/Cargo version strings obtained throu
 ## Current CI verification
 
 **Implementation commit:** a1144ccb55f22866ed229088c94890c742f435cd  
-**Current PR head:** 3feb4c27a97be36dfea1101631e991d172ff2094 (docs-only changes after the tested implementation tree)  
+**PR branch state:** documentation-only commits follow the tested implementation tree  
 **Workflow run:** [42391105667](https://github.com/mrdevmohamed/nawa/actions/runs/42391105667)  
 **Conclusion:** **Success** (completed).
 
