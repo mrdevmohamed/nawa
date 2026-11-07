@@ -70,7 +70,7 @@ The fetch extras are schema constants (fetch-go=1 / fetch-cargo=1). Cargo's ecos
 5. Include toolchain identity in build IDs and add cache invalidation tests.
 6. Add real Go/Cargo fetch integration coverage for sandbox and closure where the CI runner supports it.
 
-## Remediation status at 7280dfb
+## Remediation status at 897e208
 
 The implementation changes and targeted regressions are now committed on the PR branch:
 
@@ -78,10 +78,10 @@ The implementation changes and targeted regressions are now committed on the PR 
 |---|---|---|
 | R1 | Plain fetch commands use a dedicated process group; the reader deadline also covers descendants that retain stdout after Bash exits. Timeout kills the group and reaps Bash. | src/fetchrun.rs: descendant-inherited-stdout timeout test |
 | R2 | GO_TOOLCHAIN is now golang; rust and ca-certificates were also checked against the current Faseela recipes. | src/recipe.rs: package-ID and implicit dependency-closure tests |
-| R3 | Cargo fetch and its version probe use an empty temporary cwd, fresh per-fetch CARGO_HOME, explicit manifest path, and reject Cargo config files on the cwd ancestor chain. | tests/fetchcargo.rs: hostile ancestor config and inherited CARGO_HOME config |
+| R3 | Cargo fetch and its version probe use an empty temporary cwd, fresh per-fetch CARGO_HOME, explicit manifest path, and reject ambient Cargo configs that the recipe build cwd would discover outside the downloaded source. | tests/fetchcargo.rs: inherited CARGO_HOME is ignored; ambient parent config is rejected before fetch |
 | R4 | Resolver symlinks are resolved against the sandbox root. Live /run is replaced with an empty searchable tmpfs before binding the resolver target; the bind and /run are read-only. File-bind targets no longer follow final symlinks. | src/fetchrun.rs: direct, relative, and dangling resolver symlink path tests. Full live/closure mount execution still needs CI confirmation. |
 | R5 | Non-closure build IDs include actual Go/Cargo version strings from the fetch PATH. Closure IDs already include the implicit toolchain package archives. | src/build.rs: Go/Cargo version and closure archive invalidation tests |
 
-**CI:** workflow run 42388465305 is pending for remediation head 7280dfb. The previous run was cancelled when newer commits superseded it. No finding is marked verified until this run completes successfully.
+**CI:** workflow run 42388465305 was created for the earlier code head 7280dfb and has not returned jobs/results. No workflow run is currently associated with final code head 897e208. The latest code therefore remains unverified; do not treat the earlier green PR checks as coverage for these remediation commits.
 
 **Recommendation:** keep the PR Draft and do not merge yet. In particular, confirm the process-group test, Cargo integration test, and sandbox/closure resolver behavior in CI.
