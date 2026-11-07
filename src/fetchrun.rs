@@ -963,7 +963,7 @@ fn run_populate(r: &FetchRun, plan: &GoPlan, temp: &Path, label: &str) -> Result
         spawn_fetch_child(r, &script, env, &plan.dir, None, timeout_secs)?
     };
 
-    let status = stream_and_wait(&mut child, Some(&log_path), timeout_secs, label)?;
+    let status = stream_and_wait(&mut child, Some(&log_path), timeout_secs, label, !r.sandboxed)?;
     if !status.success() {
         bail!("fetch run ({label}) failed with status {status} — log: {}", log_path.display());
     }
