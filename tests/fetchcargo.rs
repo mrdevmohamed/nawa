@@ -36,6 +36,10 @@ fn nawa() -> Command {
         "NAWA_SRCROOT", "NAWA_ASSETSDIR",
         "NAWA_GOPROXY", "NAWA_FETCH_PATH", "NAWA_FETCH_TIMEOUT",
         "CARGO_HOME",
+        // the root CI job points CARGO_TARGET_DIR at /var/tmp for the *outer*
+        // `cargo test`; inherited by the recipe's own `cargo build` it would
+        // move target/release/ away from where the recipes copy it from
+        "CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR",
     ] {
         c.env_remove(k);
     }

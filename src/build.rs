@@ -108,21 +108,38 @@ pub struct BuildResult {
 /// read-only files (archive-normalized `pkg` contents); `unlink(2)` needs
 /// a writable *parent*, so every directory is opened up before the delete.
 /// Opening the dirs up is best effort — the delete itself is the real check.
+///
+/// The chmod must happen *before* the directory is listed: overlayfs leaves
+/// its `workdir/work` at mode 000 inside the sandbox scratch (`sb/layer-work`),
+/// and a walker that opens a directory before the caller can chmod it (as
+/// `walkdir` does) fails with EACCES on exactly that leftover.
 pub(crate) fn wipe_work(work: &Path) -> Result<()> {
-    if !work.exists() {
-        return Ok(());
+    wipe_tree(work).with_context(|| format!("wipe the previous work tree {}", work.display()))
+}
+
+fn wipe_tree(path: &Path) -> std::io::Result<()> {
+    let md = match std::fs::symlink_metadata(path) {
+        Ok(md) => md,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    if !md.is_dir() {
+        // files and symlinks (never followed) only need a writable parent,
+        // which the caller opened up before descending
+        return match std::fs::remove_file(path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        };
     }
-    for entry in walkdir::WalkDir::new(work).follow_links(false) {
-        let entry = entry.with_context(|| format!("wipe {}", work.display()))?;
-        if entry.file_type().is_dir() {
-            let _ = std::fs::set_permissions(
-                entry.path(),
-                std::fs::Permissions::from_mode(0o700),
-            );
-        }
+    // open the directory up first, then list it
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+    for entry in std::fs::read_dir(path)? {
+        wipe_tree(&entry?.path())?;
     }
-    std::fs::remove_dir_all(work)
-        .with_context(|| format!("wipe the previous work tree {}", work.display()))
+    match std::fs::remove_dir(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
 }
 
 pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
@@ -1380,3 +1397,36 @@ fn run_section(
     Ok(())
 }
 
+
+#[cfg(test)]
+mod wipe_tests {
+    use super::wipe_work;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// overlayfs leaves `<workdir>/work` at mode 000 (and the assets snapshot
+    /// keeps 0555 dirs); neither may stop the next build from wiping its tree.
+    #[test]
+    fn wipe_removes_mode_000_and_read_only_trees() {
+        let root = std::env::temp_dir().join(format!("nawa-wipe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let hidden = root.join("sb/layer-work/work/index");
+        std::fs::create_dir_all(&hidden).unwrap();
+        std::fs::write(hidden.join("f"), b"x").unwrap();
+        std::fs::set_permissions(&hidden, std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::fs::set_permissions(
+            root.join("sb/layer-work/work"),
+            std::fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
+        let ro = root.join("src/assets/files");
+        std::fs::create_dir_all(&ro).unwrap();
+        std::fs::write(ro.join("a"), b"y").unwrap();
+        std::fs::set_permissions(ro.join("a"), std::fs::Permissions::from_mode(0o444)).unwrap();
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        wipe_work(&root).unwrap();
+        assert!(!root.exists());
+        // a missing tree is not an error
+        wipe_work(&root).unwrap();
+    }
+}

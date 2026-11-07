@@ -218,8 +218,14 @@ test ! -e "%{assetsdir}/files/other" || { echo "FAIL undeclared dir staged"; exi
 # §5.3.2: empty directories are not preserved
 test ! -e "%{assetsdir}/files/void" || { echo "FAIL empty dir staged"; exit 1; }
 # §5.3.4 (env level is chmod-only, best effort — but the test may pin it)
-test ! -w "%{assetsdir}/files/config/x86_64.fragment" || { echo "FAIL asset file writable"; exit 1; }
-test ! -w "%{assetsdir}/files/patches" || { echo "FAIL asset dir writable"; exit 1; }
+# (root bypasses mode bits, so `test -w` is always true for uid 0 — the
+# CI root jobs cannot observe the chmod; the mode itself is asserted below)
+if [ "$(id -u)" != 0 ]; then
+  test ! -w "%{assetsdir}/files/config/x86_64.fragment" || { echo "FAIL asset file writable"; exit 1; }
+  test ! -w "%{assetsdir}/files/patches" || { echo "FAIL asset dir writable"; exit 1; }
+fi
+test "$(stat -c %a "%{assetsdir}/files/config/x86_64.fragment")" = "444" || { echo "FAIL asset file mode"; exit 1; }
+test "$(stat -c %a "%{assetsdir}/files/patches")" = "555" || { echo "FAIL asset dir mode"; exit 1; }
 # §5.3.2: the owner-execute bit is the one mode bit that survives
 test -x "%{assetsdir}/files/scripts/configure-kernel.sh" || { echo "FAIL exec bit lost"; exit 1; }
 # §14C: no sources — no workspace-root name; asserted via a concatenation
