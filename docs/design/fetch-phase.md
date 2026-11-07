@@ -1,6 +1,6 @@
 # Nawa build inputs and fetch phase — design
 
-**Status:** Revision 3, implemented in this PR for delivery phases 0–5 (§16). Phase 6, the bootstrap switch (§13), is not part of it. §17 records which open decisions the implementation settled and which are still open.
+**Status:** Revision 3, implemented in this PR for delivery phases 0–5 (§16). The current PR head passed CI run [42391105667](https://github.com/mrdevmohamed/nawa/actions/runs/42391105667); this verifies the configured build, lint, unit/integration, isolation, static-musl and CLI-smoke jobs, but does not close the fetch-specific sandbox/closure integration gap in §17. Phase 6, the bootstrap switch (§13), is not part of it. §17 records which open decisions the implementation settled and which are still open.
 **Project:** Nawa
 **Baseline:** the Nawa 1.0.0 tree (`src/recipe.rs`, `src/build.rs`, `src/buildenv.rs`, `src/sandbox/`, `src/fetch.rs`, `src/lint.rs`)
 **Review:** revision 2 was checked claim by claim against the 1.0.0 tree; every correction is listed in Appendix B
@@ -571,16 +571,15 @@ Settled by the implementation in this PR (recorded, not re-litigated):
 
 Still open:
 
-1. None for package naming: verified against the current faseela-repo recipes that the implicit package IDs are `golang`, `rust` and `ca-certificates`; `src/recipe.rs` and a regression test now pin those exact names.
-2. The Seed / bootstrap implementation (§13), delivery phase 6; not in this PR.
-3. Confirming that the Go cache key may omit the Go version (§11).
-4. Whether to restrict fetch-phase egress later (§12).
-5. Whether and when to move legacy recipes onto the new engine (§4.1).
-6. Asset size thresholds (§5.4): the per-file warning is 32 MiB and there is no per-recipe total, against the 1 MiB / 5 MiB proposal.
-7. Whether an optional fetched-tree output hash is useful after the first implementation (not implemented).
-8. Retuning the fetch resource profile (§12) against real large builds.
-9. Whether `load_all` / `locate` should treat a directory that contains a `recipe.toml` as a leaf, so asset files can never be parsed as recipes. Both still match `recipe.toml` at any depth; until faseela-repo is checked for recipes nested under other recipes, the §5.2 rule applies (staging and `nawa recipe check` refuse one inside an asset path).
-10. Automated coverage of the sandboxed fetch (`sandbox` and `closure`): the fetch tests use `--isolation env`, and CI has no job that runs `nawa fetch` under a sandbox (§12, "Root modes").
+1. The Seed / bootstrap implementation (§13), delivery phase 6; not in this PR.
+2. Confirming that the Go cache key may omit the Go version (§11).
+3. Whether to restrict fetch-phase egress later (§12).
+4. Whether and when to move legacy recipes onto the new engine (§4.1).
+5. Asset size thresholds (§5.4): the per-file warning is 32 MiB and there is no per-recipe total, against the 1 MiB / 5 MiB proposal.
+6. Whether an optional fetched-tree output hash is useful after the first implementation (not implemented).
+7. Retuning the fetch resource profile (§12) against real large builds.
+8. Whether `load_all` / `locate` should treat a directory that contains a `recipe.toml` as a leaf, so asset files can never be parsed as recipes. Both still match `recipe.toml` at any depth; until faseela-repo is checked for recipes nested under other recipes, the §5.2 rule applies (staging and `nawa recipe check` refuse one inside an asset path).
+9. Automated end-to-end coverage of the fetch runner under `sandbox` and `closure`: the Go/Cargo integration tests currently use `--isolation env`. CI run 42391105667 passed the general sandbox/closure build matrix, but those jobs do not execute a Go/Cargo fetch recipe in those modes. Resolver unit tests therefore do not prove live fetch mount ordering, DNS reachability, or closure-root behavior.
 
 None of these may block legacy compatibility. Unresolved details are documented and tested, not guessed.
 
@@ -657,3 +656,10 @@ Revision 2 was compared with the 1.0.0 sources. Its baseline facts (§1.1) were 
 Verified and unchanged: the §1.1 baseline; legacy path kept for legacy recipes; assets covered by the signed recipe tarball (`pack_recipes` refuses symlinks, uses `HeaderMode::Deterministic`); the seven `depends.build` reads; the pinned whitelist; `clean sources` pointing at a different directory than the source cache; no existing `fetch` or `recipe` subcommand.
 
 Unverified, to be checked in the spike or Phase 0: that `go mod download` honours `-modcacherw` from `GOFLAGS`; what Cargo needs from a read-only `CARGO_HOME`; whether legacy `source_date_epoch` is stable across re-extraction (directory mtimes).
+
+
+## 20. Verification snapshot for PR #16 (2026-11-07)
+
+The PR head `a1144ccb55f22866ed229088c94890c742f435cd` completed GitHub Actions run [42391105667](https://github.com/mrdevmohamed/nawa/actions/runs/42391105667) with conclusion **success**. The run included the build/Clippy/test job, user and root test jobs on Ubuntu 22.04/24.04, ordinary build jobs at `none`, `env`, `sandbox`, and `closure` isolation, the static musl binary, and CLI smoke tests.
+
+This is a green CI result for that exact head. It must not be overstated: the Go/Cargo fetch integration fixtures still use `--isolation env`; the isolation matrix validates ordinary builds, not the fetch runner under `sandbox` or `closure`. The remaining fetch-specific integration gap is tracked in §17 and `docs/reviews/PR-16-REVIEW.md`.
