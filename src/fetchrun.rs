@@ -1255,3 +1255,57 @@ fn terminate_fetch_process(child: &mut Child, kill_process_group: bool) {
     }
     let _ = child.wait();
 }
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+    use std::os::unix::process::CommandExt;
+
+    #[test]
+    fn timeout_kills_descendant_that_keeps_stdout_open_after_shell_exit() {
+        let pid_file = std::env::temp_dir().join(format!(
+            "nawa-fetch-descendant-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&pid_file);
+        let script = "sleep 30 & echo $! > \"$1\"; exit 0";
+        let mut child = std::process::Command::new("bash")
+            .args(["-c", script, "nawa-fetch-timeout-test"])
+            .arg(&pid_file)
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn fetch process group");
+
+        let started = Instant::now();
+        let err = stream_and_wait(&mut child, None, 1, "timeout-test", true)
+            .expect_err("the inherited stdout pipe must be bounded by the timeout");
+        assert!(err.to_string().contains("NAWA_FETCH_TIMEOUT"), "{err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "reader must not wait indefinitely for the descendant"
+        );
+
+        let pid: i32 = std::fs::read_to_string(&pid_file)
+            .expect("descendant pid file")
+            .trim()
+            .parse()
+            .expect("valid descendant pid");
+        let mut terminated = false;
+        for _ in 0..40 {
+            let alive = unsafe { libc::kill(pid, 0) == 0 };
+            let state = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .ok()
+                .and_then(|s| s.split_whitespace().nth(2).map(str::to_string));
+            if !alive || state.as_deref() == Some("Z") {
+                terminated = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let _ = std::fs::remove_file(&pid_file);
+        assert!(terminated, "the background descendant {pid} survived timeout");
+    }
+}
