@@ -1,8 +1,9 @@
 # Nawa build inputs and fetch phase — design
 
-**Status:** Proposal, revision 2 (design only; no production code in this PR)
+**Status:** Proposal, revision 3 (design only; no production code in this PR)
 **Project:** Nawa
 **Baseline:** the Nawa 1.0.0 tree (`src/recipe.rs`, `src/build.rs`, `src/buildenv.rs`, `src/sandbox/`, `src/fetch.rs`, `src/lint.rs`)
+**Review:** revision 2 was checked claim by claim against the 1.0.0 tree; every correction is listed in Appendix B
 **Scope:** Multiple external source artifacts, recipe-local assets, and lockfile-based Go/Cargo dependency fetching
 **Compatibility goal:** Existing recipes keep working unchanged **and keep byte-identical build ids**
 **Package format:** No change to archive layout, `.PKGINFO` keys, repository index, or signing format in v1
@@ -58,6 +59,22 @@ The design below is written against these facts, each verified in the tree:
 - `Recipe` and its sub-structs do **not** use `deny_unknown_fields`: unknown keys and tables are silently ignored.
 - `repo::pack_recipes` packs the **whole** recipe tree (not only `recipe.toml`) into a deterministic tarball whose sha256 is listed in the signed index, and it refuses symlinks and special files. `nawa sync` verifies and unpacks that tarball.
 - `nawa build` takes exactly one package name. There is no `--offline`, no `nawa fetch`, and no recipe-level lint command (`src/lint.rs` is the post-build package lint).
+
+### 1.2 Further facts verified against the tree (revision 3)
+
+Revision 2 was silent on, or wrong about, these. Each is read from the 1.0.0 sources.
+
+- `%{srcdir}` / `NAWA_SRCDIR` are the **working directory** of the sections (`view_src`, which includes the `source_dir` sub-path), not the staging root. `ExpandCtx` is built twice in `build.rs` and once in a `recipe.rs` test.
+- `buildenv::source_date_epoch` walks the working directory and counts directories too. A single-file source is staged with `fs::copy`, so its mtime is the staging time. `unpack_tar_stream` unpacks entry by entry (`unpack_in`) and has no deferred directory-mtime pass.
+- The sandbox applies `memory_limit_bytes` as `RLIMIT_AS` (address space), `process_limit` as `RLIMIT_NPROC` (which counts threads), plus `RLIMIT_FSIZE` and `RLIMIT_NOFILE`. `readonly_paths` and `writable_paths` name paths **inside** the sandbox. With `strict_readonly_root` every other mount is remounted read-only. The plugin preset is 1 GiB / 32 / 64 MiB / 64 fds / 30 s with the network off.
+- `StagingHandles` is a fixed `[OwnedFd; 3]` (`src`, `pkg`, `home`), opened with `O_DIRECTORY` before `/tmp` and the base tmpfs cover the host paths. Inside, `/tmp` is a 2 GiB tmpfs and the base (`/build`) is a 1 MiB tmpfs that only holds bind points.
+- The build mask list contains `/run`; so does the plugin mask.
+- `fetch.rs` is the only user of `ureq`: every HTTP request in Nawa goes through `fetch::download` / `download_opt`.
+- `recipe::load_all` and `locate` match **every** file named `recipe.toml` under the recipes root, at any depth.
+- `lint` flags the needles `/build/src` and `/build/pkg` (plus the host build directory) in package contents.
+- `cmd_clean(root, category, dry_run)` has no access to the build directory. `clean sources` removes `<root>/var/cache/nawa/sources` wholesale.
+- `tar::HeaderMode::Deterministic` writes mode 0755 when the owner-execute bit (`0o100`) is set and 0644 otherwise, with a fixed mtime. Extraction keeps `mode & 0o777`, so the executable bit survives `nawa sync`.
+- `lint::build_id` has one caller shape (`build_id_for`) and one unit test; its hashed bytes are recipe, `\0`, source sha256, `\0`, each sorted archive name followed by `\0`, `\0`, flags.
 
 ## 2. Goals and non-goals
 
@@ -149,14 +166,16 @@ Rules:
 - Each artifact has its own sha256 and its own cache entry. Built-in GNU mirror fallbacks apply per artifact; no mirror needs trust because the bytes must match.
 - `into` and `workdir` must be relative and must not contain `..`. Extraction keeps the existing safe-extraction checks and additionally rejects any write outside its destination.
 - `strip_components` is applied **before** path sanitisation, and also to hard-link targets. Entries with fewer components than the strip count are skipped (GNU tar semantics). Today's `extract_source_archive` has no strip support, so this is new extractor work with its own traversal tests.
-- Collision detection: each source is extracted into a private staging directory and then merged into `src/` in array order. Directories merge; a file path claimed twice is an error naming both sources. Nothing is silently overwritten. Download order never matters: v1 downloads sequentially (the roadmap's parallel downloader is independent of this design).
-- The new form must not be mixed with legacy `source`, `sha256`, `mirrors` **or `source_dir`**. A mixed recipe is rejected at parse time. `local:` sources are legacy-only in v1.
+- Collision detection: each archive is extracted into `<work>/stage/<name>` (same filesystem as `src/`) and its entries are moved into `src/` with `rename`, in array order, so file mtimes survive the merge. Directories merge; a file path claimed twice is an error naming both sources. Nothing is silently overwritten. `unpack = false` files are copied in and stamped (§6). Download order never matters: v1 downloads sequentially (the roadmap's parallel downloader is independent of this design).
+- The new form must not be mixed with legacy `source`, `sha256`, `mirrors` **or `source_dir`**. A mixed recipe is rejected at parse time. `local:` sources are legacy-only in v1. The one exception is the schema marker that `package.source` must carry in a new-schema recipe (§19).
 
 ### 4.3 `workdir`
 
 `[package] workdir = "kernel"` selects the working directory of every build section, relative to the workspace root (default: the root). It is valid only with `package.sources`, and the directory must exist after assembly.
 
 This field is needed in v1 (the earlier draft deferred it): each build section is its own shell, so "recipes can `cd kernel`" would have to be repeated in every section.
+
+**Placeholders.** `%{srcdir}` / `NAWA_SRCDIR` keep their legacy meaning: the directory the sections start in, which here is `workdir` (default: the workspace root). A recipe that needs the workspace root, for example to reach `into = "patches"` from `workdir = "kernel"`, uses the new `%{srcroot}` / `NAWA_SRCROOT`. Both exist only for recipes that use `package.sources`, so the whitelist of legacy recipes is unchanged. (Revision 2 never said what `%{srcdir}` meant for several sources.)
 
 ## 5. Recipe-local assets
 
@@ -192,16 +211,27 @@ Rules for v1:
 - A listed directory is included recursively. No globs.
 - Absolute paths and `..` are rejected. **Any symlink or special file (device, FIFO, socket) inside a declared path is an error.** This matches `repo::pack_recipes`, which already refuses them when a recipe tree is published, so a synced tree can never contain one; the earlier "escaping symlinks" rule is therefore unnecessary.
 - A missing path is a hard error before any download.
+- A file named `recipe.toml` anywhere inside a declared path is an error: `load_all` and `locate` match that name at any depth and would parse it as a recipe. `nawa recipe check` reports it and staging refuses it (open decision 10 asks whether to fix this at the source).
 - Only declared paths are staged. Neighbouring recipes and the rest of the repository are not visible to the build.
 
 ### 5.3 Snapshot, digest, exposure
 
-1. **Snapshot:** declared files are *copied* into `<work>/assets` (a fresh directory outside `src/`) with no-follow opens, regular files only. The digest is computed from the **copy**, in the same pass, so the build can only ever see the bytes that were hashed, even if the checkout changes during the build.
-2. **Digest:** sha256 over the records of all files in byte-wise sorted relative-path order: `path \0 x|- \0 size \0 sha256(content)`. The mode contributes **only the executable bit**: `pack_recipes` writes `HeaderMode::Deterministic`, so a synced tree and a git checkout differ in every other mode bit and must still produce the same digest. Empty directories are not preserved and are not hashed.
+1. **Snapshot:** declared files are *copied* into `<work>/assets` (a fresh directory outside `src/`) with no-follow opens, regular files only. The digest is computed from the **copy**, in the same pass, so the build can only ever see the bytes that were hashed, even if the checkout changes during the build. The copy is normalised (files 0644 or 0755 by the owner-execute bit, directories 0755, owned by the building user) so that the sandbox's mapped identity can read it, the same reason `grant_source_write` exists for `src/`.
+2. **Digest:** sha256 over the records of all files in byte-wise sorted relative-path order: `path \0 x|- \0 size \0 sha256(content)`. The mode contributes **only the executable bit** (`mode & 0o100`, the same test `HeaderMode::Deterministic` applies): `pack_recipes` writes that header mode, so a synced tree and a git checkout differ in every other mode bit and must still produce the same digest. Empty directories are not preserved and are not hashed.
 3. **Exposure:** the placeholder is `%{assetsdir}` and the environment variable `NAWA_ASSETSDIR`, matching the existing `%{srcdir}` / `NAWA_SRCDIR` and `%{pkgdir}` / `NAWA_PKGDIR` style (the earlier draft's `%{assets_dir}` was inconsistent with it and is dropped). Neither name collides with an existing placeholder. `NAWA_ASSETSDIR` is added to the environment whitelist **only for recipes that declare `[assets]`**, so the whitelist, and therefore every legacy build, is unchanged.
 4. **Read-only:** inside the sandbox the snapshot is bound read-only at `<build_inside>/assets`. At `none`/`env` isolation there is no sandbox: the directory is made non-writable with `chmod`, which is best effort and not a security boundary against root. The document must not claim otherwise.
 
-Because the sandbox binds only `src`, `pkg` and `home` today, `SandboxSpec` gains an optional list of extra binds (`host`, `inside`, `readonly`), `serde(default)` so older specs keep parsing (the same pattern as `root.layers`). They must be bound through pre-opened handles, like `StagingHandles`, because the build directory is masked.
+**Two moments, one digest.** `--use-cache` must decide before `<work>` exists, so the *probe* digest is computed by reading the checkout (`Recipe.dir`). The digest that is *recorded* (the `.buildid` sidecar and `.PKGINFO build_id`) is the one computed from the snapshot. They differ only if the checkout changes between the two steps, and then the recorded id describes what was actually built.
+
+**Extra binds.** `SandboxSpec` gains `extra_binds: Vec<ExtraBind>` with `host`, `inside`, `readonly` and `kind` (`dir` or `file`), `serde(default)` so older specs keep parsing (the same pattern as `root.layers`). Requirements read from `mounts.rs`:
+
+- the handles are opened in `StagingHandles::open`, before `/tmp` and the base tmpfs cover the host paths (a path bind made after the cover fails with ENOENT);
+- `inside` lives under `build_inside`, or under a mount point created before the root turns read-only (in `dir` mode: before the pivot, the way `setup_dev` prepares device nodes);
+- a read-only bind is remounted with the existing `remount_ro`; a writable one must also be listed in `writable_paths` when `strict_readonly_root` is set;
+- a `file` bind creates its placeholder first;
+- `SandboxSpec::parse` validates `inside` like it validates `readonly_paths` (absolute, no `..`).
+
+`EnvSpec` and `ExpandCtx` gain optional fields (`assetsdir`, `srcroot`), `None` for legacy recipes. The pinned whitelist test builds `EnvSpec` as a literal, so it needs the new fields with `None`; its expected key list stays the same, and a second test pins the keys for a recipe that has `[assets]`.
 
 ### 5.4 Trust
 
@@ -222,8 +252,11 @@ Observable contract:
 
 - Legacy recipes: working directory and layout exactly as today.
 - New recipes: working directory is `workdir` (default the workspace root).
-- `SOURCE_DATE_EPOCH` is computed from `src/` only: the extracted external sources. It must **never** include `assets/` (checkout mtimes would make archives irreproducible) or `fetch/`. This is why assets live outside `src/`, and `--rebuild-check` for a multi-source recipe is a required test (§16).
+- Legacy recipes: `SOURCE_DATE_EPOCH` is unchanged (newest mtime under the working directory, directories included).
+- Recipes with `package.sources`: the pinned `package.source_date_epoch`, else the newest mtime among the **regular files extracted from archive sources**. Directories are ignored because merging and later child creation bump them. `unpack = false` files are ignored because their staged copy carries the staging time; once the value is known, every such file is stamped with it. A recipe whose sources are all `unpack = false` must pin `source_date_epoch` (parse-time error otherwise).
+- It must **never** include `assets/` (checkout mtimes would make archives irreproducible) or `fetch/`. This is why assets live outside `src/`, and `--rebuild-check` for a multi-source recipe with a plain file is a required test (§16).
 - `grant_source_write` (ownership/permission normalisation) applies to `src/` only.
+- `lint` adds `<build_inside>/assets` and `<build_inside>/fetch` to its leak needles for recipes that use them (today: `/build/src`, `/build/pkg`).
 - All sources are verified before extraction. Any failed source stops the build before the closure is assembled and before any build section runs.
 
 ## 7. Go backend
@@ -264,6 +297,7 @@ Rules:
 - Project sources and lockfiles are not modified.
 - After a fetch, the entry is validated offline (for example with `go mod verify`) before it is published.
 - Whether a read-only `GOMODCACHE` works for the offline build is a prototype question. The fallback is a per-build writable copy (§11).
+- The fetch run adds `-modcacherw` to `GOFLAGS`: Go otherwise makes the module cache read-only, and a failed or interrupted populate could not be removed without restoring write permission first. Nawa strips write permission from the published entry itself (§11). The prototype confirms that `go mod download` honours the flag through `GOFLAGS`. A hermetic test with a `file://` proxy sets `GOSUMDB=off`.
 
 ## 8. Cargo backend
 
@@ -296,7 +330,8 @@ dir = "."
 - Implicit dependencies must be visible everywhere, not only in the command environment. Today `depends.build` is read directly in `deps.rs` (×2), `closure.rs`, `plan.rs` and `commands/querying.rs` (×3). All of them switch to a single `Recipe::build_deps()` (declared + implicit, deduplicated), so `nawa deps`, closure assembly, install planning, `nawa info`/`why` and the build id agree.
 - The closure must also provide a CA bundle for TLS, and the fetch run needs DNS (§12). Verify the package name for CA certificates in faseela-repo.
 - A recipe without `[fetch.*]` runs no backend.
-- Typos: because `Recipe` ignores unknown keys, `[fetch.cago]` would silently disable fetching and fail later, offline, with a confusing error. `Recipe::validate` therefore warns about unknown top-level tables, while unknown keys inside `[fetch.*]` and `[assets]` are hard errors.
+- Typos. `Fetch` and `Assets` are declared structs with `deny_unknown_fields`, so `[fetch.cago]` and `[assets] incude = [...]` are hard errors at parse time. What stays silent is a misspelled *top-level* table (`[fetc.go]`, `[asets]`) or a misspelled key directly under `[package]` (`workdr`). `load_all` parses every recipe on every command, so warnings must not come from `Recipe::load`; they come from `nawa recipe check` and, for the target recipe only, from `nawa build` / `nawa fetch`. Using `%{assetsdir}`, `NAWA_ASSETSDIR` or `%{srcroot}` in a recipe that does not enable it is a hard error at build time, because it would otherwise fail far from the cause.
+- The behaviour-neutral `Recipe::build_deps()` refactor lands first (Phase 0, §16).
 
 ## 10. Integrity and build identity
 
@@ -319,6 +354,8 @@ Constraint: the id must be computable **before any download**, because `--use-ca
   - the implicit toolchain dependencies, which already enter through the closure archive names.
 
 For recipes with `package.sources`, the existing `source_sha256` argument becomes the sorted list of `name=sha256`.
+
+**Implementation.** `lint::build_id` keeps its signature and its bytes. A sibling `build_id_with(..., extras: &[(&str, &str)])` appends `\0label=value` for each extra after the flags, and `build_id` calls it with an empty slice. Legacy ids are therefore identical by construction, and the golden test pins that. Extras, in this order: `assets`, `fetch-go`, `fetch-cargo`. The probe/snapshot rule for `assets` is in §5.3.
 
 **Legacy ids must not move.** The new components are appended only when the corresponding table exists; a recipe without `[assets]`, `[[package.sources]]` or `[fetch.*]` hashes exactly the same bytes as today. A golden-id test on a legacy recipe is mandatory (§16). Otherwise one release would invalidate every `--use-cache` sidecar.
 
@@ -345,10 +382,10 @@ Rules:
 - The sha256 is validated as 64 lowercase hex before it is used as a path component.
 - **Ecosystem key:** sha256 over a versioned, unambiguous encoding (length-prefixed fields): `nawa-fetch-v1`, ecosystem, then Go: `go.mod` bytes and `go.sum` bytes; Cargo: `Cargo.lock` bytes **and the Cargo version string**. The Cargo registry directory names embed a hash that has changed between Cargo releases, so a cache from another Cargo is a miss, not a bug. The Go module cache layout is stable, so the Go key does not include the Go version (the prototype must confirm).
 - **Publication:** populate in a sibling temporary directory, validate, write a completion marker last, then `rename` atomically. A directory without the marker is never a hit.
-- **Concurrency:** an advisory `flock` on `<key>.lock` serialises fetches for the same key.
-- **Immutability:** a published entry is never modified. Writable state belongs in the per-build view under `<work>/fetch/` (§8).
+- **Concurrency:** an advisory `flock` on `<key>.lock` serialises fetches for the same key. The legacy downloader has no lock and every build of the same file shares one `<file>.part`; new-form source downloads take `sha256/<digest>.lock` and use a unique `.part` name, so two concurrent builds cannot corrupt each other.
+- **Immutability:** a published entry is never modified, and Nawa strips write permission from it after publication. Writable state belongs in the per-build view under `<work>/fetch/` (§8).
 - The per-build directory is wiped on every build; only the cache outlives it.
-- **Retention:** `nawa clean sources` is extended to also clear the new-layout directories of the configured `$NAWA_SRCCACHE`, with `--dry-run` as today.
+- **Retention:** `cmd_clean` takes only `root`, `category` and `dry_run`, so the resolved source-cache path is passed in. `clean sources` removes only what Nawa wrote there: legacy `<sha16>-*` files, `sha256/`, `fetch/`, and leftover `*.part` / `*.lock` files. It never removes the cache root itself, because `$NAWA_SRCCACHE` may point at a shared directory. Entries that may be read-only get `u+w` restored before removal. `--dry-run` as today.
 - The sandbox masks the builddir and `/var/cache/nawa`, so any cache a build must read is bound through the extra-bind mechanism of §5.3, not by path.
 
 ## 12. Sandbox and network policy
@@ -363,16 +400,28 @@ There are three different execution contexts:
 
 Rules:
 
-- The fetch toolchain is third-party code that parses untrusted lockfiles and talks to the network, so at `sandbox`/`closure` isolation the fetch **runs inside the sandbox**, reusing the strict mode that plugin sandboxes already have: `strict_readonly_root`, `writable_paths` limited to the cache entry being populated, the scratch home and `/tmp`, `run_uid/run_gid` dropped, resource limits set. `src/` and `assets/` are bound read-only.
-- Network for this run is `network = true` in the spec, which skips the network namespace entirely. This is an **accepted v1 risk**: the fetch process can reach any host, including loopback services. The residual risk is bounded by: fixed commands only, no recipe scripts, a sanitized environment, a read-only root. An egress proxy is a possible later hardening.
-- At `none`/`env` isolation there is no sandbox. The fetch runs as a subprocess with a cleared environment. This provides no network or filesystem isolation and must not be described as if it did.
+- The fetch toolchain is third-party code that parses untrusted lockfiles and talks to the network, so at `sandbox`/`closure` isolation the fetch **runs inside the sandbox**, in the strict mode plugins use: `strict_readonly_root`, `run_uid/run_gid` dropped when Nawa runs as root. It does **not** reuse the plugin resource preset. 1 GiB `RLIMIT_AS`, 32 `RLIMIT_NPROC`, 64 MiB `RLIMIT_FSIZE`, 64 descriptors and 30 s would kill `go` and `cargo`: `RLIMIT_AS` limits address space, which Go reserves generously, and `RLIMIT_NPROC` counts threads. The fetch profile (starting values, tuned in the Phase 3 spike):
+
+| Setting | Fetch value | Reason |
+|---|---|---|
+| `memory_limit_bytes` | 0 | address-space cap breaks Go and Rust runtimes; the timeout is the bound |
+| `process_limit` | 4096 | threads count |
+| `open_files_limit` | 4096 | parallel downloads and module extraction |
+| `file_size_limit_bytes` | 0 | a module or crate can exceed any small cap |
+| `timeout_secs` | `NAWA_FETCH_TIMEOUT`, default 1800 | separate from the build-section timeout; the sandbox kills the whole PID namespace |
+
+  `/tmp` inside is a 2 GiB tmpfs; very large modules are the reason `TMPDIR` stays there and the cache entry is a bind (below).
+- **Mounts.** `src/` and `assets/` are bound read-only (extra binds, §5.3). Writable: `/tmp`, the existing `home` bind (the per-build scratch), and the cache entry being populated, which is an extra bind from the host directory to `<build_inside>/fetch-out`. `writable_paths` names *inside* paths, so both `home` and `<build_inside>/fetch-out` are listed there; strict mode remounts everything else read-only. When Nawa runs as root the dropped identity must be able to write the entry, so the populate directory is a private temporary with mode 0777 (the plugin sandbox does the same for its home). Before publication Nawa normalises ownership and modes and strips write permission (§11).
+- **Network.** `network = true` in the spec skips the network namespace entirely. This is an **accepted v1 risk**, stated completely: the fetch process shares the host network namespace. It can reach loopback services and the LAN, **and abstract `AF_UNIX` sockets** (D-Bus and X11 abstract sockets belong to the network namespace; the `/run` mask hides filesystem sockets only). The residual risk is bounded by: fixed commands only, no recipe scripts, a sanitized environment, a read-only root, and the dropped identity when root. An egress proxy is a possible later hardening.
+- **DNS and TLS.** Nawa follows the symlink chain of the host's `/etc/resolv.conf` and copies the content, together with `/etc/hosts`, into `<work>/fetch/etc/`, then binds the copies read-only as `file` binds. Binding the host path directly is wrong twice over: an assembled closure root has no `/etc/resolv.conf`, and on systemd-resolved hosts it is a symlink into `/run`, which the mask hides. A stub nameserver such as 127.0.0.53 works only because the network namespace is shared. TLS roots come from the build root (§9); at `sandbox` isolation, from the host.
+- **Root modes.** Strict mode has only been exercised with a `live` root (plugins). Strict + `dir`/overlay root + shared network + extra binds is untested and is the first item of the Phase 3 spike (§16). In `dir` mode the placeholders for the resolv.conf/hosts binds must exist before the pivot.
+- At `none`/`env` isolation there is no sandbox. The fetch runs as a subprocess with a cleared environment and the host toolchain. This provides no network or filesystem isolation and must not be described as if it did.
 - The fetch run's network permission comes only from "a fetch backend is running". It is independent of `--allow-network` and `[sandbox] network`, in both directions.
-- The fetch run binds host `/etc/resolv.conf` read-only, because an assembled closure root has none. TLS roots must come from the build root (§9).
-- `nawa build --offline` never opens a socket. Missing or incomplete source or ecosystem cache entries are hard errors that name the missing entries and the command that populates them.
+- **`--offline`.** `fetch.rs` is the only user of `ureq`, so the guard lives in `fetch::download` and `download_opt`: a process-wide flag, set from `--offline` or `NAWA_OFFLINE`, makes them fail with the missing entry and the command that populates it. That covers legacy recipes, mirrors, index downloads and new sources without touching the legacy staging code. Ecosystem backends are not started when offline; missing or incomplete entries are hard errors that name them.
 - `--offline` combined with a recipe that sets `[sandbox] network = true` is rejected as contradictory.
 - Isolation levels without a network namespace (`none`, `env`) must never be reported as network-isolated. If a caller requires isolation that cannot be enforced, Nawa fails closed instead of claiming it.
 
-`docs/build-isolation.md` must be updated with this design: §4.4's `[[source.extra]]` guidance is replaced, and the principle "everything fetched beforehand and hash-pinned" becomes "pinned by checksum": sources by sha256, Go by `go.sum`, Cargo by `Cargo.lock`. That is a deliberate relaxation, and Cargo git dependencies are weaker still.
+`docs/build-isolation.md` must be updated with this design: §4.4's `[[source.extra]]` guidance is replaced (it was never implemented: `recipe.rs` has no such key), and the principle "everything fetched beforehand and hash-pinned" becomes "pinned by checksum": sources by sha256, Go by `go.sum`, Cargo by `Cargo.lock`. That is a deliberate relaxation, and Cargo git dependencies are weaker still.
 
 ## 13. Nawa's own recipe and bootstrap
 
@@ -397,16 +446,18 @@ The first fetch-capable Nawa cannot fetch its own dependencies, and an older Naw
 
 ## 14. Validation
 
-There was no recipe linter before. `src/lint.rs` is the post-build package lint, so the earlier draft's "Lint should validate…" had no home. Checks are split by *when they can run*, because several of the earlier "lint" findings need the downloaded source and cannot be checked without it:
+There was no recipe linter before. `src/lint.rs` is the post-build package lint, so the earlier draft's "Lint should validate..." had no home. Checks are split by *when they can run*, because several findings need the downloaded source and cannot be checked without it:
 
 **A. Parse time (`Recipe::validate`, hard errors, every command):**
-mixed legacy/new source forms (including `source_dir`); duplicate source names; missing `url`/`sha256`; sha256 not 64 lowercase hex; bad `name`; `into`/`workdir`/`dir`/asset path escapes or is absolute; unknown keys under `[fetch]`/`[assets]`; implicit-dependency self-reference.
+mixed legacy/new source forms (including `source_dir`; `source` may only hold the §19 marker); the marker missing when a new table is used, or present without one; duplicate source names; missing `url`/`sha256`; sha256 not 64 lowercase hex; bad `name`; `into`/`workdir`/`dir`/asset path escapes or is absolute; unknown keys under `[fetch]`, `[assets]` and `[[package.sources]]` (declared structs with `deny_unknown_fields`); implicit-dependency self-reference; a `package.sources` recipe whose sources are all `unpack = false` without `package.source_date_epoch` (§6).
+
+Parse-time checks stay cheap and silent: `load_all` runs them for every recipe on every command, so nothing here prints a warning.
 
 **B. `nawa recipe check <name>|--all` (new command, local files only, no network):**
-asset path missing; symlink or special file in assets; asset size thresholds (warning); unknown top-level tables (warning); unknown `%{...}` placeholders in sections (warning); build script calls `go mod download` or `cargo fetch` itself (warning); `[fetch.*]` together with `[sandbox] network = true` (warning). The command name is open; it must not collide with a built-in, since plugins cannot shadow built-ins.
+asset path missing; symlink or special file in assets; a file named `recipe.toml` inside an asset path; asset size thresholds (warning); unknown top-level tables and unknown keys directly under `[package]` (warning, read from the raw TOML); unknown `%{...}` placeholders in sections (warning); build script calls `go mod download` or `cargo fetch` itself (warning); `[fetch.*]` together with `[sandbox] network = true` (warning). The command name is open; it must not collide with a built-in, since plugins cannot shadow built-ins. No existing subcommand is called `recipe` or `fetch`.
 
-**C. Stage/fetch time (needs the source):**
-`go.mod` / `go.sum` / `Cargo.lock` missing (error); `go.work` present (error); Go requirement newer than the local toolchain (error); disallowed source-tree Cargo config (error); Cargo git dependency (warning); extraction collision (error).
+**C. Stage/fetch/build time (needs the source, or runs for one target recipe):**
+`go.mod` / `go.sum` / `Cargo.lock` missing (error); `go.work` present (error); Go requirement newer than the local toolchain (error); disallowed source-tree Cargo config (error); Cargo git dependency (warning); extraction collision (error); `%{assetsdir}` / `NAWA_ASSETSDIR` / `%{srcroot}` used in a recipe that does not enable it (error); the unknown-table and unknown-`[package]`-key warnings of B, for the target recipe only.
 
 ## 15. Commands
 
@@ -418,6 +469,7 @@ nawa install | update ... [--offline]    # they build through the same engine
 
 - `nawa fetch` downloads and verifies external sources, checks assets, and runs the ecosystem backends. The backends need the toolchain, so the command uses the same `--isolation` as `build`: at `closure` it assembles the same build root (using the layer cache). `--sources-only` skips the ecosystem step and needs no toolchain, which is the right CI pre-seed step. `--all` covers every recipe with a remote source or a `[fetch.*]` table, legacy recipes included.
 - `nawa fetch --offline` is verify-only: it validates existing entries and exits non-zero if any is missing or incomplete. It is the CI gate before `build --offline`.
+- `--offline` applies to legacy recipes too. The guard is in `fetch::download*` (§12), so the legacy staging code needs no other change and keeps byte-identical output.
 - A normal online build prepares missing inputs automatically and then builds offline. `NAWA_OFFLINE=1` is the environment equivalent of `--offline`, honored by every command that builds from recipes through `BuildOpts`.
 - A recipe with no new tables follows the existing path unchanged. The earlier draft's `nawa build <recipe>...` is dropped: it is not needed and would change the CLI contract.
 
@@ -425,11 +477,12 @@ nawa install | update ... [--offline]    # they build through the same engine
 
 ### Delivery plan (each phase lands green on its own)
 
-1. **Schema and sources:** parse + validate (§4, §14A), `workdir`, `strip_components`, multi-source extraction and collision merge, new cache layout with legacy read fallback (§11). No ecosystems yet.
-2. **Assets:** `Recipe.dir`, snapshot + digest, `%{assetsdir}` / `NAWA_ASSETSDIR`, extra sandbox binds (§5), build-id extension with legacy ids pinned (§10.3).
-3. **Fetch runner + Go:** sandboxed network run (§12), Go backend, ecosystem cache publication.
+0. **Behaviour-neutral refactors**, one commit each, no output change: `Recipe::build_deps()` over the seven direct reads; `Recipe.dir`; optional `assetsdir` / `srcroot` fields on `ExpandCtx` and `EnvSpec` (`None` for legacy); `BuildOpts.offline` plus the guard in `fetch::download*`; `lint::build_id_with`. The golden build-id test, the whitelist test and a legacy `--rebuild-check` land here, so every later phase has a baseline. The legacy `--rebuild-check` doubles as the check that `source_date_epoch` is stable across re-extraction on this tree (the walk includes directories, the unpack is per entry; §1.2).
+1. **Schema and sources:** parse + validate (§4, §14A, §19 marker), `workdir`, `%{srcroot}`, `strip_components`, multi-source extraction through `<work>/stage` with `rename` merge, plain-file stamping (§6), new cache layout with legacy read fallback and per-digest locks (§11). No ecosystems yet.
+2. **Assets:** snapshot + digest, `%{assetsdir}` / `NAWA_ASSETSDIR`, `ExtraBind` in `SandboxSpec` and `mounts.rs`, build-id extension with legacy ids pinned (§5, §10.3), lint needles.
+3. **Spike, then fetch runner + Go.** The spike runs first on a throwaway branch, and its exit criteria gate the rest of the phase: (a) `go mod download` and `cargo fetch --locked` complete under the fetch profile (§12) in strict mode, in a `live` root and in a `dir`/overlay root, as root and unprivileged; (b) DNS and TLS work in a closure root with the copied resolv.conf; (c) a read-only `GOMODCACHE` supports offline `-mod=readonly` builds, and what Cargo needs from a read-only `CARGO_HOME` (answers §17 items 3 and 4); (d) `-modcacherw` is honoured through `GOFLAGS`. Then: sandboxed network run, Go backend, ecosystem cache publication.
 4. **Cargo.**
-5. **Commands:** `nawa fetch`, `--offline`, `nawa recipe check`, `clean sources` (§15).
+5. **Commands:** `nawa fetch`, `--offline` wiring, `nawa recipe check`, `clean sources` (§15).
 6. **Bootstrap switch (§13)** only after its end-to-end test.
 
 ### Tests
@@ -487,9 +540,24 @@ The existing tests use scratch directories and local listeners, so most can run 
 6. Package archive, `.PKGINFO` keys, repository index and signing outputs are unchanged.
 7. The independent bootstrap path builds Nawa without `vendor/` (gate for §13).
 
+**Added in revision 3**
+
+1. A recipe with an `unpack = false` file builds identical archives at two different times (the file's staging time never reaches `SOURCE_DATE_EPOCH`).
+2. A `package.sources` recipe whose sources are all plain files and that does not pin `source_date_epoch` is rejected at parse time.
+3. `%{srcdir}` equals `workdir` and `%{srcroot}` equals the workspace root; a legacy recipe sees neither new name.
+4. A `recipe.toml` inside an asset path is refused; the probe digest equals the snapshot digest when nothing changes.
+5. The fetch run succeeds under the fetch resource profile and, as a control, fails under the plugin preset (this documents why the preset is not reused).
+6. DNS resolves when the host's `/etc/resolv.conf` is a symlink into the masked `/run`.
+7. With `--offline`, a legacy recipe with a cold cache fails without opening a socket (a local listener sees zero connections).
+8. Removing a populated Go cache entry as a non-root user succeeds (`u+w` restored); `clean sources` never removes the cache root and leaves unrelated files in a shared `$NAWA_SRCCACHE` alone.
+9. Two concurrent builds that need the same new-form source download it once and neither sees a truncated file.
+10. An old binary (the 1.0.0 build) given a recipe that carries the §19 marker stops with the marker's message and does no download and no closure work.
+
 ## 17. Open decisions
 
-Resolved in this revision: Cargo targets (fetch all in v1, §8); whether assets need an index manifest (no, the recipe tarball already covers them, §5.4); the asset variable name (`%{assetsdir}`, §5.3).
+Resolved in revision 2: Cargo targets (fetch all in v1, §8); whether assets need an index manifest (no, the recipe tarball already covers them, §5.4); the asset variable name (`%{assetsdir}`, §5.3).
+
+Resolved in revision 3: the meaning of `%{srcdir}` and the new `%{srcroot}` (§4.3); the `SOURCE_DATE_EPOCH` rule for multi-source recipes (§6); where `--offline` is enforced (§12); the fetch resource profile's shape (§12; the numbers stay open); a fail-closed marker for old binaries (§19).
 
 Still open:
 
@@ -501,6 +569,9 @@ Still open:
 6. Whether and when to move legacy recipes onto the new engine (§4.1).
 7. Name of the recipe lint command and the asset size thresholds (§14, §5.4).
 8. Whether an optional fetched-tree output hash is useful after the first implementation.
+
+9. Final numbers of the fetch resource profile (§12), after the Phase 3 spike.
+10. Whether `load_all` / `locate` should treat a directory that contains a `recipe.toml` as a leaf, so asset files can never be parsed as recipes. It needs a check of faseela-repo for recipes nested under other recipes; until then the §5.2 rule applies.
 
 None of these may block legacy compatibility. Unresolved details are documented and tested, not guessed.
 
@@ -520,7 +591,15 @@ None of these may block legacy compatibility. Unresolved details are documented 
 
 `Recipe` does not use `deny_unknown_fields`. An older Nawa therefore **silently ignores** `[[package.sources]]`, `[assets]`, `[fetch.*]` and `workdir`, and treats a new-schema recipe with an empty `package.source` as a meta package, running its scripts in an empty directory.
 
-The only reliable mitigation is a process gate: no new-schema recipe lands in faseela-repo until every Nawa that builds that tree supports it, and the first release with this feature is announced in `CHANGELOG.md` as a schema change. As a forward guard, new Nawa will honor an optional `[package] nawa_min = "x.y.z"` (older binaries ignore it, so it protects future schema steps, not this one), and all *new* tables use `deny_unknown_fields`.
+**Fail-closed marker (new in revision 3).** An old binary can be made to refuse a new-schema recipe without changing it, because its source staging handles `package.source = "local:<path>"` by failing when the path does not exist, before any download or closure work (`build.rs`). A recipe that uses any new table (`package.sources`, `[assets]`, `[fetch.*]`, `workdir`) must therefore also set
+
+~~~toml
+source = "local:/nawa-schema-2-requires-a-newer-nawa"
+~~~
+
+An old binary stops with "local source /nawa-schema-2-requires-a-newer-nawa does not exist", which names the problem. The new Nawa treats exactly this value as the schema marker: it is required together with new-schema tables, rejected without them, and never staged. It is the only mechanism here that fails closed for binaries that are already deployed. The cost is one boilerplate line per new-schema recipe. Because it is a deliberate trade-off, revision 3 records it as a recommendation: if it is rejected, the process gate below is the whole protection.
+
+**Process gate (baseline, kept).** No new-schema recipe lands in faseela-repo until every Nawa that builds that tree supports it, and the first release with this feature is announced in `CHANGELOG.md` as a schema change. As a forward guard, new Nawa honours an optional `[package] nawa_min = "x.y.z"` (older binaries ignore it, so it protects future schema steps, not this one), and all *new* tables use `deny_unknown_fields`.
 
 ## Appendix A — Changes from the first draft
 
@@ -539,3 +618,33 @@ The only reliable mitigation is a process gate: no new-schema recipe lands in fa
 - Commands match today's CLI (`build` takes one name); `fetch` needs `--isolation` and `--sources-only`.
 - Implicit dependencies go through one `Recipe::build_deps()` replacing seven direct reads.
 - Bootstrap: concrete constraints and same-commit rule; new §19 on older binaries; delivery plan added.
+
+## Appendix B — Review of revision 2 (changes in revision 3)
+
+Revision 2 was compared with the 1.0.0 sources. Its baseline facts (§1.1) were accurate; the problems were in what the design asked the existing code to do.
+
+| # | Finding in revision 2 | Evidence | Fix |
+|---|---|---|---|
+| 1 | Fetch "reuses the plugin strict mode ... resource limits set". The plugin preset would kill `go` and `cargo`. | `memory_limit_bytes` is `RLIMIT_AS`, `process_limit` is `RLIMIT_NPROC` (threads); preset is 1 GiB / 32 / 64 MiB / 64 fds / 30 s | Dedicated fetch profile, §12 |
+| 2 | `writable_paths` described as limited to "the cache entry". They are inside paths, not host paths. | `spec.rs`, `remount_mount_tree_ro` | Writable extra bind plus `writable_paths`; 0777 populate directory for the dropped identity, §12 |
+| 3 | Extra binds specified without the mechanics. | `StagingHandles` is `[OwnedFd; 3]`, `O_DIRECTORY`, opened before the covers; base tmpfs is 1 MiB | `ExtraBind` with `dir`/`file`, ordering and `writable_paths` rules, §5.3 |
+| 4 | Fetch binds the host `/etc/resolv.conf`. On systemd-resolved hosts it is a symlink into `/run`, which the mask hides. | `prepare_sandbox` mask list | Bind a copy of the resolved content plus `/etc/hosts`, §12 |
+| 5 | Accepted network risk omitted abstract `AF_UNIX` sockets. | They belong to the network namespace that `network = true` shares | Risk stated completely, §12 |
+| 6 | `%{srcdir}` undefined for several sources. | Legacy `%{srcdir}` is the working directory (`view_src`) | `%{srcdir}` = `workdir`, new `%{srcroot}`, §4.3 |
+| 7 | "`--rebuild-check` must pass" for a recipe with a plain-file source. It could not. | `fs::copy` stamps the staging time; the SDE walk includes it and directories | SDE rule, stamping, pinned-epoch requirement, §6 |
+| 8 | "Extract privately, then merge" without saying how mtimes survive. | `unpack_in` per entry; directory mtimes are bumped by children | `rename` merge from `<work>/stage`, §4.2 |
+| 9 | Asset files named `recipe.toml` would be loaded as recipes. | `load_all` / `locate` match the name at any depth | Rule in §5.2, check in §14, open decision 10 |
+| 10 | Snapshot readable by the sandbox identity and the exact "executable bit" test unspecified. | `grant_source_write`; `HeaderMode::Deterministic` uses `0o100` | Normalisation and `mode & 0o100`, §5.3 |
+| 11 | One asset digest used for the cache probe and for the record, but the probe runs before `<work>` exists. | `build()` probes before `create_dir_all(work)` | Probe digest from the checkout, recorded digest from the snapshot, §5.3 |
+| 12 | Build-id extension would have changed `build_id`'s signature and test. | `lint::build_id`, one unit test | `build_id_with` with extras, §10.3 |
+| 13 | `clean sources` "extended to the new layout". `cmd_clean` has no build directory, `$NAWA_SRCCACHE` may be shared, Go caches are read-only. | `repositories.rs` | Plumbing, safe deletion set, `u+w` restore, §11 |
+| 14 | Downloads "serialised" only for ecosystem keys. | Legacy `download_cached` shares one `.part`, no lock | Per-digest lock and unique `.part` for new-form sources, §11 |
+| 15 | `--offline` had no enforcement point. | `fetch.rs` is the only `ureq` user | Guard in `fetch::download*`, covers legacy too, §12 and §15 |
+| 16 | §9 said `Recipe::validate` warns; §14 put the warning in `recipe check`; `load_all` would repeat it for every recipe. `[fetch.cago]` is already a hard error through the struct. | `load_all` runs `Recipe::load` for every recipe | One rule, §9 and §14 |
+| 17 | Delivery plan had no `build_deps()` refactor, no baseline tests first, and prototype questions without exit criteria. | Seven direct `depends.build` reads | Phase 0 and the Phase 3 spike, §16 |
+| 18 | Go cache entries are read-only by default, which blocks cleanup. | Go module cache behaviour | `-modcacherw` in the fetch run, §7 |
+| 19 | Old binaries protected by a process gate only. | `Recipe` ignores unknown keys | Fail-closed `local:` marker, §19 |
+
+Verified and unchanged: the §1.1 baseline; legacy path kept for legacy recipes; assets covered by the signed recipe tarball (`pack_recipes` refuses symlinks, uses `HeaderMode::Deterministic`); the seven `depends.build` reads; the pinned whitelist; `clean sources` pointing at a different directory than the source cache; no existing `fetch` or `recipe` subcommand.
+
+Unverified, to be checked in the spike or Phase 0: that `go mod download` honours `-modcacherw` from `GOFLAGS`; what Cargo needs from a read-only `CARGO_HOME`; whether legacy `source_date_epoch` is stable across re-extraction (directory mtimes).
