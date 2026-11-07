@@ -1345,4 +1345,13 @@ mod tests {
         rec.raw = both.to_string();
         rec.check_schema_placeholders().unwrap();
     }
+    
+    #[test]
+    fn fetch_toolchain_names_match_faseela_recipe_ids() {
+        // These are the published package IDs in mrdevmohamed/faseela-repo:
+        // recipes/dev/golang and recipes/toolchain/rust.
+        assert_eq!(GO_TOOLCHAIN, "golang");
+        assert_eq!(CARGO_TOOLCHAIN, "rust");
+    }
+
 }
