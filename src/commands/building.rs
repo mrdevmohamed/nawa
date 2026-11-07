@@ -13,6 +13,7 @@ pub(crate) fn cmd_build(
     allow_degraded: bool,
     timeout: Option<u64>,
     use_cache: bool,
+    offline: bool,
     install_after: bool,
     install_force: bool,
 ) -> Result<()> {
@@ -26,6 +27,7 @@ pub(crate) fn cmd_build(
         allow_degraded,
         timeout,
         use_cache,
+        offline,
     )?;
     if rebuild_check {
         build::rebuild_check(&rec, &opts)?;
@@ -132,6 +134,7 @@ pub(crate) fn prepare_build(
     allow_degraded: bool,
     timeout: Option<u64>,
     use_cache: bool,
+    offline_flag: bool,
 ) -> Result<build::BuildOpts> {
     let arch = rec.arch();
     let profile = profile::Profile::load(&ctx.profiles, &arch)?;
@@ -173,10 +176,10 @@ pub(crate) fn prepare_build(
         .collect::<Vec<_>>()
         .join(" ");
 
-    // NAWA_OFFLINE is the environment equivalent of --offline (§15); the
-    // dedicated flag joins when the CLI wiring lands (Phase 5). Unknown
-    // values fail loudly instead of silently degrading to online.
-    let offline = offline_from_env()?;
+    // NAWA_OFFLINE is the environment equivalent of --offline (§15): the
+    // dedicated flag wins when given; unknown values fail loudly instead
+    // of silently degrading to online.
+    let offline = offline_flag || offline_from_env()?;
 
     Ok(build::BuildOpts {
         jobs,
@@ -200,7 +203,7 @@ pub(crate) fn prepare_build(
 
 /// `NAWA_OFFLINE` → offline switch: `1|on|yes|true` enable, `0|off|no|false`
 /// (and unset) keep it off, anything else is a hard error (`§15`).
-fn offline_from_env() -> Result<bool> {
+pub(crate) fn offline_from_env() -> Result<bool> {
     let Some(v) = std::env::var_os("NAWA_OFFLINE") else {
         return Ok(false);
     };
@@ -233,6 +236,7 @@ pub(crate) fn build_one(
         flags.allow_degraded,
         None,
         flags.use_cache,
+        flags.offline,
     )?;
     Ok(build::build(&it.rec, &opts)
         .with_context(|| format!("[{n}/{total}] build of {id} failed"))?

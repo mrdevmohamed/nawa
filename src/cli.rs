@@ -98,6 +98,10 @@ pub(crate) enum Cmd {
         /// (recipe bytes, source sha256, closure, profile flags)
         #[arg(long)]
         use_cache: bool,
+        /// Refuse every download: only entries `nawa fetch` (or an earlier
+        /// online build) populated may be used — the CI gate of §15
+        #[arg(long)]
+        offline: bool,
         /// Install the freshly built archive into --root when the build
         /// succeeds (replaces the manual find-the-archive + install dance)
         #[arg(long)]
@@ -381,6 +385,40 @@ pub(crate) enum Cmd {
         force: bool,
     },
 
+    /// Download and verify external sources, then run the ecosystem
+    /// fetch backends ([fetch.go] / [fetch.cargo]) — the pre-seed step so
+    /// that later `--offline` builds have everything ready (§15)
+    Fetch {
+        /// package names
+        names: Vec<String>,
+        /// every recipe with a remote source or a fetch table (§15);
+        /// legacy recipes included
+        #[arg(long)]
+        all: bool,
+        /// Isolation level for the fetch runs: none | env | sandbox | closure
+        /// (the same levels as build; the toolchain lives at closure)
+        #[arg(long)]
+        isolation: Option<String>,
+        /// skip the ecosystem step: download and verify sources only
+        /// (needs no toolchain; the CI pre-seed mode)
+        #[arg(long)]
+        sources_only: bool,
+        /// verify-only: validate that every cached artifact and cache
+        /// entry exists and is complete; downloads are refused and a
+        /// missing entry is a hard error naming it (§15)
+        #[arg(long)]
+        offline: bool,
+        /// Continue when the host kernel refuses an isolation feature
+        #[arg(long)]
+        allow_degraded: bool,
+    },
+
+    /// Inspect and check recipes (local files only, no network)
+    Recipe {
+        #[command(subcommand)]
+        action: RecipeCmd,
+    },
+
     /// Query repository metadata without downloading any archive
     Repoquery {
         name: String,
@@ -481,7 +519,7 @@ pub(crate) const RESERVED_COMMANDS: &[&str] = &[
     "why", "deps", "deps-all", "remove", "query", "list", "files", "owner",
     "revdep", "repo-create", "sync", "keygen", "sign", "verify", "trust",
     "upgrade", "rollback", "repolist", "makecache", "repoquery", "clean",
-    "group", "history", "plugin", "service", "config", "init",
+    "fetch", "recipe", "group", "history", "plugin", "service", "config", "init",
     "completions", "sandbox-init", "sandbox-probe", "__complete_pkgs", "help",
 ];
 
@@ -510,6 +548,23 @@ pub(crate) struct PlanFlags {
     /// Continue when the host kernel refuses an isolation feature
     #[arg(long)]
     pub(crate) allow_degraded: bool,
+    /// Refuse every download: only cached, verified artifacts may be used
+    /// (`nawa fetch` populates them); also settable through `NAWA_OFFLINE`
+    #[arg(long)]
+    pub(crate) offline: bool,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum RecipeCmd {
+    /// Run the source-independent checks of §14B (warnings only): assets,
+    /// unknown tables and keys, unknown placeholders, fetch anti-patterns
+    Check {
+        /// one recipe name (exclusive with --all)
+        name: Option<String>,
+        /// every recipe in the recipes tree
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -629,6 +684,8 @@ pub(crate) fn lock_mode(cmd: &Cmd) -> Option<lock::Mode> {
         // step only (holding the db lock through a full build would starve
         // readers)
         Cmd::Build { .. } | Cmd::Update { .. } => None,
+        // fetch and recipe check never touch the package database
+        Cmd::Fetch { .. } | Cmd::Recipe { .. } => None,
         Cmd::Outdated => Some(Shared),
         Cmd::Query { .. }
         | Cmd::Info { .. }
@@ -664,7 +721,7 @@ pub(crate) const COMPLETION_BASH: &str = r#"# bash completion for nawa (generate
 _nawa() {
     local cur prev commands pkgs
     cur="${COMP_WORDS[COMP_CWORD]}"
-    commands="build install outdated update autoremove deps deps-all search info why query list remove files owner revdep repo-create sync keygen sign verify trust upgrade rollback repolist makecache repoquery clean group history plugin service config init completions"
+    commands="build install outdated update autoremove deps deps-all search info why query list remove files owner revdep repo-create sync keygen sign verify trust upgrade rollback repolist makecache repoquery fetch recipe clean group history plugin service config init completions"
     pkgs="$(nawa __complete_pkgs 2>/dev/null)"
     if [ "$COMP_CWORD" -eq 1 ]; then
         COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
@@ -734,6 +791,8 @@ _nawa() {
         'trust:Add a public key to the trust store'
         'upgrade:Upgrade installed packages from a repository'
         'rollback:Roll a package back to the previous version'
+        'fetch:Download and verify external sources, then run the fetch backends'
+        'recipe:Inspect and check recipes (check: source-independent warnings)'
         'history:Show the package transaction history'
         'plugin:Manage and run plugins'
         'service:Manage runit services'
@@ -747,7 +806,7 @@ _nawa() {
         _describe -t commands 'nawa command' cmds
     else
         case $words[2] in
-            build|deps|deps-all|info|files|remove|rollback|why|query|list|update)
+            build|deps|deps-all|info|files|remove|rollback|why|query|list|update|fetch)
                 _describe -t packages 'package' pkgs ;;
             install)
                 _describe -t packages 'package' pkgs
@@ -761,6 +820,8 @@ _nawa() {
                 fi ;;
             config)
                 _values 'action' show ;;
+            recipe)
+                _values 'action' check ;;
             completions)
                 _values 'shell' bash zsh fish ;;
         esac
@@ -783,6 +844,9 @@ complete -c nawa -n '__fish_use_subcommand' -a 'deps' -d 'Dependency resolution 
 complete -c nawa -n '__fish_use_subcommand' -a 'deps-all' -d 'Global build order'
 complete -c nawa -n '__fish_use_subcommand' -a 'query list' -d 'List installed packages'
 complete -c nawa -n '__fish_use_subcommand' -a 'remove' -d 'Remove an installed package'
+complete -c nawa -n '__fish_use_subcommand' -a 'fetch' -d 'Download and verify sources, then run the fetch backends'
+complete -c nawa -n '__fish_use_subcommand' -a 'recipe' -d 'Inspect and check recipes'
+complete -c nawa -n '__fish_seen_subcommand_from recipe' -a 'check' -d 'Source-independent recipe warnings'
 complete -c nawa -n '__fish_use_subcommand' -a 'files owner repo-create keygen sign verify trust upgrade rollback service config init completions'
 # package names, completed dynamically
 set -l pkg_cmds build install update deps deps-all info files remove rollback why query list

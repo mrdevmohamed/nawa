@@ -108,7 +108,7 @@ pub struct BuildResult {
 /// read-only files (archive-normalized `pkg` contents); `unlink(2)` needs
 /// a writable *parent*, so every directory is opened up before the delete.
 /// Opening the dirs up is best effort — the delete itself is the real check.
-fn wipe_work(work: &Path) -> Result<()> {
+pub(crate) fn wipe_work(work: &Path) -> Result<()> {
     if !work.exists() {
         return Ok(());
     }
@@ -806,7 +806,7 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
 ///
 /// This never removes permission bits, never touches mtimes (so
 /// `SOURCE_DATE_EPOCH` is unaffected) and never runs through a symlink.
-fn grant_source_write(dir: &Path) {
+pub(crate) fn grant_source_write(dir: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let euid = rustix::process::geteuid().as_raw();
     let root = euid == 0;
@@ -841,7 +841,7 @@ fn grant_source_write(dir: &Path) {
 /// hides the bind sources — the old "base must move elsewhere" workaround
 /// leaked `/tmp/.nawa-sandbox` into recipe artifacts (`bash`'s installed
 /// Makefile.inc records its build tree) and the lint rightly flagged it.
-fn sandbox_inside_base(_work: &Path) -> String {
+pub(crate) fn sandbox_inside_base(_work: &Path) -> String {
     if Path::new("/build").is_dir() || std::fs::create_dir("/build").is_ok() {
         return "/build".to_string();
     }
