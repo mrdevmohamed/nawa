@@ -6,7 +6,7 @@
 
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use super::history::{PackageState, StepAction, TransactionRecord, TxStatus};
 
@@ -460,18 +460,10 @@ pub fn history_undo(root: &Path, id: u64, yes: bool) -> Result<()> {
     }
 }
 
-/// Map of installed entries, used by undo conflict checks in tests.
-#[allow(dead_code)]
-pub fn installed_map(root: &Path) -> Result<BTreeMap<String, crate::db::Entry>> {
-    super::history::installed_snapshot(root)
-}
-
-#[allow(dead_code)]
-fn _unused(_p: PathBuf) {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use crate::db::{Db, Entry};
     use crate::transaction::context::{begin_operation, OperationCommand};
     use crate::transaction::history::{PackageChange, PackageState, StepStatus, SCHEMA_VERSION};
@@ -507,28 +499,6 @@ mod tests {
         let out = dir.join(format!("{name}-{version}-1.nawa.tar.zst"));
         crate::archive::create(&staging, &pkginfo, &out).unwrap();
         out
-    }
-
-    /// Record a completed install transaction with a real installed package.
-    #[allow(dead_code)]
-    fn record_install(root: &Path, name: &str, version: &str, digest: &str) -> u64 {
-        let mut op = begin_operation(root, OperationCommand::Install, &[name.to_string()], &[]).unwrap();
-        {
-            let mut rec = op.recorder();
-            let step = rec
-                .step_intent(name, StepAction::Install, None, Some(&entry(name, version, digest)), digest)
-                .unwrap();
-            Db::new(root).add(&entry(name, version, digest), &[], &Default::default()).unwrap();
-            rec.step_result(step, name, StepAction::Install, StepStatus::Committed, None,
-                Some(&entry(name, version, digest)), "local-build", None, None).unwrap();
-        }
-        op.finish(None).unwrap();
-        op_tx(root, name)
-    }
-
-    #[allow(dead_code)]
-    fn op_tx(root: &Path, _name: &str) -> u64 {
-        crate::transaction::history::list_records(root).unwrap().last().unwrap().id
     }
 
     #[test]

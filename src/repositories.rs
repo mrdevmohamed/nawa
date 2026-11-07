@@ -413,6 +413,3 @@ fn sweep_tree(dir: &Path, dry_run: bool) -> Result<u64> {
     }
     Ok(freed)
 }
-
-#[allow(dead_code)]
-fn unused(_: PathBuf) {}

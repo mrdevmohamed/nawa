@@ -119,27 +119,14 @@ pub fn install_archive_pinned(
     )
 }
 
-/// Install an archive authenticated by a trusted v2 repository index.
+/// Install an archive authenticated by a trusted v2 repository index, keeping
+/// the exact proof bytes (the verified index, its signature sidecar and the
+/// signer public key).
 ///
-/// The expected digest comes from the already-verified signed index. Recheck
-/// it immediately before extraction so the file cannot silently change
+/// The expected digest comes from the already-verified signed index. It is
+/// rechecked immediately before extraction so the file cannot silently change
 /// between repository fetch/validation and the install operation. This path
-/// is intentionally separate from standalone archive installation.
-#[allow(dead_code)] // kept: the public no-proof API of the signed-index path
-pub fn install_archive_from_index(
-    archive_path: &Path,
-    root: &Path,
-    force: bool,
-    expected_sha256: &str,
-    reason: &str,
-) -> Result<Entry> {
-    install_archive_from_index_proof(
-        archive_path, root, force, expected_sha256, reason, None,
-    )
-}
-
-/// [`install_archive_from_index`] with the exact proof bytes to retain (the
-/// verified index, its signature sidecar and the signer public key). The
+/// is intentionally separate from standalone archive installation. The
 /// proof is persisted next to the content-addressed object so a later
 /// rollback/undo can re-verify instead of trusting the cache blindly.
 pub fn install_archive_from_index_proof(
