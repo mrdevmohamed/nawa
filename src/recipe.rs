@@ -183,6 +183,22 @@ impl Recipe {
             .unwrap_or_else(|| "x86_64".to_string())
     }
 
+    /// The build dependency list: the declared `depends.build` plus every
+    /// implicit dependency the recipe's own tables require (e.g. the Go/Rust
+    /// toolchains implied by a `[fetch.*]` table — fetch-phase.md §9),
+    /// deduplicated.
+    ///
+    /// Every consumer of build dependencies — dependency resolution
+    /// (`deps.rs`), closure assembly (`closure.rs`), install planning
+    /// (`plan.rs`) and the `info`/`why`/`deps` queries — reads them through
+    /// this one method, so an implicit dependency becomes visible everywhere
+    /// at once instead of only in the build root.
+    pub fn build_deps(&self) -> Vec<String> {
+        // implicit fetch toolchains are appended here when the new schema
+        // lands; until then this is exactly the declared list
+        self.depends.build.clone()
+    }
+
     /// Expand placeholders inside a build/hook script.
     pub fn expand(&self, script: &str, ctx: &ExpandCtx) -> String {
         script
@@ -304,6 +320,18 @@ mod tests {
         let rec: Recipe = toml::from_str(&bad).unwrap();
         let err = rec.validate().unwrap_err().to_string();
         assert!(err.contains("package.mirrors"), "got: {err}");
+    }
+
+    #[test]
+    fn build_deps_is_the_declared_list_for_legacy_recipes() {
+        let rec: Recipe = toml::from_str(SAMPLE).unwrap();
+        assert!(
+            rec.build_deps().is_empty(),
+            "legacy recipes must not gain implicit deps yet"
+        );
+        let with = SAMPLE.replace("build = []", "build = [\"zlib\"]");
+        let rec: Recipe = toml::from_str(&with).unwrap();
+        assert_eq!(rec.build_deps(), vec!["zlib".to_string()]);
     }
 
     #[test]
