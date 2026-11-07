@@ -831,16 +831,6 @@ fn go_fetch_and_offline_build_work_under_sandbox() {
 
         let (out, err, ok) =
             run_fetch_build_with_isolation(&s, isolation, Some(&proxy), &[], &[]);
-        if !ok
-            && isolation == "sandbox"
-            && err.contains("cannot mark /proc/sys/fs/binfmt_misc read-only")
-        {
-            eprintln!(
-                "SKIP: host kernel does not provide the mount behavior required for strict sandbox; closure coverage will still run"
-            );
-            let _ = fs::remove_dir_all(&s);
-            continue;
-        }
         assert!(
             ok,
             "Go fetch/build failed at isolation={isolation}\nstdout:\n{out}\nstderr:\n{err}"
