@@ -1,7 +1,7 @@
 # PR #16 — Fetch Phase Review and Remediation Log
 
 **Pull request:** https://github.com/mrdevmohamed/nawa/pull/16
-**Reviewed head:** e77164e32ee063e416b0c9e1a91540924c202702
+**Remediation head:** 7280dfbfa640488a05355fb024e4ae164730e24b
 **Review date:** 2026-11-07
 **Initial recommendation:** Request changes before merge.
 
@@ -10,6 +10,8 @@ This review covers fetch-phase implementation, cache identity, Cargo configurati
 ## Findings
 
 ### R1 — Fetch timeout kills only the immediate shell
+**Status:** Implemented; CI pending
+
 **Severity:** High · **Location:** src/fetchrun.rs::stream_and_wait
 
 The non-sandbox fetch runner starts Bash and, at timeout, calls Child::kill(). That kills only the immediate child. A subprocess such as go mod download, Cargo, or a helper can survive, retain the inherited stdout pipe, and keep the reader thread blocked at join(). Thus the configured timeout may fail to return and may leave descendants running.
@@ -17,6 +19,8 @@ The non-sandbox fetch runner starts Bash and, at timeout, calls Child::kill(). T
 **Required fix:** Give each plain fetch run its own process group, kill the whole group at timeout, reap the direct child, and ensure inherited pipe writers cannot keep the log reader alive. Add a regression that launches a descendant which inherits stdout and proves both the runner and descendant terminate.
 
 ### R2 — Go implicit dependency name does not match Faseela
+**Status:** Implemented; CI pending
+
 **Severity:** High · **Location:** src/recipe.rs::GO_TOOLCHAIN
 
 Nawa declares the Go build dependency as go, but the current Faseela recipe is named golang (faseela-repo/recipes/dev/golang/recipe.toml). Recipes using [fetch.go] therefore request a package that does not exist in the repository.
@@ -24,6 +28,8 @@ Nawa declares the Go build dependency as go, but the current Faseela recipe is n
 **Required fix:** Use golang and add a regression/check that implicit fetch dependencies resolve to real recipe names in the Faseela repository.
 
 ### R3 — Cargo configuration discovery is not hermetic
+**Status:** Implemented; CI pending
+
 **Severity:** High · **Location:** src/fetchrun.rs::scan_cargo_configs, run_populate_cargo
 
 The scan covers the source directory up to r.src, but Cargo also discovers configuration relative to its current working directory and through parent directories, and reads configuration from CARGO_HOME. The command currently runs with the source directory as its cwd. An unscanned ancestor configuration can therefore affect registry/network behavior, while the current scan does not establish the exact config set Cargo will read.
@@ -31,6 +37,8 @@ The scan covers the source directory up to r.src, but Cargo also discovers confi
 **Required fix:** Run Cargo from a dedicated empty fetch working directory and pass the manifest path explicitly; give it a fresh, explicit CARGO_HOME; keep the intentional source-tree config scan for the explicitly supported vendored case. Add tests proving parent-directory and inherited Cargo-home configuration cannot redirect the fetch.
 
 ### R4 — Resolver bind can follow a symlink into masked /run
+**Status:** Implemented; sandbox CI pending
+
 **Severity:** High · **Location:** src/fetchrun.rs::resolver_binds, src/sandbox/mounts.rs::StagingHandles::bind_at
 
 The host's /etc/resolv.conf may be a symlink into /run. The extra file bind currently targets /etc/resolv.conf and the file placeholder logic follows that symlink. The fetch sandbox later masks /run, which can hide the bind target. In a directory/closure root, a dangling symlink or missing parent can also make placeholder creation fail.
@@ -38,6 +46,8 @@ The host's /etc/resolv.conf may be a symlink into /run. The extra file bind curr
 **Required fix:** Resolve and stage the resolver target safely for the sandbox root, ensure the required target exists without following a dangling final symlink, and order live-root masking/binding so a resolver target under /run remains reachable without modifying the host filesystem. Add live and directory-root tests for direct-file, valid-symlink, and dangling-symlink cases.
 
 ### R5 — Build cache identity omits the actual Go/Cargo toolchain in non-closure isolation
+**Status:** Implemented; CI pending
+
 **Severity:** Medium · **Location:** src/build.rs::build_id_for, try_cache_hit
 
 The fetch extras are schema constants (fetch-go=1 / fetch-cargo=1). Cargo's ecosystem cache key includes the Cargo version, but the build cache ID does not; the Go ecosystem key omits the Go version too. In env and live sandbox modes, host toolchain upgrades can therefore leave --use-cache matching an archive built with a different compiler. Closure mode also needs the toolchain package archives to be present in the closure identity.
@@ -60,6 +70,18 @@ The fetch extras are schema constants (fetch-go=1 / fetch-cargo=1). Cargo's ecos
 5. Include toolchain identity in build IDs and add cache invalidation tests.
 6. Add real Go/Cargo fetch integration coverage for sandbox and closure where the CI runner supports it.
 
-## Current status
+## Remediation status at 7280dfb
 
-All findings above are open at the reviewed head. This log is the baseline for remediation. Items must only be marked complete after their code change and targeted regression test are committed and verified on the corresponding head.
+The implementation changes and targeted regressions are now committed on the PR branch:
+
+| Finding | Implementation | Regression coverage |
+|---|---|---|
+| R1 | Plain fetch commands use a dedicated process group; the reader deadline also covers descendants that retain stdout after Bash exits. Timeout kills the group and reaps Bash. | src/fetchrun.rs: descendant-inherited-stdout timeout test |
+| R2 | GO_TOOLCHAIN is now golang; rust and ca-certificates were also checked against the current Faseela recipes. | src/recipe.rs: package-ID and implicit dependency-closure tests |
+| R3 | Cargo fetch and its version probe use an empty temporary cwd, fresh per-fetch CARGO_HOME, explicit manifest path, and reject Cargo config files on the cwd ancestor chain. | tests/fetchcargo.rs: hostile ancestor config and inherited CARGO_HOME config |
+| R4 | Resolver symlinks are resolved against the sandbox root. Live /run is replaced with an empty searchable tmpfs before binding the resolver target; the bind and /run are read-only. File-bind targets no longer follow final symlinks. | src/fetchrun.rs: direct, relative, and dangling resolver symlink path tests. Full live/closure mount execution still needs CI confirmation. |
+| R5 | Non-closure build IDs include actual Go/Cargo version strings from the fetch PATH. Closure IDs already include the implicit toolchain package archives. | src/build.rs: Go/Cargo version and closure archive invalidation tests |
+
+**CI:** workflow run 42388465305 is pending for remediation head 7280dfb. The previous run was cancelled when newer commits superseded it. No finding is marked verified until this run completes successfully.
+
+**Recommendation:** keep the PR Draft and do not merge yet. In particular, confirm the process-group test, Cargo integration test, and sandbox/closure resolver behavior in CI.
