@@ -545,6 +545,180 @@ fn copy_file_times(src: &Path, dst: &Path) -> Result<()> {
         .with_context(|| format!("set times on {}", dst.display()))
 }
 
+// ---- content-addressed source cache (fetch-phase.md §11) ---------------------
+
+/// The new-form source cache root: `<srccache>/sha256` (§11). Legacy
+/// `<sha16>-<file>` entries stay next to it and are never rewritten.
+pub fn digest_cache_dir(src_cache: &Path) -> PathBuf {
+    src_cache.join("sha256")
+}
+
+/// Hold-open lock file: closing the descriptor (on drop or process exit)
+/// releases the `flock`, the way `lock.rs` does it.
+struct CacheLock {
+    _file: File,
+}
+
+/// Take the advisory exclusive `flock` for one digest. Waiting (not
+/// `try_*`): a concurrent build is *publishing* the entry we want, so
+/// waiting is the fast path and a timeout cannot be reported by flock.
+fn lock_digest_entry(path: &Path) -> Result<CacheLock> {
+    use rustix::fs::{flock, FlockOperation};
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .read(true)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("open cache lock {}", path.display()))?;
+    // flock(2) can return EINTR when a signal handler runs (nawa's own
+    // interrupt handler); retry it like lock.rs does
+    loop {
+        match flock(&file, FlockOperation::LockExclusive) {
+            Ok(()) => return Ok(CacheLock { _file: file }),
+            Err(err) if err == rustix::io::Errno::INTR => continue,
+            Err(err) => bail!("flock on the source cache lock failed: {err}"),
+        }
+    }
+}
+
+/// Unique transfer-side `.part` name (§11): unlike the legacy downloader —
+/// which shares one `<file>.part` per destination — every new-form transfer
+/// gets its own file name so two concurrent builds of the same digest can
+/// never corrupt each other's partial bytes.
+static PART_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn unique_part_path(dest: &Path) -> PathBuf {
+    let seq = PART_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let base = dest
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "digest".to_string());
+    dest.with_file_name(format!("{base}.{}-{seq}.part", std::process::id()))
+}
+
+/// A published cache entry must never be modified again (§11 "immutability"):
+/// strip the write bits, best effort — the cache is re-verified before a hit
+/// anyway, so a world-writable entry is a permissions smell, not a trust hole.
+fn strip_write_permission(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::symlink_metadata(path).and_then(|md| {
+        let mode = md.permissions().mode() & 0o777 & !0o222;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+    });
+}
+
+/// Download one new-schema source into the content-addressed cache at
+/// `dest = <srccache>/sha256/<digest>` and publish it only after the bytes
+/// verify (§10.1: a mirror is an alternate transport for identical bytes).
+///
+/// Cache-first, like [`download_cached_with_mirrors`]: a hit is re-verified,
+/// so a truncated/corrupted entry is transparently re-downloaded. Around the
+/// miss path:
+///
+///  * [`lock_digest_entry`] on `<dest>.lock` serialises builds racing for
+///    the same digest, followed by a runner-up cache recheck — the other
+///    build may have published the entry while we waited;
+///  * the §11 legacy fallback: `<srccache>/<sha16>-<url-basename>` is
+///    verified against the full digest and *copied* (not hard-linked) into
+///    the new path, keeping the legacy entry untouched and shareable;
+///  * the transfer lands in a unique `.part` sibling and is renamed
+///    atomically after verification; the published entry is marked
+///    read-only.
+pub fn download_content_addressed(
+    url: &str,
+    mirrors: &[String],
+    sha256: &str,
+    dest: &Path,
+) -> Result<()> {
+    // the digest doubles as a path component — refuse anything but the
+    // recipe-parse shape (defence in depth: validate() already enforces it)
+    if !crate::recipe::is_lower_hex64(sha256) {
+        bail!("new-form source sha256 must be 64 lowercase hex, got `{sha256}`");
+    }
+    if dest.exists() {
+        if verify_sha256(dest, sha256).is_ok() {
+            return Ok(());
+        }
+        eprintln!("nawa: cached {} failed sha256 — re-downloading", dest.display());
+    }
+    // offline with a cold cache: one clean error here beats one per mirror
+    // candidate (mirrors [download_cached_with_mirrors] for message shape)
+    check_offline(url, offline())?;
+    let dir = dest
+        .parent()
+        .context("content-addressed cache entry needs a parent directory")?;
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("create digest cache {}", dir.display()))?;
+    let _lock = lock_digest_entry(&dest.with_file_name(format!("{}.lock", sha256)))?;
+
+    // runner-up cache hit: another build published this digest while we
+    // were waiting on the lock
+    if dest.exists() && verify_sha256(dest, sha256).is_ok() {
+        return Ok(());
+    }
+
+    // §11 migration: a legacy `<sha16>-<file>` entry whose bytes verify is
+    // adopted into the new layout
+    if let Some(parent) = dir.parent() {
+        let fname = url.rsplit('/').next().unwrap_or("source.bin");
+        let legacy = parent.join(format!("{}-{}", &sha256[..16], fname));
+        if legacy.is_file() {
+            match verify_sha256(&legacy, sha256) {
+                Ok(()) => {
+                    std::fs::copy(&legacy, dest).with_context(|| {
+                        format!("migrate legacy cache entry {}", legacy.display())
+                    })?;
+                    strip_write_permission(dest);
+                    println!(
+                        "nawa: source cached (migrated legacy entry {}): {}",
+                        legacy.display(),
+                        dest.display()
+                    );
+                    return Ok(());
+                }
+                Err(_) => {
+                    eprintln!(
+                        "nawa: legacy cache entry {} failed sha256 — downloading",
+                        legacy.display()
+                    );
+                }
+            }
+        }
+    }
+
+    // url, then built-in GNU mirrors, then the recipe's — every candidate
+    // is checked against the digest, so a mirror serving wrong bytes lets
+    // the next one speak
+    let tmp = unique_part_path(dest);
+    let mut last_err = None;
+    for cand in candidate_urls_with(url, mirrors) {
+        if cand != url {
+            eprintln!("nawa: trying alternate mirror {cand}");
+        }
+        let res = download(&cand, &tmp).and_then(|_| verify_sha256(&tmp, sha256));
+        match res {
+            Ok(()) => {
+                last_err = None;
+                break;
+            }
+            Err(e) => {
+                eprintln!("nawa: {e}");
+                let _ = std::fs::remove_file(&tmp);
+                last_err = Some(e);
+            }
+        }
+    }
+    if let Some(e) = last_err {
+        return Err(e);
+    }
+    std::fs::rename(&tmp, dest)
+        .with_context(|| format!("activate cached download {}", dest.display()))?;
+    strip_write_permission(dest);
+    Ok(())
+}
+
 // ---- package repositories ----------------------------------------------------
 
 /// A package repository location: a local directory or an http(s) URL.
@@ -818,17 +992,178 @@ pub fn extract_source_archive(tarball: &Path, dest: &Path) -> Result<()> {
     let fmt = detect_source_format(tarball)
         .with_context(|| format!("{} is not a recognized tar archive", tarball.display()))?;
     std::fs::create_dir_all(dest).with_context(|| format!("create {}", dest.display()))?;
+    unpack_tar_stream(decompressed_reader(tarball, fmt)?, dest)
+}
+
+/// Shared decompression switch of [`extract_source_archive`] /
+/// [`extract_source_archive_stripped`]: open `tarball`, wrap it in the
+/// streaming decoder `fmt` was detected with.
+fn decompressed_reader(tarball: &Path, fmt: SourceFormat) -> Result<Box<dyn Read>> {
     let f = std::fs::File::open(tarball).with_context(|| format!("open {}", tarball.display()))?;
-    match fmt {
-        SourceFormat::Tar => unpack_tar_stream(f, dest),
-        SourceFormat::TarGz => unpack_tar_stream(flate2::read::GzDecoder::new(f), dest),
-        SourceFormat::TarBz2 => unpack_tar_stream(bzip2::read::BzDecoder::new(f), dest),
-        SourceFormat::TarXz => unpack_tar_stream(
-            lzma_rust2::XzReader::new(std::io::BufReader::new(f), true),
-            dest,
-        ),
-        SourceFormat::TarZst => unpack_tar_stream(zstd::stream::read::Decoder::new(f)?, dest),
+    Ok(match fmt {
+        SourceFormat::Tar => Box::new(f),
+        SourceFormat::TarGz => Box::new(flate2::read::GzDecoder::new(f)),
+        SourceFormat::TarBz2 => Box::new(bzip2::read::BzDecoder::new(f)),
+        SourceFormat::TarXz => {
+            Box::new(lzma_rust2::XzReader::new(std::io::BufReader::new(f), true))
+        }
+        SourceFormat::TarZst => Box::new(zstd::stream::read::Decoder::new(f)?),
+    })
+}
+
+/// Extract a source archive into `dest` with `strip_components` leading path
+/// components removed first (fetch-phase.md §4.2).
+///
+/// * `strip_components = 0` is exactly [`extract_source_archive`].
+/// * Otherwise the (decompressed) archive is re-emitted into a plain tar
+///   sibling with the original headers — types, modes, ownership fields and
+///   mtimes are copied — so the hardened [`unpack_tar_stream`] path runs on
+///   it afterwards and every sanitisation, symlink and deferred-hard-link
+///   behaviour is reused unchanged.
+/// * Strip accounting follows GNU tar's extraction semantics: `.` segments
+///   count as a component and are consumed by the strip count; entries with
+///   fewer components are skipped; hard-link *targets* are stripped too and
+///   a link whose target strip comes out empty is skipped (GNU errors there;
+///   nothing sensible can be materialised); symlink targets pass through.
+/// * Unlike the legacy listing path this is strict: an entry refusing to be
+///   sanitised (`..`, absolute) aborts the staging instead of being skipped
+///   with a warning — §16 expects traversal attempts rejected for
+///   new-schema sources.
+pub fn extract_source_archive_stripped(
+    tarball: &Path,
+    dest: &Path,
+    strip_components: u32,
+) -> Result<()> {
+    if strip_components == 0 {
+        return extract_source_archive(tarball, dest);
     }
+    let fmt = detect_source_format(tarball)
+        .with_context(|| format!("{} is not a recognized tar archive", tarball.display()))?;
+    std::fs::create_dir_all(dest).with_context(|| format!("create {}", dest.display()))?;
+    // plain tar written next to the destination (same `work` tree, so same
+    // filesystem and no cross-device dance); it is transient
+    let tmp = dest.with_file_name(format!(
+        "{}.rewrite.tar",
+        dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+    ));
+    let rewrite = rewrite_tar_stripped(decompressed_reader(tarball, fmt)?, &tmp, strip_components);
+    let extracted = rewrite.and_then(|()| {
+        let f = std::fs::File::open(&tmp)
+            .with_context(|| format!("open rewritten tar {}", tmp.display()))?;
+        unpack_tar_stream(f, dest)
+    });
+    let _ = std::fs::remove_file(&tmp);
+    extracted
+}
+
+/// Rewrite a (decompressed) tar stream into a plain tar at `tmp`, removing
+/// `strip_components` leading components from every entry name and from
+/// hard-link targets. Returns when the archive is complete.
+///
+/// `..` components (entry *names*; GNU/tar-rs would skip those entries on
+/// extraction) abort with a hard error for new-schema sources (§16:
+/// "traversal paths … are rejected"). Symlink targets are kept verbatim —
+/// GNU tar does not translate them either, and extraction stores them
+/// exactly as written. Skipped entries are deliberately left unread: the
+/// `entries()` iterator seeks to the next header itself.
+fn rewrite_tar_stripped<R: Read>(reader: R, tmp: &Path, strip: u32) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut ar = tar::Archive::new(reader);
+    let file = std::fs::File::create(tmp)
+        .with_context(|| format!("create rewritten tar {}", tmp.display()))?;
+    let mut out = tar::Builder::new(BufWriter::with_capacity(256 * 1024, file));
+    for entry in ar.entries().context("read tar entries")? {
+        let mut entry = entry.context("read tar entry")?;
+        let t = entry.header().entry_type();
+        if t.is_gnu_longname() || t.is_gnu_longlink() {
+            // extension headers are composed into the next entry's path by
+            // tar-rs; they must not be re-emitted as visible entries
+            continue;
+        }
+        // component split over raw bytes (tar paths need not be UTF-8);
+        // empty segments from `//` or a trailing `/` do not count as
+        // components, matching GNU's notion
+        let path = entry.path()?;
+        let comps: Vec<&std::ffi::OsStr> = path
+            .as_os_str()
+            .as_bytes()
+            .split(|b| *b == b'/')
+            .filter(|c| !c.is_empty())
+            .map(std::ffi::OsStr::from_bytes)
+            .collect();
+        // strictness first: for new-schema sources a traversal attempt
+        // aborts the staging instead of the legacy skip-with-warning
+        if comps.iter().any(|c| *c == "..") {
+            bail!("unsafe path in source archive: `{}`", path.display());
+        }
+        if comps.len() < strip as usize {
+            // GNU tar semantics: not enough components — the entry is not
+            // extracted at all
+            continue;
+        }
+        let stripped: PathBuf = comps[strip as usize..]
+            .iter()
+            .fold(PathBuf::new(), |mut p, c| {
+                p.push(c);
+                p
+            });
+        if stripped.as_os_str().is_empty() {
+            continue;
+        }
+        let mut header = entry.header().clone();
+        if t.is_hard_link() {
+            let target = entry
+                .link_name()
+                .context("read hard-link entry")?
+                .context("hard link entry without a target")?;
+            let tcomps: Vec<&std::ffi::OsStr> = target
+                .as_os_str()
+                .as_bytes()
+                .split(|b| *b == b'/')
+                .filter(|c| !c.is_empty())
+                .map(std::ffi::OsStr::from_bytes)
+                .collect();
+            if tcomps.iter().any(|c| *c == "..") {
+                bail!(
+                    "unsafe hard-link target in source archive: `{}`",
+                    target.display()
+                );
+            }
+            if tcomps.len() < strip as usize {
+                // nothing left to link to any more; GNU reports an error for
+                // the empty target — skipping is the fail-closed variant
+                continue;
+            }
+            let ttarget: PathBuf = tcomps[strip as usize..]
+                .iter()
+                .fold(PathBuf::new(), |mut p, c| {
+                    p.push(c);
+                    p
+                });
+            if ttarget.as_os_str().is_empty() {
+                // exactly at the strip boundary: GNU errors on the emptied
+                // target; skipping keeps staging deterministic (fail-closed)
+                continue;
+            }
+            out.append_link(&mut header, &stripped, &ttarget)
+                .with_context(|| {
+                    format!("re-emit hard link {} -> {}", stripped.display(), ttarget.display())
+                })?;
+        } else if t.is_dir() || t.is_symlink() {
+            // directories and symlinks carry no body in the extraction
+            // model; some writers leave junk in the size field, so normalise
+            header.set_size(0);
+            out.append_data(&mut header, &stripped, std::io::empty())
+                .with_context(|| format!("re-emit {}", stripped.display()))?;
+        } else {
+            // regular/contiguous/special: data is appended as-is, exactly
+            // what the plain extraction path would read for such entries
+            out.append_data(&mut header, &stripped, &mut entry)
+                .with_context(|| format!("re-emit {}", stripped.display()))?;
+        }
+    }
+    out.finish().context("finish rewritten tar")?;
+    Ok(())
 }
 
 fn unpack_tar_stream<R: Read>(reader: R, dest: &Path) -> Result<()> {
@@ -1463,5 +1798,339 @@ mod tests {
             SourceFormat::TarXz => "xz",
             SourceFormat::TarZst => "zst",
         }
+    }
+
+    // ---- strip-aware extraction (fetch-phase.md §4.2) ------------------------
+
+    /// The tar used to pin strip semantics, mirroring the GNU tar 1.35
+    /// reference tree this design was verified against (`/tmp/stripref`):
+    /// a `pkg/` top dir, a file, a nested dir with a deeper file, a hard
+    /// link back to `pkg/file` and a relative symlink.
+    fn strip_reference_tar() -> Vec<u8> {
+        let mut b = tar::Builder::new(Vec::new());
+        let mut h = tar::Header::new_gnu();
+        h.set_entry_type(tar::EntryType::Directory);
+        h.set_mode(0o755);
+        h.set_mtime(1_000_000);
+        h.set_size(0);
+        h.set_cksum();
+        b.append_data(&mut h, "pkg", std::io::empty()).unwrap();
+
+        let data = b"hello\n";
+        let mut h = tar::Header::new_gnu();
+        h.set_size(data.len() as u64);
+        h.set_mode(0o640);
+        h.set_mtime(1_234_567);
+        h.set_cksum();
+        b.append_data(&mut h, "pkg/file", &data[..]).unwrap();
+
+        let mut h = tar::Header::new_gnu();
+        h.set_entry_type(tar::EntryType::Directory);
+        h.set_mode(0o750);
+        h.set_mtime(1_000_000);
+        h.set_size(0);
+        h.set_cksum();
+        b.append_data(&mut h, "pkg/sub", std::io::empty()).unwrap();
+
+        let deep = b"deep\n";
+        let mut h = tar::Header::new_gnu();
+        h.set_size(deep.len() as u64);
+        h.set_mode(0o600);
+        h.set_mtime(1_234_568);
+        h.set_cksum();
+        b.append_data(&mut h, "pkg/sub/deep", &deep[..]).unwrap();
+
+        let mut h = tar::Header::new_gnu();
+        h.set_entry_type(tar::EntryType::Link);
+        h.set_size(0);
+        h.set_mode(0o644);
+        h.set_mtime(1_234_567);
+        h.set_link_name("pkg/file").unwrap();
+        h.set_cksum();
+        b.append_data(&mut h, "pkg/sub/hardlink", std::io::empty()).unwrap();
+
+        let mut h = tar::Header::new_gnu();
+        h.set_entry_type(tar::EntryType::Symlink);
+        h.set_size(0);
+        h.set_mode(0o777);
+        h.set_mtime(1_234_567);
+        h.set_link_name("../file").unwrap();
+        h.set_cksum();
+        b.append_data(&mut h, "pkg/sub/sym", std::io::empty()).unwrap();
+
+        b.into_inner().unwrap()
+    }
+
+    #[test]
+    fn strip_one_matches_the_gnu_reference_tree() {
+        let dir = scratch("strip1");
+        let p = dir.join("ref.tar");
+        std::fs::write(&p, strip_reference_tar()).unwrap();
+
+        let out = dir.join("out");
+        extract_source_archive_stripped(&p, &out, 1).unwrap();
+        // the `pkg/` top dir is consumed (its name strip leaves it empty)
+        assert!(!out.join("pkg").exists(), "no top dir may remain");
+        // plain file lands at the workspace root, header metadata intact
+        assert_eq!(std::fs::read(out.join("file")).unwrap(), b"hello\n");
+        let md = std::fs::symlink_metadata(out.join("file")).unwrap();
+        assert_eq!(md.permissions().mode() & 0o777, 0o640, "mode preserved");
+        assert_eq!(md.mtime(), 1_234_567, "mtime preserved through the rewrite");
+        // nested dir + file
+        assert!(out.join("sub").is_dir());
+        assert_eq!(std::fs::read(out.join("sub/deep")).unwrap(), b"deep\n");
+        // hard link was re-targeted and is a real link to the extracted file
+        assert_eq!(std::fs::read(out.join("sub/hardlink")).unwrap(), b"hello\n");
+        assert_eq!(
+            std::fs::metadata(out.join("sub/hardlink")).unwrap().ino(),
+            std::fs::metadata(out.join("file")).unwrap().ino(),
+            "hard link kept as a link to the stripped target"
+        );
+        // symlink target passes through verbatim (GNU does not translate
+        // targets either)
+        assert_eq!(
+            std::fs::read_link(out.join("sub/sym")).unwrap().to_str().unwrap(),
+            "../file"
+        );
+        // the rewrite tar is transient
+        assert!(!dir.join("out.rewrite.tar").exists(), "rewrite tar cleaned up");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn strip_two_matches_the_gnu_reference_tree() {
+        let dir = scratch("strip2");
+        let p = dir.join("ref.tar");
+        std::fs::write(&p, strip_reference_tar()).unwrap();
+        let out = dir.join("out");
+        extract_source_archive_stripped(&p, &out, 2).unwrap();
+        // only the deepenough entries survive: dirs have too few components,
+        // `file` loses its last component to nothing, and the hard link's
+        // target `pkg/file` strips to empty — GNU errors there, nawa skips
+        // the entry (fail-closed)
+        assert_eq!(std::fs::read(out.join("deep")).unwrap(), b"deep\n");
+        assert_eq!(
+            std::fs::read_link(out.join("sym")).unwrap().to_str().unwrap(),
+            "../file"
+        );
+        for missing in ["file", "hardlink", "symreal", "sub", "pkg"] {
+            assert!(!out.join(missing).exists(), "{missing} must not exist");
+        }
+        // parents were created on demand despite the dir entries being
+        // stripped away
+        assert!(out.is_dir());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn strip_extraction_runs_through_compression() {
+        let dir = scratch("stripgz");
+        let bytes = strip_reference_tar();
+        let p = write_compressed(&dir, &bytes, "tar.gz");
+        assert_eq!(detect_source_format(&p), Some(SourceFormat::TarGz));
+        let out = dir.join("out");
+        extract_source_archive_stripped(&p, &out, 1).unwrap();
+        assert_eq!(std::fs::read(out.join("file")).unwrap(), b"hello\n");
+        assert!(out.join("sub/deep").is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The legacy path skips unsanitisable entries with a warning; the
+    /// new-schema path must reject them (§16). Crafted by hand because
+    /// `tar::Builder` refuses `..` names.
+    #[test]
+    fn strip_extraction_rejects_traversal_names() {
+        let dir = scratch("stripdotdot");
+        let mut img = vec![0u8; 512];
+        let name = b"pkg/../evil.txt";
+        img[..name.len()].copy_from_slice(name);
+        img[100..108].copy_from_slice(b"0000644\0");
+        img[124..136].copy_from_slice(format!("{:011o}\0", 1).as_bytes());
+        img[156] = b'0'; // regular file
+        img[148..156].copy_from_slice(b"        ");
+        let sum: u64 = img.iter().map(|v| *v as u64).sum();
+        img[148..156].copy_from_slice(format!("{:06o}\0 ", sum).as_bytes());
+        let mut raw = img;
+        raw.extend_from_slice(b"x");
+        raw.resize(1024, 0);
+        raw.extend_from_slice(&[0u8; 1024]);
+        let p = dir.join("evil.tar");
+        std::fs::write(&p, &raw).unwrap();
+
+        let err = extract_source_archive_stripped(&p, &dir.join("out"), 1).unwrap_err();
+        assert!(err.to_string().contains("unsafe path"), "got: {err}");
+        assert!(!dir.join("evil.txt").exists());
+        assert!(!dir.join("out").join("evil.txt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn strip_extraction_rejects_traversal_hardlink_targets() {
+        let dir = scratch("stripdotdotlink");
+        let mut b = tar::Builder::new(Vec::new());
+        let mut h = tar::Header::new_gnu();
+        h.set_size(3);
+        h.set_mode(0o644);
+        h.set_cksum();
+        b.append_data(&mut h, "pkg/file", &b"ok\n"[..]).unwrap();
+        let mut lh = tar::Header::new_gnu();
+        lh.set_entry_type(tar::EntryType::Link);
+        lh.set_size(0);
+        lh.set_mode(0o644);
+        lh.set_link_name("../outside").unwrap();
+        lh.set_cksum();
+        b.append_data(&mut lh, "pkg/hardlink", std::io::empty()).unwrap();
+        let p = dir.join("evil-link.tar");
+        std::fs::write(&p, b.into_inner().unwrap()).unwrap();
+
+        let err = extract_source_archive_stripped(&p, &dir.join("out"), 1).unwrap_err();
+        assert!(
+            err.to_string().contains("hard-link target"),
+            "got: {err}"
+        );
+        assert!(!dir.join("outside").exists());
+        assert!(!dir.join("out").join("outside").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- content-addressed source cache (fetch-phase.md §11) -----------------
+
+    fn sha256_of(bytes: &[u8]) -> String {
+        let mut h = Sha256::new();
+        h.update(bytes);
+        hex::encode(h.finalize())
+    }
+
+    fn dead_addr() -> String {
+        // bind, read the port, drop: connecting here fails fast
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        drop(l);
+        format!("http://{}", addr)
+    }
+
+    #[test]
+    fn content_addressed_download_publishes_readonly_and_reuses() {
+        let body = b"content-addressed-source\n";
+        let sha = sha256_of(body);
+        let base = scripted_server(vec![http_response("HTTP/1.1 200 OK", body, "")]);
+        let dir = scratch("ca");
+        let dest = digest_cache_dir(&dir).join(&sha);
+
+        download_content_addressed(
+            &format!("{base}/gzip-1.2.tar.gz"),
+            &[],
+            &sha,
+            &dest,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), body);
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::symlink_metadata(&dest).unwrap().permissions().mode();
+        assert_eq!(mode & 0o222, 0, "published entries are read-only (§11)");
+
+        // the cache sidecar is exactly entry + lock: no `.part` leftovers
+        let mut got: Vec<String> = digest_cache_dir(&dir)
+            .read_dir()
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![sha.clone(), format!("{sha}.lock")],
+            "no transfer debris may remain"
+        );
+
+        // second call is served from the cache: a dead URL is never touched
+        let dead = dead_addr();
+        download_content_addressed(&format!("{dead}/gzip-1.2.tar.gz"), &[], &sha, &dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), body);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn content_addressed_replaces_a_corrupt_cache_entry() {
+        let body = b"content-addressed-source\n";
+        let sha = sha256_of(body);
+        let base = scripted_server(vec![http_response("HTTP/1.1 200 OK", body, "")]);
+        let dir = scratch("ca-corrupt");
+        let dest = digest_cache_dir(&dir).join(&sha);
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        std::fs::write(&dest, b"truncated garbage").unwrap();
+
+        download_content_addressed(&format!("{base}/f.tar.gz"), &[], &sha, &dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), body, "re-downloaded");
+        let dead = dead_addr();
+        // the repaired entry is a verified hit again
+        download_content_addressed(&format!("{dead}/f.tar.gz"), &[], &sha, &dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), body);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn content_addressed_adopts_a_verified_legacy_entry() {
+        let body = b"content-addressed-source\n";
+        let sha = sha256_of(body);
+        let dir = scratch("ca-legacy");
+        // §11: legacy entries live at <srccache>/<sha16>-<file>
+        let legacy = dir.join(format!("{}-gzip-1.2.tar.gz", &sha[..16]));
+        std::fs::write(&legacy, body).unwrap();
+        let dest = digest_cache_dir(&dir).join(&sha);
+
+        // the URL is never contacted: the migration read happens first
+        let dead = dead_addr();
+        download_content_addressed(&format!("{dead}/gzip-1.2.tar.gz"), &[], &sha, &dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), body, "copied, not moved");
+        assert!(legacy.is_file(), "the legacy entry must stay shareable");
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::symlink_metadata(&dest).unwrap().permissions().mode();
+        assert_eq!(mode & 0o222, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn content_addressed_refuses_wrong_bytes_and_malformed_digests() {
+        // a mirror (no recipe mirrors here) serving other bytes is refused:
+        // nothing is published
+        let base = scripted_server(vec![http_response("HTTP/1.1 200 OK", b"evil bytes", "")]);
+        let dir = scratch("ca-bad");
+        let sha = sha256_of(b"content-addressed-source\n");
+        let dest = digest_cache_dir(&dir).join(&sha);
+        let res = download_content_addressed(&format!("{base}/f.tar.gz"), &[], &sha, &dest);
+        assert!(res.is_err(), "unverified bytes must not be activated");
+        assert!(!dest.exists(), "nothing may be left in the cache");
+        // the digest dir may exist (the lock file lingers by design), but no
+        // transfer debris beyond entry + lock
+        let got: Vec<String> = digest_cache_dir(&dir)
+            .read_dir()
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert!(
+            got.iter().all(|n| *n == sha.as_str() || *n == format!("{sha}.lock")),
+            "no .part debris: {got:?}"
+        );
+
+        // the digest doubles as a path component — the parse shape is
+        // checked before anything is created
+        let fresh = scratch("ca-bad2");
+        let res = download_content_addressed(&format!("{base}/f.tar.gz"), &[], "XYZ", &dest);
+        assert!(
+            res.unwrap_err().to_string().contains("64 lowercase hex"),
+            "malformed digest rejected"
+        );
+        assert!(!digest_cache_dir(&fresh).exists(), "nothing created for a bad digest");
+        drop(fresh);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unique_part_paths_never_collide() {
+        let a = unique_part_path(Path::new("/c/0123abcd"));
+        let b = unique_part_path(Path::new("/c/0123abcd"));
+        assert_ne!(a, b, "concurrent transfers must not share a part file");
+        assert!(Path::new(&a).extension().unwrap() == "part");
+        assert!(a.to_string_lossy().contains(&format!("{}-", std::process::id())));
     }
 }
