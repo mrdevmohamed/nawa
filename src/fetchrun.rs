@@ -314,18 +314,24 @@ fn scan_cargo_configs(r: &FetchRun, dir: &Path) -> Result<bool> {
     let mut vendored = false;
     let mut scan = dir.to_path_buf();
     loop {
+        let in_source_tree = scan.starts_with(&r.src);
         for name in [".cargo/config.toml", ".cargo/config"] {
             let cfg = scan.join(name);
-            // a config cargo could not even read is also invisible to it
-            let Ok(text) = std::fs::read_to_string(&cfg) else {
+            if !cfg.exists() {
                 continue;
-            };
+            }
+            if !in_source_tree {
+                bail!(
+                    "recipe {}: ambient Cargo config {} is outside the downloaded source tree and would be discovered by Cargo from the build working directory; remove it before building (fetch-phase.md §8)",
+                    r.rec.package.name,
+                    cfg.display()
+                );
+            }
+            let text = std::fs::read_to_string(&cfg)
+                .with_context(|| format!("read Cargo config {}", cfg.display()))?;
             if cargo_config_is_vendored(r, &cfg, &text)? {
                 vendored = true;
             }
-        }
-        if scan == r.src {
-            break;
         }
         match scan.parent() {
             Some(parent) => scan = parent.to_path_buf(),
