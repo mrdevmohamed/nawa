@@ -1104,17 +1104,70 @@ fn fetch_sandbox_spec(
 /// directly is wrong twice over (no `/etc/resolv.conf` in an assembled
 /// closure root; systemd-resolved's path is a symlink into the masked
 /// `/run`). Missing files are skipped with a warning.
+fn normalize_resolver_path(path: &Path) -> Result<PathBuf> {
+    let mut out = PathBuf::from("/");
+    for part in path.components() {
+        match part {
+            std::path::Component::RootDir | std::path::Component::CurDir => {},
+            std::path::Component::ParentDir => {
+                if !out.pop() { bail!("resolver symlink escapes the sandbox root"); }
+            }
+            std::path::Component::Normal(name) => out.push(name),
+            _ => bail!("unsupported resolver path component in {}", path.display()),
+        }
+    }
+    Ok(out)
+}
+
+/// Resolve the final symlink chain using the sandbox root's view of /etc.
+/// Absolute symlink targets remain absolute inside that root. A missing final
+/// target is allowed: bind_at creates it after /run has been masked.
+fn resolver_target_inside(root: &Path, name: &str) -> Result<PathBuf> {
+    let mut inside = PathBuf::from("/etc").join(name);
+    for _ in 0..40 {
+        let host_path = if root == Path::new("/") {
+            inside.clone()
+        } else {
+            root.join(inside.strip_prefix("/").context("resolver path is not absolute")?)
+        };
+        match std::fs::symlink_metadata(&host_path) {
+            Ok(md) if md.file_type().is_symlink() => {
+                let target = std::fs::read_link(&host_path)
+                    .with_context(|| format!("read resolver symlink {}", host_path.display()))?;
+                inside = if target.is_absolute() {
+                    normalize_resolver_path(&target)?
+                } else {
+                    normalize_resolver_path(&inside.parent().unwrap_or(Path::new("/")).join(target))?
+                };
+            }
+            Ok(_) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+            Err(e) => return Err(e).with_context(|| format!("inspect resolver path {}", host_path.display())),
+        }
+    }
+    if root == Path::new("/") {
+        if let Ok(real) = std::fs::canonicalize(&inside) {
+            inside = real;
+        }
+    }
+    normalize_resolver_path(&inside)
+}
+
 fn resolver_binds(r: &FetchRun) -> Result<Vec<ExtraBind>> {
     let etc = r.work.join("fetch").join("etc");
     std::fs::create_dir_all(&etc)
         .with_context(|| format!("create {}", etc.display()))?;
+    let root = if r.opts.isolation == crate::buildenv::Isolation::Closure {
+        r.work.join("buildroot")
+    } else {
+        PathBuf::from("/")
+    };
     let mut out = Vec::new();
     for name in ["resolv.conf", "hosts"] {
         let host = Path::new("/etc").join(name);
         let Ok(content) = std::fs::read(&host) else {
             eprintln!(
-                "nawa: fetch: warning: {} is missing on the host — DNS for the \
-                 fetch run may fail if the sandbox root does not provide it",
+                "nawa: fetch: warning: {} is missing on the host — DNS for the fetch run may fail if the sandbox root does not provide it",
                 host.display()
             );
             continue;
@@ -1122,9 +1175,10 @@ fn resolver_binds(r: &FetchRun) -> Result<Vec<ExtraBind>> {
         let copy = etc.join(name);
         std::fs::write(&copy, &content)
             .with_context(|| format!("copy {} to {}", host.display(), copy.display()))?;
+        let inside = resolver_target_inside(&root, name)?;
         out.push(ExtraBind {
             host: copy.to_string_lossy().into_owned(),
-            inside: format!("/etc/{name}"),
+            inside: inside.to_string_lossy().into_owned(),
             readonly: true,
             kind: "file".into(),
         });
