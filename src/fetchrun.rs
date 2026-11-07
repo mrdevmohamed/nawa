@@ -1548,7 +1548,7 @@ mod resolver_path_tests {
         assert_eq!(inside, PathBuf::from("/etc/resolv.conf"));
         let _ = std::fs::remove_dir_all(root);
     }
-    
+
     #[test]
     fn resolver_symlink_chain_is_resolved_inside_the_supplied_root() {
         let root = scratch();

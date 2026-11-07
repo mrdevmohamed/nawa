@@ -1345,7 +1345,7 @@ mod tests {
         rec.raw = both.to_string();
         rec.check_schema_placeholders().unwrap();
     }
-    
+
     #[test]
     fn fetch_toolchain_names_match_faseela_recipe_ids() {
         // Verified against the current recipe paths in mrdevmohamed/faseela-repo.
@@ -1354,7 +1354,6 @@ mod tests {
         assert_eq!(CA_BUNDLE, "ca-certificates");
     }
 
-    
     #[test]
     fn fetch_backends_add_toolchain_and_ca_bundle_to_build_dependencies() {
         let raw = r#"
@@ -1377,5 +1376,4 @@ dir = "rust"
         assert!(deps.contains(&"rust".to_string()), "{deps:?}");
         assert!(deps.contains(&"ca-certificates".to_string()), "{deps:?}");
     }
-
 }
