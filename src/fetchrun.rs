@@ -644,7 +644,7 @@ fn run_populate_cargo(r: &FetchRun, plan: &CargoPlan, temp: &Path) -> Result<()>
 /// string enters the ecosystem key). The script writes the version into
 /// the fetch-out bind (sandbox flavor) or the scratch dir (plain flavor);
 /// the caller reads it back from the host side.
-fn cargo_version_query(r: &FetchRun, plan: &CargoPlan) -> Result<String> {
+fn cargo_version_query(r: &FetchRun, _plan: &CargoPlan) -> Result<String> {
     let timeout_secs = fetch_timeout_secs()?;
     let label = "fetch-cargo-version";
     let out_dir = r.work.join("fetch").join("verq");
