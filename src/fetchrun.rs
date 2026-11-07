@@ -1426,3 +1426,52 @@ mod timeout_tests {
         assert!(terminated, "the background descendant {pid} survived timeout");
     }
 }
+
+
+#[cfg(test)]
+mod resolver_path_tests {
+    use super::*;
+
+    fn scratch() -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "nawa-resolver-path-{}-{}",
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("etc")).unwrap();
+        root
+    }
+
+    #[test]
+    fn resolver_symlink_into_run_resolves_even_when_target_is_dangling() {
+        let root = scratch();
+        std::os::unix::fs::symlink(
+            "/run/systemd/resolve/stub-resolv.conf",
+            root.join("etc/resolv.conf"),
+        )
+        .unwrap();
+        let inside = resolver_target_inside(&root, "resolv.conf").unwrap();
+        assert_eq!(inside, PathBuf::from("/run/systemd/resolve/stub-resolv.conf"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolver_relative_symlink_is_normalized_inside_root() {
+        let root = scratch();
+        std::os::unix::fs::symlink("../run/resolv.conf", root.join("etc/resolv.conf"))
+            .unwrap();
+        let inside = resolver_target_inside(&root, "resolv.conf").unwrap();
+        assert_eq!(inside, PathBuf::from("/run/resolv.conf"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn direct_resolver_file_keeps_etc_destination() {
+        let root = scratch();
+        std::fs::write(root.join("etc/resolv.conf"), b"nameserver 127.0.0.1\n").unwrap();
+        let inside = resolver_target_inside(&root, "resolv.conf").unwrap();
+        assert_eq!(inside, PathBuf::from("/etc/resolv.conf"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
