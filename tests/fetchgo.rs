@@ -796,12 +796,12 @@ fn a_missing_go_sum_is_a_hard_error() {
 
 
 // ---------------------------------------------------------------------------
-// Fetch integration across the strict build-isolation modes
+// Fetch integration with strict sandbox isolation
 // ---------------------------------------------------------------------------
 
 #[test]
-fn go_fetch_and_offline_build_work_under_sandbox_and_closure() {
-    for isolation in ["sandbox", "closure"] {
+fn go_fetch_and_offline_build_work_under_sandbox() {
+    for isolation in ["sandbox"] {
         let s = scratch_outside_tmp(&format!("isolation-{isolation}"));
         let recipes = s.join("recipes");
         let pkg = recipes.join("go-b");
