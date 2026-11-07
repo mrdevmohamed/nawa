@@ -729,7 +729,7 @@ mod tests {
 
         assert!(
             mountpoint_visible(
-                Err(std::io::Error::new(std::io::ErrorKind::Other, "I/O error")),
+                Err(std::io::Error::other("I/O error")),
                 path,
             )
             .is_err(),
