@@ -5,6 +5,7 @@
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -98,6 +99,32 @@ pub struct BuildResult {
     pub pkginfo: String,
 }
 
+// ---------------------------------------------------------------------------
+// work-tree lifecycle
+// ---------------------------------------------------------------------------
+
+/// Delete a previous run's `<work>` tree. The tree may hold *read-only*
+/// directories (the assets snapshot keeps its dirs at 0555, §5.3.1) and
+/// read-only files (archive-normalized `pkg` contents); `unlink(2)` needs
+/// a writable *parent*, so every directory is opened up before the delete.
+/// Opening the dirs up is best effort — the delete itself is the real check.
+fn wipe_work(work: &Path) -> Result<()> {
+    if !work.exists() {
+        return Ok(());
+    }
+    for entry in walkdir::WalkDir::new(work).follow_links(false) {
+        let entry = entry.with_context(|| format!("wipe {}", work.display()))?;
+        if entry.file_type().is_dir() {
+            let _ = std::fs::set_permissions(
+                entry.path(),
+                std::fs::Permissions::from_mode(0o700),
+            );
+        }
+    }
+    std::fs::remove_dir_all(work)
+        .with_context(|| format!("wipe the previous work tree {}", work.display()))
+}
+
 pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
     // ---- offline gate (fetch-phase.md §12/§15) ----------------------------
     fetch::set_offline(opts.offline);
@@ -153,7 +180,7 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
     let src = work.join("src");
     let pkg = work.join("pkg");
 
-    let _ = std::fs::remove_dir_all(&work);
+    wipe_work(&work)?;
     std::fs::create_dir_all(&src)?;
     std::fs::create_dir_all(&pkg)?;
 
@@ -427,7 +454,12 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
         } else {
             buildenv::SANDBOX_HOME.to_string()
         };
-        let spec_srcroot = staged.as_ref().map(|_| view_srcroot.clone());
+        // §4.3/§5.3: the new names follow the *tables*, not the staging
+        // structs — an assets-only recipe stages `staged` (an empty
+        // workspace) but must NOT gain NAWA_SRCROOT, exactly as
+        // `check_schema_placeholders` refuses it in raw bytes
+        let has_sources = !rec.package.sources.is_empty();
+        let spec_srcroot = has_sources.then(|| view_srcroot.clone());
         let spec_assetsdir = staged_assets.as_ref().map(|_| view_assets.clone());
         let spec_env = buildenv::EnvSpec {
             isolation: opts.isolation,
@@ -453,9 +485,10 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
         pkgdir: view_pkg.clone(),
         srcdir: view_src.clone(),
         arch: rec.arch(),
-        // §4.3: %{srcroot} exists for new-schema recipes only — legacy
-        // expansions and environments stay byte-for-byte unchanged
-        srcroot: staged.as_ref().map(|_| view_srcroot.clone()),
+        // §4.3: %{srcroot} exists only for recipes with [[package.sources]]
+        // — an assets-only recipe has a staged workspace but no workspace
+        // root (the sandbox binds it all the same; the NAME is just off)
+        srcroot: (!rec.package.sources.is_empty()).then(|| view_srcroot.clone()),
         // §5.3: same rule for %{assetsdir}
         assetsdir: staged_assets.as_ref().map(|_| view_assets.clone()),
     };
