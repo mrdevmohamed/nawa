@@ -56,6 +56,11 @@ pub struct BuildOpts {
     /// The id covers the recipe bytes, source sha256, closure archive set
     /// and profile flags — not the wall clock, not the environment.
     pub use_cache: bool,
+    /// Refuse every download instead of opening a connection (`--offline`,
+    /// `NAWA_OFFLINE`; fetch-phase.md §12/§15). Missing inputs are reported
+    /// with the command that populates them. A recipe that asks for
+    /// `[sandbox] network = true` contradicts this and is rejected.
+    pub offline: bool,
     /// Post-install slimming (strip, cleanup, `-doc`/`-lang` split); see
     /// `slim.rs`. On by default; a recipe can opt out of single passes.
     pub slim: bool,
@@ -78,6 +83,7 @@ impl Default for BuildOpts {
             allow_unsigned: false,
             profile_flags: String::new(),
             use_cache: false,
+            offline: false,
             slim: true,
         }
     }
@@ -93,6 +99,18 @@ pub struct BuildResult {
 }
 
 pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
+    // ---- offline gate (fetch-phase.md §12/§15) ----------------------------
+    fetch::set_offline(opts.offline);
+    // --offline and network-needing recipes are contradictory by design:
+    // one forbids connections, the other requires them mid-build
+    if opts.offline && rec.sandbox.network {
+        bail!(
+            "recipe {} sets [sandbox] network = true, which contradicts --offline \
+             (NAWA_OFFLINE); drop one of the two",
+            rec.id()
+        );
+    }
+
     // ---- build_id cache hit (opt-in, --use-cache) ------------------------
     // Everything the build id covers is known before any heavy work: the
     // recipe bytes, the pinned source sha256, the closure archive *names*

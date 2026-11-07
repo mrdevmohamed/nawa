@@ -25,7 +25,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Read, Seek, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 // ---- checksums -------------------------------------------------------------
@@ -188,6 +188,40 @@ pub fn snapshot_file(
 }
 
 // ---- native HTTP download engine --------------------------------------------
+
+// ---- offline mode (fetch-phase.md §12/§15) ----------------------------------
+
+/// Process-wide offline switch, set from `--offline` / `NAWA_OFFLINE` (§15).
+/// Every HTTP download nawa performs goes through [`download`] /
+/// [`download_opt`], so this one guard covers legacy recipes, mirrors,
+/// index downloads and new-schema sources alike. A download is only
+/// attempted after the cache lookup missed it; running the same build
+/// once without --offline populates the cache.
+static OFFLINE: AtomicBool = AtomicBool::new(false);
+
+/// Set the process-wide offline switch (§12): false = `--offline` absent.
+pub fn set_offline(on: bool) {
+    OFFLINE.store(on, Ordering::SeqCst);
+}
+
+/// Whether network access is forbidden process-wide (§12/§15).
+pub fn offline() -> bool {
+    OFFLINE.load(Ordering::SeqCst)
+}
+
+/// The gate itself. `download` / `download_opt` pass `offline()`; the unit
+/// tests pass the flag explicitly so they never race the process-wide
+/// switch other tests share.
+fn check_offline(url: &str, offline: bool) -> Result<()> {
+    if offline {
+        bail!(
+            "offline mode: {url} is not in the pre-fetch cache — \
+             populate it with `nawa fetch` or run once without --offline"
+        );
+    }
+    Ok(())
+}
+
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20); // curl --connect-timeout 20
 /// Per-read socket timeout: a mirror that stops sending for this long is
@@ -402,6 +436,7 @@ fn fetch_to_file(agent: &ureq::Agent, url: &str, dest: &Path, attempts: u32) -> 
 /// Download `url` into `dest` with the in-process HTTP stack
 /// (retries + fail on HTTP error — including 4xx, like `curl -f`).
 pub fn download(url: &str, dest: &Path) -> Result<()> {
+    check_offline(url, offline())?;
     let a = agent();
     match fetch_to_file(&a, url, dest, DOWNLOAD_ATTEMPTS)? {
         Outcome::Downloaded => Ok(()),
@@ -414,6 +449,7 @@ pub fn download(url: &str, dest: &Path) -> Result<()> {
 /// Server errors (5xx) are retried and still surface as an error, so a
 /// broken mirror can no longer make a signature look unpublished.
 pub fn download_opt(url: &str, dest: &Path) -> Result<bool> {
+    check_offline(url, offline())?;
     let a = agent();
     Ok(matches!(
         fetch_to_file(&a, url, dest, OPT_ATTEMPTS)?,
@@ -619,6 +655,10 @@ pub fn download_cached_with_mirrors(
             None => return Ok(()), // unpinned cache hit (index: signature checked separately)
         }
     }
+    // offline with a cold cache: one clean error here beats one per
+    // mirror candidate (the download/download_opt guards would fire for
+    // each candidate and the last error would name a fallback mirror)
+    check_offline(url, offline())?;
     let tmp = dest.with_extension("part");
     let mut last_err = None;
     for cand in candidate_urls_with(url, mirrors) {
@@ -1093,6 +1133,17 @@ mod tests {
         let err = download("ftp://host/file", &dir.join("f")).unwrap_err();
         assert!(err.to_string().contains("http(s)"), "got: {err}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn offline_gate_message_names_the_way_out() {
+        let e = check_offline("https://mirror.example/x.tar.gz", true).unwrap_err();
+        let msg = e.to_string();
+        assert!(msg.contains("offline"), "{msg}");
+        assert!(msg.contains("https://mirror.example/x.tar.gz"), "{msg}");
+        assert!(msg.contains("nawa fetch"), "names the populate command: {msg}");
+        // without the flag nothing is refused
+        check_offline("https://mirror.example/x.tar.gz", false).unwrap();
     }
 
     #[test]

@@ -173,6 +173,11 @@ pub(crate) fn prepare_build(
         .collect::<Vec<_>>()
         .join(" ");
 
+    // NAWA_OFFLINE is the environment equivalent of --offline (§15); the
+    // dedicated flag joins when the CLI wiring lands (Phase 5). Unknown
+    // values fail loudly instead of silently degrading to online.
+    let offline = offline_from_env()?;
+
     Ok(build::BuildOpts {
         jobs,
         builddir: ctx.builddir.clone(),
@@ -188,8 +193,25 @@ pub(crate) fn prepare_build(
         allow_unsigned: false,
         profile_flags,
         use_cache,
+        offline,
         slim,
     })
+}
+
+/// `NAWA_OFFLINE` → offline switch: `1|on|yes|true` enable, `0|off|no|false`
+/// (and unset) keep it off, anything else is a hard error (`§15`).
+fn offline_from_env() -> Result<bool> {
+    let Some(v) = std::env::var_os("NAWA_OFFLINE") else {
+        return Ok(false);
+    };
+    match v.to_string_lossy().trim().to_lowercase().as_str() {
+        "" | "0" | "off" | "no" | "false" => Ok(false),
+        "1" | "on" | "yes" | "true" => Ok(true),
+        other => bail!(
+            "unsupported NAWA_OFFLINE value {other:?} \
+             (expected 1|on|yes|true|0|off|no|false)"
+        ),
+    }
 }
 
 /// Build one planned package from its recipe and return the archive.
@@ -215,4 +237,26 @@ pub(crate) fn build_one(
     Ok(build::build(&it.rec, &opts)
         .with_context(|| format!("[{n}/{total}] build of {id} failed"))?
         .archive)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::offline_from_env;
+
+    #[test]
+    fn nawa_offline_env_values() {
+        // process-global env var: no other test touches NAWA_OFFLINE, so a
+        // set check pair is safe
+        std::env::set_var("NAWA_OFFLINE", "1");
+        assert!(offline_from_env().unwrap());
+        std::env::set_var("NAWA_OFFLINE", "no");
+        assert!(!offline_from_env().unwrap());
+        std::env::set_var("NAWA_OFFLINE", "  ");
+        assert!(!offline_from_env().unwrap(), "blank means off");
+        std::env::set_var("NAWA_OFFLINE", "perhaps");
+        let e = offline_from_env().unwrap_err().to_string();
+        assert!(e.contains("NAWA_OFFLINE"), "{e}");
+        std::env::remove_var("NAWA_OFFLINE");
+        assert!(!offline_from_env().unwrap(), "unset means off");
+    }
 }
