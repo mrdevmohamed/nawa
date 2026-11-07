@@ -930,7 +930,7 @@ fn an_offline_cargo_miss_names_the_expected_entry() {
 
 
 #[test]
-fn ambient_parent_cargo_config_cannot_redirect_fetch() {
+fn inherited_cargo_home_config_is_ignored_by_fetch()
     let s = scratch("ambient-config");
     let repo = s.join("dep");
     let cargo = cargo_dir();
@@ -942,16 +942,6 @@ fn ambient_parent_cargo_config_cannot_redirect_fetch() {
     // Generate the lock before installing hostile config so fixture setup is
     // independent of the configuration being tested.
     let lock = generate_lock(&main, &cg_home);
-
-    // This is an ancestor of the old fetch cwd (build/.../src/m), but it is
-    // outside the downloaded source and therefore outside the intentional
-    // source-tree config scan. Cargo must not discover it from the fetch cwd.
-    fs::create_dir_all(s.join(".cargo")).unwrap();
-    fs::write(
-        s.join(".cargo/config.toml"),
-        "[net]\nretry = \"not-an-integer\"\n",
-    )
-    .unwrap();
 
     // An inherited CARGO_HOME with another invalid config must also be
     // ignored: Nawa supplies a fresh per-fetch CARGO_HOME explicitly.
@@ -988,4 +978,50 @@ fn ambient_parent_cargo_config_cannot_redirect_fetch() {
         "ambient Cargo configuration must not affect fetch resolution:\n{out}\n{err}"
     );
     assert!(out.contains("dep-ok-v1"), "the isolated fetch built the dependency:\n{out}\n{err}");
+}
+
+
+#[test]
+fn ambient_parent_cargo_config_is_rejected_before_fetch() {
+    let s = scratch("ambient-parent-config");
+    let repo = s.join("dep");
+    let cargo = cargo_dir();
+    git_dep_repo(&repo, "v1");
+    let cg_home = s.join("cg-setup");
+    fs::create_dir_all(&cg_home).unwrap();
+    let main = s.join("main");
+    prepare_main(&main, &repo);
+    let lock = generate_lock(&main, &cg_home);
+
+    // Cargo would discover this file from the recipe's build cwd even though
+    // it is outside the downloaded source tree. Nawa must reject it before
+    // starting the fetch or the recipe's cargo build command.
+    fs::create_dir_all(s.join(".cargo")).unwrap();
+    fs::write(
+        s.join(".cargo/config.toml"),
+        "[net]\nretry = \"not-an-integer\"\n",
+    )
+    .unwrap();
+
+    let files = vec![
+        ("Cargo.toml".to_string(), fs::read(main.join("Cargo.toml")).unwrap()),
+        ("Cargo.lock".to_string(), lock),
+        ("src/main.rs".to_string(), fs::read(main.join("src/main.rs")).unwrap()),
+    ];
+    let tar = fixture_tar_gz("main-1.0", &files);
+    let tar_sha = sha256(&tar);
+    let (addr, _) = route_server(vec![("/src.tar.gz", Some(tar))]);
+    let install = format!(
+        "export PATH={cargo}:$PATH && cargo build --release --locked --offline \\
+         && mkdir -p %{{pkgdir}}/usr/bin \\
+         && cp target/release/testmain %{{pkgdir}}/usr/bin/ \\
+         && %{{pkgdir}}/usr/bin/testmain"
+    );
+    write_recipe(&s.join("recipes/cargo-b"), &recipe(&tar_sha, &addr, &install));
+    let (out, err, ok) = run_fetch_build(&s, &[], &[]);
+    assert!(!ok, "ambient Cargo config must be rejected:\n{out}\n{err}");
+    assert!(
+        format!("{out}\n{err}").contains("ambient Cargo config"),
+        "expected the hermeticity diagnostic:\n{out}\n{err}"
+    );
 }
