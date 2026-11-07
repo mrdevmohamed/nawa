@@ -160,6 +160,10 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
     // download or closure work.
     rec.check_schema_placeholders()?;
 
+    // In live/env modes the toolchain comes from the host root, not a pinned
+    // closure archive. Capture the exact fetch PATH versions before cache lookup.
+    let toolchain_identity = crate::fetchrun::build_toolchain_identity(rec, opts.isolation)?;
+
     // ---- build_id cache hit (opt-in, --use-cache) ------------------------
     // Everything the build id covers is known before any heavy work: the
     // recipe bytes, the pinned source sha256, the closure archive *names*
@@ -176,7 +180,7 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
         } else {
             Vec::new()
         };
-        if let Some(hit) = try_cache_hit(rec, opts, &closure_paths)? {
+        if let Some(hit) = try_cache_hit(rec, opts, &closure_paths, &toolchain_identity)? {
             return Ok(hit);
         }
     }
@@ -711,7 +715,7 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
             .as_ref()
             .map(|a| a.archives.clone())
             .unwrap_or_default();
-        let bid = build_id_for(rec, opts, &closure_shas, staged_assets.as_ref().map(|a| a.digest.as_str()));
+        let bid = build_id_for(rec, opts, &closure_shas, staged_assets.as_ref().map(|a| a.digest.as_str()), &toolchain_identity);
         pkginfo.push_str(&format!("build_id = {bid}\n"));
         if opts.allow_network && rec.sandbox.network {
             pkginfo.push_str("impure = network\n");
@@ -884,6 +888,7 @@ fn build_id_for(
     opts: &BuildOpts,
     closure_archives: &[PathBuf],
     asset_digest: Option<&str>,
+    toolchain_identity: &[(&'static str, String)],
 ) -> String {
     // slimming changes the archive, so its rules are an input of the id
     let flags = if opts.slim {
@@ -906,10 +911,8 @@ fn build_id_for(
         pairs.sort();
         pairs.join(",")
     };
-    // §10.3 extras, in the pinned order (assets, then the fetch backends):
-    // only appended when the table exists, so legacy ids are identical by
-    // construction. The fetch extras are per-backend schema *constants* —
-    // the id stays computable before any download (no lockfile bytes in it).
+    // §10.3 extras, in pinned order (assets, fetch backends, then actual
+    // toolchain versions for non-closure builds). Legacy ids remain identical.
     let mut extras: Vec<(&str, &str)> = asset_digest
         .map(|d| vec![("assets", d)])
         .unwrap_or_default();
@@ -918,6 +921,12 @@ fn build_id_for(
     }
     if rec.fetch.cargo.is_some() {
         extras.push(("fetch-cargo", crate::fetchrun::FETCH_CARGO_SCHEMA_VERSION));
+    }
+    if let Some((_, version)) = toolchain_identity.iter().find(|(name, _)| *name == "go") {
+        extras.push(("toolchain-go", version.as_str()));
+    }
+    if let Some((_, version)) = toolchain_identity.iter().find(|(name, _)| *name == "cargo") {
+        extras.push(("toolchain-cargo", version.as_str()));
     }
     if extras.is_empty() {
         crate::lint::build_id(
@@ -974,6 +983,7 @@ fn try_cache_hit(
     rec: &Recipe,
     opts: &BuildOpts,
     closure_archives: &[PathBuf],
+    toolchain_identity: &[(&'static str, String)],
 ) -> Result<Option<BuildResult>> {
     let out_path = opts.outdir.join(format!("{}.nawa.tar.zst", rec.id()));
     let sidecar = buildid_sidecar(&out_path);
@@ -986,7 +996,7 @@ fn try_cache_hit(
     } else {
         crate::assets::probe_digest(rec).ok()
     };
-    let bid = build_id_for(rec, opts, closure_archives, asset_digest.as_deref());
+    let bid = build_id_for(rec, opts, closure_archives, asset_digest.as_deref(), toolchain_identity);
     if stored.trim() != bid {
         println!("nawa: build cache: {} changed (build_id mismatch) — rebuilding", rec.id());
         return Ok(None);
