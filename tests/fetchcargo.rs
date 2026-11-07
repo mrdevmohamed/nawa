@@ -482,10 +482,18 @@ fn cargo_backend_fetches_builds_offline_and_hits_the_cache() {
         "the hold-open flock file exists"
     );
     assert!(entry.join("git").is_dir(), "cargo fetch populated git/ into the entry");
+    assert!(
+        entry.join("git/db").is_dir(),
+        "the Git database must be directly under the published CARGO_HOME root"
+    );
 
     // — the per-build view is a WRITABLE COPY (§8): the marker never crosses
     let view = work.join("fetch/cargo");
     assert!(view.join("git").is_dir(), "the view carries the git tree");
+    assert!(
+        view.join("git/db").is_dir(),
+        "the offline build view must expose Cargo's Git database at CARGO_HOME/git/db"
+    );
     assert!(!view.join("nawa-complete").exists(), "the marker stays in the entry");
     let snapshot = entry_snapshot(&entry);
 
