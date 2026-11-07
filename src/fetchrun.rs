@@ -564,12 +564,40 @@ const CARGO_POPULATE_SCRIPT: &str = "cargo fetch --locked --manifest-path \"$NAW
 /// before the populate actually runs.
 const CARGO_VERSION_SCRIPT: &str = "cargo --version > \"$NAWA_CARGO_VER_OUT\"";
 
+/// Create an empty Cargo working directory under the system temp root and a
+/// fresh CARGO_HOME inside the output bind. Cargo searches cwd ancestors for
+/// config files, so refuse any ambient ancestor config rather than allowing
+/// an unscanned host setting to redirect the fetch.
+fn isolated_cargo_paths(out_host: &Path) -> Result<(PathBuf, PathBuf)> {
+    let home = out_host.join("cargo-home");
+    std::fs::create_dir_all(&home).with_context(|| format!("create {}", home.display()))?;
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o777))?;
+    let cwd = std::env::temp_dir().join(format!(
+        "nawa-cargo-cwd-{}-{}",
+        std::process::id(),
+        TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir(&cwd).with_context(|| format!("create isolated Cargo cwd {}", cwd.display()))?;
+    std::fs::set_permissions(&cwd, std::fs::Permissions::from_mode(0o777))?;
+    for parent in cwd.ancestors() {
+        for name in [".cargo/config.toml", ".cargo/config"] {
+            let candidate = parent.join(name);
+            if candidate.is_file() {
+                let _ = std::fs::remove_dir_all(&cwd);
+                bail!(
+                    "Cargo fetch cannot run hermetically: ambient config {} would be discovered from its working directory; remove it or use a clean system temp root (fetch-phase.md §8)",
+                    candidate.display()
+                );
+            }
+        }
+    }
+    Ok((home, cwd))
+}
+
 fn run_populate_cargo(r: &FetchRun, plan: &CargoPlan, temp: &Path) -> Result<()> {
     if !plan.git_deps.is_empty() {
         eprintln!(
-            "nawa: fetch: warning: Cargo.lock uses git dependencies without registry \
-             checksums ({}); `cargo fetch` needs git in the fetch root, and such \
-             dependencies are verified only by their pinned commit (fetch-phase.md §8, §10.2)",
+            "nawa: fetch: warning: Cargo.lock uses git dependencies without registry checksums ({}); `cargo fetch` needs git in the fetch root, and such dependencies are verified only by their pinned commit (fetch-phase.md §8, §10.2)",
             plan.git_deps.join(", ")
         );
     }
@@ -578,47 +606,38 @@ fn run_populate_cargo(r: &FetchRun, plan: &CargoPlan, temp: &Path) -> Result<()>
     let log_path = r.work.join(format!("{label}.log"));
     let script = format!("exec 2>&1\n{CARGO_POPULATE_SCRIPT}");
     let manifest_rel = plan.dir.strip_prefix(r.src).unwrap_or(Path::new("")).join("Cargo.toml");
-
-    let mut child = if r.sandboxed {
-        let base = r.build_inside.trim_end_matches('/');
-        let env = [
-            cargo_fetch_base_env(&format!("{base}/home")),
-            vec![
-                ("CARGO_HOME".into(), format!("{base}/fetch-out")),
-                (
-                    "NAWA_CARGO_MANIFEST".into(),
-                    format!("{}/src/{}", base.trim_end_matches('/'), manifest_rel.display()),
-                ),
-            ],
-        ]
-        .concat();
-        spawn_fetch_child(r, &script, env, &plan.dir, Some(temp), timeout_secs)?
-    } else {
-        let home_host = r.work.join("sb").join("home");
-        std::fs::create_dir_all(&home_host)
-            .with_context(|| format!("create {}", home_host.display()))?;
-        let env = [
-            cargo_fetch_base_env(&home_host.to_string_lossy()),
-            vec![
-                ("CARGO_HOME".into(), temp.to_string_lossy().into_owned()),
-                (
-                    "NAWA_CARGO_MANIFEST".into(),
-                    plan.dir
-                        .join("Cargo.toml")
-                        .to_string_lossy()
-                        .into_owned(),
-                ),
-            ],
-        ]
-        .concat();
-        spawn_fetch_child(r, &script, env, &plan.dir, None, timeout_secs)?
-    };
-
-    let status = stream_and_wait(&mut child, Some(&log_path), timeout_secs, label, !r.sandboxed)?;
-    if !status.success() {
-        bail!("fetch run ({label}) failed with status {status} — log: {}", log_path.display());
-    }
-    Ok(())
+    let (cargo_home_host, cwd_host) = isolated_cargo_paths(temp)?;
+    let result = (|| -> Result<()> {
+        let mut child = if r.sandboxed {
+            let base = r.build_inside.trim_end_matches('/');
+            let env = [
+                cargo_fetch_base_env(&format!("{base}/home")),
+                vec![
+                    ("CARGO_HOME".into(), format!("{base}/fetch-out/cargo-home")),
+                    ("NAWA_CARGO_MANIFEST".into(), format!("{}/src/{}", base, manifest_rel.display())),
+                ],
+            ].concat();
+            spawn_fetch_child(r, &script, env, &cwd_host, Some(temp), timeout_secs)?
+        } else {
+            let home_host = r.work.join("sb").join("home");
+            std::fs::create_dir_all(&home_host).with_context(|| format!("create {}", home_host.display()))?;
+            let env = [
+                cargo_fetch_base_env(&home_host.to_string_lossy()),
+                vec![
+                    ("CARGO_HOME".into(), cargo_home_host.to_string_lossy().into_owned()),
+                    ("NAWA_CARGO_MANIFEST".into(), plan.dir.join("Cargo.toml").to_string_lossy().into_owned()),
+                ],
+            ].concat();
+            spawn_fetch_child(r, &script, env, &cwd_host, None, timeout_secs)?
+        };
+        let status = stream_and_wait(&mut child, Some(&log_path), timeout_secs, label, !r.sandboxed)?;
+        if !status.success() {
+            bail!("fetch run ({label}) failed with status {status} — log: {}", log_path.display());
+        }
+        Ok(())
+    })();
+    let _ = std::fs::remove_dir_all(&cwd_host);
+    result
 }
 
 /// One cheap `cargo --version` in the fetch context (§11: the version
@@ -969,12 +988,20 @@ fn fetch_sandbox_spec(
         }
     }
 
-    // §12: the working directory of the fixed command is the fetch dir,
-    // seen through the staging bind
-    let rel = workdir_host.strip_prefix(r.src).unwrap_or(Path::new(""));
-    let workdir = format!("{}/src/{}", base.trim_end_matches('/'), rel.display())
-        .trim_end_matches('/')
-        .to_string();
+    // Source-tree commands use the read-only source bind. Cargo fetch uses
+    // a dedicated empty cwd outside the source tree and outside CARGO_HOME,
+    // so no recipe-parent or user Cargo config can affect registry selection.
+    let workdir = if let Ok(rel) = workdir_host.strip_prefix(out_host) {
+        format!("{}/fetch-out/{}", base.trim_end_matches('/'), rel.display())
+            .trim_end_matches('/')
+            .to_string()
+    } else if let Ok(rel) = workdir_host.strip_prefix(r.src) {
+        format!("{}/src/{}", base.trim_end_matches('/'), rel.display())
+            .trim_end_matches('/')
+            .to_string()
+    } else {
+        format!("{}/fetch-cwd", base.trim_end_matches('/'))
+    };
 
     let mut extra_binds = vec![ExtraBind {
         // the temporary entry (or the probe scratch) being written;
@@ -984,6 +1011,14 @@ fn fetch_sandbox_spec(
         readonly: false,
         kind: "dir".into(),
     }];
+    if !workdir_host.starts_with(r.src) && !workdir_host.starts_with(out_host) {
+        extra_binds.push(ExtraBind {
+            host: workdir_host.to_string_lossy().into_owned(),
+            inside: format!("{}/fetch-cwd", base.trim_end_matches('/')),
+            readonly: false,
+            kind: "dir".into(),
+        });
+    }
     extra_binds.extend(resolver_binds(r)?);
 
     Ok(SandboxSpec {
@@ -1031,6 +1066,7 @@ fn fetch_sandbox_spec(
             "/tmp".to_string(),
             format!("{}/home", base.trim_end_matches('/')),
             format!("{}/fetch-out", base.trim_end_matches('/')),
+            format!("{}/fetch-cwd", base.trim_end_matches('/')),
         ],
     })
 }
