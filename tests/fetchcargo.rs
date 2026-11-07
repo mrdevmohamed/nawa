@@ -1034,3 +1034,176 @@ fn ambient_parent_cargo_config_is_rejected_before_fetch() {
         "expected the hermeticity diagnostic:\n{out}\n{err}"
     );
 }
+
+
+// ---------------------------------------------------------------------------
+// Real package smoke test: build Nawa from its own source recipe
+// ---------------------------------------------------------------------------
+
+/// Package the actual Nawa source tree, including the checked-in Cargo
+/// vendor directory. This keeps the test independent of GitHub and crates.io
+/// while exercising the same source archive + Cargo fetch path as a distro
+/// recipe.
+fn nawa_source_tar_gz() -> Vec<u8> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut tar_bytes = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut tar_bytes);
+        for file in ["Cargo.toml", "Cargo.lock"] {
+            builder
+                .append_path_with_name(
+                    root.join(file),
+                    PathBuf::from("nawa-1.0.0").join(file),
+                )
+                .unwrap();
+        }
+        for directory in [".cargo", "src", "vendor"] {
+            for entry in walkdir::WalkDir::new(root.join(directory)).sort_by_file_name() {
+                let entry = entry.unwrap();
+                let relative = entry.path().strip_prefix(root).unwrap();
+                let archive_path = PathBuf::from("nawa-1.0.0").join(relative);
+                if entry.file_type().is_dir() {
+                    builder.append_dir(archive_path, entry.path()).unwrap();
+                } else if entry.file_type().is_file() {
+                    builder
+                        .append_path_with_name(entry.path(), archive_path)
+                        .unwrap();
+                } else {
+                    panic!("unexpected source-tree entry: {}", entry.path().display());
+                }
+            }
+        }
+        builder.finish().unwrap();
+    }
+    let mut compressed = Vec::new();
+    let mut encoder =
+        flate2::write::GzEncoder::new(&mut compressed, flate2::Compression::default());
+    encoder.write_all(&tar_bytes).unwrap();
+    encoder.finish().unwrap();
+    compressed
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\\'', "'\\\\''"))
+}
+
+/// Expensive end-to-end test, run explicitly by the CI smoke job. It builds
+/// the real Nawa source using the real [fetch.cargo] implementation, then
+/// installs and executes the resulting package archive.
+#[test]
+#[ignore = "expensive real-package build; run from the CI smoke job"]
+fn builds_nawa_from_its_real_recipe() {
+    let s = scratch("real-nawa");
+    let source = nawa_source_tar_gz();
+    let source_sha = sha256(&source);
+    let (addr, _requests) = route_server(vec![("/nawa.tar.gz", Some(source))]);
+
+    let cargo = cargo_dir();
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("target"));
+    let target_dir = if target_dir.is_absolute() {
+        target_dir
+    } else {
+        std::env::current_dir().unwrap().join(target_dir)
+    };
+    let cargo_q = shell_quote(&cargo);
+    let target_q = shell_quote(&target_dir.to_string_lossy());
+
+    let recipe_dir = s.join("recipes/nawa");
+    fs::create_dir_all(&recipe_dir).unwrap();
+    fs::write(
+        recipe_dir.join("recipe.toml"),
+        format!(
+            r#"
+[package]
+name = "nawa"
+version = "1.0.0"
+rel = 1
+arch = ["x86_64"]
+summary = "Nawa source-based package manager"
+source = "local:/nawa-schema-2-requires-a-newer-nawa"
+workdir = "nawa"
+
+[[package.sources]]
+name = "nawa-source"
+url = "{addr}/nawa.tar.gz"
+sha256 = "{source_sha}"
+strip_components = 1
+into = "nawa"
+
+[fetch.cargo]
+dir = "nawa"
+
+[build]
+compile = """
+export PATH={cargo_q}:"$PATH"
+export CARGO_TARGET_DIR={target_q}
+cargo build --manifest-path Cargo.toml --release --locked --offline
+"""
+install = """
+install -Dm755 {target_q}/release/nawa %{{pkgdir}}/usr/bin/nawa
+"""
+"#
+        ),
+    )
+    .unwrap();
+
+    let build = nawa()
+        .args([
+            "--recipes",
+            s.join("recipes").to_str().unwrap(),
+            "--builddir",
+            s.join("build").to_str().unwrap(),
+            "build",
+            "--isolation",
+            "env",
+            "nawa",
+        ])
+        .env("NAWA_SRCCACHE", s.join("srccache"))
+        .env("NAWA_FETCH_PATH", &cargo)
+        .output()
+        .unwrap();
+    assert!(
+        build.status.success(),
+        "real Nawa package build failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&build.stdout),
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let archive = s.join("build/out/nawa-1.0.0-1.nawa.tar.zst");
+    assert!(archive.is_file(), "Nawa package archive was not produced");
+
+    let root = s.join("rootfs");
+    fs::create_dir_all(&root).unwrap();
+    let install = nawa()
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "install",
+            archive.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        install.status.success(),
+        "installing the built Nawa package failed:\n{}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+
+    let installed = root.join("usr/bin/nawa");
+    assert!(installed.is_file(), "package did not install /usr/bin/nawa");
+    let version = Command::new(&installed).arg("--version").output().unwrap();
+    assert!(
+        version.status.success(),
+        "installed Nawa binary did not execute:\n{}",
+        String::from_utf8_lossy(&version.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&version.stdout).contains("1.0.0"),
+        "installed binary reported an unexpected version: {}",
+        String::from_utf8_lossy(&version.stdout)
+    );
+
+    let _ = fs::remove_dir_all(&s);
+}
