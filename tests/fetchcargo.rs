@@ -1084,7 +1084,7 @@ fn nawa_source_tar_gz() -> Vec<u8> {
 }
 
 fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\\'', "'\\\\''"))
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 /// Expensive end-to-end test, run explicitly by the CI smoke job. It builds
