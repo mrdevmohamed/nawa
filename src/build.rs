@@ -111,6 +111,11 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
         );
     }
 
+    // §14C: %{srcroot}/NAWA_SRCROOT only exist for new-schema recipes; a
+    // legacy recipe using them would silently misbehave. Fails before any
+    // download or closure work.
+    rec.check_schema_placeholders()?;
+
     // ---- build_id cache hit (opt-in, --use-cache) ------------------------
     // Everything the build id covers is known before any heavy work: the
     // recipe bytes, the pinned source sha256, the closure archive *names*
@@ -718,9 +723,24 @@ fn build_id_for(rec: &Recipe, opts: &BuildOpts, closure_archives: &[PathBuf]) ->
     } else {
         format!("{} slim=off", opts.profile_flags)
     };
+    // §10.3: for recipes with `package.sources` the source key becomes the
+    // sorted `name=sha256` list (the recipe bytes already pin every other
+    // source field). Legacy recipes keep today's single sha256 byte-for-byte.
+    let source_sha256 = if rec.package.sources.is_empty() {
+        rec.package.sha256.clone()
+    } else {
+        let mut pairs: Vec<String> = rec
+            .package
+            .sources
+            .iter()
+            .map(|s| format!("{}={}", s.name, s.sha256))
+            .collect();
+        pairs.sort();
+        pairs.join(",")
+    };
     crate::lint::build_id(
         rec.raw.as_bytes(),
-        &rec.package.sha256,
+        &source_sha256,
         closure_archives,
         &flags,
     )
