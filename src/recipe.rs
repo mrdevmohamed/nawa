@@ -875,13 +875,13 @@ mod tests {
 
     #[test]
     fn toolchain_recipes_must_not_declare_their_own_table() {
-        let rec = new_schema_with_fetch("[fetch.cargo]\ndir = \".\"", "rust");
+        let rec = new_schema_with_fetch("[fetch.cargo]\ndir = \".\"", CARGO_TOOLCHAIN);
         let err = rec.validate().unwrap_err().to_string();
         assert!(
             err.contains("self-dependency") || err.contains("itself"),
             "the Rust toolchain must not declare [fetch.cargo], got: {err}"
         );
-        let rec = new_schema_with_fetch("[fetch.go]\ndir = \".\"", "go");
+        let rec = new_schema_with_fetch("[fetch.go]\ndir = \".\"", GO_TOOLCHAIN);
         assert!(rec.validate().is_err(), "[fetch.go] in the Go toolchain recipe");
     }
 
