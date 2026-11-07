@@ -1348,10 +1348,10 @@ mod tests {
     
     #[test]
     fn fetch_toolchain_names_match_faseela_recipe_ids() {
-        // These are the published package IDs in mrdevmohamed/faseela-repo:
-        // recipes/dev/golang and recipes/toolchain/rust.
+        // Verified against the current recipe paths in mrdevmohamed/faseela-repo.
         assert_eq!(GO_TOOLCHAIN, "golang");
         assert_eq!(CARGO_TOOLCHAIN, "rust");
+        assert_eq!(CA_BUNDLE, "ca-certificates");
     }
 
 }
