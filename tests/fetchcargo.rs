@@ -927,3 +927,65 @@ fn an_offline_cargo_miss_names_the_expected_entry() {
     assert!(ok3, "recovery run failed\n{o3}\n{e3}");
     assert!(o3.contains("dep-ok-v1"), "the recovered build resolves the dep:\n{o3}\n{e3}");
 }
+
+
+#[test]
+fn ambient_parent_cargo_config_cannot_redirect_fetch() {
+    let s = scratch("ambient-config");
+    let repo = s.join("dep");
+    let cargo = cargo_dir();
+    git_dep_repo(&repo, "v1");
+    let cg_home = s.join("cg-setup");
+    fs::create_dir_all(&cg_home).unwrap();
+    let main = s.join("main");
+    prepare_main(&main, &repo);
+    // Generate the lock before installing hostile config so fixture setup is
+    // independent of the configuration being tested.
+    let lock = generate_lock(&main, &cg_home);
+
+    // This is an ancestor of the old fetch cwd (build/.../src/m), but it is
+    // outside the downloaded source and therefore outside the intentional
+    // source-tree config scan. Cargo must not discover it from the fetch cwd.
+    fs::create_dir_all(s.join(".cargo")).unwrap();
+    fs::write(
+        s.join(".cargo/config.toml"),
+        "[net]\nretry = \"not-an-integer\"\n",
+    )
+    .unwrap();
+
+    // An inherited CARGO_HOME with another invalid config must also be
+    // ignored: Nawa supplies a fresh per-fetch CARGO_HOME explicitly.
+    let hostile_home = s.join("hostile-cargo-home");
+    fs::create_dir_all(hostile_home.join(".cargo")).unwrap();
+    fs::write(
+        hostile_home.join(".cargo/config.toml"),
+        "[net]\nretry = \"still-not-an-integer\"\n",
+    )
+    .unwrap();
+
+    let files = vec![
+        ("Cargo.toml".to_string(), fs::read(main.join("Cargo.toml")).unwrap()),
+        ("Cargo.lock".to_string(), lock),
+        ("src/main.rs".to_string(), fs::read(main.join("src/main.rs")).unwrap()),
+    ];
+    let tar = fixture_tar_gz("main-1.0", &files);
+    let tar_sha = sha256(&tar);
+    let (addr, _) = route_server(vec![("/src.tar.gz", Some(tar))]);
+    let install = format!(
+        "export PATH={cargo}:$PATH && cargo build --release --locked --offline \\
+         && mkdir -p %{{pkgdir}}/usr/bin \\
+         && cp target/release/testmain %{{pkgdir}}/usr/bin/ \\
+         && %{{pkgdir}}/usr/bin/testmain"
+    );
+    write_recipe(&s.join("recipes/cargo-b"), &recipe(&tar_sha, &addr, &install));
+    let (out, err, ok) = run_fetch_build(
+        &s,
+        &[("CARGO_HOME", hostile_home.to_str().unwrap())],
+        &[],
+    );
+    assert!(
+        ok,
+        "ambient Cargo configuration must not affect fetch resolution:\n{out}\n{err}"
+    );
+    assert!(out.contains("dep-ok-v1"), "the isolated fetch built the dependency:\n{out}\n{err}");
+}
