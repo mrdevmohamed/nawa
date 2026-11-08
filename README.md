@@ -15,6 +15,19 @@ Nawa (نواة) is a source-based package manager for Linux distributions, writt
 
 Nawa does not include a package recipe collection. Configure a recipe tree and build profiles with --recipes and --profiles, or in nawa.toml.
 
+## Output
+
+Nawa uses short, consistent status messages. Informational messages go to stdout;
+warnings and errors go to stderr. Colors are enabled on terminals, disabled for
+piped output, and can be controlled with `NO_COLOR` or `NAWA_COLOR=auto|always|never`.
+
+```text
+nawa: syncing repository
+nawa: ok: signature verified
+nawa: warning: using cached index
+nawa: error: package archive is invalid
+```
+
 ## Documentation
 
 **[Read the Nawa documentation](https://mrdevmohamed.github.io/nawa/)**
