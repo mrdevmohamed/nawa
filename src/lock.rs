@@ -109,7 +109,7 @@ pub fn try_acquire(root: &Path, mode: Mode) -> Result<Attempt> {
                 std::fs::create_dir_all(dir)
                     .with_context(|| format!("create {}", dir.display()))?;
             }
-            open_rw(&path).with_context(|| format!("open lock file {}", path.display()))?
+            open_rw(&path).with_context(|| format!("cannot open the package database lock {}", path.display()))?
         }
         Mode::Shared => {
             // readers never create nawa state; a missing/unwritable lock
