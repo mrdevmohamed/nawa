@@ -52,8 +52,18 @@ fn color_choice<S: anstream::stream::RawStream>(raw: &S) -> ColorChoice {
     }
 }
 
-fn write_line<W: Write>(stream: &mut W, level: Level, args: fmt::Arguments<'_>) {
-    let brand = Style::new().fg_color(Some(AnsiColor::Cyan.into())).bold();
+fn write_line<W: Write>(
+    stream: &mut W,
+    level: Level,
+    args: fmt::Arguments<'_>,
+    stderr: bool,
+) {
+    let brand = crate::color::Palette::auto(if stderr {
+        crate::color::Stream::Stderr
+    } else {
+        crate::color::Stream::Stdout
+    })
+    .brand("nawa:");
     let label = level.label();
     if label.is_empty() {
         let _ = writeln!(stream, "{brand}nawa:{brand:#} {args}");
