@@ -924,6 +924,15 @@ mod tests {
     use clap::CommandFactory;
 
     #[test]
+    fn group_install_does_not_take_an_outer_database_lock() {
+        let install = Cli::try_parse_from(["nawa", "group", "install", "dev"]).unwrap();
+        assert!(lock_mode(&install.cmd).is_none());
+
+        let remove = Cli::try_parse_from(["nawa", "group", "remove", "dev"]).unwrap();
+        assert_eq!(lock_mode(&remove.cmd), Some(lock::Mode::Exclusive));
+    }
+
+    #[test]
     fn reserved_commands_cover_every_builtin_cli_command() {
         let command = Cli::command();
         for subcommand in command.get_subcommands() {
