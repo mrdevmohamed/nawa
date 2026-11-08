@@ -755,8 +755,11 @@ pub(crate) fn lock_mode(cmd: &Cmd) -> Option<lock::Mode> {
         | Cmd::Service { .. }
         | Cmd::CompletePkgs => None,
         Cmd::Group { action } => match action {
-                GroupCmd::List | GroupCmd::Info { .. } => None,
-                GroupCmd::Install { .. } | GroupCmd::Remove { .. } => Some(Exclusive),
+                // Group install delegates to the ordinary install path, which
+                // acquires short per-transaction locks itself. Holding an
+                // outer lock here would deadlock that path.
+                GroupCmd::List | GroupCmd::Info { .. } | GroupCmd::Install { .. } => None,
+                GroupCmd::Remove { .. } => Some(Exclusive),
             },
         Cmd::Repolist { .. } | Cmd::Repoquery { .. } | Cmd::Makecache { .. } | Cmd::Clean { .. }
         | Cmd::Plugin { .. } | Cmd::SandboxInit { .. } | Cmd::SandboxProbe { .. }
