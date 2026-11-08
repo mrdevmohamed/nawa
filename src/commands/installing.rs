@@ -11,6 +11,19 @@ pub(crate) fn cmd_install(
     mode: Option<InstallMode>,
     repo: Option<String>,
 ) -> Result<()> {
+    cmd_install_with_why(ctx, targets, flags, no_deps, key, mode, repo, plan::Why::Explicit)
+}
+
+pub(crate) fn cmd_install_with_why(
+    ctx: &Ctx,
+    targets: &[String],
+    flags: &PlanFlags,
+    no_deps: bool,
+    key: Option<PathBuf>,
+    mode: Option<InstallMode>,
+    repo: Option<String>,
+    target_why: plan::Why,
+) -> Result<()> {
     let archives = targets.iter().filter(|t| is_archive_arg(t)).count();
     if archives == targets.len() {
         for t in targets {
@@ -87,7 +100,7 @@ pub(crate) fn cmd_install(
         }
     }
 
-    let plan = plan::install_plan(&recipe_targets, &installed, &known, plan::Why::Explicit, !no_deps)?;
+    let plan = plan::install_plan(&recipe_targets, &installed, &known, target_why, !no_deps)?;
     for name in &plan.up_to_date {
         crate::nawa_info!("{name} is already installed and up to date");
     }
@@ -112,7 +125,7 @@ pub(crate) fn cmd_install(
             &repo_ids,
         )?;
         drop(_lock);
-        let result = run_plan(ctx, &plan, flags, &sourcing, &extras, &mut op);
+        let result = run_plan(ctx, &plan, flags, &sourcing, &extras, &mut op, target_why);
         let err = result.err();
         {
             let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
@@ -383,6 +396,7 @@ pub(crate) fn run_plan(
     sourcing: &Sourcing,
     extras: &[repo::RepoEntry],
     op: &mut transaction::OperationHandle,
+    extras_why: plan::Why,
 ) -> Result<()> {
     let total = plan.items.len() + extras.len();
     if total == 0 {
@@ -599,7 +613,7 @@ pub(crate) fn run_plan(
                 &archive,
                 flags,
                 InstallRequest {
-                    reason: "explicit",
+                    reason: extras_why.db_reason(),
                     what: &what,
                     number: n,
                     total,
@@ -721,7 +735,7 @@ pub(crate) fn cmd_update(
             &repo_ids,
         )?
     };
-    let result = run_plan(ctx, &plan, flags, &sourcing, &[], &mut op);
+    let result = run_plan(ctx, &plan, flags, &sourcing, &[], &mut op, plan::Why::Update);
     let err = result.err();
     {
         let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;

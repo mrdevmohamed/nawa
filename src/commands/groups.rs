@@ -47,15 +47,62 @@ pub(crate) fn cmd_group_info(ctx: &Ctx, id: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn cmd_group_install(_ctx: &Ctx, id: &str) -> Result<()> {
+pub(crate) fn cmd_group_install(
+    ctx: &Ctx,
+    id: &str,
+    flags: &PlanFlags,
+    with_optional: bool,
+) -> Result<()> {
     groups::check_group_id(id)?;
-    // group definitions come from authenticated repository metadata; without
-    // a repository this first implementation refuses rather than guessing
-    bail!(
-        "group {id} has no published definition in the configured repositories — \
-         publishing group metadata (groups.toml referenced by the signed index) \
-         is required before `nawa group install` can resolve it"
+    let repo_url = ctx.repo.as_deref().filter(|url| !url.is_empty()).with_context(|| {
+        "no repository configured; set repo in /etc/nawa/nawa.toml"
+    })?;
+    let repo_ref = fetch::RepoRef::parse(repo_url)?;
+    let open = upgrade::open_repo(&ctx.root, &repo_ref, flags.allow_unsigned, false)
+        .with_context(|| format!("cannot read group metadata from repository {repo_url}"))?;
+    if open.signer_public.is_none() {
+        bail!("package groups require a repository index signed by a key in the configured trusted-key store");
+    }
+    let catalog = open.groups.as_ref().with_context(|| {
+        format!("repository {repo_url} does not publish groups.toml in its signed index")
+    })?;
+    let definition = catalog.find(id).cloned().with_context(|| {
+        format!("repository {repo_url} has no group named {id}")
+    })?;
+    let packages = definition.effective_packages(with_optional);
+    if packages.is_empty() {
+        bail!("group {id} has no packages selected for installation");
+    }
+    let definition_revision = open.index.groups.as_ref()
+        .map(|entry| entry.sha256.clone()).unwrap_or_default();
+    let source_repository = open.base_url.clone()
+        .unwrap_or_else(|| open.dir.display().to_string());
+
+    crate::nawa_info!(
+        "installing group {} — {} package(s){}",
+        definition.name,
+        packages.len(),
+        if with_optional { " (including optional)" } else { "" }
     );
+    crate::commands::installing::cmd_install_with_why(
+        ctx, &packages, flags, false, None, None, None, plan::Why::Group,
+    )?;
+    if !flags.dry_run {
+        let installed_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        groups::membership::save(&ctx.root, &groups::membership::MembershipRecord {
+            schema: 1,
+            group_id: id.to_string(),
+            definition_revision,
+            installed_at,
+            source_repository,
+            packages,
+        })?;
+        crate::nawa_success!("group {id} installed");
+    }
+    Ok(())
 }
 
 pub(crate) fn cmd_group_remove(ctx: &Ctx, id: &str, yes: bool) -> Result<()> {
