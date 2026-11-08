@@ -112,11 +112,11 @@ Repository creation has schema-specific requirements. Index schema v2 and later 
 | nawa service status [NAME] | Show static and, when available, live service status. |
 | nawa service enable NAME [--now] | Enable a runit service; optionally start it immediately. |
 | nawa service disable NAME [--now] | Disable a service; optionally stop it first. |
-| nawa service start|stop|restart NAME | Control an enabled service. |
+| nawa service start, stop, or restart NAME | Control an enabled service. |
 | nawa plugin list | List discovered plugins. |
 | nawa plugin info ID | Show plugin manifest details. |
-| nawa plugin enable|disable ID | Change plugin state. |
-| nawa plugin grant|revoke ID CAPABILITY | Change an administrator capability grant. |
+| nawa plugin enable or disable ID | Change plugin state. |
+| nawa plugin grant or revoke ID CAPABILITY | Change an administrator capability grant. |
 | nawa plugin run ID COMMAND [ARGS...] | Run a plugin command. |
 | nawa group list | List installed groups. |
 | nawa group info ID | Show a group's recorded membership. |
@@ -124,7 +124,7 @@ Repository creation has schema-specific requirements. Index schema v2 and later 
 | nawa config show | Show effective configuration and where each value came from. |
 | nawa init | Write a project configuration template. |
 | nawa init --system | Write the system-wide configuration template. |
-| nawa completions bash|zsh|fish | Print shell completion scripts. |
+| nawa completions SHELL | Print shell completion scripts for bash, zsh, or fish. |
 
 **Group installation status:** the command exists, but currently refuses to install a group until signed group metadata is published by a repository. See the [implementation status](design/IMPLEMENTATION-STATUS.md).
 
