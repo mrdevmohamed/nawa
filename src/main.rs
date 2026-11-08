@@ -263,35 +263,6 @@ fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             }
             Ok(())
         }
-        Cmd::RepoUpdate { dir, base, trust_key, out, add_entries, remove, drop, locations, recipes, recipes_rev, key } => {
-            // Resolve the signing key first: an update is always signed, and a
-            // missing key must not leave an unsigned index behind.
-            let signing_key = sign::resolve_signing_key(key.as_deref())?;
-            sign::load_signing_key(&signing_key)
-                .with_context(|| format!("invalid repository signing key {}", signing_key.display()))?;
-            // Verify the exact bytes that are then parsed: an unverified base
-            // must never flow into a signed index.
-            let vk = sign::load_verify_key(&trust_key)?;
-            let base_bytes = std::fs::read(&base)
-                .with_context(|| format!("read base index {}", base.display()))?;
-            let sf = sign::read_sig_file(&sign::sig_path_for(&base))?;
-            sign::verify_bytes(&base_bytes, &vk, &sf.sig).with_context(|| {
-                format!("base index {} is not signed by {}; refusing to update an unverified index", base.display(), trust_key.display())
-            })?;
-            let base_index = repo::load_index_bytes(&base_bytes)
-                .with_context(|| format!("parse base index {}", base.display()))?;
-            let out = if out.is_absolute() { out } else { dir.join(out) };
-            let tree = match (&recipes, &recipes_rev) {
-                (Some(t), Some(r)) => Some((t.as_path(), r.as_str())),
-                _ => None,
-            };
-            repo::update_index_files(
-                &base_index, &dir, &out, add_entries.as_deref(), remove, drop, locations.as_deref(), tree,
-            )?;
-            let sp = sign::sign(&out, &signing_key)?;
-            println!("nawa: signed index -> {}", sp.display());
-            Ok(())
-        }
         Cmd::Keygen { out } => {
             let dir = out.unwrap_or_else(sign::default_key_dir);
             let (sec, pub_) = sign::keygen(&dir)?;

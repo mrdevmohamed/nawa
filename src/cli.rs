@@ -305,42 +305,6 @@ pub(crate) enum Cmd {
         recipes_rev: Option<String>,
     },
 
-    /// Update a signed repository index incrementally; no archive is opened
-    #[command(name = "repo-update")]
-    RepoUpdate {
-        /// directory that receives the recipe snapshot (--recipes) and holds a relative --out
-        dir: PathBuf,
-        /// previous index (index.toml); its signature must verify with --trust-key
-        #[arg(long)]
-        base: PathBuf,
-        /// public key that must have signed --base; the update refuses otherwise
-        #[arg(long)]
-        trust_key: PathBuf,
-        #[arg(long, default_value = "index.toml")]
-        out: PathBuf,
-        /// TOML file with [[package]] entries for the new archives
-        #[arg(long)]
-        add_entries: Option<PathBuf>,
-        /// archive file that left the repository (repeatable)
-        #[arg(long = "remove", value_name = "FILE")]
-        remove: Vec<String>,
-        /// package whose entry is dropped on purpose (repeatable)
-        #[arg(long = "drop", value_name = "NAME")]
-        drop: Vec<String>,
-        /// TOML manifest with package_urls and recipe_urls (schema-3 base index)
-        #[arg(long)]
-        locations: Option<PathBuf>,
-        /// Also pack this recipe tree into the repository (for `nawa sync`)
-        #[arg(long, requires = "recipes_rev")]
-        recipes: Option<PathBuf>,
-        /// Revision recorded for --recipes (commit sha or tag)
-        #[arg(long, requires = "recipes")]
-        recipes_rev: Option<String>,
-        /// Signing key; the updated index is always signed
-        #[arg(long)]
-        key: Option<PathBuf>,
-    },
-
     /// Fetch the newest recipe tree from the repository (signature-checked)
     Sync {
         /// Repository (dir or URL); default: `repo` from the config
@@ -553,7 +517,7 @@ pub(crate) enum Cmd {
 pub(crate) const RESERVED_COMMANDS: &[&str] = &[
     "build", "install", "outdated", "update", "autoremove", "search", "info",
     "why", "deps", "deps-all", "remove", "query", "list", "files", "owner",
-    "revdep", "repo-create", "repo-update", "sync", "keygen", "sign", "verify", "trust",
+    "revdep", "repo-create", "sync", "keygen", "sign", "verify", "trust",
     "upgrade", "rollback", "repolist", "makecache", "repoquery", "clean",
     "fetch", "recipe", "group", "history", "plugin", "service", "config", "init",
     "completions", "sandbox-init", "sandbox-probe", "__complete_pkgs", "help",
@@ -732,7 +696,6 @@ pub(crate) fn lock_mode(cmd: &Cmd) -> Option<lock::Mode> {
         | Cmd::Deps { .. }
         | Cmd::DepsAll { .. } => Some(Shared),        // repo/sign tooling and everything below touches no package database
         Cmd::RepoCreate { .. }
-        | Cmd::RepoUpdate { .. }
         | Cmd::Keygen { .. }
         | Cmd::Sign { .. }
         | Cmd::Verify { .. }
@@ -758,7 +721,7 @@ pub(crate) const COMPLETION_BASH: &str = r#"# bash completion for nawa (generate
 _nawa() {
     local cur prev commands pkgs
     cur="${COMP_WORDS[COMP_CWORD]}"
-    commands="build install outdated update autoremove deps deps-all search info why query list remove files owner revdep repo-create repo-update sync keygen sign verify trust upgrade rollback repolist makecache repoquery fetch recipe clean group history plugin service config init completions"
+    commands="build install outdated update autoremove deps deps-all search info why query list remove files owner revdep repo-create sync keygen sign verify trust upgrade rollback repolist makecache repoquery fetch recipe clean group history plugin service config init completions"
     pkgs="$(nawa __complete_pkgs 2>/dev/null)"
     if [ "$COMP_CWORD" -eq 1 ]; then
         COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
@@ -769,7 +732,7 @@ _nawa() {
             COMPREPLY=( $(compgen -W "$pkgs" -- "$cur") ) ;;
         install)
             COMPREPLY=( $(compgen -W "$pkgs" -- "$cur") $(compgen -f -- "$cur") ) ;;
-        sign|verify|trust|repo-create|repo-update)
+        sign|verify|trust|repo-create)
             COMPREPLY=( $(compgen -f -- "$cur") ) ;;
         history)
             if [ "$COMP_CWORD" -eq 2 ]; then
@@ -822,7 +785,6 @@ _nawa() {
         'files:List files owned by an installed package'
         'owner:Find which package owns a file'
         'repo-create:Create a repository index'
-        'repo-update:Update a repository index incrementally'
         'keygen:Generate an ed25519 signing keypair'
         'sign:Sign a package archive or index'
         'verify:Verify a signature'
@@ -885,7 +847,7 @@ complete -c nawa -n '__fish_use_subcommand' -a 'remove' -d 'Remove an installed 
 complete -c nawa -n '__fish_use_subcommand' -a 'fetch' -d 'Download and verify sources, then run the fetch backends'
 complete -c nawa -n '__fish_use_subcommand' -a 'recipe' -d 'Inspect and check recipes'
 complete -c nawa -n '__fish_seen_subcommand_from recipe' -a 'check' -d 'Source-independent recipe warnings'
-complete -c nawa -n '__fish_use_subcommand' -a 'files owner repo-create repo-update keygen sign verify trust upgrade rollback service config init completions'
+complete -c nawa -n '__fish_use_subcommand' -a 'files owner repo-create keygen sign verify trust upgrade rollback service config init completions'
 # package names, completed dynamically
 set -l pkg_cmds build install update deps deps-all info files remove rollback why query list
 complete -c nawa -n "__fish_seen_subcommand_from $pkg_cmds" -a "(nawa __complete_pkgs 2>/dev/null)"
