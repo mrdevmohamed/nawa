@@ -106,6 +106,15 @@ pub fn dispatch_pending(
         Ok(Some(lock)) => lock,
         Ok(None) => return,
         Err(error) => {
+            // The outbox is root-owned. An unprivileged run (`nawa update`,
+            // queries) cannot lock it and has nothing to deliver anyway: the
+            // pending events go out with the next privileged command, so
+            // this is not worth a warning.
+            if crate::diag::has_io_kind(&error, std::io::ErrorKind::PermissionDenied)
+                && !crate::diag::is_root()
+            {
+                return;
+            }
             eprintln!("nawa: warning: could not lock plugin event outbox: {error:#}");
             return;
         }

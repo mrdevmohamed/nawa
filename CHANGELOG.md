@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased — cli: readable errors and no noise for unprivileged runs
+
+- Top-level errors are rendered over several lines: the message first, then
+  each underlying cause indented as `caused by:` (without the `(os error N)`
+  suffix), instead of one colon-joined line. Colors follow the existing
+  `NO_COLOR` / `NAWA_COLOR` policy.
+- A permission-denied failure of a normal user now ends with a hint telling
+  them to re-run the same command with `doas`/`sudo` (or as root when neither
+  is installed).
+- The package database lock error now reads `cannot open the package database
+  lock <path>`.
+- Unprivileged runs (`nawa update`, queries) no longer print `could not lock
+  plugin event outbox` when the root-owned outbox is unreadable to them; the
+  pending events are delivered by the next privileged command.
+
 ## Unreleased — repo-update: incremental repository index updates
 
 - Add `nawa repo-update`. It builds the next schema-2/3 index from the previous

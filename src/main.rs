@@ -14,6 +14,7 @@ mod config;
 mod confirm;
 mod db;
 mod deps;
+mod diag;
 mod fetch;
 mod fetchrun;
 mod groups;
@@ -123,11 +124,11 @@ fn main() {
     }
 }
 
-/// `nawa: error: ...` — red "error:" only on a real terminal.
+/// `nawa: error: ...` plus indented causes and an optional hint; colors only
+/// on a real terminal (see `diag::render_error`).
 fn print_error(e: anyhow::Error) {
     let p = Palette::auto(Stream::Stderr);
-    // "error:" carries its own colon; the palette adds color, not punctuation
-    eprintln!("nawa: {} {e:#}", p.err("error:"));
+    eprint!("{}", diag::render_error(&e, &p, &diag::Env::current()));
 }
 
 fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
