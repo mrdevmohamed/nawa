@@ -230,7 +230,7 @@ fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         Cmd::Revdep { names, lib_dirs, ignore, no_symlinks, unowned, scan_dirs, json, no_suggest } => {
             cmd_revdep(ctx, &names, &lib_dirs, &ignore, no_symlinks, unowned, &scan_dirs, json, no_suggest)
         }
-        Cmd::RepoCreate { dir, out, sign, key, index_version, locations, recipes, recipes_rev } => {
+        Cmd::RepoCreate { dir, out, sign, key, index_version, locations, recipes, recipes_rev, groups } => {
             if index_version >= repo::INDEX_SCHEMA_V2 && !sign {
                 bail!("repo-create --index-version {index_version} requires --sign; repository indexes v2 and newer must be authenticated");
             }
@@ -239,6 +239,9 @@ fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             }
             if index_version != repo::INDEX_SCHEMA_V3 && locations.is_some() {
                 bail!("repo-create --locations is only valid with --index-version 3");
+            }
+            if groups.is_some() && index_version < repo::INDEX_SCHEMA_V2 {
+                bail!("repo-create --groups requires --index-version 2 or 3");
             }
             // Resolve the key before writing anything, so a missing signing
             // key cannot leave an unsigned v2 index in the repository.
@@ -256,10 +259,9 @@ fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
                 (Some(t), Some(r)) => Some((t.as_path(), r.as_str())),
                 _ => None,
             };
-            match locations.as_deref() {
-                Some(path) => repo::create_index_with_locations(&dir, &out, tree, index_version, Some(path))?,
-                None => repo::create_index_with_version(&dir, &out, tree, index_version)?,
-            };
+            repo::create_index_with_locations_and_groups(
+                &dir, &out, tree, index_version, locations.as_deref(), groups.as_deref()
+            )?;
             if let Some(kp) = signing_key {
                 let sp = sign::sign(&out, &kp)?;
                 crate::nawa_info!("signed index -> {}", sp.display());
@@ -391,7 +393,7 @@ fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         Cmd::Group { action } => match action {
             GroupCmd::List => cmd_group_list(ctx),
             GroupCmd::Info { id } => cmd_group_info(ctx, &id),
-            GroupCmd::Install { id } => cmd_group_install(ctx, &id),
+            GroupCmd::Install { id, with_optional, flags } => cmd_group_install(ctx, &id, &flags, with_optional),
             GroupCmd::Remove { id, yes } => cmd_group_remove(ctx, &id, yes),
         },
         Cmd::Plugin { action } => match action {

@@ -22,6 +22,8 @@ pub enum Why {
     Explicit,
     /// pulled in as a dependency of something else
     Dependency,
+    /// requested directly as a member of a package group
+    Group,
     /// an installed package being brought to the recipe's version
     /// (keeps whatever reason it already had)
     Update,
@@ -33,6 +35,7 @@ impl Why {
         match self {
             Why::Explicit => "explicit",
             Why::Dependency => "dependency",
+            Why::Group => "group",
             Why::Update => "keep",
         }
     }
@@ -41,6 +44,7 @@ impl Why {
         match self {
             Why::Explicit => "explicit",
             Why::Dependency => "dependency",
+            Why::Group => "group",
             Why::Update => "update",
         }
     }

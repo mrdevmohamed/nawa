@@ -106,14 +106,73 @@ impl GroupDefinition {
     }
 }
 
+
+/// A repository-published catalog containing one [[group]] table per group.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupCatalog {
+    #[serde(rename = "group", default)]
+    pub groups: Vec<GroupDefinition>,
+}
+
+impl GroupCatalog {
+    pub fn from_toml(raw: &str) -> Result<Self> {
+        let catalog: GroupCatalog = toml::from_str(raw).context("corrupt group catalog")?;
+        catalog.validate()?;
+        Ok(catalog)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.groups.is_empty() {
+            bail!("group catalog contains no group definitions");
+        }
+        let mut ids = BTreeSet::new();
+        for group in &self.groups {
+            group.validate()?;
+            if !ids.insert(group.id.as_str()) {
+                bail!("group catalog contains duplicate id {:?}", group.id);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn find(&self, id: &str) -> Option<&GroupDefinition> {
+        self.groups.iter().find(|group| group.id == id)
+    }
+}
+
 use anyhow::Context as _;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+
     #[test]
-    fn ids_and_members_are_validated() {
+    fn catalog_rejects_duplicate_ids_and_finds_groups() {
+        let raw = r#"
+[[group]]
+schema = 1
+id = "dev"
+name = "Development"
+mandatory = ["git"]
+default = ["cmake"]
+
+[[group]]
+schema = 1
+id = "desktop"
+name = "Desktop"
+default = ["sway"]
+"#;
+        let catalog = GroupCatalog::from_toml(raw).unwrap();
+        assert_eq!(catalog.groups.len(), 2);
+        assert_eq!(catalog.find("dev").unwrap().effective_packages(false), vec!["git", "cmake"]);
+        assert!(GroupCatalog::from_toml(&raw.replace("id = \"desktop\"", "id = \"dev\"")).is_err());
+        assert!(GroupCatalog::from_toml(" ").is_err());
+    }
+
+    #[test]
+    fn ids_and_members_are_validated()
+ {
         assert!(check_group_id("development").is_ok());
         assert!(check_group_id("../evil").is_err());
         assert!(check_group_id("").is_err());

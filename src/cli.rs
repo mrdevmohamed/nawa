@@ -303,6 +303,9 @@ pub(crate) enum Cmd {
         /// Revision recorded for --recipes (commit sha or tag)
         #[arg(long, requires = "recipes")]
         recipes_rev: Option<String>,
+        /// Publish this validated group catalog as signed index metadata
+        #[arg(long, requires = "sign")]
+        groups: Option<PathBuf>,
     },
 
     /// Update a signed repository index incrementally; no archive is opened
@@ -610,7 +613,14 @@ pub(crate) enum GroupCmd {
     /// Show a group's recorded membership
     Info { id: String },
     /// Install a group's packages through the normal planner
-    Install { id: String },
+    Install {
+        id: String,
+        /// Include optional packages listed by the group definition
+        #[arg(long)]
+        with_optional: bool,
+        #[command(flatten)]
+        flags: PlanFlags,
+    },
     /// Remove a group's membership and its now-unneeded packages
     Remove {
         id: String,
