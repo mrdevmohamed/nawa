@@ -32,6 +32,16 @@
   change). Unit tests check that `repo-update` equals `repo-create` over the
   resulting archive set.
 
+## Unreleased — fix: shared paths and merged-usr symlinks
+
+- A staged symlink that already points exactly where the installed one does
+  (e.g. base-files' `/bin -> usr/bin`) is no longer reported as a file
+  conflict because another package's database entry also lists `/bin`.
+- Upgrading or removing a package no longer deletes paths that another
+  installed package also lists. Previously a stale `/bin`, `/lib` or `/sbin`
+  entry left behind by an older package could make `nawa upgrade`/`remove`
+  delete the merged-usr symlinks themselves.
+
 ## Unreleased — fix: fetch-phase env lost at isolation none
 
 - At `--isolation none` (the default) the `[fetch.*]` build-time environment
