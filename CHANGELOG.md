@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased — repo-update: incremental repository index updates
+
+- Add `nawa repo-update`. It builds the next schema-2/3 index from the previous
+  signed index plus a delta (`--add-entries`, `--remove`, `--drop`) without
+  opening any archive, instead of re-reading every archive like `repo-create`.
+- The base index is verified against `--trust-key` over the exact bytes that
+  are then parsed; an unverified base is refused. The result is always signed.
+- Newest-per-name selection is the same `vercmp` rule as `repo-create`. Removing
+  the indexed archive of a package without a replacement is an error (use
+  `--drop NAME` to remove a package on purpose); archive file names are
+  immutable, so re-adding one with a different sha256/size is an error.
+- `validity` is refreshed on every update, so `repo-update` with no delta also
+  renews an index that is close to its 90-day expiry.
+- `repo-create` now shares its atomic write with `repo-update` (no behaviour
+  change). Unit tests check that `repo-update` equals `repo-create` over the
+  resulting archive set.
+
 ## Unreleased — fix: fetch-phase env lost at isolation none
 
 - At `--isolation none` (the default) the `[fetch.*]` build-time environment
