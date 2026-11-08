@@ -249,6 +249,23 @@ impl Db {
         Ok(())
     }
 
+    /// Every path listed by an installed package other than `name`.
+    ///
+    /// A path can legitimately be claimed by two packages (a directory such
+    /// as `/etc`, or a merged-usr symlink like `/bin` that one package ships
+    /// and another package's directory entry also names). Removing or
+    /// obsoleting such a path on behalf of one package would pull it out from
+    /// under the other, so callers leave these paths alone.
+    pub fn paths_claimed_by_others(&self, name: &str) -> Result<std::collections::HashSet<String>> {
+        let mut set = std::collections::HashSet::new();
+        for e in self.installed()? {
+            if e.name != name {
+                set.extend(self.files(&e.name)?);
+            }
+        }
+        Ok(set)
+    }
+
     /// Map of every installed file -> owning package name.
     pub fn file_owners(&self) -> Result<HashMap<String, String>> {
         let mut map = HashMap::new();

@@ -277,6 +277,17 @@ fn install_archive_payload(
             if std::fs::symlink_metadata(&p).map(|m| m.is_dir()).unwrap_or(false) {
                 continue;
             }
+            // a symlink that already points exactly where this package wants
+            // it (the merged-usr /bin, /lib, ... links) overwrites nothing:
+            // installing it is a no-op, whoever else lists the path
+            if let (Ok(new_target), Ok(cur_target)) = (
+                std::fs::read_link(&p),
+                std::fs::read_link(root.join(f.trim_start_matches('/'))),
+            ) {
+                if new_target == cur_target {
+                    continue;
+                }
+            }
             if let Some(owner) = owners.get(f) {
                 if owner != &name {
                     conflicts.push(format!("{f} (owned by {owner})"));
@@ -398,9 +409,12 @@ fn install_archive_payload(
     let mut obsolete_dirs: Vec<PathBuf> = Vec::new();
     if !old_files.is_empty() {
         let new_set: HashSet<&String> = staged_files.iter().collect();
+        // never delete a path another installed package also lists
+        let shared = db.paths_claimed_by_others(&name)?;
         let mut obsolete: Vec<&String> = old_files
             .iter()
             .filter(|f| !new_set.contains(*f))
+            .filter(|f| !shared.contains(*f))
             .filter(|f| owners.get(*f).map(|o| o == &name).unwrap_or(false))
             .collect();
         obsolete.sort_by_key(|f| std::cmp::Reverse(f.len()));
@@ -773,7 +787,9 @@ pub fn remove_with(name: &str, root: &Path, force: bool) -> Result<()> {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let uniq = format!("{stamp}-{}", std::process::id());
-    let mut files = db.files(name)?;
+    // paths another installed package also lists stay in place
+    let shared = db.paths_claimed_by_others(name)?;
+    let mut files: Vec<String> = db.files(name)?.into_iter().filter(|f| !shared.contains(f)).collect();
     files.sort_by_key(|f| std::cmp::Reverse(f.len()));
     let mut tx = Tx::new(root, root.join(".nawa").join(format!("rm-{uniq}")));
     let mut dirs: Vec<PathBuf> = Vec::new();
@@ -1853,6 +1869,92 @@ mod tests {
         state.version = "demo-0.9-1".into();
         save_hook_status(&db, "demo", &state).unwrap();
         assert!(hook_needs_retry(&root, "demo").unwrap());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// merged-usr base package: `bin -> usr/bin` plus one real file
+    fn make_base_with_bin_symlink(dir: &Path, version: &str) -> PathBuf {
+        let staging = dir.join(format!("staging-base-{version}"));
+        std::fs::create_dir_all(staging.join("usr/bin")).unwrap();
+        std::fs::write(staging.join("usr/bin/sh"), format!("sh {version}")).unwrap();
+        std::os::unix::fs::symlink("usr/bin", staging.join("bin")).unwrap();
+        let pkginfo = format!(
+            "pkgname = base\npkgver = {version}\npkgrel = 1\narch = x86_64\nrundeps = \nsize = 1\n"
+        );
+        let out = dir.join(format!("base-{version}-1.nawa.tar.zst"));
+        archive::create(&staging, &pkginfo, &out).unwrap();
+        out
+    }
+
+    /// Record `name` as installed with a database claim on `/bin` — the shape
+    /// the pre-merged-usr shadow package left behind (a `/bin` directory entry).
+    fn claim_bin_dir(root: &Path, name: &str) {
+        let entry = Entry {
+            name: name.into(),
+            version: "1.0".into(),
+            rel: 1,
+            arch: "x86_64".into(),
+            reason: "explicit".into(),
+            run: vec![],
+            install_date: 1,
+            size: 1,
+            artifact_sha256: String::new(),
+        };
+        Db::new(root)
+            .add(&entry, &["/bin".into(), "/usr/bin/su".into()], &std::collections::HashMap::new())
+            .unwrap();
+    }
+
+    #[test]
+    fn identical_symlink_is_not_a_conflict_with_another_packages_claim() {
+        let base = tmpdir("same-symlink");
+        let root = base.join("root");
+        install_archive(&make_base_with_bin_symlink(&base, "1"), &root, false, true, None, "explicit").unwrap();
+        claim_bin_dir(&root, "zshadow");
+        // upgrade of the base package re-ships the very same /bin link
+        install_archive(&make_base_with_bin_symlink(&base, "2"), &root, false, true, None, "explicit")
+            .expect("an identical symlink must not be reported as a file conflict");
+        assert_eq!(std::fs::read_link(root.join("bin")).unwrap(), Path::new("usr/bin"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_different_symlink_target_is_still_a_conflict() {
+        let base = tmpdir("other-symlink");
+        let root = base.join("root");
+        claim_bin_dir(&root, "zshadow");
+        std::fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink("elsewhere", root.join("bin")).unwrap();
+        let err = install_archive(&make_base_with_bin_symlink(&base, "1"), &root, false, true, None, "explicit")
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("/bin (owned by zshadow)"), "{err:#}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn upgrade_keeps_paths_another_package_still_lists() {
+        let base = tmpdir("shared-upgrade");
+        let root = base.join("root");
+        install_archive(&make_base_with_bin_symlink(&base, "1"), &root, false, true, None, "explicit").unwrap();
+        claim_bin_dir(&root, "zshadow");
+        // zshadow 2.0 no longer ships /bin: the old entry is obsolete for it,
+        // but base's /bin symlink must survive
+        let v2 = make_pkg(&base, "zshadow", "2.0", &[("/usr/bin/su", b"su2")]);
+        install_archive(&v2, &root, true, true, None, "explicit").unwrap();
+        assert_eq!(std::fs::read_link(root.join("bin")).unwrap(), Path::new("usr/bin"));
+        assert!(root.join("usr/bin/su").is_file());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn remove_keeps_paths_another_package_still_lists() {
+        let base = tmpdir("shared-remove");
+        let root = base.join("root");
+        install_archive(&make_base_with_bin_symlink(&base, "1"), &root, false, true, None, "explicit").unwrap();
+        claim_bin_dir(&root, "zshadow");
+        remove_with("zshadow", &root, true).unwrap();
+        assert_eq!(std::fs::read_link(root.join("bin")).unwrap(), Path::new("usr/bin"));
+        assert!(root.join("usr/bin/sh").is_file());
         let _ = std::fs::remove_dir_all(&base);
     }
 
