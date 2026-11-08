@@ -1,0 +1,62 @@
+# Nawa documentation site configuration.
+# Build locally with: zensical build --clean
+# Preview locally with: zensical serve
+
+[project]
+site_name = "Nawa"
+site_url = "https://mrdevmohamed.github.io/nawa/"
+site_description = "Documentation for Nawa, a source-based Linux package manager."
+repo_url = "https://github.com/mrdevmohamed/nawa"
+repo_name = "mrdevmohamed/nawa"
+edit_uri = "edit/master/docs/"
+nav = [
+  { "Home" = "index.md" },
+  { "Getting started" = "getting-started.md" },
+  { "User guide" = [
+    "commands.md",
+    "configuration.md",
+    "recipes.md",
+    "build-and-fetch.md",
+  ] },
+  { "Operations" = [
+    "repositories-and-security.md",
+    "transactions-services-plugins.md",
+  ] },
+  { "Contributing" = "development.md" },
+  { "Design and implementation" = [
+    "build-isolation.md",
+    "design/IMPLEMENTATION-STATUS.md",
+    "design/fetch-phase.md",
+    "design/signed-repository-index-v2.md",
+    "design/plugin-api-v1.md",
+    "design/package-management-roadmap.md",
+    "future-dependency-aware-rebuild.md",
+  ] },
+  { "Review records" = [
+    "reviews/PR-15-REVIEW.md",
+    "reviews/PR-16-REVIEW.md",
+  ] },
+]
+
+[project.theme]
+language = "en"
+features = [
+  "navigation.instant",
+  "navigation.tabs",
+  "navigation.sections",
+  "navigation.top",
+  "search.suggest",
+  "search.highlight",
+  "toc.follow",
+  "content.code.copy",
+]
+
+[[project.theme.palette]]
+scheme = "default"
+primary = "indigo"
+accent = "cyan"
+
+[[project.theme.palette]]
+scheme = "slate"
+primary = "indigo"
+accent = "cyan"
