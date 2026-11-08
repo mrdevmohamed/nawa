@@ -1125,6 +1125,14 @@ fn rewrite_tar_stripped<R: Read>(reader: R, tmp: &Path, strip: u32) -> Result<()
             continue;
         }
         let mut header = entry.header().clone();
+        // A ustar header can split a long path across `prefix` + `name`.
+        // `set_path` (inside `append_data`) only rewrites `name` when the
+        // stripped path fits in 100 bytes and leaves the stale `prefix`
+        // behind, so readers would see `<prefix>/<stripped path>` and the
+        // file would land in the wrong place. Drop the old prefix first.
+        if let Some(ustar) = header.as_ustar_mut() {
+            ustar.prefix = [0u8; 155];
+        }
         if t.is_hard_link() {
             let target = entry
                 .link_name()
@@ -1247,6 +1255,36 @@ fn sanitize_entry_path(p: &Path) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use std::os::unix::fs::MetadataExt;
+
+    /// Regression: entries whose original path is split across the ustar
+    /// `prefix`/`name` fields (total length > 100) must survive
+    /// `strip_components` at their stripped path. fastfetch 2.30.1's
+    /// `wlr-output-management-unstable-v1-protocol.c` is such an entry.
+    #[test]
+    fn strip_keeps_ustar_prefix_split_paths() {
+        let dir = scratch("ustar-prefix");
+        let tarball = dir.join("src.tar");
+        {
+            let mut b = tar::Builder::new(std::fs::File::create(&tarball).unwrap());
+            let mut h = tar::Header::new_ustar();
+            let body = b"int x;\n";
+            h.set_size(body.len() as u64);
+            h.set_mode(0o644);
+            h.set_entry_type(tar::EntryType::Regular);
+            let long = "fastfetch-2.30.1/src/detection/displayserver/linux/wayland/\
+                        wlr-output-management-unstable-v1-protocol.c";
+            assert!(long.len() > 100);
+            h.set_path(long).unwrap(); // lands in prefix + name
+            h.set_cksum();
+            b.append(&h, &body[..]).unwrap();
+            b.finish().unwrap();
+        }
+        let dest = dir.join("out");
+        extract_source_archive_stripped(&tarball, &dest, 1).unwrap();
+        assert!(dest
+            .join("src/detection/displayserver/linux/wayland/wlr-output-management-unstable-v1-protocol.c")
+            .is_file());
+    }
 
     #[test]
     fn progress_line_shows_sizes_and_percent() {
