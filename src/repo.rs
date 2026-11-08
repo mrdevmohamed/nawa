@@ -311,6 +311,7 @@ pub fn create_index_with(
 /// Build a repository index. Version 1 remains the compatibility default;
 /// v2 uses signed-index hashes with base-URL archive lookup, while v3 adds
 /// authenticated per-archive HTTPS locations for distributed storage.
+#[allow(dead_code)] // compatibility entry point; production CLI uses the groups-aware variant
 pub fn create_index_with_version(
     dir: &Path,
     out: &Path,
@@ -321,6 +322,7 @@ pub fn create_index_with_version(
 }
 
 /// Build an index using a publisher-generated archive location manifest.
+#[allow(dead_code)] // compatibility entry point; production CLI uses the groups-aware variant
 pub fn create_index_with_locations(
     dir: &Path,
     out: &Path,

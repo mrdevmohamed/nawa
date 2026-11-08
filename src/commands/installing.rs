@@ -14,6 +14,7 @@ pub(crate) fn cmd_install(
     cmd_install_with_why(ctx, targets, flags, no_deps, key, mode, repo, plan::Why::Explicit)
 }
 
+#[allow(clippy::too_many_arguments)] // mirrors cmd_install and adds an explicit install reason
 pub(crate) fn cmd_install_with_why(
     ctx: &Ctx,
     targets: &[String],

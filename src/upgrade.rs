@@ -781,6 +781,7 @@ mod tests {
             expires: Some(20),
             repository: Some(repo::RepositoryMeta::v2()),
             recipes: None,
+            groups: None,
             packages: Vec::new(),
         };
         assert_eq!(
@@ -1013,7 +1014,7 @@ mod tests {
     fn index_older_than_seen_is_rejected() {
         let base = tmpdir("freshness");
         std::fs::write(base.join("index.seen"), "200").unwrap();
-        let idx = |g| repo::Index { generated: Some(g), expires: None, repository: None, recipes: None, packages: vec![] };
+        let idx = |g| repo::Index { generated: Some(g), expires: None, repository: None, recipes: None, groups: None, packages: vec![] };
         assert!(check_index_freshness(&base, &idx(100), true, false, true).is_err());
         assert!(check_index_freshness(&base, &idx(300), true, false, true).is_ok());
         assert_eq!(std::fs::read_to_string(base.join("index.seen")).unwrap(), "300");
@@ -1055,7 +1056,7 @@ mod tests {
     #[test]
     fn expired_remote_index_is_refused_unless_forced() {
         let base = tmpdir("expiry");
-        let idx = repo::Index { generated: Some(1000), expires: Some(2000), repository: None, recipes: None, packages: vec![] };
+        let idx = repo::Index { generated: Some(1000), expires: Some(2000), repository: None, recipes: None, groups: None, packages: vec![] };
         assert!(check_index_freshness(&base, &idx, true, false, true).is_err());
         assert!(check_index_freshness(&base, &idx, true, true, true).is_ok());
         // local repos only warn
@@ -1075,6 +1076,7 @@ mod tests {
             expires: Some(ahead + 10_000),
             repository: None,
             recipes: None,
+            groups: None,
             packages: vec![],
         };
         // a clock that runs behind the publisher still gets a usable index ...
@@ -1087,6 +1089,7 @@ mod tests {
             expires: Some(now + 10_000),
             repository: None,
             recipes: None,
+            groups: None,
             packages: vec![],
         };
         assert!(check_index_freshness(&base, &current, true, false, true).is_ok());
