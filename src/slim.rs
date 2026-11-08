@@ -288,8 +288,8 @@ pub fn split(pkgdir: &Path, splitdir: &Path) -> Result<Vec<SubPackage>> {
             continue;
         }
         if cands.len() >= count_non_dirs(pkgdir) {
-            println!(
-                "nawa: slim: -{} would leave the package empty — kept in place",
+            crate::nawa_info!(
+                "slim: -{} would leave the package empty — kept in place",
                 kind.suffix
             );
             continue;
@@ -530,7 +530,7 @@ fn strip_group(files: &[PathBuf], flag: &str) -> Option<(usize, u64)> {
             Run::Done => ok += 1,
             Run::Missing => return None,
             Run::Failed(why) => {
-                eprintln!("nawa: slim: warning: not stripping {}: {why}", p.display())
+                crate::nawa_warn!("slim: not stripping {}: {why}", p.display())
             }
         }
     }
@@ -572,7 +572,7 @@ fn strip(pkgdir: &Path, rep: &mut Report) {
                 rep.saved += saved;
             }
             None => {
-                eprintln!("nawa: slim: note: `strip` not found — skipping symbol stripping");
+                crate::nawa_note_stderr!("slim: `strip` not found — skipping symbol stripping");
                 return;
             }
         }

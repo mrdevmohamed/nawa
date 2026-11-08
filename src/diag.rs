@@ -87,7 +87,7 @@ fn hint(e: &anyhow::Error, env: &Env) -> Option<String> {
 pub fn render_error(e: &anyhow::Error, p: &Palette, env: &Env) -> String {
     let mut chain = e.chain();
     let head = chain.next().map(|c| c.to_string()).unwrap_or_default();
-    let mut out = format!("nawa: {} {}\n", p.err("error:"), strip_os_error(&head));
+    let mut out = format!("{} {} {}\n", p.brand("nawa:"), p.err("error:"), strip_os_error(&head));
     for cause in chain {
         out.push_str(&format!(
             "  {} {}\n",
@@ -96,7 +96,7 @@ pub fn render_error(e: &anyhow::Error, p: &Palette, env: &Env) -> String {
         ));
     }
     if let Some(h) = hint(e, env) {
-        out.push_str(&format!("nawa: {} {}\n", p.warn("hint:"), h));
+        out.push_str(&format!("{} {} {}\n", p.brand("nawa:"), p.warn("hint:"), h));
     }
     out
 }

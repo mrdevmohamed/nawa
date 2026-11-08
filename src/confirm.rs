@@ -11,6 +11,17 @@
 use anyhow::{bail, Result};
 use std::io::{BufRead, IsTerminal, Write};
 
+fn styled_prompt(prompt: &str) -> String {
+    match prompt.strip_prefix("nawa:") {
+        Some(rest) => format!(
+            "{}{}",
+            crate::color::Palette::auto(crate::color::Stream::Stderr).brand("nawa:"),
+            rest
+        ),
+        None => prompt.to_string(),
+    }
+}
+
 /// Ask the user. `yes=true` short-circuits.
 pub fn confirm(prompt: &str, yes: bool) -> Result<()> {
     let interactive = std::io::stdin().is_terminal();
@@ -36,7 +47,7 @@ fn confirm_with(
         );
     }
     let mut err = std::io::stderr();
-    write!(err, "{prompt} [y/N] ")?;
+    write!(err, "{} [y/N] ", styled_prompt(prompt))?;
     err.flush()?;
     let mut line = String::new();
     input.read_line(&mut line)?;
@@ -75,7 +86,7 @@ fn choose_with(
     }
     let mut err = std::io::stderr();
     loop {
-        write!(err, "{prompt} [{}] ", shown.join("/"))?;
+        write!(err, "{} [{}] ", styled_prompt(prompt), shown.join("/"))?;
         err.flush()?;
         let mut line = String::new();
         if input.read_line(&mut line)? == 0 {

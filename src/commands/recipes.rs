@@ -57,8 +57,8 @@ pub(crate) fn cmd_recipe_check(ctx: &Ctx, name: Option<&str>, all: bool) -> Resu
     for rec in &recs {
         findings += check_recipe(rec);
     }
-    println!(
-        "nawa: recipe check: {} recipe(s), {} warning(s)",
+    crate::nawa_info!(
+        "recipe check: {} recipe(s), {} warning(s)",
         recs.len(),
         findings
     );
@@ -71,7 +71,7 @@ fn check_recipe(rec: &recipe::Recipe) -> usize {
     let mut count = 0usize;
     let mut warn = |msg: String| {
         count += 1;
-        eprintln!("nawa: recipe {name}: warning: {msg}");
+        crate::nawa_info_stderr!("recipe {name}: warning: {msg}");
     };
 
     // ---- §14B: assets ---------------------------------------------------

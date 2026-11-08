@@ -9,6 +9,7 @@ mod buildenv;
 mod cli;
 mod closure;
 mod color;
+mod output;
 mod commands;
 mod config;
 mod confirm;
@@ -116,7 +117,7 @@ fn main() {
         // Ctrl+C: the current step was rolled back or finished, never left
         // half-done. Not an error to shout about; exit like a shell would.
         if e.downcast_ref::<interrupt::Interrupted>().is_some() {
-            eprintln!("nawa: interrupted - the system was left consistent");
+            crate::nawa_note_stderr!("interrupted - system state is consistent");
             std::process::exit(130);
         }
         print_error(e);
@@ -128,7 +129,8 @@ fn main() {
 /// on a real terminal (see `diag::render_error`).
 fn print_error(e: anyhow::Error) {
     let p = Palette::auto(Stream::Stderr);
-    eprint!("{}", diag::render_error(&e, &p, &diag::Env::current()));
+    let rendered = diag::render_error(&e, &p, &diag::Env::current());
+    output::write_stderr(&rendered);
 }
 
 fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
@@ -146,7 +148,7 @@ fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         // (roadmap §4.3): only clearly-nanosecond values are rewritten, each
         // with a .bak copy of the old desc
         for note in db::migrate_install_dates(&ctx.root)? {
-            eprintln!("nawa: migrated: {note}");
+            crate::nawa_info_stderr!("migrated: {note}");
         }
     }
     match cmd {
@@ -260,7 +262,7 @@ fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             };
             if let Some(kp) = signing_key {
                 let sp = sign::sign(&out, &kp)?;
-                println!("nawa: signed index -> {}", sp.display());
+                crate::nawa_info!("signed index -> {}", sp.display());
             }
             Ok(())
         }
@@ -299,20 +301,20 @@ fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
                 },
             )?;
             let sp = sign::sign(&out, &signing_key)?;
-            println!("nawa: signed index -> {}", sp.display());
+            crate::nawa_info!("signed index -> {}", sp.display());
             Ok(())
         }
         Cmd::Keygen { out } => {
             let dir = out.unwrap_or_else(sign::default_key_dir);
             let (sec, pub_) = sign::keygen(&dir)?;
-            println!("nawa: secret key  {}  (keep safe, mode 0600)", sec.display());
-            println!("nawa: public key  {}  (share / `nawa trust` on targets)", pub_.display());
+            crate::nawa_info!("secret key  {}  (keep safe, mode 0600)", sec.display());
+            crate::nawa_info!("public key  {}  (share / `nawa trust` on targets)", pub_.display());
             Ok(())
         }
         Cmd::Sign { file, key } => {
             let kp = sign::resolve_signing_key(key.as_deref())?;
             let sp = sign::sign(&file, &kp)?;
-            println!("nawa: signed {} -> {}", file.display(), sp.display());
+            crate::nawa_info!("signed {} -> {}", file.display(), sp.display());
             Ok(())
         }
         Cmd::Verify { file, key } => {
@@ -321,7 +323,7 @@ fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         }
         Cmd::Trust { keyfile } => {
             let dest = sign::trust(&keyfile, &ctx.root)?;
-            println!("nawa: trusted key installed at {}", dest.display());
+            crate::nawa_info!("trusted key installed at {}", dest.display());
             Ok(())
         }
         Cmd::Upgrade { repo, dry_run, force, allow_unsigned, yes } => {
@@ -417,7 +419,7 @@ fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             // the lock is already held (see lock_mode); reconcile what a
             // killed nawa left behind before showing or undoing anything
             for note in transaction::recovery::reconcile_incomplete(&ctx.root)? {
-                eprintln!("nawa: recovered: {note}");
+                crate::nawa_info_stderr!("recovered: {note}");
             }
             match action {
                 None => transaction::undo::print_history(&ctx.root, limit.unwrap_or(20)),
@@ -443,7 +445,7 @@ fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             ServiceCmd::Disable { name, now } => {
                 if now {
                     service::disable_now(&ctx.root, &name)?;
-                    println!("nawa: stopped and disabled {name}");
+                    crate::nawa_info!("stopped and disabled {name}");
                 } else {
                     service::disable(&ctx.root, &name)?;
                     println!(

@@ -115,7 +115,7 @@ pub fn dispatch_pending(
             {
                 return;
             }
-            eprintln!("nawa: warning: could not lock plugin event outbox: {error:#}");
+            crate::nawa_warn!("could not lock plugin event outbox: {error:#}");
             return;
         }
     };
@@ -130,19 +130,19 @@ pub fn dispatch_pending(
         let record = match load_event(&path) {
             Ok(record) => record,
             Err(error) => {
-                eprintln!("nawa: warning: cannot load observer event {}: {error:#}", path.display());
+                crate::nawa_warn!("cannot load observer event {}: {error:#}", path.display());
                 continue;
             }
         };
         let mut diagnostics_complete = true;
         for failure in dispatch_record(root, project_config, system_config, &record) {
-            eprintln!(
-                "nawa: warning: observer plugin {} failed for {}: {}",
+            crate::nawa_warn!(
+                "observer plugin {} failed for {}: {}",
                 failure.plugin_id, failure.event_type, failure.error
             );
             if let Err(error) = store_failure(root, &failure) {
                 diagnostics_complete = false;
-                eprintln!("nawa: warning: could not store observer failure: {error:#}");
+                crate::nawa_warn!("could not store observer failure: {error:#}");
             }
         }
         // Retain the event if its failure diagnostics could not be persisted.
@@ -150,7 +150,7 @@ pub fn dispatch_pending(
             continue;
         }
         if let Err(error) = std::fs::remove_file(&path) {
-            eprintln!("nawa: warning: could not remove dispatched event {}: {error}", path.display());
+            crate::nawa_warn!("could not remove dispatched event {}: {error}", path.display());
         }
     }
 }

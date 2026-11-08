@@ -39,7 +39,7 @@ pub(crate) fn cmd_install(
     let mut remaining_targets = Vec::new();
     for t in targets {
         if installed.contains_key(t) && install::hook_needs_retry(&ctx.root, t)? {
-            println!("nawa: retrying incomplete post-install hook for {t}");
+            crate::nawa_info!("retrying incomplete post-install hook for {t}");
             let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
             install::retry_pending_hook(t, &ctx.root)?;
             // Recipe-backed targets still go through normal source/version
@@ -77,7 +77,7 @@ pub(crate) fn cmd_install(
                         &format!("{}-{}", re.version, re.rel),
                     ) != std::cmp::Ordering::Less =>
                 {
-                    println!("nawa: {t} is already installed and up to date");
+                    crate::nawa_info!("{t} is already installed and up to date");
                 }
                 _ => extras.push(re.clone()),
             },
@@ -89,7 +89,7 @@ pub(crate) fn cmd_install(
 
     let plan = plan::install_plan(&recipe_targets, &installed, &known, plan::Why::Explicit, !no_deps)?;
     for name in &plan.up_to_date {
-        println!("nawa: {name} is already installed and up to date");
+        crate::nawa_info!("{name} is already installed and up to date");
     }
     if plan.items.is_empty() && extras.is_empty() {
         return Ok(());
@@ -225,7 +225,7 @@ pub(crate) fn open_sourcing(
              or /etc/nawa/nawa.toml, or export NAWA_REPO"
         ),
         None => {
-            println!("nawa: note: no repository configured — building from source");
+            crate::nawa_note!("no repository configured — building from source");
             return Ok(Sourcing::build_only());
         }
     };
@@ -234,7 +234,7 @@ pub(crate) fn open_sourcing(
         Ok(open) => Ok(Sourcing { mode: eff, ask, open: Some(open) }),
         Err(e) if strict => Err(e).with_context(|| format!("repository {url} is not usable")),
         Err(e) => {
-            println!("nawa: note: repository {url} is not usable ({e:#}) — building from source");
+            crate::nawa_note!("repository {url} is not usable ({e:#}) — building from source");
             Ok(Sourcing::build_only())
         }
     }
@@ -277,8 +277,8 @@ fn install_one(
     open_repo: Option<&upgrade::OpenRepo>,
     op: &mut transaction::OperationHandle,
 ) -> Result<()> {
-    println!(
-        "nawa: [{}/{}] installing {}",
+    crate::nawa_info!(
+        "[{}/{}] installing {}",
         request.number, request.total, request.what
     );
     let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
@@ -386,7 +386,7 @@ pub(crate) fn run_plan(
 ) -> Result<()> {
     let total = plan.items.len() + extras.len();
     if total == 0 {
-        println!("nawa: nothing to do");
+        crate::nawa_info!("nothing to do");
         return Ok(());
     }
 
@@ -403,8 +403,8 @@ pub(crate) fn run_plan(
     };
     let print_plan = |sources: &[Source]| {
         let from_repo = count_repo(sources);
-        println!(
-            "nawa: {total} package(s) to install into {} ({from_repo} from the repository, {} to build)",
+        crate::nawa_info!(
+            "{total} package(s) to install into {} ({from_repo} from the repository, {} to build)",
             ctx.root.display(),
             total - from_repo
         );
@@ -486,7 +486,7 @@ pub(crate) fn run_plan(
     };
     print_plan(sources.as_slice());
     if flags.dry_run {
-        println!("nawa: dry run — nothing was built or installed");
+        crate::nawa_info!("dry run — nothing was built or installed");
         return Ok(());
     }
 
@@ -508,7 +508,7 @@ pub(crate) fn run_plan(
             for s in sources.iter_mut() {
                 *s = Source::Build;
             }
-            println!("nawa: building all {total} package(s) from source");
+            crate::nawa_info!("building all {total} package(s) from source");
         }
     }
     confirm::confirm(&format!("nawa: install {total} package(s)?"), flags.yes)?;
@@ -524,7 +524,7 @@ pub(crate) fn run_plan(
             let (archive, index_sha256, signed_index): (PathBuf, Option<String>, bool) = match &sources[i] {
                 Source::Build => (build_one(ctx, it, flags, n, total)?, None, false),
                 Source::Repo(re) => {
-                    println!("nawa: [{n}/{total}] fetching {id} from the repository");
+                    crate::nawa_info!("[{n}/{total}] fetching {id} from the repository");
                     let open = sourcing
                         .open
                         .as_ref()
@@ -542,8 +542,8 @@ pub(crate) fn run_plan(
                         }
                         // auto: the recipe pins its sources, so a build is a safe fallback
                         Err(e) => {
-                            eprintln!(
-                                "nawa: warning: cannot use the repository copy of {id} ({e:#}) — building from source"
+                            crate::nawa_warn!(
+                                "cannot use the repository copy of {id} ({e:#}) — building from source"
                             );
                             (build_one(ctx, it, flags, n, total)?, None, false)
                         }
@@ -586,7 +586,7 @@ pub(crate) fn run_plan(
         let n = plan.items.len() + j + 1;
         let what = format!("{}-{}-{}", re.name, re.version, re.rel);
         let mut step = || -> Result<()> {
-            println!("nawa: [{n}/{total}] fetching {what} from the repository");
+            crate::nawa_info!("[{n}/{total}] fetching {what} from the repository");
             let open = sourcing
                 .open
                 .as_ref()
@@ -622,8 +622,8 @@ pub(crate) fn run_plan(
             return Err(e);
         }
     }
-    println!(
-        "nawa: done — {total} package(s) installed in {}",
+    crate::nawa_success!(
+        "done — {total} package(s) installed in {}",
         format_duration(started.elapsed().as_secs())
     );
     let mut changed: Vec<String> = plan.items.iter().map(|it| it.rec.package.name.clone()).collect();
@@ -637,7 +637,7 @@ pub(crate) fn cmd_outdated(ctx: &Ctx) -> Result<()> {
     let installed = db::Db::new(&ctx.root).installed()?;
     let list = plan::outdated(&installed, &known);
     if list.is_empty() {
-        println!("nawa: everything is up to date ({} installed)", installed.len());
+        crate::nawa_info!("everything is up to date ({} installed)", installed.len());
         return Ok(());
     }
     let pal = Palette::auto(Stream::Stdout);
@@ -649,7 +649,7 @@ pub(crate) fn cmd_outdated(ctx: &Ctx) -> Result<()> {
             pal.ver(&format!("{}-{}", r.package.version, r.package.rel)),
         );
     }
-    println!("nawa: {} package(s) can be updated — run `nawa update`", list.len());
+    crate::nawa_info!("{} package(s) can be updated — run `nawa update`", list.len());
     Ok(())
 }
 
@@ -679,7 +679,7 @@ pub(crate) fn cmd_update(
         .collect();
     targets.sort(); // deterministic update plan even though installed_map is a HashMap
     if targets.is_empty() {
-        println!("nawa: everything is up to date");
+        crate::nawa_info!("everything is up to date");
         return Ok(());
     }
     let plan = plan::install_plan(&targets, &installed, &known, plan::Why::Update, true)?;
@@ -748,17 +748,17 @@ pub(crate) fn cmd_autoremove(ctx: &Ctx, dry_run: bool, yes: bool, build_deps: bo
     let installed = db::Db::new(&ctx.root).installed()?;
     let orphans = plan::orphans(&installed, &known, build_deps);
     if orphans.is_empty() {
-        println!("nawa: nothing to remove");
+        crate::nawa_info!("nothing to remove");
         return Ok(());
     }
     let order = plan::removal_order(&orphans, &installed);
     let pal = Palette::auto(Stream::Stdout);
-    println!("nawa: {} unneeded dependency package(s):", order.len());
+    crate::nawa_info!("{} unneeded dependency package(s):", order.len());
     for n in &order {
         println!("  {}", pal.name(n));
     }
     if dry_run {
-        println!("nawa: dry run — nothing was removed");
+        crate::nawa_info!("dry run — nothing was removed");
         return Ok(());
     }
     confirm::confirm(&format!("nawa: remove {} package(s)?", order.len()), yes)?;
@@ -772,7 +772,7 @@ pub(crate) fn cmd_autoremove(ctx: &Ctx, dry_run: bool, yes: bool, build_deps: bo
     )?;
     for (i, n) in order.iter().enumerate() {
         crate::interrupt::check()?;
-        println!("nawa: [{}/{}] removing {n}", i + 1, order.len());
+        crate::nawa_info!("[{}/{}] removing {n}", i + 1, order.len());
         let db = db::Db::new(&ctx.root);
         let before = db.entry(n)?;
         let mut recorder = op.recorder();
@@ -811,7 +811,7 @@ pub(crate) fn cmd_autoremove(ctx: &Ctx, dry_run: bool, yes: bool, build_deps: bo
         }
     }
     op.finish(None)?;
-    println!("nawa: done — {} package(s) removed", order.len());
+    crate::nawa_success!("done — {} package(s) removed", order.len());
     Ok(())
 }
 
@@ -918,7 +918,7 @@ pub(crate) fn cmd_remove(ctx: &Ctx, name: &str, force: bool, yes: bool) -> Resul
     // the confirmation shows what will actually happen; the removal itself
     // re-checks dependents (refusing without --force) after the prompt
     let pal = Palette::auto(Stream::Stdout);
-    println!("nawa: {} {} ({} file(s))", pal.warn("removing"), pal.name(name), nfiles);
+    crate::nawa_info!("{} {} ({} file(s))", pal.warn("removing"), pal.name(name), nfiles);
     println!("     {} {} — {}", pal.dim("version"), pal.ver(&entry.version_full()), pal.dim(&format_date(entry.install_date)));
     if !dependents.is_empty() {
         println!(

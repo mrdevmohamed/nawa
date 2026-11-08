@@ -28,7 +28,7 @@ pub(crate) fn cmd_plugin_list(ctx: &Ctx) -> Result<()> {
     let state = effective_state(ctx);
     let found = plugins::discovery::discover(running_as_root())?;
     if found.is_empty() {
-        println!("nawa: no plugins discovered");
+        crate::nawa_info!("no plugins discovered");
         return Ok(());
     }
     let pal = Palette::auto(Stream::Stdout);
@@ -116,8 +116,8 @@ pub(crate) fn cmd_plugin_enable(ctx: &Ctx, id: &str, enable: bool) -> Result<()>
         }
     }
     state.save(ctx.cfg.file.as_deref())?;
-    println!(
-        "nawa: plugin {id} {} (recorded in {})",
+    crate::nawa_info!(
+        "plugin {id} {} (recorded in {})",
         if enable { "enabled" } else { "disabled" },
         ctx.cfg.file.as_deref().map(|path| path.display().to_string())
             .unwrap_or_else(|| "(no project config)".into()),
@@ -163,8 +163,8 @@ pub(crate) fn cmd_plugin_grant(
         state.revoke(id, capability);
     }
     state.save(Some(&system_file))?;
-    println!(
-        "nawa: {} {} for plugin {id}",
+    crate::nawa_info!(
+        "{} {} for plugin {id}",
         if grant { "granted" } else { "revoked" },
         capability.as_str()
     );

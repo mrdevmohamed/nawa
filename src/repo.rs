@@ -355,7 +355,7 @@ pub fn create_index_with_locations(
             .with_context(|| format!("stat package archive {}", path.display()))?
             .len();
         let installed_size: u64 = info.get("size").and_then(|v| v.parse().ok()).unwrap_or(0);
-        println!("nawa: index -> {}-{}-{}", name, version, rel);
+        crate::nawa_success!("index -> {}-{}-{}", name, version, rel);
         let file = path.file_name().unwrap().to_string_lossy().to_string();
         let download_url = locations.as_ref().and_then(|loc| loc.package_urls.get(&file).cloned());
         packages.push(RepoEntry {
@@ -405,7 +405,7 @@ pub fn create_index_with_locations(
     };
     index.validate()?;
     write_index_atomic(&index, out)?;
-    println!("nawa: wrote index {} ({} packages, schema v{})", out.display(), index.packages.len(), index_version);
+    crate::nawa_success!("wrote index {} ({} packages, schema v{})", out.display(), index.packages.len(), index_version);
     Ok(index)
 }
 
@@ -621,7 +621,7 @@ pub fn update_index_files(
         now,
     )?;
     write_index_atomic(&index, out)?;
-    println!("nawa: wrote index {} ({} packages, schema v{})", out.display(), index.packages.len(), schema);
+    crate::nawa_info!("wrote index {} ({} packages, schema v{})", out.display(), index.packages.len(), schema);
     Ok(index)
 }
 
@@ -707,7 +707,7 @@ pub fn pack_recipes(tree: &Path, out_dir: &Path, rev: &str) -> Result<RecipesEnt
     b.into_inner()?.finish()?;
     std::fs::rename(&part, &dest).with_context(|| format!("write {}", dest.display()))?;
     let sha256 = crate::fetch::sha256_of_file(&dest)?;
-    println!("nawa: index -> recipes {rev} ({count} recipes)");
+    crate::nawa_info!("index -> recipes {rev} ({count} recipes)");
     Ok(RecipesEntry { rev: rev.to_string(), file, sha256, download_url: None })
 }
 

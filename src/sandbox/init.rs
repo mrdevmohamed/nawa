@@ -83,7 +83,7 @@ pub fn init(path: &Path) -> Result<i32> {
         let code = match run_pid1(&spec) {
             Ok(()) => EXEC_MUST_NOT_RETURN, // exec must not return
             Err(e) => {
-                eprintln!("nawa: sandbox: {e:#}");
+                crate::nawa_info_stderr!("sandbox: {e:#}");
                 PID1_SETUP_FAILED
             }
         };
@@ -100,8 +100,8 @@ pub fn init(path: &Path) -> Result<i32> {
         .ok_or_else(|| anyhow::Error::msg("waitpid: no status (child vanished)"))?
         .1;
     if sys::timed_out() {
-        eprintln!(
-            "nawa: sandbox: section timed out after {}s (all processes killed)",
+        crate::nawa_info_stderr!(
+            "sandbox: section timed out after {}s (all processes killed)",
             spec.timeout_secs
         );
         return Ok(EXIT_TIMEOUT);

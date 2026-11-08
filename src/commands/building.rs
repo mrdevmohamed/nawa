@@ -49,8 +49,8 @@ pub(crate) fn cmd_build(
 
     // ---- --install --------------------------------------------------------
     let pal = Palette::auto(Stream::Stdout);
-    println!(
-        "nawa: installing {} into {}",
+    crate::nawa_info!(
+        "installing {} into {}",
         pal.ver(&archive.display().to_string()),
         ctx.root.display()
     );
@@ -146,7 +146,7 @@ pub(crate) fn prepare_build(
         .unwrap_or_else(default_jobs);
     if !env.is_empty() {
         let flags: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
-        println!("nawa: profile {arch}: {}", flags.join(" "));
+        crate::nawa_info!("profile {arch}: {}", flags.join(" "));
     }
 
     // isolation precedence: --isolation > profile [build] isolation > none
@@ -226,7 +226,7 @@ pub(crate) fn build_one(
     total: usize,
 ) -> Result<PathBuf> {
     let id = it.rec.id();
-    println!("nawa: [{n}/{total}] building {id}");
+    crate::nawa_info!("[{n}/{total}] building {id}");
     let opts = prepare_build(
         ctx,
         &it.rec,

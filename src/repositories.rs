@@ -99,7 +99,7 @@ fn parse_file_entries(cfg: &Config) -> Result<Vec<RepoConfig>> {
 pub fn cmd_repolist(cfg: &Config, all: bool) -> Result<()> {
     let repos = effective(cfg)?;
     if repos.is_empty() {
-        println!("nawa: no repositories configured");
+        crate::nawa_info!("no repositories configured");
         return Ok(());
     }
     println!("{:<12}  {:<8}  {:<8}  URL", "ID", "State", "Priority");
@@ -125,7 +125,7 @@ pub fn cmd_makecache(cfg: &Config, root: &Path, allow_unsigned: bool, force: boo
     let repos = effective(cfg)?;
     let enabled: Vec<&RepoConfig> = repos.iter().filter(|r| r.enabled).collect();
     if enabled.is_empty() {
-        println!("nawa: no enabled repositories to refresh");
+        crate::nawa_info!("no enabled repositories to refresh");
         return Ok(());
     }
     let total = enabled.len();
@@ -133,8 +133,8 @@ pub fn cmd_makecache(cfg: &Config, root: &Path, allow_unsigned: bool, force: boo
     for r in enabled {
         let repo_ref = RepoRef::parse(&r.url)?;
         match crate::upgrade::open_repo(root, &repo_ref, allow_unsigned, force) {
-            Ok(open) => println!(
-                "nawa: {} ({}): cache verified — {} package(s), schema v{}",
+            Ok(open) => crate::nawa_info!(
+                "{} ({}): cache verified — {} package(s), schema v{}",
                 r.id,
                 r.url,
                 open.index.packages.len(),
@@ -142,7 +142,7 @@ pub fn cmd_makecache(cfg: &Config, root: &Path, allow_unsigned: bool, force: boo
             ),
             Err(e) => {
                 failures += 1;
-                eprintln!("nawa: error: {} ({}): {e:#}", r.id, r.url);
+                crate::nawa_error!("{} ({}): {e:#}", r.id, r.url);
             }
         }
     }
@@ -291,9 +291,9 @@ pub fn cmd_clean(ctx: &crate::Ctx, category: &str, dry_run: bool) -> Result<()> 
         }
     }
     if dry_run {
-        println!("nawa: dry run — would free {}, retaining {}", crate::humanize::format_size(removed), crate::humanize::format_size(retained));
+        crate::nawa_info!("dry run — would free {}, retaining {}", crate::humanize::format_size(removed), crate::humanize::format_size(retained));
     } else {
-        println!("nawa: cleaned {} (retained {} of referenced data)", crate::humanize::format_size(removed), crate::humanize::format_size(retained));
+        crate::nawa_info!("cleaned {} (retained {} of referenced data)", crate::humanize::format_size(removed), crate::humanize::format_size(retained));
     }
     Ok(())
 }
@@ -359,14 +359,14 @@ fn clean_sources(cache: &Path, dry_run: bool) -> Result<(u64, u64)> {
             } else if name.ends_with(".lock") {
                 // a lock we couldn't take: a live fetch holds it
                 retained += md.len();
-                println!("nawa: clean sources: leaving {} (a live fetch holds its lock)", p.display());
+                crate::nawa_info!("clean sources: leaving {} (a live fetch holds its lock)", p.display());
             } else {
                 retained += md.len();
-                println!("nawa: clean sources: leaving {} (not Nawa-owned)", p.display());
+                crate::nawa_info!("clean sources: leaving {} (not Nawa-owned)", p.display());
             }
         } else {
             retained += md.len();
-            println!("nawa: clean sources: leaving {} (not Nawa-owned)", p.display());
+            crate::nawa_info!("clean sources: leaving {} (not Nawa-owned)", p.display());
         }
     }
     Ok((freed, retained))

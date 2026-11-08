@@ -259,7 +259,7 @@ pub fn trusted_keys(root: &Path) -> Result<Vec<(String, VerifyingKey)>> {
         let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
         match load_verify_key(&p) {
             Ok(vk) => out.push((name, vk)),
-            Err(e) => eprintln!("nawa: warning: skipping unparseable key {name}: {e:#}"),
+            Err(e) => crate::nawa_warn!("skipping unparseable key {name}: {e:#}"),
         }
     }
     Ok(out)
@@ -310,8 +310,8 @@ pub fn verify_for_install_with_sig_reported(
         }
         if trusted.is_empty() {
             // bootstrap mode stays permitted, but never silently
-            eprintln!(
-                "nawa: note: {} is unsigned and no trusted keys are configured — installing unauthenticated (bootstrap mode)",
+            crate::nawa_note_stderr!(
+                "{} is unsigned and no trusted keys are configured — installing unauthenticated (bootstrap mode)",
                 archive.file_name().unwrap_or_default().to_string_lossy()
             );
         }
@@ -322,7 +322,7 @@ pub fn verify_for_install_with_sig_reported(
     if let Some(kp) = key {
         let vk = load_verify_key(kp)?;
         verify(archive, &vk, &sf.sig)?;
-        println!("nawa: signature OK (explicit key {})", kp.display());
+        crate::nawa_success!("signature OK (explicit key {})", kp.display());
         return Ok(true);
     }
 
@@ -330,7 +330,7 @@ pub fn verify_for_install_with_sig_reported(
     if !trusted.is_empty() {
         for (name, vk) in &trusted {
             if verify(archive, vk, &sf.sig).is_ok() {
-                println!("nawa: signature OK (trusted key {name})");
+                crate::nawa_success!("signature OK (trusted key {name})");
                 return Ok(true);
             }
         }
@@ -343,8 +343,8 @@ pub fn verify_for_install_with_sig_reported(
 
     // no trust configured: pin integrity to the embedded signer key
     verify(archive, &sf.embedded, &sf.sig)?;
-    eprintln!(
-        "nawa: warning: no trusted keys configured — verified against the key embedded in {} only",
+    crate::nawa_warn!(
+        "no trusted keys configured — verified against the key embedded in {} only",
         sig_path.file_name().unwrap_or_default().to_string_lossy()
     );
     Ok(true)
@@ -383,13 +383,13 @@ pub fn verify_index_bytes(
             );
         }
         if !trusted.is_empty() {
-            eprintln!(
-                "nawa: warning: accepting unsigned repository index {} because --allow-unsigned was specified",
+            crate::nawa_warn!(
+                "accepting unsigned repository index {} because --allow-unsigned was specified",
                 file.display()
             );
         } else {
-            eprintln!(
-                "nawa: warning: repository index is unsigned ({})",
+            crate::nawa_warn!(
+                "repository index is unsigned ({})",
                 file.display()
             );
         }
@@ -400,7 +400,7 @@ pub fn verify_index_bytes(
     if !trusted.is_empty() {
         for (name, vk) in &trusted {
             if verify_bytes(bytes, vk, &sf.sig).is_ok() {
-                println!("nawa: repository index signature OK (trusted key {name})");
+                crate::nawa_success!("repository index signature OK (trusted key {name})");
                 return Ok(IndexTrust::TrustedKey { key_name: name.clone() });
             }
         }
@@ -411,8 +411,8 @@ pub fn verify_index_bytes(
     }
 
     verify_bytes(bytes, &sf.embedded, &sf.sig)?;
-    eprintln!(
-        "nawa: warning: no trusted keys configured — repository index verified against its embedded key only"
+    crate::nawa_warn!(
+        "no trusted keys configured — repository index verified against its embedded key only"
     );
     Ok(IndexTrust::EmbeddedKeyOnly)
 }
@@ -441,7 +441,7 @@ pub fn verify_standalone(file: &Path, root: &Path, key: Option<&Path>) -> Result
     }
     if trusted_keys(root)?.is_empty() {
         verify(file, &sf.embedded, &sf.sig)?;
-        eprintln!("nawa: warning: no trusted keys configured — verified against embedded key");
+        crate::nawa_warn!("no trusted keys configured — verified against embedded key");
         println!("{}: signature OK (embedded key)", file.display());
         return Ok(());
     }
