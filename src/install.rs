@@ -499,9 +499,9 @@ fn install_archive_payload(
     }
 
     if is_upgrade {
-        crate::nawa_info!("upgraded {} (previous version kept for rollback)", entry.version_full());
+        crate::nawa_success!("upgraded {} (previous version kept for rollback)", entry.version_full());
     } else {
-        crate::nawa_info!("installed {} into {}", entry.version_full(), root.display());
+        crate::nawa_success!("installed {} into {}", entry.version_full(), root.display());
     }
     Ok(entry)
 }
@@ -676,7 +676,7 @@ pub fn rollback(name: &str, root: &Path) -> Result<()> {
 }
 
 fn report_restored(entry: &Entry, how: &str) {
-    crate::nawa_info!(
+    crate::nawa_success!(
         "rolled back to {} (verified: {how})",
         entry.version_full()
     );
@@ -836,7 +836,7 @@ pub fn remove_with(name: &str, root: &Path, force: bool) -> Result<()> {
     }
 
     run_hook("post_remove", &hooks.post_remove, root)?;
-    crate::nawa_info!(
+    crate::nawa_success!(
         "removed {} from {} (rollback available via cached archive)",
         entry.version_full(),
         root.display()

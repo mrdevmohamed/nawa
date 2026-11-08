@@ -622,7 +622,7 @@ pub(crate) fn run_plan(
             return Err(e);
         }
     }
-    crate::nawa_info!(
+    crate::nawa_success!(
         "done — {total} package(s) installed in {}",
         format_duration(started.elapsed().as_secs())
     );
@@ -811,7 +811,7 @@ pub(crate) fn cmd_autoremove(ctx: &Ctx, dry_run: bool, yes: bool, build_deps: bo
         }
     }
     op.finish(None)?;
-    crate::nawa_info!("done — {} package(s) removed", order.len());
+    crate::nawa_success!("done — {} package(s) removed", order.len());
     Ok(())
 }
 

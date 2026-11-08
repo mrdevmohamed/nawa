@@ -126,7 +126,7 @@ pub fn sync(root: &Path, repo_ref: &RepoRef, dest: &Path, opts: &SyncOpts) -> Re
     let tmp = rev_path.with_extension("rev.part");
     std::fs::write(&tmp, format!("{}\n", rec.rev))?;
     std::fs::rename(&tmp, &rev_path)?;
-    crate::nawa_info!("recipes synced to {} ({count} recipes) -> {}", rec.rev, dest.display());
+    crate::nawa_success!("recipes synced to {} ({count} recipes) -> {}", rec.rev, dest.display());
     Ok(())
 }
 

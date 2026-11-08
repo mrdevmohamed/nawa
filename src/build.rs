@@ -790,7 +790,7 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
         } else {
             archive::create_with_hooks(&sp.dir, &sub_info, None, &sub_path)?;
         }
-        crate::nawa_info!(
+        crate::nawa_success!(
             "built {sub_name}-{}-{} ({} files) -> {}",
             rec.package.version,
             rec.package.rel,
@@ -805,7 +805,7 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
         let _ = std::fs::remove_dir_all(&root.dir);
     }
 
-    crate::nawa_info!(
+    crate::nawa_success!(
         "built {} ({} files){} -> {}",
         rec.id(),
         files.len(),
