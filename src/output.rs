@@ -66,12 +66,12 @@ fn write_line<W: Write>(
     .brand("nawa:");
     let label = level.label();
     if label.is_empty() {
-        let _ = writeln!(stream, "{brand}nawa:{brand:#} {args}");
+        let _ = writeln!(stream, "{brand} {args}");
     } else {
         let style = level.style();
         let _ = writeln!(
             stream,
-            "{brand}nawa:{brand:#} {style}{label}{style:#} {args}"
+            "{brand} {style}{label}{style:#} {args}"
         );
     }
 }
