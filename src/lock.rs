@@ -70,8 +70,8 @@ pub fn acquire(root: &Path, mode: Mode) -> Result<Option<DbLock>> {
             Attempt::Busy => {
                 if !announced {
                     announced = true;
-                    eprintln!(
-                        "nawa: waiting for the package database lock ({}){}",
+                    crate::nawa_info_stderr!(
+                        "waiting for the package database lock ({}){}",
                         lock_path(root).display(),
                         holder_hint(root)
                     );

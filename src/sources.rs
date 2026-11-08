@@ -94,7 +94,7 @@ pub fn stage_sources(rec: &Recipe, work: &Path, src: &Path, cache: &Path, jobs: 
             .with_context(|| {
                 format!("fetch source `{}` of recipe {}", spec.name, rec.package.name)
             })?;
-        println!("nawa: source `{}` verified: {}", spec.name, dest.display());
+        crate::nawa_success!("source `{}` verified: {}", spec.name, dest.display());
 
         // unpack = true demands an archive; unpack = false always stages the
         // raw file; omitted detects by content, like the legacy path (§4.2)

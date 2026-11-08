@@ -175,7 +175,7 @@ pub(crate) fn setup_dir_root(spec: &SandboxSpec) -> Result<()> {
     let old_s = old.to_string_lossy().into_owned();
     chdir(&root_s).map_err(|e| anyhow::Error::msg(format!("chdir {}: {e}", root.display())))?;
     if let Err(err) = pivot_root(&root_s, &old_s) {
-        eprintln!("nawa: sandbox: pivot_root failed ({err}) — falling back to chroot");
+        crate::nawa_info_stderr!("sandbox: pivot_root failed ({err}) — falling back to chroot");
         chroot(&root_s)
             .map_err(|e| anyhow::Error::msg(format!("chroot {}: {e}", root.display())))?;
     }
@@ -280,8 +280,8 @@ fn mountpoint_visible(exists: std::io::Result<bool>, path: &Path) -> Result<bool
     match exists {
         Ok(exists) => Ok(exists),
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-            eprintln!(
-                "nawa: sandbox: note: skipping mountpoint inaccessible to the sandbox identity: {}",
+            crate::nawa_note_stderr!(
+                "sandbox: skipping mountpoint inaccessible to the sandbox identity: {}",
                 path.display()
             );
             Ok(false)
@@ -567,7 +567,7 @@ pub(crate) fn setup_dev(dev: &Path, scratch: &Path) -> Result<()> {
     for node in ["null", "zero", "full", "random", "urandom", "tty"] {
         let src = PathBuf::from("/dev").join(node);
         if !src.exists() {
-            eprintln!("nawa: sandbox: note: host /dev/{node} missing, skipped");
+            crate::nawa_note_stderr!("sandbox: host /dev/{node} missing, skipped");
             continue;
         }
         let staged = staging.join(node);
