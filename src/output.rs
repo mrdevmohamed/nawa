@@ -81,12 +81,12 @@ fn emit_to(level: Level, args: fmt::Arguments<'_>, stderr: bool) {
         let raw = io::stderr();
         let choice = color_choice(&raw);
         let mut stream = AutoStream::new(raw, choice);
-        write_line(&mut stream, level, args);
+        write_line(&mut stream, level, args, true);
     } else {
         let raw = io::stdout();
         let choice = color_choice(&raw);
         let mut stream = AutoStream::new(raw, choice);
-        write_line(&mut stream, level, args);
+        write_line(&mut stream, level, args, false);
     }
 }
 

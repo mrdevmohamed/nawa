@@ -53,6 +53,11 @@ impl Palette {
         }
     }
 
+    /// The application prefix used by all status messages.
+    pub fn brand(&self, s: &str) -> String {
+        self.wrap(Style::new().fg_color(Some(AnsiColor::Cyan.into())).bold(), s)
+    }
+
     /// Package / command names in user-facing listings.
     pub fn name(&self, s: &str) -> String {
         self.wrap(Style::new().bold(), s)
