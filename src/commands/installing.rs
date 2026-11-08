@@ -302,7 +302,16 @@ fn install_one(
         .ok_or_else(|| anyhow::anyhow!("cannot read package name from {}", archive.display()))?;
     let db = db::Db::new(&ctx.root);
     let before = db.entry(&package)?;
-    let target = install::inspect_archive_state(archive, request.reason, before.as_ref())?;
+    // A package that was explicitly requested must stay explicit even when
+    // a group later upgrades it. "keep" preserves the existing DB reason.
+    let effective_reason = if request.reason == "group"
+        && before.as_ref().is_some_and(|entry| entry.reason == "explicit")
+    {
+        "keep"
+    } else {
+        request.reason
+    };
+    let target = install::inspect_archive_state(archive, effective_reason, before.as_ref())?;
     if let Some(expected) = request.index_sha256 {
         if expected != target.artifact_sha256 {
             bail!(
@@ -330,14 +339,14 @@ fn install_one(
                 repo_id: open.base_url.as_deref(),
             });
             install::install_archive_from_index_proof(
-                archive, &ctx.root, flags.force, expected, request.reason, proof,
+                archive, &ctx.root, flags.force, expected, effective_reason, proof,
             )
         }
         pinned => {
             let expected = pinned.unwrap_or(target.artifact_sha256.as_str());
             install::install_archive_pinned(
                 archive, &ctx.root, flags.force, flags.allow_unsigned, None,
-                request.reason, Some(expected),
+                effective_reason, Some(expected),
             )
         },
     };
@@ -761,7 +770,17 @@ pub(crate) fn cmd_autoremove(ctx: &Ctx, dry_run: bool, yes: bool, build_deps: bo
         );
     }
     let installed = db::Db::new(&ctx.root).installed()?;
-    let orphans = plan::orphans(&installed, &known, build_deps);
+    // Membership files are the authoritative roots for package groups. Do
+    // not let autoremove discard a direct group member merely because it was
+    // originally pulled in as a dependency before the group was installed.
+    let group_owned = groups::membership::group_owned_packages(&ctx.root, None)?;
+    let mut orphan_view = installed.clone();
+    for entry in &mut orphan_view {
+        if group_owned.contains(&entry.name) && entry.reason == "dependency" {
+            entry.reason = "group".to_string();
+        }
+    }
+    let orphans = plan::orphans(&orphan_view, &known, build_deps);
     if orphans.is_empty() {
         crate::nawa_info!("nothing to remove");
         return Ok(());
