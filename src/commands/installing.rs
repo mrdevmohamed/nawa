@@ -11,6 +11,21 @@ pub(crate) fn cmd_install(
     mode: Option<InstallMode>,
     repo: Option<String>,
 ) -> Result<()> {
+    cmd_install_with_why(ctx, targets, flags, no_deps, key, mode, repo, plan::Why::Explicit, None)
+}
+
+#[allow(clippy::too_many_arguments)] // mirrors cmd_install and adds an explicit install reason
+pub(crate) fn cmd_install_with_why(
+    ctx: &Ctx,
+    targets: &[String],
+    flags: &PlanFlags,
+    no_deps: bool,
+    key: Option<PathBuf>,
+    mode: Option<InstallMode>,
+    repo: Option<String>,
+    target_why: plan::Why,
+    group_id: Option<&str>,
+) -> Result<()> {
     let archives = targets.iter().filter(|t| is_archive_arg(t)).count();
     if archives == targets.len() {
         for t in targets {
@@ -87,11 +102,24 @@ pub(crate) fn cmd_install(
         }
     }
 
-    let plan = plan::install_plan(&recipe_targets, &installed, &known, plan::Why::Explicit, !no_deps)?;
+    let plan = plan::install_plan(&recipe_targets, &installed, &known, target_why, !no_deps)?;
     for name in &plan.up_to_date {
         crate::nawa_info!("{name} is already installed and up to date");
     }
     if plan.items.is_empty() && extras.is_empty() {
+        // A group install still changes durable membership even when every
+        // selected package is already present, so keep it visible in history.
+        if let Some(id) = group_id.filter(|_| !flags.dry_run) {
+            let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
+            let mut op = transaction::begin_operation(
+                &ctx.root,
+                transaction::OperationCommand::GroupInstall,
+                &remaining_targets,
+                &[],
+            )?;
+            op.record_group(id);
+            op.finish(None)?;
+        }
         return Ok(());
     }
     // one transaction for the whole command (roadmap §5.1): the id is
@@ -105,14 +133,22 @@ pub(crate) fn cmd_install(
         .collect();
     {
         let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
+        let command = if group_id.is_some() {
+            transaction::OperationCommand::GroupInstall
+        } else {
+            transaction::OperationCommand::Install
+        };
         let mut op = transaction::begin_operation(
             &ctx.root,
-            transaction::OperationCommand::Install,
+            command,
             &requested,
             &repo_ids,
         )?;
+        if let Some(id) = group_id {
+            op.record_group(id);
+        }
         drop(_lock);
-        let result = run_plan(ctx, &plan, flags, &sourcing, &extras, &mut op);
+        let result = run_plan(ctx, &plan, flags, &sourcing, &extras, &mut op, target_why);
         let err = result.err();
         {
             let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
@@ -288,7 +324,16 @@ fn install_one(
         .ok_or_else(|| anyhow::anyhow!("cannot read package name from {}", archive.display()))?;
     let db = db::Db::new(&ctx.root);
     let before = db.entry(&package)?;
-    let target = install::inspect_archive_state(archive, request.reason, before.as_ref())?;
+    // A package that was explicitly requested must stay explicit even when
+    // a group later upgrades it. "keep" preserves the existing DB reason.
+    let effective_reason = if request.reason == "group"
+        && before.as_ref().is_some_and(|entry| entry.reason == "explicit")
+    {
+        "keep"
+    } else {
+        request.reason
+    };
+    let target = install::inspect_archive_state(archive, effective_reason, before.as_ref())?;
     if let Some(expected) = request.index_sha256 {
         if expected != target.artifact_sha256 {
             bail!(
@@ -316,14 +361,14 @@ fn install_one(
                 repo_id: open.base_url.as_deref(),
             });
             install::install_archive_from_index_proof(
-                archive, &ctx.root, flags.force, expected, request.reason, proof,
+                archive, &ctx.root, flags.force, expected, effective_reason, proof,
             )
         }
         pinned => {
             let expected = pinned.unwrap_or(target.artifact_sha256.as_str());
             install::install_archive_pinned(
                 archive, &ctx.root, flags.force, flags.allow_unsigned, None,
-                request.reason, Some(expected),
+                effective_reason, Some(expected),
             )
         },
     };
@@ -383,6 +428,7 @@ pub(crate) fn run_plan(
     sourcing: &Sourcing,
     extras: &[repo::RepoEntry],
     op: &mut transaction::OperationHandle,
+    extras_why: plan::Why,
 ) -> Result<()> {
     let total = plan.items.len() + extras.len();
     if total == 0 {
@@ -599,7 +645,7 @@ pub(crate) fn run_plan(
                 &archive,
                 flags,
                 InstallRequest {
-                    reason: "explicit",
+                    reason: extras_why.db_reason(),
                     what: &what,
                     number: n,
                     total,
@@ -721,7 +767,7 @@ pub(crate) fn cmd_update(
             &repo_ids,
         )?
     };
-    let result = run_plan(ctx, &plan, flags, &sourcing, &[], &mut op);
+    let result = run_plan(ctx, &plan, flags, &sourcing, &[], &mut op, plan::Why::Update);
     let err = result.err();
     {
         let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
@@ -746,7 +792,17 @@ pub(crate) fn cmd_autoremove(ctx: &Ctx, dry_run: bool, yes: bool, build_deps: bo
         );
     }
     let installed = db::Db::new(&ctx.root).installed()?;
-    let orphans = plan::orphans(&installed, &known, build_deps);
+    // Membership files are the authoritative roots for package groups. Do
+    // not let autoremove discard a direct group member merely because it was
+    // originally pulled in as a dependency before the group was installed.
+    let group_owned = groups::membership::group_owned_packages(&ctx.root, None)?;
+    let mut orphan_view = installed.clone();
+    for entry in &mut orphan_view {
+        if group_owned.contains(&entry.name) && entry.reason == "dependency" {
+            entry.reason = "group".to_string();
+        }
+    }
+    let orphans = plan::orphans(&orphan_view, &known, build_deps);
     if orphans.is_empty() {
         crate::nawa_info!("nothing to remove");
         return Ok(());

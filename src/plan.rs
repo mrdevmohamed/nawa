@@ -22,6 +22,8 @@ pub enum Why {
     Explicit,
     /// pulled in as a dependency of something else
     Dependency,
+    /// requested directly as a member of a package group
+    Group,
     /// an installed package being brought to the recipe's version
     /// (keeps whatever reason it already had)
     Update,
@@ -33,6 +35,7 @@ impl Why {
         match self {
             Why::Explicit => "explicit",
             Why::Dependency => "dependency",
+            Why::Group => "group",
             Why::Update => "keep",
         }
     }
@@ -41,6 +44,7 @@ impl Why {
         match self {
             Why::Explicit => "explicit",
             Why::Dependency => "dependency",
+            Why::Group => "group",
             Why::Update => "update",
         }
     }
@@ -388,6 +392,28 @@ mod tests {
         let mut both = orphans(&have, &known, true);
         both.sort();
         assert_eq!(both, ["gcc", "stale"], "--build-deps frees them");
+    }
+
+    #[test]
+    fn group_direct_members_are_roots_for_autoremove() {
+        let known = tree(vec![
+            rec("dev-tool", "1", &[], &["shared-lib"]),
+            rec("shared-lib", "1", &[], &[]),
+        ]);
+        let have = vec![
+            entry("dev-tool", "1", "group", &["shared-lib"]),
+            entry("shared-lib", "1", "dependency", &[]),
+            entry("stale", "1", "dependency", &[]),
+        ];
+        assert_eq!(orphans(&have, &known, false), ["stale"]);
+    }
+
+    #[test]
+    fn group_install_reason_is_distinct_from_explicit() {
+        let known = tree(vec![rec("dev-tool", "1", &[], &[])]);
+        let plan = install_plan(&["dev-tool".into()], &HashMap::new(), &known, Why::Group, true).unwrap();
+        assert_eq!(plan.items[0].why.db_reason(), "group");
+        assert_eq!(plan.items[0].why.label(), "group");
     }
 
     #[test]

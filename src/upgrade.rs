@@ -58,6 +58,8 @@ pub struct OpenRepo {
     /// The public key bytes of the trusted signer, when the index was
     /// authenticated by a configured trusted key.
     pub signer_public: Option<Vec<u8>>,
+    /// Parsed catalog whose exact bytes match the signed index digest.
+    pub groups: Option<crate::groups::GroupCatalog>,
 }
 
 /// Fetch (remote) or locate (local) a repository, then parse and
@@ -166,6 +168,40 @@ pub fn open_repo(
     let index = repo::load_index_bytes(&index_bytes)?;
     let index_trust = sign::verify_index_bytes(&index_bytes, &index_path, root, allow_unsigned)
         .map_err(|e| anyhow::anyhow!("repository index signature is INVALID or untrusted: {e:#}"))?;
+    // Group definitions are supplemental metadata: usable only when the
+    // index itself was authenticated by a key in the configured trust store.
+    // The signed index pins the exact catalog bytes by SHA-256.
+    let groups = match &index.groups {
+        Some(entry) => {
+            if !index_trust.is_trusted() {
+                bail!("repository publishes package groups but its index is not authenticated by a trusted key");
+            }
+            let path = repo_dir.join(&entry.file);
+            if let Some(url) = &base_url {
+                fetch::download_cached(
+                    &format!("{url}/{}", entry.file),
+                    &path,
+                    Some(&entry.sha256),
+                ).with_context(|| format!("fetch signed group catalog {}", entry.file))?;
+            } else if !path.is_file() {
+                bail!("group catalog {} referenced by the signed index is missing", path.display());
+            }
+            fetch::verify_sha256(&path, &entry.sha256)?;
+            let actual_size = std::fs::metadata(&path)
+                .with_context(|| format!("stat group catalog {}", path.display()))?
+                .len();
+            if actual_size != entry.size {
+                bail!("group catalog {} size mismatch: index says {} bytes, file has {} bytes",
+                    entry.file, entry.size, actual_size);
+            }
+            let raw = std::fs::read_to_string(&path)
+                .with_context(|| format!("read group catalog {}", path.display()))?;
+            Some(crate::groups::GroupCatalog::from_toml(&raw)
+                .with_context(|| format!("parse signed group catalog {}", path.display()))?)
+        }
+        None => None,
+    };
+
     let distributed_locations = index.repository.as_ref()
         .map(|meta| meta.archive_location == repo::ARCHIVE_LOCATION_PER_PACKAGE_URL)
         .unwrap_or(false);
@@ -211,6 +247,7 @@ pub fn open_repo(
         index_bytes,
         index_signature,
         signer_public,
+        groups,
     })
 }
 
@@ -744,6 +781,7 @@ mod tests {
             expires: Some(20),
             repository: Some(repo::RepositoryMeta::v2()),
             recipes: None,
+            groups: None,
             packages: Vec::new(),
         };
         assert_eq!(
@@ -976,7 +1014,7 @@ mod tests {
     fn index_older_than_seen_is_rejected() {
         let base = tmpdir("freshness");
         std::fs::write(base.join("index.seen"), "200").unwrap();
-        let idx = |g| repo::Index { generated: Some(g), expires: None, repository: None, recipes: None, packages: vec![] };
+        let idx = |g| repo::Index { generated: Some(g), expires: None, repository: None, recipes: None, groups: None, packages: vec![] };
         assert!(check_index_freshness(&base, &idx(100), true, false, true).is_err());
         assert!(check_index_freshness(&base, &idx(300), true, false, true).is_ok());
         assert_eq!(std::fs::read_to_string(base.join("index.seen")).unwrap(), "300");
@@ -1018,7 +1056,7 @@ mod tests {
     #[test]
     fn expired_remote_index_is_refused_unless_forced() {
         let base = tmpdir("expiry");
-        let idx = repo::Index { generated: Some(1000), expires: Some(2000), repository: None, recipes: None, packages: vec![] };
+        let idx = repo::Index { generated: Some(1000), expires: Some(2000), repository: None, recipes: None, groups: None, packages: vec![] };
         assert!(check_index_freshness(&base, &idx, true, false, true).is_err());
         assert!(check_index_freshness(&base, &idx, true, true, true).is_ok());
         // local repos only warn
@@ -1038,6 +1076,7 @@ mod tests {
             expires: Some(ahead + 10_000),
             repository: None,
             recipes: None,
+            groups: None,
             packages: vec![],
         };
         // a clock that runs behind the publisher still gets a usable index ...
@@ -1050,6 +1089,7 @@ mod tests {
             expires: Some(now + 10_000),
             repository: None,
             recipes: None,
+            groups: None,
             packages: vec![],
         };
         assert!(check_index_freshness(&base, &current, true, false, true).is_ok());

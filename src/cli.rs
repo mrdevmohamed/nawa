@@ -303,6 +303,9 @@ pub(crate) enum Cmd {
         /// Revision recorded for --recipes (commit sha or tag)
         #[arg(long, requires = "recipes")]
         recipes_rev: Option<String>,
+        /// Publish this validated group catalog as signed index metadata
+        #[arg(long, requires = "sign")]
+        groups: Option<PathBuf>,
     },
 
     /// Update a signed repository index incrementally; no archive is opened
@@ -610,7 +613,14 @@ pub(crate) enum GroupCmd {
     /// Show a group's recorded membership
     Info { id: String },
     /// Install a group's packages through the normal planner
-    Install { id: String },
+    Install {
+        id: String,
+        /// Include optional packages listed by the group definition
+        #[arg(long)]
+        with_optional: bool,
+        #[command(flatten)]
+        flags: PlanFlags,
+    },
     /// Remove a group's membership and its now-unneeded packages
     Remove {
         id: String,
@@ -745,8 +755,11 @@ pub(crate) fn lock_mode(cmd: &Cmd) -> Option<lock::Mode> {
         | Cmd::Service { .. }
         | Cmd::CompletePkgs => None,
         Cmd::Group { action } => match action {
-                GroupCmd::List | GroupCmd::Info { .. } => None,
-                GroupCmd::Install { .. } | GroupCmd::Remove { .. } => Some(Exclusive),
+                // Group install delegates to the ordinary install path, which
+                // acquires short per-transaction locks itself. Holding an
+                // outer lock here would deadlock that path.
+                GroupCmd::List | GroupCmd::Info { .. } | GroupCmd::Install { .. } => None,
+                GroupCmd::Remove { .. } => Some(Exclusive),
             },
         Cmd::Repolist { .. } | Cmd::Repoquery { .. } | Cmd::Makecache { .. } | Cmd::Clean { .. }
         | Cmd::Plugin { .. } | Cmd::SandboxInit { .. } | Cmd::SandboxProbe { .. }
@@ -909,6 +922,15 @@ pub(crate) fn completions_script(shell: Shell) -> &'static str {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    #[test]
+    fn group_install_does_not_take_an_outer_database_lock() {
+        let install = Cli::try_parse_from(["nawa", "group", "install", "dev"]).unwrap();
+        assert!(lock_mode(&install.cmd).is_none());
+
+        let remove = Cli::try_parse_from(["nawa", "group", "remove", "dev"]).unwrap();
+        assert_eq!(lock_mode(&remove.cmd), Some(lock::Mode::Exclusive));
+    }
 
     #[test]
     fn reserved_commands_cover_every_builtin_cli_command() {
