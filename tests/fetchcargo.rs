@@ -1350,3 +1350,85 @@ fn cargo_fetch_env_reaches_the_build_at_isolation_none() {
     );
     let _ = fs::remove_dir_all(&s);
 }
+
+
+// ---------------------------------------------------------------------------
+// Relative paths passed to the fetch runner
+// ---------------------------------------------------------------------------
+
+/// Regression for invoking `nawa fetch` from a project directory with a
+/// relative --builddir. Cargo runs from an isolated temporary cwd, so every
+/// host-side path passed to its probe and fetch command must already be
+/// absolute (including the default source-cache path).
+#[test]
+fn fetch_all_resolves_relative_builddir_before_running_cargo() {
+    let s = scratch("relative-builddir");
+    let main = s.join("main");
+    fs::create_dir_all(main.join("src")).unwrap();
+    fs::write(
+        main.join("Cargo.toml"),
+        b"[package]\nname = \"relative-fetch-fixture\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    fs::write(main.join("src/main.rs"), b"fn main() {}\n").unwrap();
+
+    let cg_home = s.join("cg-setup");
+    fs::create_dir_all(&cg_home).unwrap();
+    let lock = generate_lock(&main, &cg_home);
+    let files = vec![
+        ("Cargo.toml".to_string(), fs::read(main.join("Cargo.toml")).unwrap()),
+        ("Cargo.lock".to_string(), lock),
+        ("src/main.rs".to_string(), fs::read(main.join("src/main.rs")).unwrap()),
+    ];
+    let tar = fixture_tar_gz("main-1.0", &files);
+    let tar_sha = sha256(&tar);
+    let (addr, _) = route_server(vec![("/src.tar.gz", Some(tar))]);
+    write_recipe(&s.join("recipes/cargo-b"), &recipe(&tar_sha, &addr, "echo built"));
+
+    // Deliberately use relative recipe/build paths and leave NAWA_SRCCACHE
+    // unset so the default build/distfiles path is covered as well.
+    let cargo = cargo_dir();
+    let output = nawa()
+        .current_dir(&s)
+        .args([
+            "--recipes", "recipes",
+            "--builddir", "build",
+            "fetch",
+            "--all",
+            "--isolation", "env",
+        ])
+        .env("NAWA_FETCH_PATH", &cargo)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "fetch --all failed with relative paths:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    let work = s.join("build/cargo-b-1.0-1");
+    assert!(
+        work.join("fetch/verq/version").is_file(),
+        "cargo --version output must be written to the absolute per-build path"
+    );
+    assert!(
+        work.join("fetch-cargo.log").is_file(),
+        "the Cargo populate command must run after the version probe"
+    );
+
+    let cache = s.join("build/distfiles/fetch/cargo");
+    let entries: Vec<PathBuf> = fs::read_dir(&cache)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir() && path.join("nawa-complete").is_file())
+        .collect();
+    assert_eq!(
+        entries.len(),
+        1,
+        "the Cargo cache entry must be published under the resolved default source cache"
+    );
+
+    let _ = fs::remove_dir_all(&s);
+}

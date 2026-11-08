@@ -16,7 +16,7 @@
 
 use crate::*;
 use anyhow::{bail, Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn cmd_fetch(
@@ -71,13 +71,29 @@ pub(crate) fn cmd_fetch(
         return Ok(());
     }
 
+    // Fetch runners execute Cargo from an isolated temporary working
+    // directory. Resolve every host-side workspace path before handing it
+    // to them; relative CARGO_HOME, manifest and output paths would otherwise
+    // be interpreted relative to that temporary cwd.
+    let cwd = std::env::current_dir().context("resolve the fetch working directory")?;
+    let builddir = if ctx.builddir.is_absolute() {
+        ctx.builddir.clone()
+    } else {
+        cwd.join(&ctx.builddir)
+    };
+    std::fs::create_dir_all(&builddir)
+        .with_context(|| format!("create build directory {}", builddir.display()))?;
+    let builddir = std::fs::canonicalize(&builddir)
+        .with_context(|| format!("resolve build directory {}", builddir.display()))?;
+
     let srccache = std::env::var_os("NAWA_SRCCACHE")
         .map(PathBuf::from)
-        .unwrap_or_else(|| ctx.builddir.join("distfiles"));
+        .map(|path| if path.is_absolute() { path } else { cwd.join(path) })
+        .unwrap_or_else(|| builddir.join("distfiles"));
     info_mode(&recs, sources_only, offline);
 
     for rec in &recs {
-        fetch_one(ctx, rec, &srccache, isolation, sources_only, offline, allow_degraded)
+        fetch_one(ctx, &builddir, rec, &srccache, isolation, sources_only, offline, allow_degraded)
             .with_context(|| format!("fetching sources for {}", rec.id()))?;
     }
     println!(
@@ -113,6 +129,7 @@ fn info_mode(recs: &[recipe::Recipe], sources_only: bool, offline: bool) {
 #[allow(clippy::too_many_arguments)]
 fn fetch_one(
     ctx: &Ctx,
+    builddir: &Path,
     rec: &recipe::Recipe,
     srccache: &std::path::Path,
     isolation: Option<&str>,
@@ -135,7 +152,7 @@ fn fetch_one(
             .with_context(|| format!("assets of recipe {}", rec.package.name))?;
     }
 
-    let work = ctx.builddir.join(rec.id());
+    let work = builddir.join(rec.id());
     let src = work.join("src");
 
     // ---- sources ----------------------------------------------------------
@@ -209,7 +226,7 @@ fn fetch_one(
             closure::assemble(
                 &members,
                 &known,
-                &ctx.builddir.join("out"),
+                &builddir.join("out"),
                 &root_dir,
                 &ctx.root,
                 false,
