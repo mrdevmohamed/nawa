@@ -87,19 +87,34 @@ pub fn open_repo(
                 .with_context(|| format!("create cache {}", cache.display()))?;
             let index_path = cache.join("index.toml");
             let index_url = format!("{url}/index.toml");
+            let mut index_refresh_unavailable = false;
             if index_path.exists() {
-                // refresh in place; on network failure keep the cached index
+                // A failed cache write is not a network failure. Keep the
+                // authenticated cached index, but report the actual cause.
                 match fetch::download_opt(&index_url, &cache.join("index.toml.part")) {
                     Ok(true) => {
                         std::fs::rename(cache.join("index.toml.part"), &index_path)?;
                     }
                     Ok(false) => bail!("remote index not available (HTTP error): {index_url}"),
-                    Err(e) => eprintln!(
-                        "nawa: warning: cannot reach {url} ({e:#}) — using cached index"
-                    ),
+                    Err(e) if crate::diag::has_io_kind(
+                        &e,
+                        std::io::ErrorKind::PermissionDenied,
+                    ) => {
+                        index_refresh_unavailable = true;
+                        let _ = std::fs::remove_file(cache.join("index.toml.part"));
+                        crate::nawa_warn!("repository cache is not writable; using cached index");
+                    }
+                    Err(e) => {
+                        index_refresh_unavailable = true;
+                        let _ = std::fs::remove_file(cache.join("index.toml.part"));
+                        crate::nawa_warn!(
+                            "cannot reach {url} ({}); using cached index",
+                            e.root_cause()
+                        );
+                    }
                 }
             } else {
-                println!("nawa: fetching index from {index_url}");
+                crate::nawa_info!("fetching index from {index_url}");
                 // land in a .part file first: an interrupted transfer must not
                 // leave a truncated index.toml behind as the "cached" copy
                 let part = cache.join("index.toml.part");
@@ -118,15 +133,25 @@ pub fn open_repo(
                 Ok(false) => {
                     let _ = std::fs::remove_file(&sig_part);
                     let _ = std::fs::remove_file(&sig_path);
-                    println!("nawa: note: remote repo publishes no index signature");
+                    crate::nawa_note!("remote repo publishes no index signature");
                 }
                 Err(e) if sig_path.exists() => {
                     let _ = std::fs::remove_file(&sig_part);
-                    eprintln!("nawa: warning: using cached index signature ({e:#})");
+                    if !index_refresh_unavailable {
+                        crate::nawa_warn!(
+                            "cannot refresh repository signature; using cached signature ({})",
+                            e.root_cause()
+                        );
+                    }
                 }
                 Err(e) => {
                     let _ = std::fs::remove_file(&sig_part);
-                    eprintln!("nawa: note: could not fetch index signature ({e:#})");
+                    if !index_refresh_unavailable {
+                        crate::nawa_note_stderr!(
+                            "repository signature unavailable ({})",
+                            e.root_cause()
+                        );
+                    }
                 }
             }
             repo_dir = cache;
@@ -148,12 +173,12 @@ pub fn open_repo(
         bail!("distributed schema-v3 repositories require a trusted signing key; refusing to use per-package URLs from an unauthenticated index");
     }
     let archive_auth = if index.repository.is_some() && index_trust.is_trusted() {
-        println!("nawa: repository schema v{}: package SHA-256 values authenticated by trusted index",
+        crate::nawa_info!("repository schema v{}: package SHA-256 values authenticated by trusted index",
             index.repository.as_ref().map(|meta| meta.schema).unwrap_or(1));
         ArchiveAuth::SignedIndexSha256
     } else {
         if index.repository.is_some() {
-            eprintln!("nawa: note: v2 index is not authenticated by a configured trusted key; using legacy per-archive signature policy");
+            crate::nawa_note_stderr!("v2 index is not authenticated by a configured trusted key; using legacy per-archive signature policy");
         }
         ArchiveAuth::DetachedSignature
     };
@@ -276,8 +301,8 @@ pub fn fetch_entry(
                                 format!("could not fetch signature for {}", re.file)
                             });
                         }
-                        eprintln!(
-                            "nawa: warning: could not refresh signature for {} ({e:#}); using cached signature",
+                        crate::nawa_warn!(
+                            "could not refresh signature for {} ({e:#}); using cached signature",
                             re.file
                         );
                     }
@@ -335,7 +360,7 @@ pub fn upgrade(
     }
 
     if plan.is_empty() {
-        println!("nawa: everything up to date ({} installed)", db.installed()?.len());
+        crate::nawa_info!("everything up to date ({} installed)", db.installed()?.len());
         return Ok(());
     }
 
@@ -349,7 +374,7 @@ pub fn upgrade(
             order_with_fallback(&names, &installed, &tree)
         }
         _ => {
-            eprintln!("nawa: note: no recipe tree at {} — applying in alphabetical order", recipes.display());
+            crate::nawa_note_stderr!("no recipe tree at {} — applying in alphabetical order", recipes.display());
             let mut n = names.clone();
             n.sort();
             n
@@ -357,7 +382,7 @@ pub fn upgrade(
     };
 
     let pal = crate::color::Palette::auto(crate::color::Stream::Stdout);
-    println!("nawa: {} package(s) to upgrade:", plan.len());
+    crate::nawa_info!("{} package(s) to upgrade:", plan.len());
     for name in &ordered {
         let (_, new) = plan.iter().find(|(r, _)| &r.name == name).unwrap();
         let cur = db.entry(name)?.map(|e| e.version_full()).unwrap_or_default();
@@ -371,7 +396,7 @@ pub fn upgrade(
     }
 
     if opts.dry_run {
-        println!("nawa: dry run — no changes made");
+        crate::nawa_info!("dry run — no changes made");
         return Ok(());
     }
 
@@ -476,7 +501,7 @@ pub fn upgrade(
     if let Some(e) = first_err {
         return Err(e.context(format!("upgraded {done} of {} package(s) before the failure", ordered.len())));
     }
-    println!("nawa: upgraded {done} package(s)");
+    crate::nawa_info!("upgraded {done} package(s)");
     Ok(())
 }
 
@@ -489,7 +514,7 @@ pub fn upgrade(
 /// could then run code as root through package files and hooks.
 fn require_trust_for_remote(root: &Path, url: &str, allow_unsigned: bool) -> Result<()> {
     if allow_unsigned {
-        eprintln!("nawa: warning: --allow-unsigned: {url} is NOT authenticated");
+        crate::nawa_warn!("--allow-unsigned: {url} is NOT authenticated");
         return Ok(());
     }
     if sign::trusted_keys(root)?.is_empty() {
@@ -500,7 +525,7 @@ fn require_trust_for_remote(root: &Path, url: &str, allow_unsigned: bool) -> Res
         );
     }
     if url.starts_with("http://") {
-        eprintln!("nawa: warning: {url} uses plain http — authenticity relies on signatures only");
+        crate::nawa_warn!("{url} uses plain http — authenticity relies on signatures only");
     }
     Ok(())
 }
@@ -522,7 +547,7 @@ fn check_index_freshness(
     let gen = match index.generated {
         Some(g) => g,
         None => {
-            eprintln!("nawa: note: index has no timestamp — no rollback protection");
+            crate::nawa_note_stderr!("index has no timestamp — no rollback protection");
             return Ok(());
         }
     };
@@ -568,12 +593,12 @@ fn check_index_freshness(
                     (now - exp) / 86400
                 );
             }
-            eprintln!("nawa: warning: repository index has expired");
+            crate::nawa_warn!("repository index has expired");
         }
     }
     if now > gen && now - gen > 30 * 24 * 3600 {
-        eprintln!(
-            "nawa: warning: repository index is {} days old",
+        crate::nawa_warn!(
+            "repository index is {} days old",
             (now - gen) / 86400
         );
     }
@@ -663,7 +688,7 @@ fn order_with_fallback(
             .filter(|n| planned.contains(n))
             .collect(),
         Err(_) => {
-            eprintln!("nawa: warning: recipe graph incomplete for this plan — alphabetical order");
+            crate::nawa_warn!("recipe graph incomplete for this plan — alphabetical order");
             let mut k = known.clone();
             k.sort();
             k

@@ -335,19 +335,19 @@ fn install_archive_payload(
             match &auth {
                 InstallAuth::SignedIndex { index_bytes, index_signature, signer_public, repo_id } => {
                     if let Err(e) = artifact::save_provenance(root, &prov) {
-                        eprintln!("nawa: warning: could not record artifact provenance: {e:#}");
+                        crate::nawa_warn!("could not record artifact provenance: {e:#}");
                     } else if let (Some(idx), Some(key)) = (index_bytes, signer_public) {
                         if let Err(e) = artifact::retain_repository_proof(
                             root, &digest, idx, index_signature.as_deref(), key,
                             repo_id.as_deref().unwrap_or("repository"), true,
                         ) {
-                            eprintln!("nawa: warning: could not retain repository proof: {e:#}");
+                            crate::nawa_warn!("could not retain repository proof: {e:#}");
                         }
                     }
                 }
                 InstallAuth::Detached { trusted: true } => {
                     if let Err(e) = artifact::save_provenance(root, &prov) {
-                        eprintln!("nawa: warning: could not record artifact provenance: {e:#}");
+                        crate::nawa_warn!("could not record artifact provenance: {e:#}");
                     } else {
                         // retain the detached signature that verified these
                         // bytes, so a later rollback can re-verify it
@@ -376,13 +376,13 @@ fn install_archive_payload(
             Some(digest)
         }
         Err(e) => {
-            eprintln!("nawa: warning: could not store the archive as a content-addressed object: {e:#}");
+            crate::nawa_warn!("could not store the archive as a content-addressed object: {e:#}");
             None
         }
     };
     if is_upgrade {
-        println!(
-            "nawa: upgrading {} {} -> {}-{}-{}",
+        crate::nawa_info!(
+            "upgrading {} {} -> {}-{}-{}",
             name,
             old.as_ref().map(|e| e.version_full()).unwrap_or_default(),
             name,
@@ -402,7 +402,7 @@ fn install_archive_payload(
     }
     let _ = std::fs::remove_dir_all(&tmp);
     for (orig, new) in &diverted {
-        println!("nawa: NOTE: installed {new} (local {orig} changed — merge manually)");
+        crate::nawa_note!("installed {new} (local {orig} changed — merge manually)");
     }
 
     // ---- delete files that disappeared between the two versions -------------
@@ -499,9 +499,9 @@ fn install_archive_payload(
     }
 
     if is_upgrade {
-        println!("nawa: upgraded {} (previous version kept for rollback)", entry.version_full());
+        crate::nawa_info!("upgraded {} (previous version kept for rollback)", entry.version_full());
     } else {
-        println!("nawa: installed {} into {}", entry.version_full(), root.display());
+        crate::nawa_info!("installed {} into {}", entry.version_full(), root.display());
     }
     Ok(entry)
 }
@@ -539,8 +539,8 @@ pub fn rollback(name: &str, root: &Path) -> Result<()> {
             bail!("`{name}` is already at {} — nothing to roll back", cur.version_full());
         }
     }
-    println!(
-        "nawa: rolling back {} -> {}",
+    crate::nawa_info!(
+        "rolling back {} -> {}",
         before.as_ref().map(|e| e.version_full()).unwrap_or_else(|| "(removed)".into()),
         prev.version_full()
     );
@@ -676,8 +676,8 @@ pub fn rollback(name: &str, root: &Path) -> Result<()> {
 }
 
 fn report_restored(entry: &Entry, how: &str) {
-    println!(
-        "nawa: rolled back to {} (verified: {how})",
+    crate::nawa_info!(
+        "rolled back to {} (verified: {how})",
         entry.version_full()
     );
 }
@@ -836,8 +836,8 @@ pub fn remove_with(name: &str, root: &Path, force: bool) -> Result<()> {
     }
 
     run_hook("post_remove", &hooks.post_remove, root)?;
-    println!(
-        "nawa: removed {} from {} (rollback available via cached archive)",
+    crate::nawa_info!(
+        "removed {} from {} (rollback available via cached archive)",
         entry.version_full(),
         root.display()
     );
@@ -1375,10 +1375,10 @@ pub fn recover_and_report(root: &Path) {
     match recover(root) {
         Ok(notes) => {
             for n in notes {
-                eprintln!("nawa: recovered: {n}");
+                crate::nawa_info_stderr!("recovered: {n}");
             }
         }
-        Err(e) => eprintln!("nawa: warning: could not check for an interrupted transaction: {e:#}"),
+        Err(e) => crate::nawa_warn!("could not check for an interrupted transaction: {e:#}"),
     }
 }
 
@@ -1731,7 +1731,7 @@ fn run_hook(label: &str, script: &str, root: &Path) -> Result<()> {
         .map(|p| p == Path::new("/"))
         .unwrap_or(false);
     let status = if live {
-        println!("nawa: running {label} hook");
+        crate::nawa_info!("running {label} hook");
         // Installing glibc over a seed with a different glibc swaps the
         // loader (/usr/lib64/ld-linux-x86-64.so.2) BEFORE /etc/ld.so.cache is
         // regenerated, so the hook's own bash would run on the new loader with
@@ -1757,7 +1757,7 @@ fn run_hook(label: &str, script: &str, root: &Path) -> Result<()> {
             .find(|sh| exists_in_root(root, sh));
         match shell {
             Some(sh) if running_as_root() => {
-                println!("nawa: running {label} hook in chroot {}", root.display());
+                crate::nawa_info!("running {label} hook in chroot {}", root.display());
                 let status = chroot_command(root, sh, script)?;
                 if !status.success() {
                     return Err(hook_failed(label));
@@ -1765,7 +1765,7 @@ fn run_hook(label: &str, script: &str, root: &Path) -> Result<()> {
                 return Ok(());
             }
             _ => {
-                println!("nawa: note: skipping {label} hook (--root is not / and no chroot possible)");
+                crate::nawa_note!("skipping {label} hook (--root is not / and no chroot possible)");
                 return Ok(());
             }
         }

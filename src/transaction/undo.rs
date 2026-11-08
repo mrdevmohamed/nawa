@@ -326,7 +326,7 @@ fn restore_object(root: &Path, object: &Path, digest: &str, reason: &str) -> Res
 pub fn print_history(root: &Path, limit: usize) -> Result<()> {
     let records = crate::transaction::history::list_records(root)?;
     if records.is_empty() {
-        println!("nawa: no transaction history yet");
+        crate::nawa_info!("no transaction history yet");
         return Ok(());
     }
     println!(
@@ -416,7 +416,7 @@ pub fn history_undo(root: &Path, id: u64, yes: bool) -> Result<()> {
     // main::run owns the exclusive database lock for history commands.
     // A second flock on another open file description would deadlock here.
     let plan = plan_undo(root, id)?;
-    println!("nawa: undoing transaction {id} ({}) — compensating steps:", plan.steps.len());
+    crate::nawa_info!("undoing transaction {id} ({}) — compensating steps:", plan.steps.len());
     for step in &plan.steps {
         match &step.action {
             UndoAction::Remove => println!("  remove     {}", step.package),
@@ -433,7 +433,7 @@ pub fn history_undo(root: &Path, id: u64, yes: bool) -> Result<()> {
             UndoAction::Nothing => {}
         }
     }
-    println!("nawa: note: package hooks and other external side effects are not reversed");
+    crate::nawa_note!("package hooks and other external side effects are not reversed");
     if !yes {
         crate::confirm::confirm(&format!("nawa: undo transaction {id}?"), false)?;
     }
@@ -453,7 +453,7 @@ pub fn history_undo(root: &Path, id: u64, yes: bool) -> Result<()> {
         Ok(_) => {
             op.finish(None)?;
             super::history::mark_undone_by(root, id, undo_id)?;
-            println!("nawa: transaction {id} undone (recorded as transaction {undo_id})");
+            crate::nawa_info!("transaction {id} undone (recorded as transaction {undo_id})");
             Ok(())
         }
         Err(error) => { op.finish(Some(&error))?; Err(error) }

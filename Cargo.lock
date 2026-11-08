@@ -573,6 +573,8 @@ dependencies = [
 name = "nawa"
 version = "1.0.0"
 dependencies = [
+ "anstream",
+ "anstyle",
  "anyhow",
  "bzip2",
  "clap",

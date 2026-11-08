@@ -198,7 +198,7 @@ pub fn assemble_cached(
             .with_context(|| format!("hash {}", archive.display()))?;
         let layer = layers_dir.join(&sha);
         if layer.is_dir() {
-            println!("nawa: closure: layer cache hit for {name}");
+            crate::nawa_info!("closure: layer cache hit for {name}");
         } else {
             progress(name);
             // extract next to the final name and rename: a half-written

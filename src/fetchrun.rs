@@ -609,8 +609,8 @@ fn isolated_cargo_paths(out_host: &Path) -> Result<(PathBuf, PathBuf)> {
 
 fn run_populate_cargo(r: &FetchRun, plan: &CargoPlan, temp: &Path) -> Result<()> {
     if !plan.git_deps.is_empty() {
-        eprintln!(
-            "nawa: fetch: warning: Cargo.lock uses git dependencies without registry checksums ({}); `cargo fetch` needs git in the fetch root, and such dependencies are verified only by their pinned commit (fetch-phase.md §8, §10.2)",
+        crate::nawa_warn!(
+            "fetch: Cargo.lock uses git dependencies without registry checksums ({}); `cargo fetch` needs git in the fetch root, and such dependencies are verified only by their pinned commit (fetch-phase.md §8, §10.2)",
             plan.git_deps.join(", ")
         );
     }
@@ -1235,8 +1235,8 @@ fn resolver_binds(r: &FetchRun) -> Result<Vec<ExtraBind>> {
     for name in ["resolv.conf", "hosts"] {
         let host = Path::new("/etc").join(name);
         let Ok(content) = std::fs::read(&host) else {
-            eprintln!(
-                "nawa: fetch: warning: {} is missing on the host — DNS for the fetch run may fail if the sandbox root does not provide it",
+            crate::nawa_warn!(
+                "fetch: {} is missing on the host — DNS for the fetch run may fail if the sandbox root does not provide it",
                 host.display()
             );
             continue;

@@ -67,7 +67,7 @@ pub(crate) fn cmd_fetch(
         recs
     };
     if recs.is_empty() {
-        println!("nawa: fetch: nothing to fetch (--all found no recipe with a remote source or a fetch table)");
+        crate::nawa_info!("fetch: nothing to fetch (--all found no recipe with a remote source or a fetch table)");
         return Ok(());
     }
 
@@ -96,8 +96,8 @@ pub(crate) fn cmd_fetch(
         fetch_one(ctx, &builddir, rec, &srccache, isolation, sources_only, offline, allow_degraded)
             .with_context(|| format!("fetching sources for {}", rec.id()))?;
     }
-    println!(
-        "nawa: fetch: {} recipe(s) done{}",
+    crate::nawa_info!(
+        "fetch: {} recipe(s) done{}",
         recs.len(),
         if sources_only {
             " (sources only)"
@@ -118,8 +118,8 @@ fn fetchable_legacy(rec: &recipe::Recipe) -> bool {
 fn info_mode(recs: &[recipe::Recipe], sources_only: bool, offline: bool) {
     let what = if sources_only { "sources" } else { "sources + ecosystems" };
     let mode = if offline { " (offline: verify only)" } else { "" };
-    println!(
-        "nawa: fetch: {} recipe(s) — {}: {}{mode}",
+    crate::nawa_info!(
+        "fetch: {} recipe(s) — {}: {}{mode}",
         recs.len(),
         what,
         recs.iter().map(|r| r.package.name.clone()).collect::<Vec<_>>().join(", ")
@@ -166,7 +166,7 @@ fn fetch_one(
         let s = sources::stage_sources(rec, &work, &src, srccache, crate::default_jobs())?;
         build::grant_source_write(&s.srcroot);
         staged_srcdir = Some(s.srcdir);
-        println!("nawa: fetch: staged {} source(s)", rec.package.sources.len());
+        crate::nawa_info!("fetch: staged {} source(s)", rec.package.sources.len());
     } else if fetchable_legacy(rec) {
         fetch_legacy_source(rec, ctx, srccache)?;
     }
@@ -215,8 +215,8 @@ fn fetch_one(
         let known = recipe::load_all(&ctx.recipes)?;
         let members =
             closure::buildroot(rec, &known, false).context("compute build root")?;
-        println!(
-            "nawa: fetch: closure: {} package(s) in the build root: {}",
+        crate::nawa_info!(
+            "fetch: closure: {} package(s) in the build root: {}",
             members.len(),
             members.join(" ")
         );
@@ -230,7 +230,7 @@ fn fetch_one(
                 &root_dir,
                 &ctx.root,
                 false,
-                |pkg| println!("nawa: fetch: closure: extracted {pkg}"),
+                |pkg| crate::nawa_info!("fetch: closure: extracted {pkg}"),
             )
             .with_context(|| format!("assemble the fetch build root for {}", rec.id()))?,
         );
@@ -249,7 +249,7 @@ fn fetch_one(
     };
     let env = fetchrun::run(&fr).context("the ecosystem fetch failed")?;
     for (k, v) in &env {
-        println!("nawa: fetch: {k}={v}");
+        crate::nawa_info!("fetch: {k}={v}");
     }
     Ok(())
 }
@@ -278,13 +278,13 @@ fn fetch_legacy_source(
     let sha = rec.package.sha256.as_str();
     let tarball = cache_dir.join(format!("{}-{}", sha.get(..16).unwrap_or("nosha"), fname));
     if tarball.exists() && fetch::verify_sha256(&tarball, sha).is_ok() {
-        println!("nawa: source cached: {}", tarball.display());
+        crate::nawa_info!("source cached: {}", tarball.display());
         return Ok(());
     }
     let mirrors: Vec<String> = rec.package.mirrors.iter().map(|m| rec.expand(m, &ectx)).collect();
     fetch::download_cached_with_mirrors(&source, &mirrors, &tarball, Some(sha))?;
     fetch::verify_sha256(&tarball, sha)
         .with_context(|| format!("verify the fetched source of recipe {}", rec.package.name))?;
-    println!("nawa: source verified: {}", tarball.display());
+    crate::nawa_info!("source verified: {}", tarball.display());
     Ok(())
 }

@@ -274,9 +274,9 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
         let sha = rec.package.sha256.as_str();
         let tarball = cache_dir.join(format!("{}-{}", sha.get(..16).unwrap_or("nosha"), fname));
         if tarball.exists() && fetch::verify_sha256(&tarball, sha).is_ok() {
-            println!("nawa: source cached: {}", tarball.display());
+            crate::nawa_info!("source cached: {}", tarball.display());
         } else {
-            println!("nawa: downloading {source}");
+            crate::nawa_info!("downloading {source}");
         }
         let mirrors: Vec<String> =
             rec.package.mirrors.iter().map(|m| rec.expand(m, &ctx)).collect();
@@ -382,8 +382,8 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
         let with_check = opts.check != CheckMode::Off;
         let members =
             crate::closure::buildroot(rec, &known, with_check).context("compute build root")?;
-        println!(
-            "nawa: closure: {} package(s) in the build root ({}{}): {}",
+        crate::nawa_info!(
+            "closure: {} package(s) in the build root ({}{}): {}",
             members.len(),
             crate::closure::BASE_DEVEL,
             if with_check { " + check deps" } else { "" },
@@ -442,7 +442,7 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
                 ok
             };
         assembled = Some(if layered {
-            println!("nawa: closure: assembling the build root from the layer cache (overlayfs)");
+            crate::nawa_info!("closure: assembling the build root from the layer cache (overlayfs)");
             let cache = layer_cache.expect("checked above");
             crate::closure::assemble_cached(
                 &members,
@@ -452,10 +452,10 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
                 &cache,
                 &opts.root,
                 opts.allow_unsigned,
-                |pkg| println!("nawa: closure: extracted {pkg} (new layer)"),
+                |pkg| crate::nawa_info!("closure: extracted {pkg} (new layer)"),
             )?
         } else {
-            println!("nawa: closure: assembling the build root (extract-per-build)");
+            crate::nawa_info!("closure: assembling the build root (extract-per-build)");
             crate::closure::assemble(
                 &members,
                 &known,
@@ -463,7 +463,7 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
                 &root_dir,
                 &opts.root,
                 opts.allow_unsigned,
-                |pkg| println!("nawa: closure: extracted {pkg}"),
+                |pkg| crate::nawa_info!("closure: extracted {pkg}"),
             )?
         });
     }
@@ -592,7 +592,7 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
                         rec, label, script, &ctx, &srcdir, &work, &env_vars, env_prefix,
                         sandbox_cfg.as_ref(), opts,
                     ) {
-                        eprintln!("nawa: warning: check failed for {} (continuing): {e:#}", rec.id());
+                        crate::nawa_warn!("check failed for {} (continuing): {e:#}", rec.id());
                     }
                     continue;
                 }
@@ -677,10 +677,10 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
         };
         let rep = crate::lint::run(&ctx);
         for w in &rep.warnings {
-            eprintln!("nawa: lint: warning: {w}");
+            crate::nawa_warn!("lint: {w}");
         }
         for e in &rep.errors {
-            eprintln!("nawa: lint: {e}");
+            crate::nawa_info_stderr!("lint: {e}");
         }
         if !rep.ok() {
             bail!(
@@ -690,7 +690,7 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
             );
         }
         if rep.elf_count > 0 {
-            println!("nawa: lint: checked {} ELF file(s)", rep.elf_count);
+            crate::nawa_info!("lint: checked {} ELF file(s)", rep.elf_count);
         }
     }
 
@@ -740,8 +740,8 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
         post_remove: rec.hooks.post_remove.clone(),
     };
 
-    println!(
-        "nawa: [{}] isolation={} sde={}",
+    crate::nawa_info!(
+        "[{}] isolation={} sde={}",
         rec.id(),
         opts.isolation.as_str(),
         sde
@@ -790,8 +790,8 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
         } else {
             archive::create_with_hooks(&sp.dir, &sub_info, None, &sub_path)?;
         }
-        println!(
-            "nawa: built {sub_name}-{}-{} ({} files) -> {}",
+        crate::nawa_info!(
+            "built {sub_name}-{}-{} ({} files) -> {}",
             rec.package.version,
             rec.package.rel,
             sp.files,
@@ -805,8 +805,8 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
         let _ = std::fs::remove_dir_all(&root.dir);
     }
 
-    println!(
-        "nawa: built {} ({} files){} -> {}",
+    crate::nawa_info!(
+        "built {} ({} files){} -> {}",
         rec.id(),
         files.len(),
         if assembled.as_ref().is_some_and(|a| a.layered) {
@@ -1003,12 +1003,12 @@ fn try_cache_hit(
     };
     let bid = build_id_for(rec, opts, closure_archives, asset_digest.as_deref(), toolchain_identity);
     if stored.trim() != bid {
-        println!("nawa: build cache: {} changed (build_id mismatch) — rebuilding", rec.id());
+        crate::nawa_info!("build cache: {} changed (build_id mismatch) — rebuilding", rec.id());
         return Ok(None);
     }
     let pkginfo = archive::read_pkginfo(&out_path)?;
-    println!(
-        "nawa: build cache hit: {} (build_id {bid}) — nothing to do",
+    crate::nawa_info!(
+        "build cache hit: {} (build_id {bid}) — nothing to do",
         out_path.display()
     );
     Ok(Some(BuildResult { archive: out_path, pkginfo }))
@@ -1096,7 +1096,7 @@ pub fn rebuild_check(rec: &Recipe, opts: &BuildOpts) -> Result<()> {
         // --rebuild-check exists to catch non-reproducible builds; a cache
         // hit would compare the archive with itself and prove nothing
         o.use_cache = false;
-        println!("nawa: rebuild-check: building {tag} in {}", o.builddir.display());
+        crate::nawa_info!("rebuild-check: building {tag} in {}", o.builddir.display());
         let r = build(rec, &o)?;
         let mut h = sha2::Sha256::new();
         use sha2::Digest;
@@ -1108,10 +1108,10 @@ pub fn rebuild_check(rec: &Recipe, opts: &BuildOpts) -> Result<()> {
     let (a_path, a_hash) = &results[0];
     let (b_path, b_hash) = &results[1];
     if a_hash == b_hash {
-        println!("nawa: rebuild-check: OK — {a_hash} ({})", a_path.display());
+        crate::nawa_info!("rebuild-check: OK — {a_hash} ({})", a_path.display());
         return Ok(());
     }
-    eprintln!("nawa: rebuild-check: MISMATCH");
+    crate::nawa_info_stderr!("rebuild-check: MISMATCH");
     eprintln!("  run A: {a_hash} {}", a_path.display());
     eprintln!("  run B: {b_hash} {}", b_path.display());
     let diffs = diff_archives(a_path, b_path)?;
@@ -1332,7 +1332,7 @@ fn run_section(
     opts: &BuildOpts,
 ) -> Result<()> {
     let expanded = rec.expand(script, ctx);
-    println!("nawa: [{}] running {} (isolation: {})", rec.id(), label, opts.isolation.as_str());
+    crate::nawa_info!("[{}] running {} (isolation: {})", rec.id(), label, opts.isolation.as_str());
 
     let log_path = work.join(format!("build-{label}.log"));
     let mut log = std::fs::File::create(&log_path)

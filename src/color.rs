@@ -10,6 +10,7 @@
 //! sites never need two code paths.
 
 use std::io::IsTerminal;
+use anstyle::{AnsiColor, Style};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stream {
@@ -44,9 +45,9 @@ impl Palette {
         self.enabled
     }
 
-    fn wrap(&self, code: &str, s: &str) -> String {
+    fn wrap(&self, style: Style, s: &str) -> String {
         if self.enabled && !s.is_empty() {
-            format!("\x1b[{code}m{s}\x1b[0m")
+            format!("{style}{s}{style:#}")
         } else {
             s.to_string()
         }
@@ -54,42 +55,42 @@ impl Palette {
 
     /// Package / command names in user-facing listings.
     pub fn name(&self, s: &str) -> String {
-        self.wrap("1", s) // bold
+        self.wrap(Style::new().bold(), s)
     }
 
     /// Versions and identifiers.
     pub fn ver(&self, s: &str) -> String {
-        self.wrap("36", s) // cyan
+        self.wrap(Style::new().fg_color(Some(AnsiColor::Cyan.into())), s)
     }
 
     /// Success / installed markers.
     pub fn ok(&self, s: &str) -> String {
-        self.wrap("32", s) // green
+        self.wrap(Style::new().fg_color(Some(AnsiColor::Green.into())), s)
     }
 
     /// Warnings.
     pub fn warn(&self, s: &str) -> String {
-        self.wrap("33", s) // yellow
+        self.wrap(Style::new().fg_color(Some(AnsiColor::Yellow.into())), s)
     }
 
     /// Errors.
     pub fn err(&self, s: &str) -> String {
-        self.wrap("31", s) // red
+        self.wrap(Style::new().fg_color(Some(AnsiColor::Red.into())), s)
     }
 
     /// Secondary text (reasons, dates, hints).
     pub fn dim(&self, s: &str) -> String {
-        self.wrap("2", s)
+        self.wrap(Style::new().dimmed(), s)
     }
 
     /// Section headers in `info`-style output.
     pub fn header(&self, s: &str) -> String {
-        self.wrap("1;39", s) // bold, default color
+        self.wrap(Style::new().bold(), s)
     }
 }
 
 /// The single decision point (unit-tested without a tty).
-fn colors_enabled(is_tty: bool) -> bool {
+pub(crate) fn colors_enabled(is_tty: bool) -> bool {
     if std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()) {
         return false;
     }
@@ -166,7 +167,8 @@ mod tests {
         let off = Palette::new(false);
         assert_eq!(off.name("gzip"), "gzip");
         let on = Palette::new(true);
-        assert_eq!(on.name("gzip"), "\x1b[1mgzip\x1b[0m");
+        let bold = Style::new().bold();
+        assert_eq!(on.name("gzip"), format!("{bold}gzip{bold:#}"));
         // empty strings stay empty (no stray escape sequences)
         assert_eq!(on.name(""), "");
     }

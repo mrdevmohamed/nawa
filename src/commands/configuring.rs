@@ -67,8 +67,8 @@ pub(crate) fn cmd_init(force: bool, system: bool) -> Result<()> {
         }
     }
     std::fs::write(&path, body).with_context(|| format!("write {}", path.display()))?;
-    println!(
-        "nawa: wrote {} — uncomment what you need, then check with `nawa config show`",
+    crate::nawa_info!(
+        "wrote {} — uncomment what you need, then check with `nawa config show`",
         path.display()
     );
     Ok(())

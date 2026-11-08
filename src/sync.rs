@@ -41,7 +41,7 @@ pub fn sync(root: &Path, repo_ref: &RepoRef, dest: &Path, opts: &SyncOpts) -> Re
     let rev_path = rev_file(root);
     let current = std::fs::read_to_string(&rev_path).ok().map(|s| s.trim().to_string());
     if current.as_deref() == Some(rec.rev.as_str()) && dest.is_dir() {
-        println!("nawa: recipes already at {} ({})", rec.rev, dest.display());
+        crate::nawa_info!("recipes already at {} ({})", rec.rev, dest.display());
         return Ok(());
     }
 
@@ -126,7 +126,7 @@ pub fn sync(root: &Path, repo_ref: &RepoRef, dest: &Path, opts: &SyncOpts) -> Re
     let tmp = rev_path.with_extension("rev.part");
     std::fs::write(&tmp, format!("{}\n", rec.rev))?;
     std::fs::rename(&tmp, &rev_path)?;
-    println!("nawa: recipes synced to {} ({count} recipes) -> {}", rec.rev, dest.display());
+    crate::nawa_info!("recipes synced to {} ({count} recipes) -> {}", rec.rev, dest.display());
     Ok(())
 }
 

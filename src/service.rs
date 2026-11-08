@@ -263,7 +263,7 @@ fn live_status(root: &Path, name: &str) -> String {
 pub fn print_list(root: &Path) -> Result<()> {
     let services = list(root)?;
     if services.is_empty() {
-        println!("nawa: no services under {}", sv_dir(root).display());
+        crate::nawa_info!("no services under {}", sv_dir(root).display());
         return Ok(());
     }
     println!("{:<24} {:<9} RUN-SCRIPT", "SERVICE", "ENABLED");
@@ -288,7 +288,7 @@ pub fn print_status(root: &Path, name: Option<&str>) -> Result<()> {
         None => services,
     };
     if chosen.is_empty() {
-        println!("nawa: no services under {}", sv_dir(root).display());
+        crate::nawa_info!("no services under {}", sv_dir(root).display());
         return Ok(());
     }
     for s in &chosen {

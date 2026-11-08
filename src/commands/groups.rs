@@ -9,7 +9,7 @@ use anyhow::bail;
 pub(crate) fn cmd_group_list(ctx: &Ctx) -> Result<()> {
     let installed = groups::membership::load_all(&ctx.root)?;
     if installed.is_empty() {
-        println!("nawa: no groups installed");
+        crate::nawa_info!("no groups installed");
         return Ok(());
     }
     println!("{:<14}  {:<10}  Packages", "ID", "Installed");
@@ -81,7 +81,7 @@ pub(crate) fn cmd_group_remove(ctx: &Ctx, id: &str, yes: bool) -> Result<()> {
         .filter(|entry| !candidate_set.contains(&entry.name))
         .all(|entry| !entry.run.iter().any(|dependency| dependency == package)));
 
-    println!("nawa: removing group {} (membership record)", id);
+    crate::nawa_info!("removing group {} (membership record)", id);
     for package in &candidates { println!("  remove {package}"); }
     if !candidates.is_empty() {
         confirm::confirm(&format!("nawa: remove {} package(s) of group {id}?", candidates.len()), yes)?;
@@ -131,7 +131,7 @@ pub(crate) fn cmd_group_remove(ctx: &Ctx, id: &str, yes: bool) -> Result<()> {
             // interruption happens between the two durable operations.
             op.finish(None)?;
             groups::membership::remove(&ctx.root, id)?;
-            println!("nawa: group {id} removed ({} package(s))", candidates.len());
+            crate::nawa_info!("group {id} removed ({} package(s))", candidates.len());
             Ok(())
         }
     }

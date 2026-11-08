@@ -309,7 +309,7 @@ fn http_get(agent: &ureq::Agent, url: &str) -> Result<ureq::Response> {
         // signed CDN URLs are hundreds of characters of noise: show only the
         // hosts, and only when asked (NAWA_VERBOSE=1)
         if std::env::var_os("NAWA_VERBOSE").is_some_and(|v| v != "0" && !v.is_empty()) {
-            eprintln!("nawa: redirect {} -> {}", current.host_str().unwrap_or("?"), loc.split('?').next().unwrap_or(&loc));
+            crate::nawa_info_stderr!("redirect {} -> {}", current.host_str().unwrap_or("?"), loc.split('?').next().unwrap_or(&loc));
         }
         current = redirect_target(&current, &loc)?;
     }
@@ -424,7 +424,7 @@ fn fetch_to_file(agent: &ureq::Agent, url: &str, dest: &Path, attempts: u32) -> 
             Ok(outcome) => return Ok(outcome),
             Err(e) if is_retryable(&e) && attempt < attempts => {
                 let wait = backoff(attempt);
-                eprintln!("nawa: {url}: attempt {attempt}/{attempts} failed ({e:#}); retrying in {wait:?}");
+                crate::nawa_info_stderr!("{url}: attempt {attempt}/{attempts} failed ({e:#}); retrying in {wait:?}");
                 std::thread::sleep(wait);
             }
             Err(e) => return Err(e),
@@ -515,7 +515,7 @@ pub fn copy_local(src: &Path, dest: &Path) -> Result<()> {
                 preserve_owner(&dst, &md);
             }
         } else {
-            eprintln!("nawa: warning: skipping special file {}", e.path().display());
+            crate::nawa_warn!("skipping special file {}", e.path().display());
         }
     }
     // directory timestamps go last: writing children bumps parent mtimes
@@ -644,7 +644,7 @@ pub fn download_content_addressed(
         if verify_sha256(dest, sha256).is_ok() {
             return Ok(());
         }
-        eprintln!("nawa: cached {} failed sha256 — re-downloading", dest.display());
+        crate::nawa_info_stderr!("cached {} failed sha256 — re-downloading", dest.display());
     }
     // offline with a cold cache: one clean error here beats one per mirror
     // candidate (mirrors [download_cached_with_mirrors] for message shape)
@@ -685,16 +685,16 @@ pub fn download_content_addressed(
                         )));
                     }
                     strip_write_permission(dest);
-                    println!(
-                        "nawa: source cached (migrated legacy entry {}): {}",
+                    crate::nawa_info!(
+                        "source cached (migrated legacy entry {}): {}",
                         legacy.display(),
                         dest.display()
                     );
                     return Ok(());
                 }
                 Err(_) => {
-                    eprintln!(
-                        "nawa: legacy cache entry {} failed sha256 — downloading",
+                    crate::nawa_info_stderr!(
+                        "legacy cache entry {} failed sha256 — downloading",
                         legacy.display()
                     );
                 }
@@ -709,7 +709,7 @@ pub fn download_content_addressed(
     let mut last_err = None;
     for cand in candidate_urls_with(url, mirrors) {
         if cand != url {
-            eprintln!("nawa: trying alternate mirror {cand}");
+            crate::nawa_info_stderr!("trying alternate mirror {cand}");
         }
         let res = download(&cand, &tmp).and_then(|_| verify_sha256(&tmp, sha256));
         match res {
@@ -718,7 +718,7 @@ pub fn download_content_addressed(
                 break;
             }
             Err(e) => {
-                eprintln!("nawa: {e}");
+                crate::nawa_info_stderr!("{e}");
                 let _ = std::fs::remove_file(&tmp);
                 last_err = Some(e);
             }
@@ -838,7 +838,7 @@ pub fn download_cached_with_mirrors(
                 if verify_sha256(dest, expected).is_ok() {
                     return Ok(()); // cache hit
                 }
-                eprintln!("nawa: cached {} failed sha256 — re-downloading", dest.display());
+                crate::nawa_info_stderr!("cached {} failed sha256 — re-downloading", dest.display());
             }
             None => return Ok(()), // unpinned cache hit (index: signature checked separately)
         }
@@ -851,7 +851,7 @@ pub fn download_cached_with_mirrors(
     let mut last_err = None;
     for cand in candidate_urls_with(url, mirrors) {
         if cand != url {
-            eprintln!("nawa: trying alternate mirror {cand}");
+            crate::nawa_info_stderr!("trying alternate mirror {cand}");
         }
         let res = download(&cand, &tmp).and_then(|_| match expect_sha256 {
             Some(e) => verify_sha256(&tmp, e),
@@ -863,7 +863,7 @@ pub fn download_cached_with_mirrors(
                 break;
             }
             Err(e) => {
-                eprintln!("nawa: {e}");
+                crate::nawa_info_stderr!("{e}");
                 let _ = std::fs::remove_file(&tmp);
                 last_err = Some(e);
             }
@@ -1213,7 +1213,7 @@ fn unpack_tar_stream<R: Read>(reader: R, dest: &Path) -> Result<()> {
             .unpack_in(dest)
             .with_context(|| format!("unpack {}", p.display()))?
         {
-            eprintln!("nawa: warning: skipped unsafe path in source archive: {}", p.display());
+            crate::nawa_warn!("skipped unsafe path in source archive: {}", p.display());
         }
     }
     for (link, target) in links {
@@ -1834,7 +1834,7 @@ mod tests {
                     let _ = std::fs::remove_file(&p);
                 }
                 Err(e) if is_retryable(&e) => {
-                    eprintln!("skipping {url}: no route from this sandbox ({e:#})");
+                    crate::nawa_info_stderr!("skipping {url}: no route from this sandbox ({e:#})");
                 }
                 Err(e) => panic!("{url}: {e:#}"),
             }

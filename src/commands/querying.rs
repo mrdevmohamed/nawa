@@ -35,8 +35,8 @@ pub(crate) fn cmd_search(ctx: &Ctx, term: &str, glob: bool) -> Result<()> {
         );
     }
     if hits == 0 {
-        eprintln!(
-            "nawa: {} no recipes match {term:?} in {}",
+        crate::nawa_info_stderr!(
+            "{} no recipes match {term:?} in {}",
             pal.warn("note:"),
             ctx.recipes.display()
         );
@@ -257,7 +257,7 @@ pub(crate) fn cmd_query(ctx: &Ctx, pattern: Option<&str>, explicit: bool, deps: 
     }
     let pal = Palette::auto(Stream::Stdout);
     if pkgs.is_empty() {
-        println!("nawa: no packages installed in {}", ctx.root.display());
+        crate::nawa_info!("no packages installed in {}", ctx.root.display());
         return Ok(());
     }
     let needle = pattern.map(|p| p.to_lowercase());
@@ -296,8 +296,8 @@ pub(crate) fn cmd_query(ctx: &Ctx, pattern: Option<&str>, explicit: bool, deps: 
         }
     }
     if shown == 0 {
-        eprintln!(
-            "nawa: no installed package matches {:?}",
+        crate::nawa_info_stderr!(
+            "no installed package matches {:?}",
             pattern.unwrap_or_default()
         );
         std::process::exit(1);
@@ -462,7 +462,7 @@ pub(crate) fn warn_revdep(ctx: &Ctx, changed: &[String]) {
     let rep = match checked {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("nawa: warning: revdep check failed: {e:#}");
+            crate::nawa_warn!("revdep check failed: {e:#}");
             return;
         }
     };
@@ -471,13 +471,13 @@ pub(crate) fn warn_revdep(ctx: &Ctx, changed: &[String]) {
     }
     let pal = Palette::auto(Stream::Stderr);
     let none = revdep::Suggestions::new();
-    eprintln!("nawa: {} this change left broken shared-library links:", pal.warn("warning:"));
+    crate::nawa_info_stderr!("{} this change left broken shared-library links:", pal.warn("warning:"));
     for (pkg, pr) in &rep.packages {
         eprintln!("{}", pal.name(pkg));
         eprint!("{}", fmt_revdep_pkg(&pal, pr, &none));
     }
     let pkgs: Vec<&str> = rep.packages.keys().map(|s| s.as_str()).collect();
-    eprintln!("nawa: details and fixes: nawa revdep {}   (silence: NAWA_NO_REVDEP=1)", pkgs.join(" "));
+    crate::nawa_info_stderr!("details and fixes: nawa revdep {}   (silence: NAWA_NO_REVDEP=1)", pkgs.join(" "));
 }
 
 /// Every known package name: the recipes tree plus the local db. One bare
