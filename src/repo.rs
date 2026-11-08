@@ -92,6 +92,16 @@ pub struct RecipesEntry {
     pub download_url: Option<String>,
 }
 
+/// Authenticated reference to the standalone package-group catalog.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GroupsEntry {
+    pub schema: u32,
+    pub file: String,
+    pub sha256: String,
+    pub size: u64,
+}
+
 pub const RECIPES_SUFFIX: &str = ".recipes.tar.zst";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,6 +118,9 @@ pub struct Index {
     /// Recipe tree for nawa sync.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipes: Option<RecipesEntry>,
+    /// Package groups, authenticated by this signed index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub groups: Option<GroupsEntry>,
     #[serde(rename = "package")]
     pub packages: Vec<RepoEntry>,
 }
@@ -138,7 +151,12 @@ impl Index {
     /// Validate schema and the stronger invariants required by v2.
     pub fn validate(&self) -> Result<()> {
         let meta = match &self.repository {
-            None => return Ok(()), // v1: retain the historical parser/policy
+            None => {
+                if self.groups.is_some() {
+                    bail!("group metadata requires a signed schema-v2/v3 repository index");
+                }
+                return Ok(()); // v1: retain the historical parser/policy
+            }
             Some(meta) => meta,
         };
         if !matches!(meta.schema, INDEX_SCHEMA_V2 | INDEX_SCHEMA_V3) {
@@ -170,6 +188,20 @@ impl Index {
         let expires = self.expires.context("schema-v2 index is missing expires")?;
         if generated == 0 || expires <= generated {
             bail!("schema-v2 index has invalid generated/expires timestamps");
+        }
+
+        if let Some(groups) = &self.groups {
+            if groups.schema != 1 {
+                bail!("unsupported group catalog schema {}; expected 1", groups.schema);
+            }
+            validate_plain_filename(&groups.file)?;
+            if !groups.file.ends_with(".toml") {
+                bail!("group catalog has an unexpected filename {:?}", groups.file);
+            }
+            validate_sha256(&groups.sha256, "group catalog")?;
+            if groups.size == 0 {
+                bail!("group catalog has no size");
+            }
         }
 
         let mut names = HashSet::new();
@@ -296,11 +328,27 @@ pub fn create_index_with_locations(
     index_version: u32,
     locations_path: Option<&Path>,
 ) -> Result<Index> {
+    create_index_with_locations_and_groups(dir, out, recipes, index_version, locations_path, None)
+}
+
+/// Build an index and optionally publish a validated group catalog beside it.
+/// The catalog digest and size are included in the signed index.
+pub fn create_index_with_locations_and_groups(
+    dir: &Path,
+    out: &Path,
+    recipes: Option<(&Path, &str)>,
+    index_version: u32,
+    locations_path: Option<&Path>,
+    groups_path: Option<&Path>,
+) -> Result<Index> {
     if !matches!(index_version, 1 | INDEX_SCHEMA_V2 | INDEX_SCHEMA_V3) {
         bail!("unsupported repository index version {index_version} (supported: 1, 2, 3)");
     }
     if index_version == INDEX_SCHEMA_V3 && locations_path.is_none() {
         bail!("schema-v3 requires --locations with package_urls and recipe_urls");
+    }
+    if groups_path.is_some() && index_version < INDEX_SCHEMA_V2 {
+        bail!("--groups requires a signed schema-v2/v3 repository index");
     }
     if index_version != INDEX_SCHEMA_V3 && locations_path.is_some() {
         bail!("--locations is only valid with --index-version 3");
@@ -309,6 +357,7 @@ pub fn create_index_with_locations(
         Some(path) => Some(load_locations(path)?),
         None => None,
     };
+    let groups_entry = groups_path.map(|path| pack_groups(path, dir)).transpose()?;
     let mut recipes_entry = match recipes {
         Some((tree, rev)) => Some(pack_recipes(tree, dir, rev)?),
         None => None,
@@ -401,6 +450,7 @@ pub fn create_index_with_locations(
             _ => unreachable!("index version validated above"),
         },
         recipes: recipes_entry,
+        groups: groups_entry,
         packages: newest.into_values().collect(),
     };
     index.validate()?;
@@ -536,6 +586,7 @@ pub fn update_index(
         expires: Some(now + INDEX_VALIDITY_SECS),
         repository: Some(meta),
         recipes: recipes.or_else(|| base.recipes.clone()),
+        groups: base.groups.clone(),
         packages: map.into_values().collect(),
     };
     index.validate()?;
@@ -711,6 +762,32 @@ pub fn pack_recipes(tree: &Path, out_dir: &Path, rev: &str) -> Result<RecipesEnt
     Ok(RecipesEntry { rev: rev.to_string(), file, sha256, download_url: None })
 }
 
+
+/// Validate and copy a group catalog into the repository, then return the
+/// digest reference that the signed index will authenticate.
+pub fn pack_groups(source: &Path, out_dir: &Path) -> Result<GroupsEntry> {
+    let raw = std::fs::read(source)
+        .with_context(|| format!("read group catalog {}", source.display()))?;
+    let text = std::str::from_utf8(&raw).context("group catalog is not valid UTF-8")?;
+    crate::groups::GroupCatalog::from_toml(text)
+        .with_context(|| format!("validate group catalog {}", source.display()))?;
+
+    let dest = out_dir.join("groups.toml");
+    if source != dest {
+        std::fs::write(&dest, &raw)
+            .with_context(|| format!("write group catalog {}", dest.display()))?;
+    }
+    let sha256 = crate::fetch::sha256_of_file(&dest)?;
+    let size = std::fs::metadata(&dest)
+        .with_context(|| format!("stat group catalog {}", dest.display()))?
+        .len();
+    if size == 0 {
+        bail!("group catalog {} is empty", source.display());
+    }
+    crate::nawa_success!("group metadata -> {} ({size} bytes)", dest.display());
+    Ok(GroupsEntry { schema: 1, file: "groups.toml".into(), sha256, size })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -754,6 +831,7 @@ mod tests {
             expires: Some(20),
             repository: Some(meta),
             recipes: None,
+            groups: None,
             packages: vec![RepoEntry {
                 name: "bash".into(),
                 version: "5.2".into(),
@@ -782,6 +860,7 @@ mod tests {
             expires: Some(20),
             repository: Some(RepositoryMeta::v3_per_package_url()),
             recipes: None,
+            groups: None,
             packages: vec![RepoEntry {
                 name: "bash".into(),
                 version: "5.2".into(),
@@ -882,6 +961,7 @@ mod tests {
             expires: Some(20),
             repository: Some(RepositoryMeta::v2()),
             recipes: None,
+            groups: None,
             packages: vec![RepoEntry {
                 name: "bash".into(),
                 version: "5.2".into(),
@@ -1100,7 +1180,7 @@ mod tests {
         entry.download_url = None;
         let entries = base.join("entries.toml");
         std::fs::write(&entries, toml::to_string(&Index {
-            generated: None, expires: None, repository: None, recipes: None, packages: vec![entry],
+            generated: None, expires: None, repository: None, recipes: None, groups: None, packages: vec![entry],
         }).unwrap()).unwrap();
 
         let out = base.join("out.toml");
