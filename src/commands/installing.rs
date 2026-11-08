@@ -11,7 +11,7 @@ pub(crate) fn cmd_install(
     mode: Option<InstallMode>,
     repo: Option<String>,
 ) -> Result<()> {
-    cmd_install_with_why(ctx, targets, flags, no_deps, key, mode, repo, plan::Why::Explicit)
+    cmd_install_with_why(ctx, targets, flags, no_deps, key, mode, repo, plan::Why::Explicit, None)
 }
 
 #[allow(clippy::too_many_arguments)] // mirrors cmd_install and adds an explicit install reason
@@ -24,6 +24,7 @@ pub(crate) fn cmd_install_with_why(
     mode: Option<InstallMode>,
     repo: Option<String>,
     target_why: plan::Why,
+    group_id: Option<&str>,
 ) -> Result<()> {
     let archives = targets.iter().filter(|t| is_archive_arg(t)).count();
     if archives == targets.len() {
@@ -106,6 +107,19 @@ pub(crate) fn cmd_install_with_why(
         crate::nawa_info!("{name} is already installed and up to date");
     }
     if plan.items.is_empty() && extras.is_empty() {
+        // A group install still changes durable membership even when every
+        // selected package is already present, so keep it visible in history.
+        if let Some(id) = group_id.filter(|_| !flags.dry_run) {
+            let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
+            let mut op = transaction::begin_operation(
+                &ctx.root,
+                transaction::OperationCommand::GroupInstall,
+                &remaining_targets,
+                &[],
+            )?;
+            op.record_group(id);
+            op.finish(None)?;
+        }
         return Ok(());
     }
     // one transaction for the whole command (roadmap §5.1): the id is
@@ -119,12 +133,20 @@ pub(crate) fn cmd_install_with_why(
         .collect();
     {
         let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
+        let command = if group_id.is_some() {
+            transaction::OperationCommand::GroupInstall
+        } else {
+            transaction::OperationCommand::Install
+        };
         let mut op = transaction::begin_operation(
             &ctx.root,
-            transaction::OperationCommand::Install,
+            command,
             &requested,
             &repo_ids,
         )?;
+        if let Some(id) = group_id {
+            op.record_group(id);
+        }
         drop(_lock);
         let result = run_plan(ctx, &plan, flags, &sourcing, &extras, &mut op, target_why);
         let err = result.err();

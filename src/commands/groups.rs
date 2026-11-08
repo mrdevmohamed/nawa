@@ -73,6 +73,16 @@ pub(crate) fn cmd_group_install(
     if packages.is_empty() {
         bail!("group {id} has no packages selected for installation");
     }
+    if let Some(existing) = groups::membership::load(&ctx.root, id)? {
+        if existing.packages == packages {
+            crate::nawa_info!("group {id} is already installed");
+            return Ok(());
+        }
+        bail!(
+            "group {id} is already installed with a different package selection; \
+             remove it first with `nawa group remove {id}`, then install it again"
+        );
+    }
     let definition_revision = open.index.groups.as_ref()
         .map(|entry| entry.sha256.clone()).unwrap_or_default();
     let source_repository = open.base_url.clone()
@@ -85,9 +95,10 @@ pub(crate) fn cmd_group_install(
         if with_optional { " (including optional)" } else { "" }
     );
     crate::commands::installing::cmd_install_with_why(
-        ctx, &packages, flags, false, None, None, None, plan::Why::Group,
+        ctx, &packages, flags, false, None, None, None, plan::Why::Group, Some(id),
     )?;
     if !flags.dry_run {
+        let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
         let installed_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_secs())
