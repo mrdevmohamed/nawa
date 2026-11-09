@@ -152,6 +152,9 @@ fn require_live_root(root: &Path) -> Result<()> {
     if root != Path::new("/") {
         bail!("live service control works on the running system only (got --root {})", root.display());
     }
+    if crate::sys::geteuid() != 0 {
+        bail!("service control needs root privileges; run this command again with `doas nawa service ...`");
+    }
     Ok(())
 }
 
