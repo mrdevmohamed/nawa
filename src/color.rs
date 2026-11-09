@@ -13,13 +13,13 @@ use std::io::IsTerminal;
 use anstyle::{AnsiColor, Style};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Stream {
+pub(crate) enum Stream {
     Stdout,
     Stderr,
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct Palette {
+pub(crate) struct Palette {
     enabled: bool,
 }
 

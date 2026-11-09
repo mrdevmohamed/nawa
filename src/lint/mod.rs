@@ -22,13 +22,11 @@
 //! against hostile inputs (malformed ELFs produce ordinary errors) and safe
 //! to run on untrusted-looking bytes.
 
-use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
-use std::io::Read;
 use std::path::Path;
 
 /// Top-level trees a package may install files into.
-pub const ALLOWED_TOP: &[&str] = &["bin", "boot", "etc", "lib", "lib64", "opt", "run", "sbin", "srv", "usr", "var"];
+pub(crate) const ALLOWED_TOP: &[&str] = &["bin", "boot", "etc", "lib", "lib64", "opt", "run", "sbin", "srv", "usr", "var"];
 
 /// Top-level dirs a package may stage as bare mount points only — the FHS
 /// skeleton owned by `base-files`. Content under them is an error:
@@ -36,15 +34,15 @@ pub const ALLOWED_TOP: &[&str] = &["bin", "boot", "etc", "lib", "lib64", "opt", 
 /// `home`, `media`, `mnt` stay empty for the site. The one documented
 /// exception is the root account's shell rc file (`root/.bashrc`), which
 /// ships with the skeleton.
-pub const SKELETON_TOP: &[&str] = &["dev", "home", "media", "mnt", "proc", "root", "sys", "tmp"];
+pub(crate) const SKELETON_TOP: &[&str] = &["dev", "home", "media", "mnt", "proc", "root", "sys", "tmp"];
 
 /// Skeleton trees where not even a subdirectory may be staged — the kernel
 /// owns everything below them at runtime.
-const KERNEL_MANAGED: &[&str] = &["dev", "proc", "sys", "tmp"];
+pub(crate) const KERNEL_MANAGED: &[&str] = &["dev", "proc", "sys", "tmp"];
 
 /// Everything the checks found. Errors abort the build; warnings do not.
 #[derive(Debug, Default)]
-pub struct LintReport {
+pub(crate) struct LintReport {
     pub errors: Vec<String>,
     pub warnings: Vec<String>,
     pub elf_count: usize,
@@ -57,7 +55,7 @@ impl LintReport {
 }
 
 /// Context for [`run`].
-pub struct LintCtx<'a> {
+pub(crate) struct LintCtx<'a> {
     /// The staging dir (`%{pkgdir}`).
     pub pkgdir: &'a Path,
     /// `depends.run` of the recipe under test.
@@ -73,7 +71,7 @@ pub struct LintCtx<'a> {
     pub extra_leak_paths: Vec<&'static str>,
 }
 
-pub fn run(ctx: &LintCtx) -> LintReport {
+pub(crate) fn run(ctx: &LintCtx) -> LintReport {
     let mut rep = LintReport::default();
     for entry in walkdir::WalkDir::new(ctx.pkgdir).sort_by_file_name() {
         let Ok(e) = entry else { continue };
@@ -123,234 +121,6 @@ pub fn run(ctx: &LintCtx) -> LintReport {
     rep
 }
 
-/// Layout rules (§7.3): files belong under `ALLOWED_TOP`; the FHS mount
-/// points (`SKELETON_TOP`) are staged as directories only — any content under
-/// them (`/tmp` leftovers, `/dev` rules, `/home` files, …) is an error, with
-/// `root/.<rcfile>` as the skeleton's one exception. `/usr/local` may exist
-/// as empty directories (the skeleton) but never receive files or links.
-/// World-writable modes are errors unless the entry is a sticky directory
-/// (/tmp, /var/tmp, /dev/shm).
-fn check_layout(rel: &str, md: &std::fs::Metadata, rep: &mut LintReport) {
-    let top = rel.split('/').next().unwrap_or("");
-    let is_file = md.is_file();
-    let is_link = md.file_type().is_symlink();
-    if !ALLOWED_TOP.contains(&top) && !SKELETON_TOP.contains(&top) {
-        rep.errors.push(format!(
-            "{rel}: outside the allowed trees ({})",
-            [ALLOWED_TOP, SKELETON_TOP].concat().join(" ")
-        ));
-        return;
-    }
-    if SKELETON_TOP.contains(&top) && rel != top {
-        // under a mount point: only `root/.<rcfile>` (a plain file) is legal
-        let why = if KERNEL_MANAGED.contains(&top) {
-            format!("{top} is kernel-managed — packages may not stage anything there")
-        } else {
-            format!("{top} is reserved for the site/user — packages may not stage content there")
-        };
-        if !(is_file && top == "root" && root_dot_rc(rel)) {
-            rep.errors.push(format!("{rel}: {why}"));
-        }
-    }
-    if top == "usr" && rel.starts_with("usr/local/") && (is_file || is_link) {
-        // the skeleton may create the /usr/local directories; nothing may
-        // live in them — that path belongs to the site administrator
-        rep.errors.push(format!("{rel}: nothing may be installed into /usr/local"));
-    }
-    use std::os::unix::fs::PermissionsExt;
-    let mode = md.permissions().mode();
-    if !md.file_type().is_symlink() && mode & 0o002 != 0 {
-        // world-writable dirs are legitimate only with the sticky bit
-        // (e.g. /tmp, /var/tmp, /dev/shm)
-        let sticky_tmp = md.is_dir() && mode & 0o1000 != 0;
-        if !sticky_tmp {
-            rep.errors.push(format!(
-                "{rel}: world-writable (mode {:o}) — packaging mistake or attack",
-                mode & 0o7777
-            ));
-        }
-    }
-}
-
-/// The skeleton's /root rc file: exactly two components, `root/<dot-name>`.
-fn root_dot_rc(rel: &str) -> bool {
-    let mut parts = rel.split('/');
-    let top = parts.next() == Some("root");
-    match (parts.next(), parts.next()) {
-        (Some(second), None) => top && second.starts_with('.'),
-        _ => false,
-    }
-}
-
-fn check_elf(rel: &str, info: &ElfInfo, ctx: &LintCtx, rep: &mut LintReport) {
-    // leaked rpath/runpath
-    for path in [&info.rpath, &info.runpath].into_iter().flatten() {
-        if path.contains("/build/") {
-            rep.errors
-                .push(format!("{rel}: rpath leaks the build tree: {path}"));
-        }
-        if let Some(hb) = ctx.host_builddir {
-            if !hb.is_empty() && path.contains(hb) {
-                rep.errors
-                    .push(format!("{rel}: rpath leaks the build machine: {path}"));
-            }
-        }
-    }
-    // run-dependency check (Phase 6a: warn)
-    for needed in &info.needed {
-        if let Some(owner) = ctx.sonames.get(needed) {
-            if owner != "SELF" && !ctx.rundeps.iter().any(|d| d == owner) {
-                rep.warnings.push(format!(
-                    "{rel}: links {needed} (owned by `{owner}`) but depends.run does not list it"
-                ));
-            }
-        }
-        // an unindexed soname is usually part of libc/libgcc (present in
-        // base-devel, never listed) — not worth warning about
-    }
-}
-
-fn check_text_leaks(rel: &str, data: &[u8], ctx: &LintCtx, rep: &mut LintReport) {
-    let text = String::from_utf8_lossy(data);
-    // the two staging pins every recipe sees, plus the per-recipe insides
-    // (§5.3): <build_inside>/assets for recipes that declare [assets] —
-    // <build_inside>/fetch joins with the ecosystem phases
-    let mut needles = vec!["/build/src", "/build/pkg"];
-    needles.extend(ctx.extra_leak_paths.iter().copied());
-    for n in needles {
-        if text.contains(n) {
-            rep.errors.push(format!("{rel}: contains the sandbox path {n}"));
-        }
-    }
-    if let Some(hb) = ctx.host_builddir {
-        if !hb.is_empty() && text.contains(hb) {
-            rep.errors
-                .push(format!("{rel}: contains the build machine path {hb}"));
-        }
-    }
-}
-
-/// ELF parsing needs the complete file because goblin follows offsets throughout
-/// it. Keep that read bounded: package contents are inputs to the linter and
-/// must not be able to force an unbounded allocation.
-const MAX_ELF_SCAN_MIB: u64 = 512;
-const MAX_ELF_SCAN: u64 = MAX_ELF_SCAN_MIB * 1024 * 1024;
-const MAX_TEXT_SCAN: usize = 4 * 1024 * 1024;
-
-enum LintRead {
-    Data(Vec<u8>),
-    ElfTooLarge { size: u64 },
-}
-
-fn read_for_lint(path: &Path) -> std::io::Result<LintRead> {
-    let mut f = std::fs::File::open(path)?;
-    let mut buf = Vec::with_capacity(4);
-    (&mut f).take(4).read_to_end(&mut buf)?;
-
-    if buf.as_slice() == b"\x7fELF" {
-        // Reject obviously oversized files before reading their payload. Read
-        // at most one byte beyond the limit as a second check in case the file
-        // grew after metadata() was queried.
-        let size = f.metadata()?.len();
-        if size > MAX_ELF_SCAN {
-            return Ok(LintRead::ElfTooLarge { size });
-        }
-
-        let remaining = MAX_ELF_SCAN
-            .saturating_sub(buf.len() as u64)
-            .saturating_add(1);
-        (&mut f).take(remaining).read_to_end(&mut buf)?;
-        if buf.len() as u64 > MAX_ELF_SCAN {
-            return Ok(LintRead::ElfTooLarge {
-                size: buf.len() as u64,
-            });
-        }
-    } else {
-        // Text/configuration leak scans stay deliberately small; large assets
-        // are not read into memory just to search for build-path strings.
-        let remaining = MAX_TEXT_SCAN.saturating_sub(buf.len());
-        (&mut f).take(remaining as u64).read_to_end(&mut buf)?;
-    }
-    Ok(LintRead::Data(buf))
-}
-
-fn looks_texty(data: &[u8]) -> bool {
-    // a NUL in the first 512 bytes almost always means binary data; ELF is
-    // already handled above
-    !data.iter().take(512).any(|&b| b == 0)
-}
-
-// ---------------------------------------------------------------------------
-// ELF reader (goblin): DT_NEEDED / DT_RUNPATH / DT_RPATH / DT_SONAME
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Default, Clone)]
-pub struct ElfInfo {
-    pub needed: Vec<String>,
-    pub rpath: Option<String>,
-    pub runpath: Option<String>,
-    /// DT_SONAME, when the file carries one. The run-dep policy itself keys
-    /// on DT_NEEDED only; the field is kept (like the reader it replaced)
-    /// so the info stays complete for consumers.
-    #[allow(dead_code)]
-    pub soname: Option<String>,
-    /// PT_INTERP (the dynamic loader path) when the file has one; `revdep`
-    /// checks that it exists in the target root.
-    pub interp: Option<String>,
-    /// ELFCLASS64 / e_machine of the file: `revdep` only accepts libraries
-    /// with the same class and machine, like the loader.
-    pub is_64: bool,
-    pub machine: u16,
-}
-
-/// Parse an ELF file's dynamic section. `Ok(None)` for non-dynamic ELFs
-/// (relocatable objects, core files). Endianness and class are taken from
-/// the file; both ELF32 and ELF64 are supported.
-///
-/// goblin is bounds-checked throughout: truncated headers, oversized field
-/// values and dangling string offsets are reported as errors instead of
-/// panics — this function must stay safe to call on adversarial bytes.
-pub fn parse_elf(data: &[u8]) -> Result<Option<ElfInfo>> {
-    if data.len() < 16 || &data[..4] != b"\x7fELF" {
-        bail!("not an ELF");
-    }
-    let elf = goblin::elf::Elf::parse(data).context("malformed ELF file")?;
-    // relocatable objects (ET_REL) and kernel core dumps (ET_CORE) never
-    // carry an ELF interpreter / dynamic linking info worth auditing;
-    // matching the previous reader, they parse to nothing
-    if matches!(elf.header.e_type, goblin::elf::header::ET_REL | goblin::elf::header::ET_CORE) {
-        return Ok(None);
-    }
-    let Some(dynamic) = &elf.dynamic else {
-        // dynamic executables and shared objects always have PT_DYNAMIC;
-        // a stripped/odd file without one has no dependencies to audit
-        return Ok(None);
-    };
-    let info = ElfInfo {
-        needed: dynamic
-            .get_libraries(&elf.dynstrtab)
-            .into_iter()
-            .map(str::to_string)
-            .collect(),
-        // goblin keeps every DT_RPATH/DT_RUNPATH occurrence; the previous
-        // reader kept the last non-empty one — same drop-in behaviour
-        rpath: last_non_empty(&elf.rpaths),
-        runpath: last_non_empty(&elf.runpaths),
-        soname: elf
-            .soname
-            .filter(|s| !s.is_empty())
-            .map(str::to_string),
-        interp: elf.interpreter.map(str::to_string),
-        is_64: elf.is_64,
-        machine: elf.header.e_machine,
-    };
-    Ok(Some(info))
-}
-
-fn last_non_empty(paths: &[&str]) -> Option<String> {
-    paths.iter().rev().find(|p| !p.is_empty()).map(|p| (*p).to_string())
-}
-
 // ---------------------------------------------------------------------------
 // build id (§7)
 // ---------------------------------------------------------------------------
@@ -358,7 +128,7 @@ fn last_non_empty(paths: &[&str]) -> Option<String> {
 /// `build_id = sha256(recipe.toml bytes ‖ source sha256 ‖ sorted closure
 /// archive sha256s ‖ profile flags)` — "is this archive up to date?"
 /// becomes a hash comparison.
-pub fn build_id(
+pub(crate) fn build_id(
     recipe_bytes: &[u8],
     source_sha256: &str,
     closure_archives: &[std::path::PathBuf],
@@ -372,7 +142,7 @@ pub fn build_id(
 /// (asset-tree digest, per-backend fetch-schema versions — fetch-phase.md
 /// §10.3); `build_id` forwards an empty slice, so legacy recipes hash
 /// exactly today's bytes by construction.
-pub fn build_id_with(
+pub(crate) fn build_id_with(
     recipe_bytes: &[u8],
     source_sha256: &str,
     closure_archives: &[std::path::PathBuf],
@@ -408,6 +178,15 @@ pub fn build_id_with(
     }
     hex::encode(h.finalize())
 }
+
+
+pub mod elf;
+pub mod layout;
+
+#[allow(unused_imports)]
+pub(crate) use elf::{parse_elf, ElfInfo, LintRead, MAX_ELF_SCAN, MAX_ELF_SCAN_MIB, read_for_lint, looks_texty};
+#[allow(unused_imports)]
+pub(crate) use layout::{check_elf, check_layout, check_text_leaks};
 
 #[cfg(test)]
 mod tests {

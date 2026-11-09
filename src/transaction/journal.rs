@@ -20,7 +20,7 @@ fn journal_dir(root: &Path, tx: u64) -> PathBuf {
 
 /// The intent of one not-yet-applied package step.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StepIntent {
+pub(crate) struct StepIntent {
     pub schema: u32,
     pub tx: u64,
     pub step: u32,
@@ -42,7 +42,7 @@ pub struct StepIntent {
 
 /// The observed outcome of one step.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StepResult {
+pub(crate) struct StepResult {
     pub schema: u32,
     pub tx: u64,
     pub step: u32,
@@ -65,7 +65,7 @@ fn result_path(root: &Path, tx: u64, step: u32) -> PathBuf {
 
 /// Transaction-level marker: state.toml with the running status.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TxState {
+pub(crate) struct TxState {
     pub schema: u32,
     pub tx: u64,
     pub command: String,
@@ -73,7 +73,7 @@ pub struct TxState {
 }
 
 /// Persist the write-ahead intent for one step (atomic temp+rename).
-pub fn write_intent(root: &Path, intent: &StepIntent) -> Result<()> {
+pub(crate) fn write_intent(root: &Path, intent: &StepIntent) -> Result<()> {
     if intent.schema != SCHEMA_VERSION {
         anyhow::bail!("unsupported step-intent schema {}", intent.schema);
     }
@@ -83,7 +83,7 @@ pub fn write_intent(root: &Path, intent: &StepIntent) -> Result<()> {
 }
 
 /// Record the observed outcome of one step.
-pub fn write_result(root: &Path, result: &StepResult) -> Result<()> {
+pub(crate) fn write_result(root: &Path, result: &StepResult) -> Result<()> {
     if result.schema != SCHEMA_VERSION {
         anyhow::bail!("unsupported step-result schema {}", result.schema);
     }
@@ -93,14 +93,14 @@ pub fn write_result(root: &Path, result: &StepResult) -> Result<()> {
 }
 
 /// Write the transaction-level running marker.
-pub fn write_tx_state(root: &Path, state: &TxState) -> Result<()> {
+pub(crate) fn write_tx_state(root: &Path, state: &TxState) -> Result<()> {
     let dir = journal_dir(root, state.tx);
     let path = dir.join("state.toml");
     atomic::write_atomic(&path, toml::to_string_pretty(state)?.as_bytes(), 0o600)
 }
 
 /// Read one step's intent, if it was written.
-pub fn read_intent(root: &Path, tx: u64, step: u32) -> Result<Option<StepIntent>> {
+pub(crate) fn read_intent(root: &Path, tx: u64, step: u32) -> Result<Option<StepIntent>> {
     let path = intent_path(root, tx, step);
     if !path.exists() {
         return Ok(None);
@@ -110,7 +110,7 @@ pub fn read_intent(root: &Path, tx: u64, step: u32) -> Result<Option<StepIntent>
 }
 
 /// Read one step's result, if it was written.
-pub fn read_result(root: &Path, tx: u64, step: u32) -> Result<Option<StepResult>> {
+pub(crate) fn read_result(root: &Path, tx: u64, step: u32) -> Result<Option<StepResult>> {
     let path = result_path(root, tx, step);
     if !path.exists() {
         return Ok(None);
@@ -120,7 +120,7 @@ pub fn read_result(root: &Path, tx: u64, step: u32) -> Result<Option<StepResult>
 }
 
 /// Every step intent paired with its durable result when one exists.
-pub fn transaction_steps(root: &Path, tx: u64) -> Result<Vec<(StepIntent, Option<StepResult>)>> {
+pub(crate) fn transaction_steps(root: &Path, tx: u64) -> Result<Vec<(StepIntent, Option<StepResult>)>> {
     let dir = journal_dir(root, tx).join("steps");
     let rd = match std::fs::read_dir(&dir) {
         Ok(rd) => rd,
@@ -154,14 +154,14 @@ pub fn transaction_steps(root: &Path, tx: u64) -> Result<Vec<(StepIntent, Option
 }
 
 /// Every intent without a durable result.
-pub fn pending_steps(root: &Path, tx: u64) -> Result<Vec<(u32, StepIntent)>> {
+pub(crate) fn pending_steps(root: &Path, tx: u64) -> Result<Vec<(u32, StepIntent)>> {
     Ok(transaction_steps(root, tx)?.into_iter()
         .filter_map(|(intent, result)| result.is_none().then_some((intent.step, intent)))
         .collect())
 }
 
 /// Every transaction id that has a journal directory.
-pub fn journaled_transactions(root: &Path) -> Result<Vec<u64>> {
+pub(crate) fn journaled_transactions(root: &Path) -> Result<Vec<u64>> {
     let dir = super::history::history_dir(root).join("journal");
     let mut out = Vec::new();
     let rd = match std::fs::read_dir(&dir) {
@@ -185,7 +185,7 @@ pub fn journaled_transactions(root: &Path) -> Result<Vec<u64>> {
 
 /// Remove the journal of a finished transaction (after its record is fully
 /// written). Interrupted/needs-recovery journals are kept.
-pub fn clear_journal(root: &Path, tx: u64) -> Result<()> {
+pub(crate) fn clear_journal(root: &Path, tx: u64) -> Result<()> {
     let dir = journal_dir(root, tx);
     if dir.exists() {
         std::fs::remove_dir_all(&dir).with_context(|| format!("remove journal {}", dir.display()))?;
@@ -213,7 +213,7 @@ mod tests {
                 version: Some("1.0".into()),
                 rel: Some(1),
                 arch: String::new(),
-                reason: "explicit".into(),
+                reason: "explicit".to_string(),
                 artifact_sha256: String::new(),
             }),
             artifact_sha256: String::new(),

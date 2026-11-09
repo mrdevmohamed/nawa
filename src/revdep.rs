@@ -39,7 +39,7 @@ const DEFAULT_DIRS: &[&str] = &["/lib", "/usr/lib", "/lib64", "/usr/lib64", "/us
 /// Where `--unowned` looks when no `--scan-dir` is given.
 const DEFAULT_SCAN: &[&str] = &["/usr", "/bin", "/sbin", "/lib", "/lib64", "/opt"];
 
-pub struct Options<'a> {
+pub(crate) struct Options<'a> {
     /// extra library directories, searched before the system ones
     pub lib_dirs: &'a [String],
     /// `DT_NEEDED` names matching one of these globs are not reported
@@ -54,14 +54,14 @@ pub struct Options<'a> {
 
 /// A `DT_NEEDED` entry that could not be satisfied.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Missing {
+pub(crate) struct Missing {
     pub name: String,
     /// a library of that name exists, but for another ELF class/machine
     pub wrong_arch: bool,
 }
 
 #[derive(Debug)]
-pub struct BrokenFile {
+pub(crate) struct BrokenFile {
     pub path: String,
     pub missing: Vec<Missing>,
     /// the ELF interpreter, when it does not exist in the root
@@ -69,7 +69,7 @@ pub struct BrokenFile {
 }
 
 #[derive(Debug, Default)]
-pub struct PkgReport {
+pub(crate) struct PkgReport {
     pub files: Vec<BrokenFile>,
     pub dead_links: Vec<String>,
 }
@@ -81,7 +81,7 @@ impl PkgReport {
 }
 
 #[derive(Debug, Default)]
-pub struct Report {
+pub(crate) struct Report {
     /// broken packages only
     pub packages: BTreeMap<String, PkgReport>,
     /// broken files that no package owns (only filled with `--unowned`)
@@ -117,7 +117,7 @@ impl Report {
 
 /// Library search directories: `--lib-dir`, `/etc/ld.so.conf` (+ includes),
 /// `/etc/ld-musl-*.path`, then the defaults. First occurrence wins.
-pub fn system_dirs(root: &Path, extra: &[String]) -> Vec<String> {
+pub(crate) fn system_dirs(root: &Path, extra: &[String]) -> Vec<String> {
     let mut all: Vec<String> = extra.to_vec();
     all.extend(ld_so_conf(root, "etc/ld.so.conf", 0));
     all.extend(musl_paths(root));
@@ -369,7 +369,7 @@ fn scan_dirs(opts: &Options) -> Vec<String> {
 
 /// Scan `names` (empty = every installed package), plus unowned files when
 /// asked to.
-pub fn scan(root: &Path, db: &Db, names: &[String], opts: &Options) -> Result<Report> {
+pub(crate) fn scan(root: &Path, db: &Db, names: &[String], opts: &Options) -> Result<Report> {
     let targets: Vec<String> = if names.is_empty() {
         db.installed()?.into_iter().map(|e| e.name).collect()
     } else {
@@ -435,7 +435,7 @@ pub fn scan(root: &Path, db: &Db, names: &[String], opts: &Options) -> Result<Re
 /// removed: the ones still installed, plus every installed package that
 /// lists one of them in its run-dependencies (nawa derives those from
 /// `DT_NEEDED`, so they are exactly the programs linked against them).
-pub fn affected(db: &Db, changed: &[String]) -> Result<Vec<String>> {
+pub(crate) fn affected(db: &Db, changed: &[String]) -> Result<Vec<String>> {
     let installed = db.installed()?;
     let names: HashSet<&str> = installed.iter().map(|e| e.name.as_str()).collect();
     let mut out: BTreeSet<String> = changed
@@ -452,7 +452,7 @@ pub fn affected(db: &Db, changed: &[String]) -> Result<Vec<String>> {
 }
 
 /// `pkgname` of a package archive (`.PKGINFO`), if it can be read.
-pub fn archive_name(archive: &Path) -> Option<String> {
+pub(crate) fn archive_name(archive: &Path) -> Option<String> {
     let info = crate::archive::read_pkginfo(archive).ok()?;
     crate::archive::parse_pkginfo(&info).ok()?.remove("pkgname")
 }
@@ -460,7 +460,7 @@ pub fn archive_name(archive: &Path) -> Option<String> {
 // ---- which package provides a missing library ----------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Source {
+pub(crate) enum Source {
     /// the file list of a locally built archive contains the library
     Archive,
     /// no file list known: a recipe is named like the library (`libfoo.so.1` → `foo`)
@@ -477,19 +477,19 @@ impl Source {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Provider {
+pub(crate) struct Provider {
     pub package: String,
     pub source: Source,
     pub installed: bool,
 }
 
 /// missing library name → candidate providers
-pub type Suggestions = BTreeMap<String, Vec<Provider>>;
+pub(crate) type Suggestions = BTreeMap<String, Vec<Provider>>;
 
 /// Look for providers of `missing`: first the file lists of the archives in
 /// `out_dir` (authoritative), then — for what is still unexplained — recipes
 /// whose name matches the library name.
-pub fn suggest(
+pub(crate) fn suggest(
     missing: &BTreeSet<String>,
     out_dir: &Path,
     recipes: &[String],
@@ -702,7 +702,7 @@ mod tests {
             version: "1".into(),
             rel: 1,
             arch: String::new(),
-            reason: "explicit".into(),
+            reason: "explicit".to_string(),
             run: vec![],
             install_date: 0,
             size: 0,

@@ -19,7 +19,7 @@ use super::journal;
 /// the finished record (status `interrupted` if the process died before
 /// finishing, with per-step outcomes inferred where they are unambiguous).
 /// Must run while holding the exclusive database lock.
-pub fn reconcile(root: &Path, tx: u64) -> Result<Option<TransactionRecord>> {
+pub(crate) fn reconcile(root: &Path, tx: u64) -> Result<Option<TransactionRecord>> {
     let Some(state) = read_state(root, tx)? else { return Ok(None) };
     let existing = super::history::load_record(root, tx).ok();
     let db = crate::db::Db::new(root);
@@ -137,7 +137,7 @@ fn read_state(root: &Path, tx: u64) -> Result<Option<journal::TxState>> {
 /// Reconcile every journaled transaction without a finished record, write
 /// the results, and clean up the unambiguous journals. Returns human notes.
 /// Must run while holding the exclusive database lock.
-pub fn reconcile_incomplete(root: &Path) -> Result<Vec<String>> {
+pub(crate) fn reconcile_incomplete(root: &Path) -> Result<Vec<String>> {
     let mut notes = Vec::new();
     for tx in journal::journaled_transactions(root)? {
         let pending = journal::pending_steps(root, tx)?;
@@ -186,7 +186,7 @@ mod tests {
                 version: version.into(),
                 rel: 1,
                 arch: String::new(),
-                reason: "explicit".into(),
+                reason: "explicit".to_string(),
                 run: vec![],
                 install_date: 0,
                 size: 0,
@@ -204,7 +204,7 @@ mod tests {
         let root = base.join("root");
         let entry = crate::db::Entry {
             name: "demo".into(), version: "1.0".into(), rel: 1, arch: "any".into(),
-            reason: "explicit".into(), run: vec![], install_date: 0, size: 0,
+            reason: "explicit".to_string(), run: vec![], install_date: 0, size: 0,
             artifact_sha256: "a".repeat(64),
         };
         crate::transaction::history::write_record(&root, &TransactionRecord {
@@ -275,7 +275,7 @@ mod tests {
                 version: Some("1.0".into()),
                 rel: Some(1),
                 arch: String::new(),
-                reason: "explicit".into(),
+                reason: "explicit".to_string(),
                 artifact_sha256: "a".repeat(64),
             }),
             artifact_sha256: "a".repeat(64),
@@ -307,7 +307,7 @@ mod tests {
                 version: Some("1.0".into()),
                 rel: Some(1),
                 arch: String::new(),
-                reason: "explicit".into(),
+                reason: "explicit".to_string(),
                 artifact_sha256: "a".repeat(64),
             }),
             artifact_sha256: "a".repeat(64),
@@ -365,7 +365,7 @@ mod tests {
             version: Some("1.0".into()),
             rel: Some(1),
             arch: String::new(),
-            reason: "explicit".into(),
+            reason: "explicit".to_string(),
             artifact_sha256: digest.clone(),
         };
         add_entry(&root, "demo", "1.0", &digest);
@@ -426,7 +426,7 @@ mod tests {
                 version: Some("1.0".into()),
                 rel: Some(1),
                 arch: String::new(),
-                reason: "explicit".into(),
+                reason: "explicit".to_string(),
                 artifact_sha256: "a".repeat(64),
             }),
             target: None,
@@ -458,7 +458,7 @@ mod tests {
                 version: Some("1.0".into()),
                 rel: Some(1),
                 arch: String::new(),
-                reason: "explicit".into(),
+                reason: "explicit".to_string(),
                 artifact_sha256: "a".repeat(64),
             }),
             target: None,

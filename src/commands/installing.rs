@@ -287,7 +287,7 @@ pub(crate) fn installed_map(ctx: &Ctx) -> Result<std::collections::HashMap<Strin
 
 /// Details for one staged archive installation.
 struct InstallRequest<'a> {
-    reason: &'a str,
+    reason: crate::db::InstallReason,
     what: &'a str,
     number: usize,
     total: usize,
@@ -325,10 +325,10 @@ fn install_one(
     let before = db.entry(&package)?;
     // A package that was explicitly requested must stay explicit even when
     // a group later upgrades it. "keep" preserves the existing DB reason.
-    let effective_reason = if request.reason == "group"
-        && before.as_ref().is_some_and(|entry| entry.reason == "explicit")
+    let effective_reason = if request.reason == crate::db::InstallReason::Group
+        && before.as_ref().is_some_and(|entry| entry.reason == crate::db::InstallReason::Explicit.as_str())
     {
-        "keep"
+        crate::db::InstallReason::Keep
     } else {
         request.reason
     };
@@ -904,7 +904,7 @@ pub(crate) fn install_archive_file(
     let pkg_name = archive_name_of(file)
         .ok_or_else(|| anyhow::anyhow!("cannot read package name from {}", file.display()))?;
     let before = db.entry(&pkg_name)?;
-    let target = install::inspect_archive_state(file, "explicit", before.as_ref())?;
+    let target = install::inspect_archive_state(file, crate::db::InstallReason::Explicit, before.as_ref())?;
     let action = match &before {
         None => transaction::history::StepAction::Install,
         Some(old) if old.version != target.version.clone().unwrap_or_default()
@@ -924,7 +924,7 @@ pub(crate) fn install_archive_file(
     )?;
     let result = install::install_archive_pinned(
         file, &ctx.root,
-        install::InstallOpts { force, allow_unsigned, key: key.as_deref(), reason: "explicit", pinned_sha: Some(&digest) },
+        install::InstallOpts { force, allow_unsigned, key: key.as_deref(), reason: crate::db::InstallReason::Explicit, pinned_sha: Some(&digest) },
     );
     match &result {
         Ok(entry) => {

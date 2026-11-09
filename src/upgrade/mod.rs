@@ -9,12 +9,15 @@
 //! the mirror is unreachable) and archives are downloaded on demand, cached,
 //! and sha256-verified before install.
 
+// Note: trim unused imports in later pass
+#[allow(unused_imports)]
 use anyhow::{bail, Context, Result};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
+#[cfg(test)]
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::db::Db;
-use crate::deps;
 use crate::fetch::{self, RepoRef};
 use crate::install;
 use crate::recipe;
@@ -22,7 +25,7 @@ use crate::repo;
 use crate::sign;
 use crate::version::vercmp;
 
-pub struct UpgradeOpts {
+pub(crate) struct UpgradeOpts {
     pub dry_run: bool,
     pub force: bool,
     pub allow_unsigned: bool,
@@ -32,7 +35,7 @@ pub struct UpgradeOpts {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ArchiveAuth {
+pub(crate) enum ArchiveAuth {
     /// Legacy v1 policy: each archive needs its own detached signature.
     DetachedSignature,
     /// V2 policy: a trusted signed index authenticates the archive SHA-256.
@@ -41,7 +44,7 @@ pub enum ArchiveAuth {
 
 /// A repository materialized on disk: for a local repo its own directory,
 /// for a remote one the per-URL cache holding the freshly fetched index.
-pub struct OpenRepo {
+pub(crate) struct OpenRepo {
     /// directory holding `index.toml` (and, locally, the archives)
     pub dir: PathBuf,
     /// `Some(url)` for a remote repository — archives are fetched on demand
@@ -65,7 +68,7 @@ pub struct OpenRepo {
 /// Fetch (remote) or locate (local) a repository, then parse and
 /// authenticate its index: trust policy for remote repos, signature check,
 /// rollback/freeze protection. Shared by `nawa upgrade` and `nawa install`.
-pub fn open_repo(
+pub(crate) fn open_repo(
     root: &Path,
     repo_ref: &RepoRef,
     allow_unsigned: bool,
@@ -274,7 +277,7 @@ pub(crate) fn archive_download_url(
 /// downloaded into the cache (remote) or located in the repo dir (local),
 /// then sha256 against the index, signature policy, and the `.PKGINFO`
 /// must match what the index promised.
-pub fn fetch_entry(
+pub(crate) fn fetch_entry(
     root: &Path,
     open: &OpenRepo,
     re: &repo::RepoEntry,
@@ -371,7 +374,7 @@ pub fn fetch_entry(
     Ok(src)
 }
 
-pub fn upgrade(
+pub(crate) fn upgrade(
     root: &Path,
     repo_ref: &RepoRef,
     recipes: &Path,
@@ -485,7 +488,7 @@ pub fn upgrade(
                     root,
                     opts.force,
                     &re.sha256,
-                    "keep",
+                    crate::db::InstallReason::Keep,
                     Some(install::IndexProof {
                         index_bytes: Some(&open.index_bytes),
                         index_signature: open.index_signature.as_deref(),
@@ -497,7 +500,7 @@ pub fn upgrade(
                 install::install_archive_pinned(
                     &src,
                     root,
-                    install::InstallOpts { force: opts.force, allow_unsigned: opts.allow_unsigned, key: None, reason: "keep", pinned_sha: Some(&re.sha256) },
+                    install::InstallOpts { force: opts.force, allow_unsigned: opts.allow_unsigned, key: None, reason: crate::db::InstallReason::Keep, pinned_sha: Some(&re.sha256) },
                 )
             }
         });
@@ -541,201 +544,13 @@ pub fn upgrade(
     Ok(())
 }
 
-/// A remote repository is only usable when its content can be authenticated:
-/// at least one trusted key must be configured (`nawa trust <key.pub>`), or the
-/// caller must opt out explicitly with `--allow-unsigned`. Without a trust
-/// store a signature is checked against the key embedded in the `.sig` file,
-/// which proves integrity but not origin, and an unsigned repo is accepted
-/// as-is: anyone able to modify the transfer (plain http, a compromised mirror)
-/// could then run code as root through package files and hooks.
-fn require_trust_for_remote(root: &Path, url: &str, allow_unsigned: bool) -> Result<()> {
-    if allow_unsigned {
-        crate::nawa_warn!("--allow-unsigned: {url} is NOT authenticated");
-        return Ok(());
-    }
-    if sign::trusted_keys(root)?.is_empty() {
-        bail!(
-            "refusing remote repository {url}: no trusted keys configured in {}\n\
-             (add the repository's public key with `nawa trust <key.pub>`, or pass --allow-unsigned to accept it unauthenticated)",
-            sign::trust_dir(root).display()
-        );
-    }
-    if url.starts_with("http://") {
-        crate::nawa_warn!("{url} uses plain http — authenticity relies on signatures only");
-    }
-    Ok(())
-}
+pub mod verify;
+pub mod order;
 
-/// Rollback / freeze protection for the (signed) index timestamp.
-/// Remote repos remember the newest `generated` value seen in the cache dir
-/// and refuse anything older; a very old index only produces a warning.
-fn check_index_freshness(
-    repo_dir: &Path,
-    index: &repo::Index,
-    remote: bool,
-    force: bool,
-    authenticated: bool,
-) -> Result<()> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let gen = match index.generated {
-        Some(g) => g,
-        None => {
-            crate::nawa_note_stderr!("index has no timestamp — no rollback protection");
-            return Ok(());
-        }
-    };
-    // A `generated` value ahead of this machine's clock is not an error: an
-    // unsynchronised clock (no RTC, fresh VM or chroot) must not make every
-    // freshly published index unusable. It only must never become the
-    // "newest seen" marker, or one bad publisher/system clock would block
-    // every later genuine index.
-    let future = gen > now;
-    if future {
-        eprintln!(
-            "nawa: warning: repository index timestamp is ahead of this system's clock; \
-             check the system clock (the index is used, but not recorded as newest seen)"
-        );
-    }
-    if remote {
-        let seen_path = repo_dir.join("index.seen");
-        if let Ok(raw) = std::fs::read_to_string(&seen_path) {
-            if let Ok(seen) = raw.trim().parse::<u64>() {
-                if gen < seen {
-                    bail!(
-                        "repository index is older than one already seen (possible rollback attack)"
-                    );
-                }
-            }
-        }
-        // Best effort, as before: failing to record the marker must not fail
-        // the upgrade. The write is atomic so a crash cannot leave a torn file.
-        if authenticated && !future {
-            let part = seen_path.with_extension("seen.part");
-            let recorded = std::fs::write(&part, gen.to_string())
-                .and_then(|()| std::fs::rename(&part, &seen_path));
-            if recorded.is_err() {
-                let _ = std::fs::remove_file(&part);
-            }
-        }
-    }
-    if let Some(exp) = index.expires {
-        if now > exp {
-            if remote && !force {
-                bail!(
-                    "repository index expired {} days ago — the mirror may be frozen or stale\n(use --force to upgrade anyway)",
-                    (now - exp) / 86400
-                );
-            }
-            crate::nawa_warn!("repository index has expired");
-        }
-    }
-    if now > gen && now - gen > 30 * 24 * 3600 {
-        crate::nawa_warn!(
-            "repository index is {} days old",
-            (now - gen) / 86400
-        );
-    }
-    Ok(())
-}
-
-/// The `.PKGINFO` inside the archive must agree with the index entry.
-fn check_archive_matches_index(
-    archive: &Path,
-    re: &repo::RepoEntry,
-    strict_v2: bool,
-) -> Result<()> {
-    let raw = crate::archive::read_pkginfo(archive)?;
-    let info = crate::archive::parse_pkginfo(&raw)?;
-    let get = |k: &str| info.get(k).cloned().unwrap_or_default();
-    let rel: u32 = match info.get("pkgrel") {
-        Some(raw) => match raw.parse::<u32>() {
-            Ok(value) if !strict_v2 || value > 0 => value,
-            Ok(_) => bail!("archive {} has invalid pkgrel 0 in .PKGINFO", re.file),
-            Err(_) if !strict_v2 => 1,
-            Err(_) => bail!("archive {} has invalid pkgrel {:?} in .PKGINFO", re.file, raw),
-        },
-        None if strict_v2 => bail!("archive {} is missing pkgrel in .PKGINFO", re.file),
-        None => 1,
-    };
-    let arch = get("arch");
-    let host = std::env::var("NAWA_ARCH").unwrap_or_else(|_| std::env::consts::ARCH.to_string());
-    if !crate::commands::arch_fits(&arch) {
-        bail!("archive {} is built for {arch}, this system is {host}", re.file);
-    }
-    if get("pkgname") != re.name || get("pkgver") != re.version || rel != re.rel || arch != re.arch {
-        bail!(
-            "archive {} metadata does not match the index (archive: {}-{}-{} arch {}; index: {}-{}-{} arch {})",
-            re.file,
-            get("pkgname"),
-            get("pkgver"),
-            rel,
-            arch,
-            re.name,
-            re.version,
-            re.rel,
-            re.arch
-        );
-    }
-    Ok(())
-}
-
-/// A malicious or compromised index must not be able to escape the cache
-/// directory through crafted archive paths.
-pub(crate) fn validate_entry_filename(file: &str) -> Result<()> {
-    if file.is_empty()
-        || file.contains('/')
-        || file.contains('\\')
-        || file.contains("..")
-        || file.starts_with('.')
-    {
-        bail!("index entry has an unsafe archive path: `{file}`");
-    }
-    Ok(())
-}
-
-/// Order the upgrade plan by the recipe graph where recipes exist; anything
-/// the tree does not know about (foreign repo packages) is appended
-/// alphabetically. If even the known subset cannot be resolved (missing
-/// dep recipes), the whole plan falls back to alphabetical order.
-///
-/// Every name in `names` is an upgrade TARGET and therefore installed. The
-/// resolver treats "installed" as "done", so the targets must be taken out
-/// of the satisfied set — otherwise the order comes back empty and nothing
-/// is applied (the bug this guard fixes). Conversely, only planned names may
-/// appear in the result: a build dependency that is not part of the plan is
-/// irrelevant for a binary upgrade and would panic the plan lookup in the
-/// caller.
-fn order_with_fallback(
-    names: &[String],
-    installed: &HashSet<String>,
-    tree: &BTreeMap<String, recipe::Recipe>,
-) -> Vec<String> {
-    let planned: HashSet<&String> = names.iter().collect();
-    let satisfied: HashSet<String> =
-        installed.iter().filter(|n| !planned.contains(*n)).cloned().collect();
-    let known: Vec<String> = names.iter().filter(|n| tree.contains_key(*n)).cloned().collect();
-    let mut ordered: Vec<String> = match deps::resolve(&known, &satisfied, tree) {
-        Ok(order) => order
-            .into_iter()
-            .map(|r| r.package.name)
-            .filter(|n| planned.contains(n))
-            .collect(),
-        Err(_) => {
-            crate::nawa_warn!("recipe graph incomplete for this plan — alphabetical order");
-            let mut k = known.clone();
-            k.sort();
-            k
-        }
-    };
-    let mut unknown: Vec<String> =
-        names.iter().filter(|n| !tree.contains_key(*n)).cloned().collect();
-    unknown.sort();
-    ordered.extend(unknown);
-    ordered
-}
+#[allow(unused_imports)]
+pub(crate) use verify::{check_archive_matches_index, check_index_freshness, require_trust_for_remote, validate_entry_filename};
+#[allow(unused_imports)]
+pub(crate) use order::order_with_fallback;
 
 #[cfg(test)]
 mod tests {
@@ -832,7 +647,7 @@ mod tests {
 
         // v1.0 installed directly from an archive outside the repo
         let v1 = make_pkg(&base, "demo", "1.0", 1, b"one");
-        install::install_archive(&v1, &root, false, true, None, "explicit").unwrap();
+        install::install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
 
         // repo contains 1.0-2 (rel bump)
         let v2 = make_pkg(&base, "demo", "1.0", 2, b"two");
@@ -868,7 +683,7 @@ mod tests {
         let base = tmpdir("tamper");
         let root = base.join("root");
         let v1 = make_pkg(&base, "demo", "1.0", 1, b"one");
-        install::install_archive(&v1, &root, false, true, None, "explicit").unwrap();
+        install::install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
         let v2 = make_pkg(&base, "demo", "2.0", 1, b"two");
         let repo = setup_repo(&base, &[v2]);
 
@@ -978,7 +793,7 @@ mod tests {
         let base = tmpdir("order-e2e");
         let root = base.join("root");
         let v1 = make_pkg(&base, "a", "1.0", 1, b"one");
-        install::install_archive(&v1, &root, false, true, None, "explicit").unwrap();
+        install::install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
         let v2 = make_pkg(&base, "a", "2.0", 1, b"two");
         let repo = setup_repo(&base, &[v2]);
 

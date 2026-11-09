@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 /// Named, narrow permissions a plugin may request (roadmap §6.8). Broad
 /// capabilities (root, filesystem.write, package.install) do not exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub enum Capability {
+pub(crate) enum Capability {
     #[serde(rename = "history.read")]
     HistoryRead,
     #[serde(rename = "repository.metadata.read")]
@@ -69,7 +69,7 @@ impl Capability {
 }
 
 /// Event names supported by plugin API v1.
-pub const SUPPORTED_EVENTS: &[&str] = &[
+pub(crate) const SUPPORTED_EVENTS: &[&str] = &[
     "transaction.completed",
     "transaction.failed",
     "transaction.partial",
@@ -125,7 +125,7 @@ struct RawEvents {
 
 /// A validated plugin manifest.
 #[derive(Debug, Clone)]
-pub struct PluginManifest {
+pub(crate) struct PluginManifest {
     pub id: String,
     pub name: String,
     pub version: String,
@@ -140,7 +140,7 @@ pub struct PluginManifest {
 
 /// The plugin API version this host implements (roadmap §6.12). Independent
 /// of the Nawa application version.
-pub const HOST_API_VERSION: u32 = 1;
+pub(crate) const HOST_API_VERSION: u32 = 1;
 const MANIFEST_NAME: &str = "nawa-plugin.toml";
 
 impl PluginManifest {

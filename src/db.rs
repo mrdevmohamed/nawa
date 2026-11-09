@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Entry {
+pub(crate) struct Entry {
     pub name: String,
     pub version: String,
     pub rel: u32,
@@ -32,9 +32,56 @@ pub struct Entry {
     pub artifact_sha256: String,
 }
 
+/// Why a package was installed, as recorded in `Entry.reason`.
+///
+/// The stored form is a string for backwards-compatibility of the on-disk
+/// `desc` files; this enum is the type-safe spelling used by the install
+/// pipeline (`InstallOpts`, `inspect_archive_state`, plan/upgrade). The
+/// special `Keep` variant is not stored in the db — it means “preserve the
+/// existing reason” and is only used as an install-time request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum InstallReason {
+    /// Named on the command line.
+    Explicit,
+    /// Pulled in as a dependency.
+    Dependency,
+    /// Requested as a member of a package group.
+    Group,
+    /// Preserve the existing db reason (only for reinstall/upgrade).
+    Keep,
+}
+
+impl InstallReason {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit",
+            Self::Dependency => "dependency",
+            Self::Group => "group",
+            Self::Keep => "keep",
+        }
+    }
+
+    pub(crate) fn parse(s: &str) -> Option<Self> {
+        match s {
+            "explicit" => Some(Self::Explicit),
+            "dependency" => Some(Self::Dependency),
+            "group" => Some(Self::Group),
+            "keep" => Some(Self::Keep),
+            _ => None,
+        }
+    }
+}
+
 impl Entry {
     pub fn version_full(&self) -> String {
         format!("{}-{}-{}", self.name, self.version, self.rel)
+    }
+
+    #[allow(dead_code)]
+    /// The recorded install reason as an enum, if the stored string is a
+    /// known value (legacy entries may have empty or unknown values).
+    pub fn reason_kind(&self) -> Option<InstallReason> {
+        InstallReason::parse(&self.reason)
     }
 }
 
@@ -49,7 +96,7 @@ impl Entry {
 /// threshold are ambiguous in theory; the conservative rule keeps them as-is
 /// (seconds interpretation) and migration only rewrites clearly-nanosecond
 /// values, idempotently.
-pub fn normalize_legacy_install_date(raw: u64) -> u64 {
+pub(crate) fn normalize_legacy_install_date(raw: u64) -> u64 {
     const NANOS_THRESHOLD: u64 = u64::MAX / 1000;
     if raw > NANOS_THRESHOLD {
         raw / 1_000_000_000
@@ -66,7 +113,7 @@ pub fn normalize_legacy_install_date(raw: u64) -> u64 {
 /// * already-correct entries are left untouched, so re-running is a no-op.
 ///
 /// Must be called while holding the exclusive database lock.
-pub fn migrate_install_dates(root: &Path) -> Result<Vec<String>> {
+pub(crate) fn migrate_install_dates(root: &Path) -> Result<Vec<String>> {
     let db = Db::new(root);
     let mut changed = Vec::new();
     if !db.local_dir().exists() {
@@ -82,7 +129,9 @@ pub fn migrate_install_dates(root: &Path) -> Result<Vec<String>> {
         if fixed == entry.install_date {
             continue;
         }
-        // recoverable backup, only when not already present
+        // Recoverable backup, only when not already present. The rewrite
+        // itself is a durable atomic publication (fsync file + parent dir),
+        // so a crash cannot leave a half-written desc behind.
         let bak = dir.join("desc.pre-seconds.bak");
         if !bak.exists() {
             std::fs::copy(&desc, &bak).with_context(|| format!("back up {}", desc.display()))?;
@@ -90,9 +139,7 @@ pub fn migrate_install_dates(root: &Path) -> Result<Vec<String>> {
         let mut e = entry.clone();
         e.install_date = fixed;
         let new = toml::to_string_pretty(&e)?;
-        let tmp = dir.join(".desc.migrate.tmp");
-        std::fs::write(&tmp, new)?;
-        std::fs::rename(&tmp, &desc)?;
+        crate::transaction::atomic::write_atomic(&desc, new.as_bytes(), 0o644)?;
         changed.push(format!(
             "{}: install date migrated from nanoseconds to seconds",
             e.name
@@ -104,7 +151,7 @@ pub fn migrate_install_dates(root: &Path) -> Result<Vec<String>> {
 /// Package names become directory names (db, undo log, hooks) and parts of
 /// archive file names, so they must not be able to contain path syntax.
 /// Allowed: ASCII letters/digits and `+ _ . -`, starting with a letter/digit.
-pub fn valid_name(n: &str) -> bool {
+pub(crate) fn valid_name(n: &str) -> bool {
     let mut chars = n.chars();
     match chars.next() {
         Some(c) if c.is_ascii_alphanumeric() => {}
@@ -114,7 +161,7 @@ pub fn valid_name(n: &str) -> bool {
 }
 
 /// Versions end up in file names too (`<name>-<ver>-<rel>.nawa.tar.zst`).
-pub fn valid_version(v: &str) -> bool {
+pub(crate) fn valid_version(v: &str) -> bool {
     let mut chars = v.chars();
     match chars.next() {
         Some(c) if c.is_ascii_alphanumeric() => {}
@@ -124,14 +171,14 @@ pub fn valid_version(v: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '_' | '.' | '-' | '~' | ':'))
 }
 
-pub fn check_name(n: &str) -> Result<()> {
+pub(crate) fn check_name(n: &str) -> Result<()> {
     if !valid_name(n) {
         bail!("invalid package name `{}` (allowed: letters, digits and + _ . -)", n.escape_debug());
     }
     Ok(())
 }
 
-pub struct Db {
+pub(crate) struct Db {
     root: PathBuf,
 }
 
@@ -223,21 +270,28 @@ impl Db {
 
     pub fn add(&self, e: &Entry, files: &[String], hashes: &HashMap<String, String>) -> Result<()> {
         let dir = self.checked_dir(&e.name)?;
-        std::fs::create_dir_all(&dir)?;
-        // write temp + rename so an interrupted install can't leave a
-        // half-written entry behind
+        // Durable atomic publication for each file (follows
+        // transaction/atomic.rs): a crash leaves the previous, fully-valid
+        // entry or the new, fully-valid entry — never a half-written one.
+        // `write_atomic` creates parent directories durably, so no
+        // separate `create_dir_all` is needed here.
         let desc = toml::to_string_pretty(e)?;
-        std::fs::write(dir.join(".desc.tmp"), desc)?;
-        std::fs::rename(dir.join(".desc.tmp"), dir.join("desc"))?;
-        std::fs::write(dir.join(".files.tmp"), files.join("\n") + "\n")?;
-        std::fs::rename(dir.join(".files.tmp"), dir.join("files"))?;
+        crate::transaction::atomic::write_atomic(&dir.join("desc"), desc.as_bytes(), 0o644)?;
+        crate::transaction::atomic::write_atomic(
+            &dir.join("files"),
+            (files.join("\n") + "\n").as_bytes(),
+            0o644,
+        )?;
         let mut h: Vec<String> = hashes
             .iter()
             .map(|(p, s)| format!("{s}  {p}"))
             .collect();
         h.sort();
-        std::fs::write(dir.join(".hashes.tmp"), h.join("\n") + "\n")?;
-        std::fs::rename(dir.join(".hashes.tmp"), dir.join("hashes"))?;
+        crate::transaction::atomic::write_atomic(
+            &dir.join("hashes"),
+            (h.join("\n") + "\n").as_bytes(),
+            0o644,
+        )?;
         Ok(())
     }
 
@@ -341,7 +395,7 @@ mod tests {
             version: "1".into(),
             rel: 1,
             arch: String::new(),
-            reason: "explicit".into(),
+            reason: "explicit".to_string(),
             run: vec![],
             // what pre-roadmap nawa actually wrote (nanos)
             install_date: 1_762_000_000_000_000_000,

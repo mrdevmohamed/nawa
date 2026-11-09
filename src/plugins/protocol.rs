@@ -11,13 +11,13 @@ use serde::{Deserialize, Serialize};
 use std::io::BufRead;
 
 /// Hard ceiling on one protocol line (bytes).
-pub const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 
-pub const PROTOCOL_NAME: &str = "nawa-plugin";
+pub(crate) const PROTOCOL_NAME: &str = "nawa-plugin";
 
 /// The `hello` handshake request the host sends first.
 #[derive(Debug, Serialize)]
-pub struct HelloRequest<'a> {
+pub(crate) struct HelloRequest<'a> {
     pub protocol: &'a str,
     pub protocol_version: u32,
     pub request_id: &'a str,
@@ -26,7 +26,7 @@ pub struct HelloRequest<'a> {
 }
 
 #[derive(Debug, Serialize)]
-pub struct HelloParams<'a> {
+pub(crate) struct HelloParams<'a> {
     pub nawa_version: &'a str,
     pub plugin_api: &'a str,
     /// Effective capabilities granted by the system administrator.
@@ -37,7 +37,7 @@ pub struct HelloParams<'a> {
 /// contract even when the current host does not consume it.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
-pub struct HelloResponse {
+pub(crate) struct HelloResponse {
     pub plugin_id: String,
     pub plugin_version: String,
     pub api_version: String,
@@ -49,7 +49,7 @@ pub struct HelloResponse {
 
 /// The envelope of every response line.
 #[derive(Debug, Deserialize)]
-pub struct Envelope {
+pub(crate) struct Envelope {
     pub protocol: String,
     pub protocol_version: u32,
     pub request_id: String,
@@ -62,7 +62,7 @@ pub struct Envelope {
 
 /// A `run` command request (one-shot command execution).
 #[derive(Debug, Serialize)]
-pub struct RunRequest<'a> {
+pub(crate) struct RunRequest<'a> {
     pub protocol: &'a str,
     pub protocol_version: u32,
     pub request_id: &'a str,
@@ -71,14 +71,14 @@ pub struct RunRequest<'a> {
 }
 
 #[derive(Debug, Serialize)]
-pub struct RunParams<'a> {
+pub(crate) struct RunParams<'a> {
     pub command: &'a str,
     pub args: &'a [String],
 }
 
 /// A post-transaction observer request.
 #[derive(Debug, Serialize)]
-pub struct EventRequest<'a> {
+pub(crate) struct EventRequest<'a> {
     pub protocol: &'a str,
     pub protocol_version: u32,
     pub request_id: &'a str,
@@ -87,13 +87,13 @@ pub struct EventRequest<'a> {
 }
 
 #[derive(Debug, Serialize)]
-pub struct EventParams<'a> {
+pub(crate) struct EventParams<'a> {
     pub event_type: &'a str,
     pub payload: &'a serde_json::Value,
 }
 
 /// Serialize one request line.
-pub fn encode_request<T: Serialize>(req: &T) -> Result<String> {
+pub(crate) fn encode_request<T: Serialize>(req: &T) -> Result<String> {
     let line = serde_json::to_string(req).context("serialize plugin request")?;
     if line.len() > MAX_MESSAGE_BYTES {
         bail!("plugin request exceeds {} bytes", MAX_MESSAGE_BYTES);
@@ -102,7 +102,7 @@ pub fn encode_request<T: Serialize>(req: &T) -> Result<String> {
 }
 
 /// Read one bounded line from the plugin's stdout and parse the envelope.
-pub fn read_response(reader: &mut impl BufRead) -> Result<Envelope> {
+pub(crate) fn read_response(reader: &mut impl BufRead) -> Result<Envelope> {
     let mut line = Vec::new();
     let mut byte = [0u8; 1];
     // read byte-by-byte up to the bound: a line longer than the limit must
@@ -136,7 +136,7 @@ pub fn read_response(reader: &mut impl BufRead) -> Result<Envelope> {
 }
 
 /// Validate that the envelope answers `request_id` and carries a result.
-pub fn expect_result(env: Envelope, request_id: &str) -> Result<serde_json::Value> {
+pub(crate) fn expect_result(env: Envelope, request_id: &str) -> Result<serde_json::Value> {
     if env.request_id != request_id {
         bail!(
             "plugin answered request {:?} but the host asked {:?}",
@@ -153,7 +153,7 @@ pub fn expect_result(env: Envelope, request_id: &str) -> Result<serde_json::Valu
 }
 
 /// Parse a validated `hello` result value.
-pub fn parse_hello(result: serde_json::Value) -> Result<HelloResponse> {
+pub(crate) fn parse_hello(result: serde_json::Value) -> Result<HelloResponse> {
     serde_json::from_value(result).context("plugin hello result has unexpected fields")
 }
 

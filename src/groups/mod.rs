@@ -7,7 +7,7 @@
 //! user actually chose (a later remote definition change must not silently
 //! alter an installed group).
 
-pub mod membership;
+pub(crate) mod membership;
 
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
@@ -15,7 +15,7 @@ use std::collections::BTreeSet;
 
 /// Group ids become file names under `var/lib/nawa/groups/installed/`, so
 /// they use the same conservative alphabet as package names.
-pub fn check_group_id(id: &str) -> Result<()> {
+pub(crate) fn check_group_id(id: &str) -> Result<()> {
     if !crate::db::valid_name(id) {
         bail!(
             "invalid group id `{}` (allowed: letters, digits and + _ . -)",
@@ -30,7 +30,7 @@ pub fn check_group_id(id: &str) -> Result<()> {
 /// (Phase 5 CLI).
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GroupDefinition {
+pub(crate) struct GroupDefinition {
     pub schema: u32,
     pub id: String,
     pub name: String,
@@ -109,7 +109,7 @@ impl GroupDefinition {
 
 /// A repository-published catalog containing one [[group]] table per group.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GroupCatalog {
+pub(crate) struct GroupCatalog {
     #[serde(rename = "group", default)]
     pub groups: Vec<GroupDefinition>,
 }

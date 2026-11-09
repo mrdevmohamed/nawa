@@ -32,7 +32,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 /// The sync fd the parent (build engine) passes as fd 3 to `sandbox-init`.
 /// Absent when the process is started directly (tests, debugging), in which
 /// case the fd simply has nothing behind it: reads see EOF immediately.
-pub const SYNC_FD: i32 = 3;
+pub(crate) const SYNC_FD: i32 = 3;
 
 // ---------------------------------------------------------------------------
 // process
@@ -46,7 +46,7 @@ pub const SYNC_FD: i32 = 3;
 /// The child's very next step is a fixed function that either execs bash or
 /// exits; the parent immediately re-waits for the child. No file descriptors
 /// are shared into synchronous section locks.
-pub fn fork() -> Result<i32> {
+pub(crate) fn fork() -> Result<i32> {
     // SAFETY: see the function's contract; plain libc call, no arguments.
     let pid = unsafe { libc::fork() };
     if pid < 0 {
@@ -58,14 +58,14 @@ pub fn fork() -> Result<i32> {
 /// `_exit(2)` — terminate the child without flushing anything, exactly as a
 /// failed exec handler must (std's `exit` would flush and the child of a
 /// failed exec must not run buffered destructors).
-pub fn exit_now(code: i32) -> ! {
+pub(crate) fn exit_now(code: i32) -> ! {
     // SAFETY: constant procedure, no state held.
     unsafe { libc::_exit(code) }
 }
 
 /// Clear supplementary groups while the sandbox helper still has host-root
 /// credentials, before the user namespace installs setgroups=deny.
-pub fn clear_supplementary_groups() -> Result<()> {
+pub(crate) fn clear_supplementary_groups() -> Result<()> {
     // SAFETY: a zero-length list with a null pointer is the documented
     // setgroups(2) form for clearing all supplementary groups.
     if unsafe { libc::setgroups(0, std::ptr::null()) } != 0 {
@@ -76,7 +76,7 @@ pub fn clear_supplementary_groups() -> Result<()> {
 
 /// Switch to an already-mapped unprivileged identity inside the plugin
 /// user namespace. Supplementary groups were cleared before unshare.
-pub fn drop_to_ids(uid: u32, gid: u32) -> Result<()> {
+pub(crate) fn drop_to_ids(uid: u32, gid: u32) -> Result<()> {
     // SAFETY: called only by sandbox PID 1 after the parent installed the
     // subordinate gid/uid mappings; these scalar IDs contain no pointers.
     if unsafe { libc::setgid(gid as libc::gid_t) } != 0 {
@@ -89,7 +89,7 @@ pub fn drop_to_ids(uid: u32, gid: u32) -> Result<()> {
 }
 
 /// Ensure sandbox PID 1 dies when its supervising Nawa process is killed.
-pub fn set_parent_death_kill() -> Result<()> {
+pub(crate) fn set_parent_death_kill() -> Result<()> {
     // SAFETY: PR_SET_PDEATHSIG takes fixed scalar arguments.
     if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) } != 0 {
         return Err(std::io::Error::last_os_error()).context("set sandbox parent-death signal");
@@ -103,7 +103,7 @@ pub fn set_parent_death_kill() -> Result<()> {
 
 /// `prctl(PR_SET_NO_NEW_PRIVS, 1)` — even a setuid binary inside the build
 /// cannot regain privilege (design §4.4).
-pub fn no_new_privs() -> Result<()> {
+pub(crate) fn no_new_privs() -> Result<()> {
     // SAFETY: fixed arguments on a single-threaded process; prctl may only
     // fail with EINVAL, which becomes the error below.
     let rc = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
@@ -133,7 +133,7 @@ struct CapUserData {
 /// `capset` with an all-zero set: drop every capability of this thread. The
 /// struct layouts are fixed ABI (linux/capability.h); `_LINUX_CAPABILITY_...`
 /// v3 carries two `cap_user_data` words.
-pub fn drop_capabilities() -> Result<()> {
+pub(crate) fn drop_capabilities() -> Result<()> {
     let hdr = CapUserHeader { version: LINUX_CAPABILITY_VERSION_3, pid: 0 };
     let data = [CapUserData { effective: 0, permitted: 0, inheritable: 0 }; 2];
     // SAFETY: valid, correctly-aligned pointers to our own the initialized
@@ -156,13 +156,13 @@ pub fn drop_capabilities() -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// The caller's effective uid, for the user-namespace mapping policy (§4.3).
-pub fn geteuid() -> u32 {
+pub(crate) fn geteuid() -> u32 {
     // SAFETY: trivial value read; libc's geteuid has no failure mode.
     unsafe { libc::geteuid() }
 }
 
 /// The caller's effective gid — same contract as [`geteuid`].
-pub fn getegid() -> u32 {
+pub(crate) fn getegid() -> u32 {
     // SAFETY: trivial value read; libc's getegid has no failure mode.
     unsafe { libc::getegid() }
 }
@@ -175,13 +175,13 @@ static PID1: AtomicI32 = AtomicI32::new(0);
 static TIMED_OUT: AtomicBool = AtomicBool::new(false);
 
 /// True once the alarm has fired in this process.
-pub fn timed_out() -> bool {
+pub(crate) fn timed_out() -> bool {
     TIMED_OUT.load(Ordering::Relaxed)
 }
 
 /// Alarm-based timeout: kills PID 1, whose death makes the kernel reap the
 /// whole PID namespace (§4.5). `secs == 0` (no limit) arms nothing.
-pub fn install_timeout(secs: u64, pid1: i32) {
+pub(crate) fn install_timeout(secs: u64, pid1: i32) {
     if secs == 0 {
         return;
     }
@@ -212,7 +212,7 @@ extern "C" fn on_alarm(_sig: libc::c_int) {
 /// Bring the network namespace's loopback interface up (`IFF_UP` on `lo`):
 /// many test suites need 127.0.0.1 even with no other connectivity. There is
 /// no portable safe wrapper for `SIOCSIFFLAGS`; this is the one raw ioctl.
-pub fn bring_up_loopback() -> Result<()> {
+pub(crate) fn bring_up_loopback() -> Result<()> {
     #[repr(C)]
     struct IfReq {
         name: [u8; 16],
@@ -249,7 +249,7 @@ pub fn bring_up_loopback() -> Result<()> {
 
 /// Announce readiness to the parent ("R" on the sync fd; a failed write means
 /// there is no parent end — direct invocation).
-pub fn sync_announce() {
+pub(crate) fn sync_announce() {
     // SAFETY: fd 3 is our sync socket for the duration of the handshake.
     let fd = unsafe { BorrowedFd::borrow_raw(SYNC_FD) };
     let _ = rustix::io::write(fd, b"R");
@@ -257,7 +257,7 @@ pub fn sync_announce() {
 
 /// Block until the parent (which may install a ranged uid map) answers with
 /// `G`, or EOF — both mean "proceed" (the child writes its own map).
-pub fn sync_read_gate() {
+pub(crate) fn sync_read_gate() {
     // SAFETY: same borrowed fd as `sync_announce`.
     let fd = unsafe { BorrowedFd::borrow_raw(SYNC_FD) };
     let mut buf = [0u8; 1];
@@ -265,7 +265,7 @@ pub fn sync_read_gate() {
 }
 
 /// The sync fd must not leak into exec'd bash — `FD_CLOEXEC`.
-pub fn sync_make_cloexec() {
+pub(crate) fn sync_make_cloexec() {
     // SAFETY: same borrowed fd as `sync_announce`.
     let fd = unsafe { BorrowedFd::borrow_raw(SYNC_FD) };
     let _ = rustix::io::fcntl_setfd(fd, rustix::io::FdFlags::CLOEXEC);

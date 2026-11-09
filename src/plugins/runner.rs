@@ -19,7 +19,7 @@ use super::manifest::{Capability, PluginManifest};
 use super::protocol::{self, EventRequest, HelloRequest, HelloResponse, RunRequest};
 
 /// Default wall-clock limit for each plugin handshake, command, or event.
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 type PendingWrite = (Vec<u8>, mpsc::Sender<std::result::Result<(), String>>);
@@ -27,7 +27,7 @@ type PendingWrite = (Vec<u8>, mpsc::Sender<std::result::Result<(), String>>);
 /// A live sandboxed plugin process. Worker threads exclusively own its pipes,
 /// allowing the host to enforce a timeout even when the plugin stops reading
 /// stdin or never writes a response.
-pub struct PluginProcess {
+pub(crate) struct PluginProcess {
     child: Child,
     requests: mpsc::Sender<PendingWrite>,
     responses: mpsc::Receiver<Result<protocol::Envelope>>,

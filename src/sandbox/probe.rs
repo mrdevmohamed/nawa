@@ -20,12 +20,12 @@ use super::sys;
 // ---------------------------------------------------------------------------
 
 /// All probes, for `nawa sandbox-probe` (and the integration tests).
-pub const PROBES: &[&str] = &[
+pub(crate) const PROBES: &[&str] = &[
     "userns", "mounts", "ro-bind", "proc", "pivot", "netns-lo", "overlay",
 ];
 
 /// Run one probe; `Ok(true)` = supported, `Ok(false)` = unavailable.
-pub fn probe(op: &str) -> Result<bool> {
+pub(crate) fn probe(op: &str) -> Result<bool> {
     let euid = sys::geteuid();
     let egid = sys::getegid();
     let userns = matches!(op, "userns" | "mounts" | "ro-bind" | "proc" | "pivot" | "netns-lo" | "overlay");

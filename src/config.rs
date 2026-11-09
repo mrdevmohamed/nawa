@@ -27,24 +27,24 @@ use std::path::{Path, PathBuf};
 
 /// The config file name searched in the CWD and every ancestor, and the
 /// name of the system-wide file inside the system config directory.
-pub const CONFIG_FILE: &str = "nawa.toml";
+pub(crate) const CONFIG_FILE: &str = "nawa.toml";
 
 /// Where the system-wide configuration lives (`/etc/nawa/nawa.toml`).
-pub const SYSCONF_DIR: &str = "/etc/nawa";
+pub(crate) const SYSCONF_DIR: &str = "/etc/nawa";
 
 /// The repository used when nothing else is configured. `index.toml`, the
 /// optional `index.toml.sig` and the `*.nawa.tar.zst` archives are expected
 /// directly under this URL.
-pub const DEFAULT_REPO: &str =
+pub(crate) const DEFAULT_REPO: &str =
     "https://github.com/mrdevmohamed/faseela-repo/releases/download/stable";
 
 /// Default parallel download workers (roadmap §7.2: conservative default,
 /// clamped to 1..=64 from all sources).
-pub const DEFAULT_DOWNLOADS: u32 = 4;
+pub(crate) const DEFAULT_DOWNLOADS: u32 = 4;
 
 /// Where `nawa install <name>` gets a package from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InstallMode {
+pub(crate) enum InstallMode {
     /// use the repository when it has the package (at least as new as the
     /// recipe), otherwise build it from the recipe — the default
     Auto,
@@ -80,7 +80,7 @@ impl InstallMode {
 /// What the user passed on the command line (already `None` when absent —
 /// the CLI declares no defaults for these, resolution happens here).
 #[derive(Debug, Default, Clone)]
-pub struct Overrides {
+pub(crate) struct Overrides {
     pub root: Option<PathBuf>,
     pub recipes: Option<PathBuf>,
     pub builddir: Option<PathBuf>,
@@ -128,7 +128,7 @@ struct Layer {
 /// Fully resolved configuration plus where every value came from
 /// (for `nawa config show`).
 #[derive(Debug, Clone)]
-pub struct Config {
+pub(crate) struct Config {
     pub root: PathBuf,
     pub recipes: PathBuf,
     pub builddir: PathBuf,
@@ -155,7 +155,7 @@ impl Config {
 
 /// The directory holding the system-wide configuration: `$NAWA_SYSCONFDIR`
 /// if set, else [`SYSCONF_DIR`].
-pub fn sysconf_dir() -> PathBuf {
+pub(crate) fn sysconf_dir() -> PathBuf {
     match std::env::var("NAWA_SYSCONFDIR") {
         Ok(s) if !s.trim().is_empty() => PathBuf::from(s.trim()),
         _ => PathBuf::from(SYSCONF_DIR),
@@ -166,7 +166,7 @@ pub fn sysconf_dir() -> PathBuf {
 /// `<builddir>/distfiles`. When `anchor` is given, a relative value is
 /// resolved against it (the `fetch` command's semantics; every other
 /// caller keeps the value exactly as given).
-pub fn srccache_dir(builddir: &Path, anchor: Option<&Path>) -> PathBuf {
+pub(crate) fn srccache_dir(builddir: &Path, anchor: Option<&Path>) -> PathBuf {
     std::env::var_os("NAWA_SRCCACHE")
         .map(PathBuf::from)
         .map(|path| match (anchor, path.is_absolute()) {
@@ -177,13 +177,13 @@ pub fn srccache_dir(builddir: &Path, anchor: Option<&Path>) -> PathBuf {
 }
 
 /// The system-wide config file (`/etc/nawa/nawa.toml` by default).
-pub fn system_file() -> PathBuf {
+pub(crate) fn system_file() -> PathBuf {
     sysconf_dir().join(CONFIG_FILE)
 }
 
 /// Find the nearest `nawa.toml`: `$NAWA_CONFIG` if set, else the first file
 /// named `nawa.toml` in the CWD or any of its ancestors.
-pub fn discover() -> Option<PathBuf> {
+pub(crate) fn discover() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("NAWA_CONFIG") {
         let p = PathBuf::from(p.trim());
         if !p.as_os_str().is_empty() {
@@ -253,7 +253,7 @@ fn normalize_repo(s: &str) -> Option<String> {
 }
 
 /// Resolve the effective configuration from all layers.
-pub fn load(ov: &Overrides) -> Result<Config> {
+pub(crate) fn load(ov: &Overrides) -> Result<Config> {
     let project_path = discover();
     let sys_path = system_file();
 
@@ -375,7 +375,7 @@ fn env_u32(key: &str) -> Result<Option<u32>> {
 }
 
 /// The commented template `nawa init` writes (a per-project file).
-pub fn template() -> String {
+pub(crate) fn template() -> String {
     format!(
         r#"# {CONFIG_FILE} — nawa configuration
 # nawa reads the nearest {CONFIG_FILE} at or above the current directory
@@ -421,7 +421,7 @@ pub fn template() -> String {
 /// The file `nawa init --system` writes to `/etc/nawa/nawa.toml`, and the one
 /// the `nawa` package ships: the repository and install mode are active, the
 /// rest is commented.
-pub fn system_template() -> String {
+pub(crate) fn system_template() -> String {
     format!(
         r#"# /etc/nawa/{CONFIG_FILE} — system-wide nawa configuration
 #

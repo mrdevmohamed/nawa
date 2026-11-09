@@ -9,7 +9,7 @@ use std::path::Path;
 
 /// Everything the sandbox needs, serialised as TOML next to the build logs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SandboxSpec {
+pub(crate) struct SandboxSpec {
     pub version: u32,
     #[serde(default)]
     pub root: RootSpec,
@@ -82,7 +82,7 @@ pub struct SandboxSpec {
 
 /// One extra bind mount, raw data of the spec (§5.3).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExtraBind {
+pub(crate) struct ExtraBind {
     /// Host path of the bind source.
     pub host: String,
     /// Absolute path *inside* the sandbox, under `build_inside` (validated
@@ -103,7 +103,7 @@ fn default_build_inside() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RootSpec {
+pub(crate) struct RootSpec {
     /// `live` = the running system (sandbox level),
     /// `dir` = an assembled build root (closure level).
     #[serde(default = "default_root_mode")]
@@ -133,7 +133,7 @@ fn default_root_mode() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BuildPaths {
+pub(crate) struct BuildPaths {
     /// Host path of the source staging dir (bound at /build/src).
     pub src_host: String,
     /// Host path of the DESTDIR staging dir (bound at /build/pkg).

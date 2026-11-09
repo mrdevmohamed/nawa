@@ -65,7 +65,7 @@ pub(crate) fn cmd_build(
     )?;
     let db = db::Db::new(&ctx.root);
     let before = db.entry(name)?;
-    let target = install::inspect_archive_state(&archive, "explicit", before.as_ref())?;
+    let target = install::inspect_archive_state(&archive, crate::db::InstallReason::Explicit, before.as_ref())?;
     let actual_name = crate::archive::read_pkginfo(&archive)
         .ok()
         .and_then(|raw| crate::archive::parse_pkginfo(&raw).ok())
@@ -85,7 +85,7 @@ pub(crate) fn cmd_build(
     let step_no = recorder.step_intent_state(name, action, before.as_ref(), Some(&target), &digest)?;
     let result = install::install_archive_pinned(
         &archive, &ctx.root,
-        install::InstallOpts { force: install_force, allow_unsigned: false, key: None, reason: "explicit", pinned_sha: Some(&digest) },
+        install::InstallOpts { force: install_force, allow_unsigned: false, key: None, reason: crate::db::InstallReason::Explicit, pinned_sha: Some(&digest) },
     );
     match &result {
         Ok(entry) => {

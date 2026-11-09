@@ -21,7 +21,7 @@ use std::path::Path;
 
 /// Isolation level for a build (see the module docs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Isolation {
+pub(crate) enum Isolation {
     /// Today's behaviour: inherit nawa's environment, no sandbox.
     None,
     /// Whitelisted environment, umask, SOURCE_DATE_EPOCH, normalised archive.
@@ -66,13 +66,13 @@ impl Isolation {
 
 /// Where `HOME` points inside a sandboxed build (bound to an empty dir);
 /// the §4.2 default when the build base is the pinned `/build`.
-pub const SANDBOX_HOME: &str = "/build/home";
+pub(crate) const SANDBOX_HOME: &str = "/build/home";
 /// Where the sources live inside a sandboxed build.
 #[allow(dead_code)] // referenced by the whitelist test and the docs
-pub const SANDBOX_SRC: &str = "/build/src";
+pub(crate) const SANDBOX_SRC: &str = "/build/src";
 /// Where `DESTDIR` (`%{pkgdir}`) points inside a sandboxed build.
 #[allow(dead_code)] // referenced by the whitelist test and the docs
-pub const SANDBOX_PKG: &str = "/build/pkg";
+pub(crate) const SANDBOX_PKG: &str = "/build/pkg";
 
 /// Everything a build section sees, as a sorted list of key/value pairs.
 ///
@@ -80,7 +80,7 @@ pub const SANDBOX_PKG: &str = "/build/pkg";
 ///   (`profile.rs` already handles "explicit env beats profile").
 /// * `srcdir` / `pkgdir` — paths *as the build sees them*: the host paths at
 ///   `none`/`env`, the `/build/{src,pkg}` bind points at `sandbox`/`closure`.
-pub struct EnvSpec<'a> {
+pub(crate) struct EnvSpec<'a> {
     pub profile_env: &'a [(String, String)],
     pub jobs: u32,
     pub srcdir: &'a Path,
@@ -103,7 +103,7 @@ pub struct EnvSpec<'a> {
 }
 
 /// The whitelist for `env` and above — nothing else is inherited.
-pub fn whitelist(spec: &EnvSpec) -> Vec<(String, String)> {
+pub(crate) fn whitelist(spec: &EnvSpec) -> Vec<(String, String)> {
     let mut v: Vec<(String, String)> = vec![
         ("PATH".into(), "/usr/bin:/usr/sbin".into()),
         ("HOME".into(), spec.home.to_string()),
@@ -144,7 +144,7 @@ pub fn whitelist(spec: &EnvSpec) -> Vec<(String, String)> {
 /// The mtime of the staging *parent* directories is ignored — only the files
 /// (and dirs) that came out of the tarball count, so re-extracting at a later
 /// time does not change the epoch.
-pub fn source_date_epoch(srcdir: &Path, pinned: Option<u64>) -> Result<u64> {
+pub(crate) fn source_date_epoch(srcdir: &Path, pinned: Option<u64>) -> Result<u64> {
     if let Some(p) = pinned {
         return Ok(p);
     }
@@ -184,7 +184,7 @@ pub fn source_date_epoch(srcdir: &Path, pinned: Option<u64>) -> Result<u64> {
 /// when the workspace has no regular file at all: with no tarball there is
 /// nothing reproducible to derive the epoch from, and the recipe must pin
 /// `package.source_date_epoch` instead.
-pub fn source_date_epoch_from_files(srcdir: &Path) -> Result<u64> {
+pub(crate) fn source_date_epoch_from_files(srcdir: &Path) -> Result<u64> {
     let mut newest: Option<u64> = None;
     for e in walkdir::WalkDir::new(srcdir).max_depth(usize::MAX) {
         let e = match e {

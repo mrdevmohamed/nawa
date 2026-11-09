@@ -12,7 +12,7 @@ use super::history::{PackageState, StepAction, TransactionRecord, TxStatus};
 
 /// What undo will do to one package.
 #[derive(Debug, Clone, PartialEq)]
-pub enum UndoAction {
+pub(crate) enum UndoAction {
     /// The transaction installed it (and nothing needed it before): remove.
     Remove,
     /// The transaction upgraded/downgraded/reinstalled it: restore the exact
@@ -27,7 +27,7 @@ pub enum UndoAction {
 
 /// One planned compensation.
 #[derive(Debug, Clone)]
-pub struct UndoStep {
+pub(crate) struct UndoStep {
     pub package: String,
     pub action: UndoAction,
     /// The before-state recorded by the original transaction.
@@ -42,7 +42,7 @@ pub struct UndoStep {
 
 /// A fully preflighted undo plan.
 #[derive(Debug)]
-pub struct UndoPlan {
+pub(crate) struct UndoPlan {
     pub original_id: u64,
     pub steps: Vec<UndoStep>,
 }
@@ -52,7 +52,7 @@ pub struct UndoPlan {
 /// a mismatch (later operation touched it) is a conflict. All required
 /// archive objects are located and digest-verified here, before any
 /// mutation. Must be called while holding the exclusive db lock.
-pub fn plan_undo(root: &Path, id: u64) -> Result<UndoPlan> {
+pub(crate) fn plan_undo(root: &Path, id: u64) -> Result<UndoPlan> {
     let record: TransactionRecord = crate::transaction::history::load_record(root, id)?;
     if record.schema != super::history::SCHEMA_VERSION {
         bail!("transaction {id} uses unsupported schema {}", record.schema);
@@ -210,7 +210,7 @@ pub fn plan_undo(root: &Path, id: u64) -> Result<UndoPlan> {
 /// Apply a preflighted undo plan through the ordinary installer/remover.
 /// Each step rechecks its preconditions under the exclusive db lock right
 /// before mutating. Returns the per-step outcomes for the history record.
-pub struct AppliedStep {
+pub(crate) struct AppliedStep {
     #[allow(dead_code)]
     pub package: String,
     #[allow(dead_code)]
@@ -220,7 +220,7 @@ pub struct AppliedStep {
     pub failure: Option<String>,
 }
 
-pub fn apply_undo(
+pub(crate) fn apply_undo(
     root: &Path, plan: &UndoPlan,
     recorder: &mut super::context::RecorderHandle<'_>, force: bool,
 ) -> Result<Vec<AppliedStep>> {
@@ -262,7 +262,11 @@ pub fn apply_undo(
             UndoAction::RestorePrevious { digest } | UndoAction::Reinstall { digest } => {
                 if let Err(error) = crate::artifact::verify_stored(root, digest)
                     .map_err(|error| anyhow::anyhow!("object verification failed: {error:#}"))
-                    .and_then(|object| restore_object(root, &object, digest, &step.reason))
+                    .and_then(|object| {
+                        let reason = crate::db::InstallReason::parse(&step.reason)
+                            .unwrap_or(crate::db::InstallReason::Explicit);
+                        restore_object(root, &object, digest, reason)
+                    })
                 {
                     failure = Some(format!("{error:#}"));
                     let current = db.entry(&step.package)?;
@@ -296,7 +300,7 @@ pub fn apply_undo(
 
 /// Restore one object through the ordinary installer, honouring the recorded
 /// authentication kind (roadmap §4.7 rules apply here too).
-fn restore_object(root: &Path, object: &Path, digest: &str, reason: &str) -> Result<()> {
+fn restore_object(root: &Path, object: &Path, digest: &str, reason: crate::db::InstallReason) -> Result<()> {
     let prov = crate::artifact::load_provenance(root, digest)?;
     match prov.as_ref().map(|p| p.authentication.as_str()) {
         Some("signed-index") => {
@@ -325,7 +329,7 @@ fn restore_object(root: &Path, object: &Path, digest: &str, reason: &str) -> Res
 }
 
 /// The `nawa history` table (roadmap §5.8): newest first, stable ids.
-pub fn print_history(root: &Path, limit: usize) -> Result<()> {
+pub(crate) fn print_history(root: &Path, limit: usize) -> Result<()> {
     let records = crate::transaction::history::list_records(root)?;
     if records.is_empty() {
         crate::nawa_info!("no transaction history yet");
@@ -350,7 +354,7 @@ pub fn print_history(root: &Path, limit: usize) -> Result<()> {
 }
 
 /// `nawa history info <ID>`: the full story of one transaction.
-pub fn print_info(root: &Path, id: u64) -> Result<()> {
+pub(crate) fn print_info(root: &Path, id: u64) -> Result<()> {
     let r = crate::transaction::history::load_record(root, id)?;
     println!("Transaction {}", r.id);
     println!("  Command:   {} {}", r.command, r.requested_packages.join(" "));
@@ -414,7 +418,7 @@ impl super::history::PackageChange {
 
 /// `nawa history undo <ID>`: plan, confirm, then apply as a new transaction
 /// linked to the original. Returns Ok(()) even when the user declined.
-pub fn history_undo(root: &Path, id: u64, yes: bool) -> Result<()> {
+pub(crate) fn history_undo(root: &Path, id: u64, yes: bool) -> Result<()> {
     // main::run owns the exclusive database lock for history commands.
     // A second flock on another open file description would deadlock here.
     let plan = plan_undo(root, id)?;
@@ -626,7 +630,7 @@ mod tests {
         let base = tmpdir("rm");
         let root = base.join("root");
         let v1 = make_pkg(&base, "demo", "1.0", b"one");
-        crate::install::install_archive(&v1, &root, false, true, None, "explicit").unwrap();
+        crate::install::install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
         let digest = crate::fetch::sha256_of_file(&v1).unwrap();
         let db = Db::new(&root);
         let installed = db.entry("demo").unwrap().unwrap();
@@ -667,7 +671,7 @@ mod tests {
         let base = tmpdir("removed-dependency-reason");
         let root = base.join("root");
         let archive = make_pkg(&base, "demo", "1.0", b"dependency package");
-        crate::install::install_archive(&archive, &root, false, true, None, "dependency").unwrap();
+        crate::install::install_archive(&archive, &root, false, true, None, crate::db::InstallReason::Dependency).unwrap();
         let before = Db::new(&root).entry("demo").unwrap().unwrap();
         assert_eq!(before.reason, "dependency");
         crate::install::remove_with("demo", &root, false).unwrap();
@@ -705,9 +709,9 @@ mod tests {
         let root = base.join("root");
         let v1 = make_pkg(&base, "demo", "1.0", b"one");
         let v2 = make_pkg(&base, "demo", "2.0", b"two");
-        crate::install::install_archive(&v1, &root, false, true, None, "explicit").unwrap();
+        crate::install::install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
         let before = Db::new(&root).entry("demo").unwrap().unwrap();
-        crate::install::install_archive(&v2, &root, false, true, None, "explicit").unwrap();
+        crate::install::install_archive(&v2, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
         let after = Db::new(&root).entry("demo").unwrap().unwrap();
 
         let mut op = begin_operation(&root, OperationCommand::Upgrade, &[], &[]).unwrap();
@@ -740,9 +744,9 @@ mod tests {
         let v1 = make_pkg(&base, "demo", "1.0", b"one");
         let v2 = make_pkg(&base, "demo", "2.0", b"two");
         let v3 = make_pkg(&base, "demo", "3.0", b"three");
-        crate::install::install_archive(&v1, &root, false, true, None, "explicit").unwrap();
+        crate::install::install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
         let b1 = Db::new(&root).entry("demo").unwrap().unwrap();
-        crate::install::install_archive(&v2, &root, false, true, None, "explicit").unwrap();
+        crate::install::install_archive(&v2, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
         let b2 = Db::new(&root).entry("demo").unwrap().unwrap();
 
         // transaction 1: upgrade 1.0 -> 2.0
@@ -757,7 +761,7 @@ mod tests {
         let tx1 = crate::transaction::history::list_records(&root).unwrap().last().unwrap().id;
 
         // a LATER transaction upgrades 2.0 -> 3.0
-        crate::install::install_archive(&v3, &root, false, true, None, "explicit").unwrap();
+        crate::install::install_archive(&v3, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
         let b3 = Db::new(&root).entry("demo").unwrap().unwrap();
         let mut op = begin_operation(&root, OperationCommand::Upgrade, &[], &[]).unwrap();
         {
@@ -780,9 +784,9 @@ mod tests {
         let root = base.join("root");
         let v1 = make_pkg(&base, "demo", "1.0", b"one");
         let v2 = make_pkg(&base, "demo", "2.0", b"two");
-        crate::install::install_archive(&v1, &root, false, true, None, "explicit").unwrap();
+        crate::install::install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
         let b1 = Db::new(&root).entry("demo").unwrap().unwrap();
-        crate::install::install_archive(&v2, &root, false, true, None, "explicit").unwrap();
+        crate::install::install_archive(&v2, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
         let b2 = Db::new(&root).entry("demo").unwrap().unwrap();
         // destroy the old object so restoration is impossible
         let obj = crate::artifact::object_path(&root, &b1.artifact_sha256).unwrap();
@@ -849,14 +853,14 @@ mod tests {
                     version: Some("1.0".into()),
                     rel: Some(1),
                     arch: String::new(),
-                    reason: "explicit".into(),
+                    reason: "explicit".to_string(),
                     artifact_sha256: String::new(),
                 }),
                 after: Some(PackageState {
                     version: Some("2.0".into()),
                     rel: Some(1),
                     arch: String::new(),
-                    reason: "explicit".into(),
+                    reason: "explicit".to_string(),
                     artifact_sha256: String::new(),
                 }),
                 source: String::new(),

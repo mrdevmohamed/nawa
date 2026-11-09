@@ -58,28 +58,17 @@ fn acquire_dispatch_lock(dir: &Path) -> Result<Option<File>> {
 }
 
 /// Queue one finalized transaction. The rename publishes a complete record.
-pub fn enqueue_transaction(root: &Path, record: &TransactionRecord) -> Result<()> {
+pub(crate) fn enqueue_transaction(root: &Path, record: &TransactionRecord) -> Result<()> {
     let dir = outbox_dir(root);
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
     let target = dir.join(format!("{:010}.toml", record.id));
-    let temporary = dir.join(format!(
-        ".{:010}.{}.{}.tmp",
-        record.id,
-        std::process::id(),
-        crate::artifact::now_secs()
-    ));
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&temporary)?;
-    use std::io::Write as _;
-    file.write_all(toml::to_string(record)?.as_bytes())?;
-    file.sync_all()?;
-    std::fs::rename(&temporary, &target)
-        .with_context(|| format!("publish transaction observer event {}", target.display()))?;
-    Ok(())
+    crate::transaction::atomic::write_atomic(
+        &target,
+        toml::to_string(record)?.as_bytes(),
+        0o600,
+    )
+    .with_context(|| format!("publish transaction observer event {}", target.display()))
 }
 
 #[derive(Debug, Serialize)]
@@ -93,7 +82,7 @@ struct ObserverFailure {
 }
 
 /// Dispatch pending events. Malformed records remain in the outbox for review.
-pub fn dispatch_pending(
+pub(crate) fn dispatch_pending(
     root: &Path,
     project_config: Option<&Path>,
     system_config: Option<&Path>,
@@ -335,17 +324,11 @@ fn store_failure(root: &Path, failure: &ObserverFailure) -> Result<()> {
         failure.recorded_at,
         std::process::id()
     ));
-    let temporary = dir.join(format!(".{}.{}.tmp", failure.transaction_id, std::process::id()));
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&temporary)?;
-    use std::io::Write as _;
-    file.write_all(toml::to_string(failure)?.as_bytes())?;
-    file.sync_all()?;
-    std::fs::rename(temporary, target)?;
-    Ok(())
+    crate::transaction::atomic::write_atomic(
+        &target,
+        toml::to_string(failure)?.as_bytes(),
+        0o600,
+    )
 }
 
 #[cfg(test)]

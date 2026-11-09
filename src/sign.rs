@@ -24,17 +24,17 @@
 use anyhow::{bail, Context, Result};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use sha2::{Digest, Sha256};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
-pub const SEC_NAME: &str = "nawa.sec";
-pub const PUB_NAME: &str = "nawa.pub";
-pub const SIG_SUFFIX: &str = ".sig";
-pub const DOMAIN: &str = "nawa-v1:sha256:";
+pub(crate) const SEC_NAME: &str = "nawa.sec";
+pub(crate) const PUB_NAME: &str = "nawa.pub";
+pub(crate) const SIG_SUFFIX: &str = ".sig";
+pub(crate) const DOMAIN: &str = "nawa-v1:sha256:";
 
 /// Where signing keys live. `$NAWA_KEYS_DIR` wins, else `/etc/nawa/keys`
 /// when creatable (root / writable system), else `~/.config/nawa/keys`.
-pub fn default_key_dir() -> PathBuf {
+pub(crate) fn default_key_dir() -> PathBuf {
     if let Ok(d) = std::env::var("NAWA_KEYS_DIR") {
         if !d.is_empty() {
             return PathBuf::from(d);
@@ -50,7 +50,7 @@ pub fn default_key_dir() -> PathBuf {
 
 /// Resolve the signing key: `--key` > `$NAWA_SIGN_KEY` > `$NAWA_KEYS_DIR` >
 /// `/etc/nawa/keys/nawa.sec` > `~/.config/nawa/keys/nawa.sec`.
-pub fn resolve_signing_key(explicit: Option<&Path>) -> Result<PathBuf> {
+pub(crate) fn resolve_signing_key(explicit: Option<&Path>) -> Result<PathBuf> {
     if let Some(p) = explicit {
         if !p.exists() {
             bail!("signing key not found: {}", p.display());
@@ -77,7 +77,7 @@ pub fn resolve_signing_key(explicit: Option<&Path>) -> Result<PathBuf> {
 }
 
 /// Generate a new ed25519 keypair into `dir` (`nawa.sec` 0600 + `nawa.pub` 0644).
-pub fn keygen(dir: &Path) -> Result<(PathBuf, PathBuf)> {
+pub(crate) fn keygen(dir: &Path) -> Result<(PathBuf, PathBuf)> {
     std::fs::create_dir_all(dir)
         .with_context(|| format!("create key dir {}", dir.display()))?;
     let sec_path = dir.join(SEC_NAME);
@@ -107,7 +107,7 @@ pub fn keygen(dir: &Path) -> Result<(PathBuf, PathBuf)> {
     Ok((sec_path, pub_path))
 }
 
-pub fn load_signing_key(path: &Path) -> Result<SigningKey> {
+pub(crate) fn load_signing_key(path: &Path) -> Result<SigningKey> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("read signing key {}", path.display()))?;
     let seed = decode_hex32(raw.lines().next().unwrap_or_default())
@@ -115,7 +115,7 @@ pub fn load_signing_key(path: &Path) -> Result<SigningKey> {
     Ok(SigningKey::from_bytes(&seed))
 }
 
-pub fn load_verify_key(path: &Path) -> Result<VerifyingKey> {
+pub(crate) fn load_verify_key(path: &Path) -> Result<VerifyingKey> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("read public key {}", path.display()))?;
     parse_pub_hex(&raw)
@@ -123,7 +123,7 @@ pub fn load_verify_key(path: &Path) -> Result<VerifyingKey> {
 }
 
 /// Sign `file` (hash + sign) and write `<file>.sig`. Returns the sig path.
-pub fn sign(file: &Path, key_path: &Path) -> Result<PathBuf> {
+pub(crate) fn sign(file: &Path, key_path: &Path) -> Result<PathBuf> {
     let sk = load_signing_key(key_path)?;
     let hash = crate::fetch::sha256_of_file(file)?;
     let msg = format!("{DOMAIN}{hash}");
@@ -135,42 +135,18 @@ pub fn sign(file: &Path, key_path: &Path) -> Result<PathBuf> {
         hex::encode(sig.to_bytes()),
         hex::encode(sk.verifying_key().to_bytes()),
     );
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let tmp = sig_path.with_file_name(format!(
-        ".{}.tmp-{}-{stamp}",
-        sig_path.file_name().unwrap_or_default().to_string_lossy(),
-        std::process::id()
-    ));
-    let result = (|| -> Result<()> {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)
-            .with_context(|| format!("create temporary signature {}", tmp.display()))?;
-        f.write_all(body.as_bytes())?;
-        f.sync_all()?;
-        drop(f);
-        std::fs::rename(&tmp, &sig_path)
-            .with_context(|| format!("activate signature {}", sig_path.display()))?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result?;
+    crate::transaction::atomic::write_atomic(&sig_path, body.as_bytes(), 0o644)
+        .with_context(|| format!("activate signature {}", sig_path.display()))?;
     Ok(sig_path)
 }
 
-pub fn sig_path_for(file: &Path) -> PathBuf {
+pub(crate) fn sig_path_for(file: &Path) -> PathBuf {
     let mut s = file.as_os_str().to_os_string();
     s.push(SIG_SUFFIX);
     PathBuf::from(s)
 }
 
-pub struct SigFile {
+pub(crate) struct SigFile {
     pub sig: Signature,
     pub embedded: VerifyingKey,
     #[allow(dead_code)]
@@ -178,7 +154,7 @@ pub struct SigFile {
 }
 
 /// Parse a 3-line nawa signature file (comment / sig-hex / pubkey-hex).
-pub fn read_sig_file(path: &Path) -> Result<SigFile> {
+pub(crate) fn read_sig_file(path: &Path) -> Result<SigFile> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("read signature {}", path.display()))?;
     let mut lines = raw.lines();
@@ -202,13 +178,13 @@ pub fn read_sig_file(path: &Path) -> Result<SigFile> {
 }
 
 /// Verify `file` against one key. Recomputes sha256 (integrity + authenticity).
-pub fn verify(file: &Path, key: &VerifyingKey, sig: &Signature) -> Result<()> {
+pub(crate) fn verify(file: &Path, key: &VerifyingKey, sig: &Signature) -> Result<()> {
     let hash = crate::fetch::sha256_of_file(file)?;
     verify_hash(&hash, key, sig)
 }
 
 /// Verify a signature over an already-read byte buffer.
-pub fn verify_bytes(data: &[u8], key: &VerifyingKey, sig: &Signature) -> Result<()> {
+pub(crate) fn verify_bytes(data: &[u8], key: &VerifyingKey, sig: &Signature) -> Result<()> {
     let hash = hex::encode(Sha256::digest(data));
     verify_hash(&hash, key, sig)
 }
@@ -220,12 +196,12 @@ fn verify_hash(hash: &str, key: &VerifyingKey, sig: &Signature) -> Result<()> {
 }
 
 /// Trust-store directory for a target root.
-pub fn trust_dir(root: &Path) -> PathBuf {
+pub(crate) fn trust_dir(root: &Path) -> PathBuf {
     root.join("etc/nawa/trusted-keys")
 }
 
 /// Copy a public key into the trust store (validated first).
-pub fn trust(pubfile: &Path, root: &Path) -> Result<PathBuf> {
+pub(crate) fn trust(pubfile: &Path, root: &Path) -> Result<PathBuf> {
     load_verify_key(pubfile)?; // validate
     let dir = trust_dir(root);
     std::fs::create_dir_all(&dir)?;
@@ -243,7 +219,7 @@ pub fn trust(pubfile: &Path, root: &Path) -> Result<PathBuf> {
 }
 
 /// All trusted public keys for `root` as (key-file-name, key) pairs.
-pub fn trusted_keys(root: &Path) -> Result<Vec<(String, VerifyingKey)>> {
+pub(crate) fn trusted_keys(root: &Path) -> Result<Vec<(String, VerifyingKey)>> {
     let dir = trust_dir(root);
     let mut out = Vec::new();
     if !dir.is_dir() {
@@ -267,7 +243,7 @@ pub fn trusted_keys(root: &Path) -> Result<Vec<(String, VerifyingKey)>> {
 
 /// Policy check before installing `archive` into `root`.
 /// `key` = explicit `--key` override; `allow_unsigned` = --allow-unsigned.
-pub fn verify_for_install(
+pub(crate) fn verify_for_install(
     archive: &Path,
     root: &Path,
     key: Option<&Path>,
@@ -278,7 +254,7 @@ pub fn verify_for_install(
 }
 
 /// Verify bytes using a detached signature stored at an explicit path.
-pub fn verify_for_install_with_sig(
+pub(crate) fn verify_for_install_with_sig(
     archive: &Path,
     sig_path: &Path,
     root: &Path,
@@ -292,7 +268,7 @@ pub fn verify_for_install_with_sig(
 /// authenticated, so the installer can record provenance (roadmap §4.5):
 /// `true` only for a verified detached signature (trusted key or an
 /// explicitly pinned `--key`), `false` for bootstrap-mode acceptance.
-pub fn verify_for_install_with_sig_reported(
+pub(crate) fn verify_for_install_with_sig_reported(
     archive: &Path,
     sig_path: &Path,
     root: &Path,
@@ -353,7 +329,7 @@ pub fn verify_for_install_with_sig_reported(
 /// How the repository index was authenticated. Only TrustedKey is strong
 /// enough to authorize v2 package hashes in place of per-archive signatures.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum IndexTrust {
+pub(crate) enum IndexTrust {
     TrustedKey { key_name: String },
     EmbeddedKeyOnly,
     UnsignedAllowed,
@@ -366,7 +342,7 @@ impl IndexTrust {
 }
 
 /// Verify a repository index using the same bytes that the caller will parse.
-pub fn verify_index_bytes(
+pub(crate) fn verify_index_bytes(
     bytes: &[u8],
     file: &Path,
     root: &Path,
@@ -418,7 +394,7 @@ pub fn verify_index_bytes(
 }
 
 /// `nawa verify` standalone: explicit key > trust store > embedded key.
-pub fn verify_standalone(file: &Path, root: &Path, key: Option<&Path>) -> Result<()> {
+pub(crate) fn verify_standalone(file: &Path, root: &Path, key: Option<&Path>) -> Result<()> {
     if !file.exists() {
         bail!("file not found: {}", file.display());
     }

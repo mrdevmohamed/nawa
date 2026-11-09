@@ -13,9 +13,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path};
 use std::time::SystemTime;
 
-pub const PKGINFO: &str = ".PKGINFO";
-pub const PAYLOAD: &str = "payload";
-pub const HOOKS: &str = ".HOOKS";
+pub(crate) const PKGINFO: &str = ".PKGINFO";
+pub(crate) const PAYLOAD: &str = "payload";
+pub(crate) const HOOKS: &str = ".HOOKS";
 
 /// Archive normalisation for reproducible builds
 /// (docs/design/build-isolation.md §6): every entry is owned by `root:root`
@@ -23,13 +23,13 @@ pub const HOOKS: &str = ".HOOKS";
 /// The archive layout itself (entry order, zstd level 3, single thread)
 /// is already deterministic.
 #[derive(Debug, Clone, Copy)]
-pub struct Normalize {
+pub(crate) struct Normalize {
     pub source_date_epoch: u64,
 }
 
 /// Install/remove hooks shipped inside an archive as `.HOOKS` (TOML).
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub struct Hooks {
+pub(crate) struct Hooks {
     #[serde(default)]
     pub post_install: String,
     #[serde(default)]
@@ -48,12 +48,12 @@ impl Hooks {
 
 /// Create a package archive from a staging directory (`pkgdir`).
 #[allow(dead_code)] // convenience wrapper; the build engine uses create_with_normalisation
-pub fn create(pkgdir: &Path, pkginfo: &str, out: &Path) -> Result<()> {
+pub(crate) fn create(pkgdir: &Path, pkginfo: &str, out: &Path) -> Result<()> {
     create_with_normalisation(pkgdir, pkginfo, None, out, None)
 }
 
 /// Like `create`, additionally storing `.HOOKS` when any hook is non-empty.
-pub fn create_with_hooks(
+pub(crate) fn create_with_hooks(
     pkgdir: &Path,
     pkginfo: &str,
     hooks: Option<&Hooks>,
@@ -65,7 +65,7 @@ pub fn create_with_hooks(
 /// `create_with_hooks` + entry normalisation (uid/gid 0, empty uname/gname,
 /// `mtime = min(mtime, source_date_epoch)`), used from the `env` isolation
 /// level up so the same recipe + inputs always hash to the same archive.
-pub fn create_normalized(
+pub(crate) fn create_normalized(
     pkgdir: &Path,
     pkginfo: &str,
     hooks: Option<&Hooks>,
@@ -203,13 +203,13 @@ fn entry_type(md: &std::fs::Metadata) -> tar::EntryType {
     }
 }
 
-pub struct Extracted {
+pub(crate) struct Extracted {
     pub pkginfo: String,
 }
 
 /// Extract a package archive into `root` (files land under `root/payload/...`
 /// is NOT the case — payload entries are re-rooted directly into `root`).
-pub fn extract(archive: &Path, root: &Path) -> Result<Extracted> {
+pub(crate) fn extract(archive: &Path, root: &Path) -> Result<Extracted> {
     std::fs::create_dir_all(root)?;
     let f = File::open(archive).with_context(|| format!("open {}", archive.display()))?;
     let dec = zstd::Decoder::new(f)?;
@@ -244,7 +244,7 @@ pub fn extract(archive: &Path, root: &Path) -> Result<Extracted> {
 /// Unpack one payload entry (already re-rooted to `rel`) into `root`, with
 /// the same safety checks `extract` applies. Also used by the closure
 /// assembler, which indexes files as it streams them out of the archive.
-pub fn extract_entry_into<R: Read>(
+pub(crate) fn extract_entry_into<R: Read>(
     entry: &mut tar::Entry<'_, R>,
     rel: &Path,
     root: &Path,
@@ -311,7 +311,7 @@ fn reject_symlinked_parents(root: &Path, rel: &Path) -> Result<()> {
 }
 
 /// Parse `key = value` lines from a .PKGINFO string.
-pub fn parse_pkginfo(s: &str) -> Result<std::collections::HashMap<String, String>> {
+pub(crate) fn parse_pkginfo(s: &str) -> Result<std::collections::HashMap<String, String>> {
     let mut map = std::collections::HashMap::new();
     for line in s.lines() {
         let line = line.trim();
@@ -337,7 +337,7 @@ pub fn parse_pkginfo(s: &str) -> Result<std::collections::HashMap<String, String
 }
 
 /// Read the optional `.HOOKS` entry (empty hooks when absent).
-pub fn read_hooks(archive: &Path) -> Result<Hooks> {
+pub(crate) fn read_hooks(archive: &Path) -> Result<Hooks> {
     let f = File::open(archive)?;
     let dec = zstd::Decoder::new(f)?;
     let mut ar = tar::Archive::new(dec);
@@ -354,7 +354,7 @@ pub fn read_hooks(archive: &Path) -> Result<Hooks> {
 
 /// Convenience used by `nawa repo-create`: read only .PKGINFO without
 /// extracting payload.
-pub fn read_pkginfo(archive: &Path) -> Result<String> {
+pub(crate) fn read_pkginfo(archive: &Path) -> Result<String> {
     let f = File::open(archive)?;
     let dec = zstd::Decoder::new(f)?;
     let mut ar = tar::Archive::new(dec);

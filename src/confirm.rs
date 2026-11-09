@@ -23,7 +23,7 @@ fn styled_prompt(prompt: &str) -> String {
 }
 
 /// Ask the user. `yes=true` short-circuits.
-pub fn confirm(prompt: &str, yes: bool) -> Result<()> {
+pub(crate) fn confirm(prompt: &str, yes: bool) -> Result<()> {
     let interactive = std::io::stdin().is_terminal();
     confirm_with(prompt, yes, interactive, &mut std::io::stdin().lock())
 }
@@ -61,7 +61,7 @@ fn confirm_with(
 /// answer picks `default`. Without a terminal there is nobody to ask, so the
 /// default is returned (unlike [`confirm`], which refuses: a *choice* between
 /// two safe sources is not a destructive step). Prompt goes to stderr.
-pub fn choose(prompt: &str, default: char, allowed: &[char]) -> Result<char> {
+pub(crate) fn choose(prompt: &str, default: char, allowed: &[char]) -> Result<char> {
     let interactive = std::io::stdin().is_terminal();
     choose_with(prompt, default, allowed, interactive, &mut std::io::stdin().lock())
 }

@@ -16,7 +16,7 @@ use std::path::Path;
 
 /// What `render_error` needs to know about the process; passed in so the
 /// rendering itself stays a pure, testable function.
-pub struct Env<'a> {
+pub(crate) struct Env<'a> {
     /// Running with effective uid 0.
     pub root: bool,
     /// `doas`/`sudo`, when one is installed.
@@ -38,12 +38,12 @@ impl Env<'static> {
     }
 }
 
-pub fn is_root() -> bool {
+pub(crate) fn is_root() -> bool {
     rustix::process::geteuid().is_root()
 }
 
 /// True when some error in the chain is an I/O error of `kind`.
-pub fn has_io_kind(e: &anyhow::Error, kind: ErrorKind) -> bool {
+pub(crate) fn has_io_kind(e: &anyhow::Error, kind: ErrorKind) -> bool {
     e.chain().any(|c| {
         c.downcast_ref::<std::io::Error>()
             .is_some_and(|io| io.kind() == kind)
@@ -84,7 +84,7 @@ fn hint(e: &anyhow::Error, env: &Env) -> Option<String> {
 
 /// Multi-line, colored (when `p` is enabled) description of `e`, ending with
 /// a newline.
-pub fn render_error(e: &anyhow::Error, p: &Palette, env: &Env) -> String {
+pub(crate) fn render_error(e: &anyhow::Error, p: &Palette, env: &Env) -> String {
     let mut chain = e.chain();
     let head = chain.next().map(|c| c.to_string()).unwrap_or_default();
     let mut out = format!("{} {} {}\n", p.brand("nawa:"), p.err("error:"), strip_os_error(&head));

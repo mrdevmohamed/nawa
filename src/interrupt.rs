@@ -42,7 +42,7 @@ interrupted transaction\n";
 
 /// The error returned by [`check`]; `main` turns it into exit status 130.
 #[derive(Debug)]
-pub struct Interrupted;
+pub(crate) struct Interrupted;
 
 impl fmt::Display for Interrupted {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -53,7 +53,7 @@ impl fmt::Display for Interrupted {
 impl std::error::Error for Interrupted {}
 
 /// True once a deferred signal has arrived in this process.
-pub fn is_interrupted() -> bool {
+pub(crate) fn is_interrupted() -> bool {
     #[cfg(test)]
     if TEST_INTERRUPT.with(|c| c.get()) {
         return true;
@@ -83,7 +83,7 @@ pub(crate) fn clear_simulated_interrupt() {
 
 /// `Err(Interrupted)` when a deferred signal is pending. Call it only at
 /// points where abandoning the work (and rolling it back) is safe.
-pub fn check() -> Result<(), Interrupted> {
+pub(crate) fn check() -> Result<(), Interrupted> {
     if is_interrupted() {
         Err(Interrupted)
     } else {
@@ -123,7 +123,7 @@ extern "C" fn on_signal(_sig: libc::c_int) {
 
 /// While alive, SIGINT/SIGTERM/SIGHUP are deferred instead of fatal. Guards
 /// nest; the previous handlers come back when the outermost one is dropped.
-pub struct Guard {
+pub(crate) struct Guard {
     _private: (),
 }
 

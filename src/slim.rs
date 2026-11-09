@@ -36,11 +36,11 @@ use crate::humanize::format_size;
 
 /// Bumped whenever the slimming rules change. It is part of the build id, so
 /// `--use-cache` never serves an archive made by older rules.
-pub const VERSION: u32 = 1;
+pub(crate) const VERSION: u32 = 1;
 
 /// Suffixes of the sub-packages `split` can produce, in the order it makes
 /// them (`<name>-doc`, `<name>-lang`).
-pub const SUFFIXES: [&str; 2] = ["doc", "lang"];
+pub(crate) const SUFFIXES: [&str; 2] = ["doc", "lang"];
 
 fn yes() -> bool {
     true
@@ -48,7 +48,7 @@ fn yes() -> bool {
 
 /// The recipe's `[slim]` table: every pass is on unless the recipe says no.
 #[derive(Debug, Clone, Deserialize)]
-pub struct Slim {
+pub(crate) struct Slim {
     #[serde(default = "yes")]
     pub strip: bool,
     #[serde(default = "yes")]
@@ -65,7 +65,7 @@ impl Default for Slim {
 
 /// A sub-package staged in its own directory, ready to be archived.
 #[derive(Debug)]
-pub struct SubPackage {
+pub(crate) struct SubPackage {
     /// `doc` or `lang`
     pub suffix: &'static str,
     /// Staging directory (same layout as `pkgdir`).
@@ -78,7 +78,7 @@ pub struct SubPackage {
 
 /// What `run` did.
 #[derive(Debug, Default)]
-pub struct Report {
+pub(crate) struct Report {
     pub stripped: usize,
     pub saved: u64,
     pub removed: usize,
@@ -117,14 +117,14 @@ impl Report {
 
 /// File name of a sub-package archive, next to the main one:
 /// `<name>-<suffix>-<version>-<rel>.nawa.tar.zst`.
-pub fn subpackage_file(name: &str, suffix: &str, version: &str, rel: u32) -> String {
+pub(crate) fn subpackage_file(name: &str, suffix: &str, version: &str, rel: u32) -> String {
     format!("{name}-{suffix}-{version}-{rel}.nawa.tar.zst")
 }
 
 /// `.PKGINFO` of a sub-package, derived from the main package's: same
 /// version, arch and build inputs; its own name and size; it depends on the
 /// main package.
-pub fn derive_pkginfo(main: &str, main_name: &str, sub_name: &str, size: u64) -> String {
+pub(crate) fn derive_pkginfo(main: &str, main_name: &str, sub_name: &str, size: u64) -> String {
     let mut out = String::new();
     for line in main.lines() {
         if line.starts_with("pkgname = ") {
@@ -143,7 +143,7 @@ pub fn derive_pkginfo(main: &str, main_name: &str, sub_name: &str, size: u64) ->
 
 /// Run the enabled passes over `pkgdir`. Sub-packages are staged under
 /// `splitdir/<suffix>`; `splitdir` is wiped first.
-pub fn run(pkgdir: &Path, splitdir: &Path, policy: &Slim) -> Result<Report> {
+pub(crate) fn run(pkgdir: &Path, splitdir: &Path, policy: &Slim) -> Result<Report> {
     let mut rep = Report::default();
     if policy.cleanup {
         rep.removed = cleanup(pkgdir);
@@ -163,7 +163,7 @@ pub fn run(pkgdir: &Path, splitdir: &Path, policy: &Slim) -> Result<Report> {
 // ---------------------------------------------------------------------------
 
 /// Remove files that are never needed at run time. Returns how many.
-pub fn cleanup(pkgdir: &Path) -> usize {
+pub(crate) fn cleanup(pkgdir: &Path) -> usize {
     let mut n = 0;
     for e in walkdir::WalkDir::new(pkgdir).into_iter().filter_map(|e| e.ok()) {
         // symlinks are not `is_file()` here: a link is never junk
@@ -248,7 +248,7 @@ const KINDS: [Kind; 2] = [
 /// Move documentation and message catalogs out of `pkgdir` into
 /// `splitdir/<suffix>`. A kind that is absent, or that would leave the main
 /// package without any file, is skipped.
-pub fn split(pkgdir: &Path, splitdir: &Path) -> Result<Vec<SubPackage>> {
+pub(crate) fn split(pkgdir: &Path, splitdir: &Path) -> Result<Vec<SubPackage>> {
     let real_root = pkgdir
         .canonicalize()
         .with_context(|| format!("resolve {}", pkgdir.display()))?;
