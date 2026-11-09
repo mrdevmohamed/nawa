@@ -14,7 +14,7 @@ pub use strsim::levenshtein;
 ///   (typing `zst` for `zstd` is a truncation, not a typo);
 /// * otherwise candidates within the distance cutoff win, closest first;
 /// * ties break alphabetically for deterministic output.
-pub fn did_you_mean(target: &str, candidates: &[String]) -> Vec<String> {
+pub(crate) fn did_you_mean(target: &str, candidates: &[String]) -> Vec<String> {
     let t = target.to_ascii_lowercase();
     let cutoff = if t.len() >= 8 { 3 } else { 2 };
     let mut scored: Vec<(usize, String)> = Vec::new();
@@ -39,7 +39,7 @@ pub fn did_you_mean(target: &str, candidates: &[String]) -> Vec<String> {
 
 /// Ready-to-append error text: `" — did you mean `x`?"` / with an OR list,
 /// or `""` when nothing plausible exists.
-pub fn hint(target: &str, candidates: &[String]) -> String {
+pub(crate) fn hint(target: &str, candidates: &[String]) -> String {
     let picks = did_you_mean(target, candidates);
     match picks.len() {
         0 => String::new(),

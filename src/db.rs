@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Entry {
+pub(crate) struct Entry {
     pub name: String,
     pub version: String,
     pub rel: u32,
@@ -49,7 +49,7 @@ impl Entry {
 /// threshold are ambiguous in theory; the conservative rule keeps them as-is
 /// (seconds interpretation) and migration only rewrites clearly-nanosecond
 /// values, idempotently.
-pub fn normalize_legacy_install_date(raw: u64) -> u64 {
+pub(crate) fn normalize_legacy_install_date(raw: u64) -> u64 {
     const NANOS_THRESHOLD: u64 = u64::MAX / 1000;
     if raw > NANOS_THRESHOLD {
         raw / 1_000_000_000
@@ -66,7 +66,7 @@ pub fn normalize_legacy_install_date(raw: u64) -> u64 {
 /// * already-correct entries are left untouched, so re-running is a no-op.
 ///
 /// Must be called while holding the exclusive database lock.
-pub fn migrate_install_dates(root: &Path) -> Result<Vec<String>> {
+pub(crate) fn migrate_install_dates(root: &Path) -> Result<Vec<String>> {
     let db = Db::new(root);
     let mut changed = Vec::new();
     if !db.local_dir().exists() {
@@ -104,7 +104,7 @@ pub fn migrate_install_dates(root: &Path) -> Result<Vec<String>> {
 /// Package names become directory names (db, undo log, hooks) and parts of
 /// archive file names, so they must not be able to contain path syntax.
 /// Allowed: ASCII letters/digits and `+ _ . -`, starting with a letter/digit.
-pub fn valid_name(n: &str) -> bool {
+pub(crate) fn valid_name(n: &str) -> bool {
     let mut chars = n.chars();
     match chars.next() {
         Some(c) if c.is_ascii_alphanumeric() => {}
@@ -114,7 +114,7 @@ pub fn valid_name(n: &str) -> bool {
 }
 
 /// Versions end up in file names too (`<name>-<ver>-<rel>.nawa.tar.zst`).
-pub fn valid_version(v: &str) -> bool {
+pub(crate) fn valid_version(v: &str) -> bool {
     let mut chars = v.chars();
     match chars.next() {
         Some(c) if c.is_ascii_alphanumeric() => {}
@@ -124,14 +124,14 @@ pub fn valid_version(v: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '_' | '.' | '-' | '~' | ':'))
 }
 
-pub fn check_name(n: &str) -> Result<()> {
+pub(crate) fn check_name(n: &str) -> Result<()> {
     if !valid_name(n) {
         bail!("invalid package name `{}` (allowed: letters, digits and + _ . -)", n.escape_debug());
     }
     Ok(())
 }
 
-pub struct Db {
+pub(crate) struct Db {
     root: PathBuf,
 }
 

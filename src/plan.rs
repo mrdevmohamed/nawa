@@ -17,7 +17,7 @@ use crate::version::vercmp;
 
 /// Why a package is part of a plan; decides the `reason` recorded in the db.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Why {
+pub(crate) enum Why {
     /// named on the command line
     Explicit,
     /// pulled in as a dependency of something else
@@ -51,7 +51,7 @@ impl Why {
 }
 
 #[derive(Debug, Clone)]
-pub struct Item {
+pub(crate) struct Item {
     pub rec: Recipe,
     pub why: Why,
     /// `version-rel` currently installed, when this replaces something
@@ -59,7 +59,7 @@ pub struct Item {
 }
 
 #[derive(Debug, Default)]
-pub struct Plan {
+pub(crate) struct Plan {
     /// build + install order: dependencies first
     pub items: Vec<Item>,
     /// requested targets that need nothing (already at the recipe's version
@@ -91,7 +91,7 @@ fn deps_of(
 ///
 /// * `target_why` — `Explicit` for `nawa install`, `Update` for `nawa update`
 /// * `with_deps`  — follow dependencies (`--no-deps` turns this off)
-pub fn install_plan(
+pub(crate) fn install_plan(
     targets: &[String],
     installed: &HashMap<String, Entry>,
     known: &BTreeMap<String, Recipe>,
@@ -180,7 +180,7 @@ fn visit(
 
 /// Installed packages whose recipe is newer: `(installed entry, recipe)`,
 /// alphabetical. Packages without a recipe are not "outdated", just unknown.
-pub fn outdated<'a>(
+pub(crate) fn outdated<'a>(
     installed: &'a [Entry],
     known: &'a BTreeMap<String, Recipe>,
 ) -> Vec<(&'a Entry, &'a Recipe)> {
@@ -198,7 +198,7 @@ pub fn outdated<'a>(
 /// `build_deps` is set, the **build** dependencies named by the recipes of
 /// kept packages are kept too — in a source distribution the compiler and
 /// the -dev libraries are what the next rebuild needs.
-pub fn orphans(
+pub(crate) fn orphans(
     installed: &[Entry],
     known: &BTreeMap<String, Recipe>,
     build_deps: bool,
@@ -233,7 +233,7 @@ pub fn orphans(
 /// Order `names` so that a package is removed before the packages it
 /// depends on (dependents first) — `remove` refuses to break a live
 /// dependency. Anything that cannot be ordered (a cycle) goes last.
-pub fn removal_order(names: &[String], installed: &[Entry]) -> Vec<String> {
+pub(crate) fn removal_order(names: &[String], installed: &[Entry]) -> Vec<String> {
     let set: HashSet<&str> = names.iter().map(|s| s.as_str()).collect();
     let run: HashMap<&str, Vec<&str>> = installed
         .iter()

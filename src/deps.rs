@@ -9,7 +9,7 @@ use crate::recipe::Recipe;
 /// Resolve build order for `targets` given the set of installed packages.
 /// Returns recipes in dependency order (deps first, targets last).
 /// Unknown names get a "did you mean" hint built from the known graph.
-pub fn resolve(
+pub(crate) fn resolve(
     targets: &[String],
     installed: &HashSet<String>,
     known: &BTreeMap<String, Recipe>,
@@ -71,7 +71,7 @@ fn visit(
 /// Here the target stays in `done` while its dependencies are visited — a
 /// dependency that leads back to it counts as satisfied instead of a cycle —
 /// and it is listed last, like any other target.
-pub fn resolve_target(
+pub(crate) fn resolve_target(
     name: &str,
     installed: &HashSet<String>,
     known: &BTreeMap<String, Recipe>,

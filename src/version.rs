@@ -12,7 +12,7 @@ use std::cmp::Ordering;
 /// Split `epoch:version-rel` into `(epoch, version, rel)`. The epoch is kept
 /// as its digit string (`"0"` when absent) so arbitrarily long epochs compare
 /// without integer overflow; `rel` is `"0"` when absent.
-pub fn split_full(v: &str) -> (&str, &str, &str) {
+pub(crate) fn split_full(v: &str) -> (&str, &str, &str) {
     let (epoch, rest) = match v.find(':') {
         Some(i) if !v[..i].is_empty() && v[..i].bytes().all(|b| b.is_ascii_digit()) => {
             (&v[..i], &v[i + 1..])
@@ -112,7 +112,7 @@ fn core_cmp(a: &str, b: &str) -> Ordering {
 /// Deliberate difference from libalpm: a missing release counts as `0`
 /// (libalpm skips the release comparison unless both sides have one), so
 /// `1.0-1 > 1.0`. Nawa packages always carry a release.
-pub fn vercmp(a: &str, b: &str) -> Ordering {
+pub(crate) fn vercmp(a: &str, b: &str) -> Ordering {
     let (ea, va, ra) = split_full(a);
     let (eb, vb, rb) = split_full(b);
     num_cmp(ea.as_bytes(), eb.as_bytes())

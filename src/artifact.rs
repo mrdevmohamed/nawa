@@ -35,12 +35,12 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 /// `<root>/var/cache/nawa/objects/sha256` — the immutable object store root.
-pub fn store_dir(root: &Path) -> PathBuf {
+pub(crate) fn store_dir(root: &Path) -> PathBuf {
     root.join("var/cache/nawa/objects/sha256")
 }
 
 /// The immutable object path for a full (validated) SHA-256 digest.
-pub fn object_path(root: &Path, sha256: &str) -> Result<PathBuf> {
+pub(crate) fn object_path(root: &Path, sha256: &str) -> Result<PathBuf> {
     validate_digest(sha256)?;
     let fan = &sha256[..2];
     Ok(store_dir(root).join(fan).join(format!("{sha256}.nawa.tar.zst")))
@@ -48,7 +48,7 @@ pub fn object_path(root: &Path, sha256: &str) -> Result<PathBuf> {
 
 /// A digest is 64 lowercase hex characters; it becomes path components, so
 /// anything else is rejected outright.
-pub fn validate_digest(sha256: &str) -> Result<()> {
+pub(crate) fn validate_digest(sha256: &str) -> Result<()> {
     let ok = sha256.len() == 64
         && sha256.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
     if !ok {
@@ -59,7 +59,7 @@ pub fn validate_digest(sha256: &str) -> Result<()> {
 
 /// Normalize a digest recorded elsewhere (trust-store style uppercase is
 /// tolerated on input, always stored lowercase).
-pub fn normalize_digest(sha256: &str) -> Result<String> {
+pub(crate) fn normalize_digest(sha256: &str) -> Result<String> {
     validate_digest(sha256)?;
     Ok(sha256.to_ascii_lowercase())
 }
@@ -80,7 +80,7 @@ fn random_suffix() -> String {
 
 /// An open, exclusive-create handle on a temporary file inside the object
 /// store's filesystem. Removed on drop unless [`Self::publish`] succeeded.
-pub struct StagedObject {
+pub(crate) struct StagedObject {
     root: PathBuf,
     tmp: PathBuf,
     file: Option<File>,
@@ -208,7 +208,7 @@ fn set_readonly(path: &Path) -> Result<()> {
 
 /// Verify that `path` contains exactly the bytes of `digest` and is a regular
 /// file (not a symlink someone dropped into the store).
-pub fn verify_object_file(path: &Path, digest: &str) -> Result<()> {
+pub(crate) fn verify_object_file(path: &Path, digest: &str) -> Result<()> {
     let digest = normalize_digest(digest)?;
     let md = std::fs::symlink_metadata(path)
         .with_context(|| format!("object {digest} is not present in the store"))?;
@@ -227,7 +227,7 @@ pub fn verify_object_file(path: &Path, digest: &str) -> Result<()> {
 /// Stage + absorb + publish in one call. Used by the installer right after it
 /// has verified the archive bytes: the object becomes eligible for history
 /// references and later restoration.
-pub fn store_verified_copy(root: &Path, source: &Path, expected: Option<&str>) -> Result<(PathBuf, String)> {
+pub(crate) fn store_verified_copy(root: &Path, source: &Path, expected: Option<&str>) -> Result<(PathBuf, String)> {
     let mut staged = StagedObject::create(root)?;
     let digest = staged.absorb(source, expected)?;
     let path = staged.publish()?;
@@ -237,7 +237,7 @@ pub fn store_verified_copy(root: &Path, source: &Path, expected: Option<&str>) -
 /// Import a legacy version-named cache archive into the object store after
 /// verifying it (roadmap §4.4 compatibility lookup). The legacy file is left
 /// in place. Returns the digest when the import succeeded.
-pub fn import_legacy(root: &Path, legacy_path: &Path) -> Result<Option<String>> {
+pub(crate) fn import_legacy(root: &Path, legacy_path: &Path) -> Result<Option<String>> {
     let digest = match crate::fetch::sha256_of_file(legacy_path) {
         Ok(d) => d,
         Err(_) => return Ok(None), // unreadable legacy entry: leave it alone
@@ -262,7 +262,7 @@ pub fn import_legacy(root: &Path, legacy_path: &Path) -> Result<Option<String>> 
 /// How the bytes of an installed archive were authenticated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum Authentication {
+pub(crate) enum Authentication {
     /// Trusted v2/v3 repository index: the signed index authenticated the
     /// archive digest (and the index bytes + signature are retained as proof).
     SignedIndex,
@@ -335,7 +335,7 @@ impl Authentication {
 /// signature bytes' digest and the verifying key fingerprint. For unsigned
 /// bootstrap artifacts and local builds both tables are absent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Provenance {
+pub(crate) struct Provenance {
     pub schema: u32,
     pub artifact_sha256: String,
     pub archive_size: u64,
@@ -351,7 +351,7 @@ pub struct Provenance {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PackageIdentity {
+pub(crate) struct PackageIdentity {
     pub name: String,
     pub version: String,
     pub rel: u32,
@@ -360,7 +360,7 @@ pub struct PackageIdentity {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RepositoryProof {
+pub(crate) struct RepositoryProof {
     /// Stable repository identifier (or the cache-derived id of a legacy
     /// single-repo configuration).
     pub id: String,
@@ -376,7 +376,7 @@ pub struct RepositoryProof {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SignatureProof {
+pub(crate) struct SignatureProof {
     /// SHA-256 of the detached signature bytes retained in the proof bundle.
     pub signature_sha256: String,
     /// Stable fingerprint of the verifying key.
@@ -419,7 +419,7 @@ impl Provenance {
     }
 }
 
-pub fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -429,14 +429,14 @@ pub fn now_secs() -> u64 {
 /// Stable fingerprint for an Ed25519 verifying key: the first 16 bytes of
 /// SHA-256 over the compressed Ristretto/Ed25519 point encoding, shown as
 /// hex. Used to tie a proof bundle to a key without embedding the key bytes.
-pub fn key_fingerprint(public_key: &[u8]) -> String {
+pub(crate) fn key_fingerprint(public_key: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(public_key);
     hex::encode(&h.finalize()[..16])
 }
 
 /// Where the provenance sidecar of an object lives.
-pub fn provenance_path(root: &Path, digest: &str) -> Result<PathBuf> {
+pub(crate) fn provenance_path(root: &Path, digest: &str) -> Result<PathBuf> {
     Ok(object_path(root, digest)?
         .parent()
         .expect("object path always has a fan-out parent")
@@ -447,7 +447,7 @@ pub fn provenance_path(root: &Path, digest: &str) -> Result<PathBuf> {
 /// Persist a provenance record next to its (already published) object.
 /// Idempotent: an existing identical record is left alone; a conflicting one
 /// is an error (the object store must never rewrite history).
-pub fn save_provenance(root: &Path, prov: &Provenance) -> Result<()> {
+pub(crate) fn save_provenance(root: &Path, prov: &Provenance) -> Result<()> {
     let path = provenance_path(root, &prov.artifact_sha256)?;
     if path.exists() {
         let existing = std::fs::read_to_string(&path)
@@ -479,7 +479,7 @@ pub fn save_provenance(root: &Path, prov: &Provenance) -> Result<()> {
 }
 
 /// Load the provenance record for a digest, if one was persisted.
-pub fn load_provenance(root: &Path, digest: &str) -> Result<Option<Provenance>> {
+pub(crate) fn load_provenance(root: &Path, digest: &str) -> Result<Option<Provenance>> {
     let path = provenance_path(root, digest)?;
     if !path.exists() {
         return Ok(None);
@@ -491,7 +491,7 @@ pub fn load_provenance(root: &Path, digest: &str) -> Result<Option<Provenance>> 
 
 /// Retain the detached-signature bytes of an object in its proof bundle and
 /// record their digest inside the provenance record.
-pub fn retain_detached_signature(
+pub(crate) fn retain_detached_signature(
     root: &Path,
     digest: &str,
     signature_source: &Path,
@@ -532,7 +532,7 @@ pub fn retain_detached_signature(
 /// object's proof bundle (`<digest>.index.toml`, `<digest>.index.toml.sig`,
 /// `<digest>.signer.pub` — shared bytes per digest, no per-package
 /// duplication beyond what the filesystem deduplicates by content).
-pub fn retain_repository_proof(
+pub(crate) fn retain_repository_proof(
     root: &Path,
     digest: &str,
     index_bytes: &[u8],
@@ -592,7 +592,7 @@ pub fn retain_repository_proof(
 /// Re-verify a stored object against its provenance record: exact bytes
 /// (digest) plus, when the record says so, the retained signature/index
 /// proof. Used by rollback and history undo before any restoration.
-pub fn verify_stored(root: &Path, digest: &str) -> Result<PathBuf> {
+pub(crate) fn verify_stored(root: &Path, digest: &str) -> Result<PathBuf> {
     let digest = normalize_digest(digest)?;
     let path = object_path(root, &digest)?;
     verify_object_file(&path, &digest)?;

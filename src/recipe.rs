@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct Recipe {
+pub(crate) struct Recipe {
     pub package: Package,
     /// Recipe-local assets (fetch-phase.md §5). A top-level table, like
     /// `[sandbox]`; any use makes the recipe a new-schema recipe whose
@@ -52,10 +52,10 @@ pub struct Recipe {
 /// exist, before any download or closure work. The new nawa treats exactly
 /// this value as the marker: required with the new tables, rejected
 /// without them, and never staged.
-pub const SCHEMA_MARKER: &str = "local:/nawa-schema-2-requires-a-newer-nawa";
+pub(crate) const SCHEMA_MARKER: &str = "local:/nawa-schema-2-requires-a-newer-nawa";
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct Package {
+pub(crate) struct Package {
     pub name: String,
     pub version: String,
     #[serde(default = "default_rel")]
@@ -106,7 +106,7 @@ pub struct Package {
 /// the forward-compatibility rules of §19.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SourceSpec {
+pub(crate) struct SourceSpec {
     /// Unique within the recipe; `[a-z0-9][a-z0-9._-]*`, at most 64
     /// characters. Names appear in paths (stage trees, build-id key, errors).
     pub name: String,
@@ -148,7 +148,7 @@ pub struct SourceSpec {
 /// `deny_unknown_fields`: a misspelled key is a parse-time error (§9).
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AssetSpec {
+pub(crate) struct AssetSpec {
     #[serde(default)]
     pub include: Vec<String>,
 }
@@ -161,7 +161,7 @@ pub struct AssetSpec {
 /// parse-time error (§9).
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Fetch {
+pub(crate) struct Fetch {
     #[serde(default)]
     pub go: Option<FetchSpec>,
     #[serde(default)]
@@ -178,7 +178,7 @@ impl Fetch {
 /// One backend declaration (`[fetch.go]` / `[fetch.cargo]`, §9).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct FetchSpec {
+pub(crate) struct FetchSpec {
     /// The workspace-relative directory holding `go.mod`/`go.sum` (or
     /// `Cargo.toml`/`Cargo.lock`). Defaults to the workspace root (`.`).
     /// Never absolute, never borrowing `..` — parsed like `into`/`workdir`.
@@ -194,19 +194,19 @@ fn default_fetch_dir() -> String {
 /// (fetch-phase.md §9). The toolchain names live here in **one** place and
 /// are kept here in one place and must match the package names published
 /// by faseela-repo. Go is `golang`; Rust is `rust`.
-pub const GO_TOOLCHAIN: &str = "golang";
+pub(crate) const GO_TOOLCHAIN: &str = "golang";
 /// Implicit package providing the Rust toolchain, added by `[fetch.cargo]`.
-pub const CARGO_TOOLCHAIN: &str = "rust";
+pub(crate) const CARGO_TOOLCHAIN: &str = "rust";
 /// The closure must provide a CA bundle for the fetch toolchain's TLS (§9);
 /// the name must be verified against faseela-repo before release.
-pub const CA_BUNDLE: &str = "ca-certificates";
+pub(crate) const CA_BUNDLE: &str = "ca-certificates";
 
 fn default_rel() -> u32 {
     1
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-pub struct Depends {
+pub(crate) struct Depends {
     /// Build dependencies. At the `closure` isolation level this means
     /// "libraries/headers/tools beyond `base-devel`" — see
     /// docs/design/build-isolation.md §5.1; at lower levels everything
@@ -222,7 +222,7 @@ pub struct Depends {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-pub struct Build {
+pub(crate) struct Build {
     #[serde(default)]
     pub prepare: String,
     #[serde(default)]
@@ -237,7 +237,7 @@ pub struct Build {
 
 /// Per-recipe sandbox overrides (docs/design/build-isolation.md §8).
 #[derive(Debug, Clone, Default, Deserialize)]
-pub struct Sandbox {
+pub(crate) struct Sandbox {
     /// A recipe that truly needs network during a build section. Requires
     /// `nawa build --allow-network` as well; the archive records `impure = network`.
     #[serde(default)]
@@ -248,7 +248,7 @@ pub struct Sandbox {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-pub struct Hooks {
+pub(crate) struct Hooks {
     #[serde(default)]
     pub post_install: String,
     #[serde(default)]
@@ -258,7 +258,7 @@ pub struct Hooks {
 }
 
 /// Context used to expand `%{...}` placeholders in build scripts.
-pub struct ExpandCtx {
+pub(crate) struct ExpandCtx {
     pub jobs: u32,
     pub pkgdir: PathBuf,
     pub srcdir: PathBuf,
@@ -606,7 +606,7 @@ fn valid_source_name(name: &str) -> bool {
 
 /// Exactly 64 lowercase hex characters (§4.2): the digest doubles as a cache
 /// path component, so it must never carry `/` or `..` or any other shape.
-pub fn is_lower_hex64(s: &str) -> bool {
+pub(crate) fn is_lower_hex64(s: &str) -> bool {
     s.len() == 64
         && s.bytes()
             .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
@@ -634,7 +634,7 @@ fn check_rel_path(kind: &str, value: &str) -> Result<()> {
 }
 
 /// Discover every recipe under a recipes root (`recipes/**/recipe.toml`).
-pub fn load_all(root: &Path) -> Result<BTreeMap<String, Recipe>> {
+pub(crate) fn load_all(root: &Path) -> Result<BTreeMap<String, Recipe>> {
     let mut map = BTreeMap::new();
     for entry in walkdir::WalkDir::new(root)
         .into_iter()
@@ -655,13 +655,13 @@ pub fn load_all(root: &Path) -> Result<BTreeMap<String, Recipe>> {
 /// Load one recipe by package name, searching `recipes/**/recipe.toml`.
 /// A miss suggests close recipe names — "did you mean `gzip`?" beats a bare
 /// "not found" every time.
-pub fn load_by_name(root: &Path, name: &str) -> Result<Recipe> {
+pub(crate) fn load_by_name(root: &Path, name: &str) -> Result<Recipe> {
     Ok(locate(root, name)?.0)
 }
 
 /// Load one recipe by name and also report where its `recipe.toml` lives
 /// (single walk — `load_by_name` drops the path).
-pub fn locate(root: &Path, name: &str) -> Result<(Recipe, PathBuf)> {
+pub(crate) fn locate(root: &Path, name: &str) -> Result<(Recipe, PathBuf)> {
     for entry in walkdir::WalkDir::new(root)
         .into_iter()
         .filter_map(|e| e.ok())

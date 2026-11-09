@@ -10,7 +10,7 @@ use std::fmt;
 use std::io::{self, Write};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Level {
+pub(crate) enum Level {
     Info,
     Success,
     Note,
@@ -77,12 +77,12 @@ fn write_line<W: Write>(
 }
 
 /// Emit a message using the default stream for its level.
-pub fn emit(level: Level, args: fmt::Arguments<'_>) {
+pub(crate) fn emit(level: Level, args: fmt::Arguments<'_>) {
     emit_to(level, args, level.stderr());
 }
 
 /// Emit a message to stderr while retaining its semantic level.
-pub fn emit_stderr(level: Level, args: fmt::Arguments<'_>) {
+pub(crate) fn emit_stderr(level: Level, args: fmt::Arguments<'_>) {
     emit_to(level, args, true);
 }
 

@@ -27,10 +27,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// Set in the environment of hooks so nested nawa calls skip locking.
-pub const HELD_ENV: &str = "NAWA_LOCK_HELD";
+pub(crate) const HELD_ENV: &str = "NAWA_LOCK_HELD";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mode {
+pub(crate) enum Mode {
     Shared,
     Exclusive,
 }
@@ -38,11 +38,11 @@ pub enum Mode {
 /// Held for as long as the value lives; dropping it closes the file, which
 /// releases the lock.
 #[derive(Debug)]
-pub struct DbLock {
+pub(crate) struct DbLock {
     _file: File,
 }
 
-pub fn lock_path(root: &Path) -> PathBuf {
+pub(crate) fn lock_path(root: &Path) -> PathBuf {
     root.join("var/lib/nawa/lock")
 }
 
@@ -52,7 +52,7 @@ pub fn lock_path(root: &Path) -> PathBuf {
 /// * inside a hook of a nawa that already holds the lock (`NAWA_LOCK_HELD`);
 /// * a *shared* lock on a root that has no nawa state yet, or that is
 ///   read-only for us (readers are best-effort, writers are strict).
-pub fn acquire(root: &Path, mode: Mode) -> Result<Option<DbLock>> {
+pub(crate) fn acquire(root: &Path, mode: Mode) -> Result<Option<DbLock>> {
     if std::env::var_os(HELD_ENV).is_some() {
         return Ok(None);
     }
@@ -92,7 +92,7 @@ pub fn acquire(root: &Path, mode: Mode) -> Result<Option<DbLock>> {
 }
 
 #[derive(Debug)]
-pub enum Attempt {
+pub(crate) enum Attempt {
     Locked(DbLock),
     /// Another process holds a conflicting lock.
     Busy,
@@ -101,7 +101,7 @@ pub enum Attempt {
 }
 
 /// One non-blocking attempt.
-pub fn try_acquire(root: &Path, mode: Mode) -> Result<Attempt> {
+pub(crate) fn try_acquire(root: &Path, mode: Mode) -> Result<Attempt> {
     let path = lock_path(root);
     let file = match mode {
         Mode::Exclusive => {

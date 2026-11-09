@@ -25,7 +25,7 @@ use crate::sign;
 /// How the bytes of the archive being installed were authenticated. Decides
 /// the provenance record written next to the content-addressed object.
 #[derive(Debug, Clone, Default)]
-pub enum InstallAuth {
+pub(crate) enum InstallAuth {
     /// Standalone archive path: detached signature (or bootstrap mode when no
     /// signature exists and the trust policy allowed it in).
     Detached {
@@ -67,7 +67,7 @@ impl InstallAuth {
 /// * `allow_unsigned`   — accept unsigned archives when trust keys exist
 /// * `key`              — verify signature against this pubkey instead of the trust store
 /// * `reason`           — "explicit" | "dependency" | "keep" (preserve old reason)
-pub fn install_archive(
+pub(crate) fn install_archive(
     archive_path: &Path,
     root: &Path,
     force: bool,
@@ -81,7 +81,7 @@ pub fn install_archive(
 /// Options for [`install_archive_pinned`]: the install booleans and
 /// the pinned digest live in one struct so call sites cannot
 /// transpose `force`/`allow_unsigned` or pass a mistyped reason.
-pub struct InstallOpts<'a> {
+pub(crate) struct InstallOpts<'a> {
     pub force: bool,
     pub allow_unsigned: bool,
     pub key: Option<&'a Path>,
@@ -93,7 +93,7 @@ pub struct InstallOpts<'a> {
 /// described. With `pinned_sha` the snapshot must hash to the index
 /// digest, so the bytes whose detached signature is checked are provably the
 /// bytes the index entry (and `.PKGINFO` check) was validated against.
-pub fn install_archive_pinned(
+pub(crate) fn install_archive_pinned(
     archive_path: &Path,
     root: &Path,
     opts: InstallOpts<'_>,
@@ -137,7 +137,7 @@ pub fn install_archive_pinned(
 /// is intentionally separate from standalone archive installation. The
 /// proof is persisted next to the content-addressed object so a later
 /// rollback/undo can re-verify instead of trusting the cache blindly.
-pub fn install_archive_from_index_proof(
+pub(crate) fn install_archive_from_index_proof(
     archive_path: &Path,
     root: &Path,
     force: bool,
@@ -165,7 +165,7 @@ pub fn install_archive_from_index_proof(
 }
 
 /// Borrowed proof bundle for a trusted-index install.
-pub struct IndexProof<'a> {
+pub(crate) struct IndexProof<'a> {
     pub index_bytes: Option<&'a [u8]>,
     pub index_signature: Option<&'a [u8]>,
     pub signer_public: Option<&'a [u8]>,
@@ -175,7 +175,7 @@ pub struct IndexProof<'a> {
 /// Inspect package identity and archive digest before installation. This state
 /// is persisted in the WAL intent so recovery can distinguish installs from
 /// removals without guessing.
-pub fn inspect_archive_state(
+pub(crate) fn inspect_archive_state(
     archive_path: &Path,
     reason: &str,
     previous: Option<&Entry>,
@@ -529,7 +529,7 @@ fn install_archive_payload(
 /// * legacy undo records without a digest fall back to the previous
 ///   behaviour (detached-signature policy where a usable signature exists).
 ///   This weaker legacy path is explicit and never reported as strong proof.
-pub fn rollback(name: &str, root: &Path) -> Result<()> {
+pub(crate) fn rollback(name: &str, root: &Path) -> Result<()> {
     let db = Db::new(root);
     crate::db::check_name(name)?;
     let desc_path = root.join("var/lib/nawa/undo").join(name).join("desc");
@@ -747,7 +747,7 @@ pub(crate) fn verify_retained_detached_proof(root: &Path, digest: &str) -> Resul
 }
 
 #[allow(dead_code)] // convenience wrapper over remove_with
-pub fn remove(name: &str, root: &Path) -> Result<()> {
+pub(crate) fn remove(name: &str, root: &Path) -> Result<()> {
     remove_with(name, root, false)
 }
 
@@ -759,7 +759,7 @@ pub fn remove(name: &str, root: &Path) -> Result<()> {
 /// update fails; the db entry is only dropped once every file has been moved.
 /// A failure to move any file aborts the removal instead of silently
 /// leaving a half-removed package behind.
-pub fn remove_with(name: &str, root: &Path, force: bool) -> Result<()> {
+pub(crate) fn remove_with(name: &str, root: &Path, force: bool) -> Result<()> {
     let db = Db::new(root);
     let _interrupts = interrupt::Guard::new();
     recover_and_report(root);
@@ -1348,7 +1348,7 @@ impl Drop for Tx {
 /// * leftover staging directories of dead installs are removed.
 ///
 /// Returns one line per repair for the caller to show.
-pub fn recover(root: &Path) -> Result<Vec<String>> {
+pub(crate) fn recover(root: &Path) -> Result<Vec<String>> {
     let dir = root.join(".nawa");
     let mut notes = Vec::new();
     let rd = match std::fs::read_dir(&dir) {
@@ -1394,7 +1394,7 @@ pub fn recover(root: &Path) -> Result<Vec<String>> {
 
 /// [`recover`], reporting on stderr. Failures to repair are warnings: the
 /// command at hand should still be able to run.
-pub fn recover_and_report(root: &Path) {
+pub(crate) fn recover_and_report(root: &Path) {
     match recover(root) {
         Ok(notes) => {
             for n in notes {

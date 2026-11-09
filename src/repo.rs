@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use crate::archive;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RepoEntry {
+pub(crate) struct RepoEntry {
     pub name: String,
     pub version: String,
     pub rel: u32,
@@ -40,7 +40,7 @@ fn is_base_url(value: &String) -> bool {
 /// Authentication metadata for a schema-v2 repository.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RepositoryMeta {
+pub(crate) struct RepositoryMeta {
     pub schema: u32,
     pub archive_auth: String,
     pub hash_algorithm: String,
@@ -72,18 +72,18 @@ impl RepositoryMeta {
     }
 }
 
-pub const INDEX_SCHEMA_V2: u32 = 2;
-pub const INDEX_SCHEMA_V3: u32 = 3;
-pub const ARCHIVE_LOCATION_BASE_URL: &str = "base-url";
-pub const ARCHIVE_LOCATION_PER_PACKAGE_URL: &str = "per-package-url";
-pub const ARCHIVE_AUTH_SIGNED_INDEX: &str = "signed-index";
-pub const HASH_ALGORITHM_SHA256: &str = "sha256";
-pub const INDEX_SIGNATURE_NAWA_SIG_V1: &str = "nawa-sig-v1";
+pub(crate) const INDEX_SCHEMA_V2: u32 = 2;
+pub(crate) const INDEX_SCHEMA_V3: u32 = 3;
+pub(crate) const ARCHIVE_LOCATION_BASE_URL: &str = "base-url";
+pub(crate) const ARCHIVE_LOCATION_PER_PACKAGE_URL: &str = "per-package-url";
+pub(crate) const ARCHIVE_AUTH_SIGNED_INDEX: &str = "signed-index";
+pub(crate) const HASH_ALGORITHM_SHA256: &str = "sha256";
+pub(crate) const INDEX_SIGNATURE_NAWA_SIG_V1: &str = "nawa-sig-v1";
 
 /// The recipe tree published next to the packages (nawa sync). It lives in
 /// the signed index, so the signature covers the revision and the tarball hash.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RecipesEntry {
+pub(crate) struct RecipesEntry {
     pub rev: String,
     pub file: String,
     pub sha256: String,
@@ -95,17 +95,17 @@ pub struct RecipesEntry {
 /// Authenticated reference to the standalone package-group catalog.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct GroupsEntry {
+pub(crate) struct GroupsEntry {
     pub schema: u32,
     pub file: String,
     pub sha256: String,
     pub size: u64,
 }
 
-pub const RECIPES_SUFFIX: &str = ".recipes.tar.zst";
+pub(crate) const RECIPES_SUFFIX: &str = ".recipes.tar.zst";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Index {
+pub(crate) struct Index {
     /// Unix time the index was generated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generated: Option<u64>,
@@ -125,18 +125,18 @@ pub struct Index {
     pub packages: Vec<RepoEntry>,
 }
 
-pub const INDEX_VALIDITY_SECS: u64 = 90 * 24 * 3600;
+pub(crate) const INDEX_VALIDITY_SECS: u64 = 90 * 24 * 3600;
 
 /// Load and validate an index. An index without [repository] remains legacy v1.
 #[cfg(test)]
-pub fn load_index(path: &Path) -> Result<Index> {
+pub(crate) fn load_index(path: &Path) -> Result<Index> {
     let raw = std::fs::read(path)
         .with_context(|| format!("read index {}", path.display()))?;
     load_index_bytes(&raw).with_context(|| format!("parse index {}", path.display()))
 }
 
 /// Parse and validate exactly the byte sequence whose signature was checked.
-pub fn load_index_bytes(raw: &[u8]) -> Result<Index> {
+pub(crate) fn load_index_bytes(raw: &[u8]) -> Result<Index> {
     let text = std::str::from_utf8(raw).context("repository index is not valid UTF-8")?;
     let idx: Index = toml::from_str(text).context("parse repository index TOML")?;
     idx.validate()?;
@@ -265,7 +265,7 @@ fn validate_download_url(value: &str, what: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn validate_sha256(value: &str, what: &str) -> Result<()> {
+pub(crate) fn validate_sha256(value: &str, what: &str) -> Result<()> {
     if value.len() != 64 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
         bail!("{what} has an invalid SHA-256 digest (expected 64 hexadecimal characters)");
     }
@@ -294,13 +294,13 @@ fn validate_archive_filename(file: &str) -> Result<()> {
 
 /// Build a legacy v1 index from a directory containing package archives.
 #[cfg(test)]
-pub fn create_index(dir: &Path, out: &Path) -> Result<Index> {
+pub(crate) fn create_index(dir: &Path, out: &Path) -> Result<Index> {
     create_index_with(dir, out, None)
 }
 
 /// Backward-compatible v1 index generator used by repository unit tests.
 #[cfg(test)]
-pub fn create_index_with(
+pub(crate) fn create_index_with(
     dir: &Path,
     out: &Path,
     recipes: Option<(&Path, &str)>,
@@ -312,7 +312,7 @@ pub fn create_index_with(
 /// v2 uses signed-index hashes with base-URL archive lookup, while v3 adds
 /// authenticated per-archive HTTPS locations for distributed storage.
 #[allow(dead_code)] // compatibility entry point; production CLI uses the groups-aware variant
-pub fn create_index_with_version(
+pub(crate) fn create_index_with_version(
     dir: &Path,
     out: &Path,
     recipes: Option<(&Path, &str)>,
@@ -323,7 +323,7 @@ pub fn create_index_with_version(
 
 /// Build an index using a publisher-generated archive location manifest.
 #[allow(dead_code)] // compatibility entry point; production CLI uses the groups-aware variant
-pub fn create_index_with_locations(
+pub(crate) fn create_index_with_locations(
     dir: &Path,
     out: &Path,
     recipes: Option<(&Path, &str)>,
@@ -335,7 +335,7 @@ pub fn create_index_with_locations(
 
 /// Build an index and optionally publish a validated group catalog beside it.
 /// The catalog digest and size are included in the signed index.
-pub fn create_index_with_locations_and_groups(
+pub(crate) fn create_index_with_locations_and_groups(
     dir: &Path,
     out: &Path,
     recipes: Option<(&Path, &str)>,
@@ -472,7 +472,7 @@ fn write_index_atomic(index: &Index, out: &Path) -> Result<()> {
 
 /// What changed since a base index (see `update_index`).
 #[derive(Debug, Default)]
-pub struct IndexDelta {
+pub(crate) struct IndexDelta {
     /// Entries for new archives, one per archive, in any order.
     pub add: Vec<RepoEntry>,
     /// Archive file names that left the repository. An unindexed name (an old
@@ -501,7 +501,7 @@ fn archive_file_name(e: &RepoEntry) -> String {
 ///   like repo-create; an older added entry is ignored;
 /// * an archive file name is immutable: re-adding the same name with another
 ///   sha256 or size is an error, re-adding it unchanged is a no-op.
-pub fn update_index(
+pub(crate) fn update_index(
     base: &Index,
     delta: IndexDelta,
     recipes: Option<RecipesEntry>,
@@ -589,7 +589,7 @@ struct EntriesFile {
 /// flags: entries to add, archives/packages to remove, an archive-locations
 /// manifest, and a new recipe snapshot.
 #[derive(Debug, Default)]
-pub struct UpdateIndexFilesInputs<'a> {
+pub(crate) struct UpdateIndexFilesInputs<'a> {
     pub entries_path: Option<&'a Path>,
     pub remove_files: Vec<String>,
     pub drop_packages: Vec<String>,
@@ -601,7 +601,7 @@ pub struct UpdateIndexFilesInputs<'a> {
 /// write the new index atomically. `dir` receives the recipe snapshot when
 /// `inputs.recipes` is given (as in repo-create); without it the base recipes
 /// entry is kept unchanged. Signing is the caller's job.
-pub fn update_index_files(
+pub(crate) fn update_index_files(
     base: &Index,
     dir: &Path,
     out: &Path,
@@ -688,7 +688,7 @@ fn load_locations(path: &Path) -> Result<LocationsFile> {
 
 /// A revision is a commit sha or tag: it ends up in a file name, so keep it
 /// to a conservative alphabet.
-pub fn validate_rev(rev: &str) -> Result<()> {
+pub(crate) fn validate_rev(rev: &str) -> Result<()> {
     let ok = !rev.is_empty()
         && rev.len() <= 64
         && !rev.starts_with('.')
@@ -703,7 +703,7 @@ pub fn validate_rev(rev: &str) -> Result<()> {
 
 /// Pack the recipe tree into recipes-<rev>.recipes.tar.zst and describe it.
 /// .git is skipped; symlinks and special files are refused — a recipe tree is plain data.
-pub fn pack_recipes(tree: &Path, out_dir: &Path, rev: &str) -> Result<RecipesEntry> {
+pub(crate) fn pack_recipes(tree: &Path, out_dir: &Path, rev: &str) -> Result<RecipesEntry> {
     validate_rev(rev)?;
     if !tree.is_dir() {
         anyhow::bail!("recipes directory not found: {}", tree.display());
@@ -750,7 +750,7 @@ pub fn pack_recipes(tree: &Path, out_dir: &Path, rev: &str) -> Result<RecipesEnt
 
 /// Validate and copy a group catalog into the repository, then return the
 /// digest reference that the signed index will authenticate.
-pub fn pack_groups(source: &Path, out_dir: &Path) -> Result<GroupsEntry> {
+pub(crate) fn pack_groups(source: &Path, out_dir: &Path) -> Result<GroupsEntry> {
     let raw = std::fs::read(source)
         .with_context(|| format!("read group catalog {}", source.display()))?;
     let text = std::str::from_utf8(&raw).context("group catalog is not valid UTF-8")?;
