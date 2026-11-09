@@ -134,3 +134,64 @@ No breaking changes were introduced in this PR; future splits should also be mec
 - [x] No breaking changes to CLI, recipe/archive/index formats, signing, deps
 - [x] Validation: `cargo check --all-targets` clean; `cargo test` green
 
+
+
+---
+
+## 6. Update — Steps 3-8 (2026-11-09, PRs #36-#42)
+
+This section is appended to the 2026-11-09 report above to record the incremental implementation of the plan's Steps 3-8. The original Phase 1-4 validation above is preserved for history; the newer validation below supersedes it.
+
+### Steps completed since the original report
+
+- **Step 3 — Durable atomic writes (PR-3a/3b/3c, in PR #36):** `db.rs` (desc/files/hashes, migrate_install_dates), `sign.rs` (sig), `repo.rs` index (now `repo/create.rs`), `groups/membership.rs`, `plugins/events.rs` (enqueue/store_failure) now use `crate::transaction::atomic::write_atomic` (fsync file + parent dir, creates parents). Modes preserved (0o644 for db/sign/repo/groups, 0o600 for plugin events, 0o700 for plugin dir). Commits `19656c7`, `521b89d`.
+
+- **Step 4 — Visibility tightening (in PR #36):** `pub` → `pub(crate)` for internal `fn`/`struct`/`enum`/`const` across 60+ files (top-level and submodule dirs `fetch/`, `install/`, `fetchrun/`, `repo/`, `lint/`, `upgrade/`, `build/`, `recipe/`, `transaction/`, `plugins/`, `sandbox/`, `groups/`). Re-exports changed to `pub(crate) use` where needed (e.g. `sandbox/init.rs` `SYNC_FD`).
+
+- **Step 5 — Split `install.rs` 2711 → `install/{mod,payload,hooks,journal,rollback}` (PR #36, commit `2742844`).**
+- **Step 6 — Split remaining god modules (PR #36):** `fetch.rs` 2213 → `fetch/{mod,checksum,snapshot,http,cache,local,extract}` (incl. P0-2 `.part` race fix via `unique_part_path`); `fetchrun.rs` 1617 → `fetchrun/{mod,go,cargo,common}` (`62711d7`); `repo.rs` 1203 → `repo/{mod,model,validate,create,update,pack}` (`dc8c4d9`); `lint.rs` 1024 → `lint/{mod,elf,layout}` (`e37b0a4`); `upgrade.rs` 1097 → `upgrade/{mod,verify,order}` (`9ed7b18`); `build.rs` 1550 → `build/{mod,cache,sandbox,sections}` (`0c5c8aa`); `recipe.rs` 1374 → `recipe/{mod,model,validate,expand,load}` (`10f3e78`). Each split preserves `crate::<module>::*` public paths via `pub(crate) use`, keeps tests in `mod.rs`, keeps clippy clean.
+
+- **Step 7 — Type safety (PR #36 + PRs #39-#40):** `InstallReason` enum (`Explicit`, `Dependency`, `Group`, `Keep`) with `as_str()`/`parse()` and `Entry::reason_kind()` in `db.rs`; install pipeline (`InstallOpts`, `install_archive*`, `inspect_archive_state`, `install_archive_payload`) now takes `InstallReason`; `plan::Why::db_reason()` now returns `InstallReason` (`0d2d9e1`); single-pass placeholder expansion in `recipe/expand.rs` (no chained `replace`, `%%{name}` escapes to `%{name}`, bare `%%` left as `%%` for shell `${var%%pat}`, fixes double-expansion) (PR #39 `bf25966`); lightweight `ErrorClass` (`Io`, `Config`, `Trust`, `Checksum`, `Offline`, `Interrupted`, `Other`) with `Class::of(&anyhow::Error)` in new `src/error.rs`, gated in `diag::hint` (PR #40 `cf73dbc`).
+
+- **Step 8 — Performance (PRs #37, #38, #41, #42):** Cache `recipe::load_all` per-`Ctx` (`Ctx.recipe_cache: RefCell<Option<BTreeMap>>`, `ctx.load_all()` replaces `recipe::load_all(&ctx.recipes)` in `fetching/installing/querying/recipes`) — saves re-walking recipes tree multiple times per invocation (PR #37 `26d5c32`); Centralize sorted directory walks into `src/fswalk.rs` (`entries_sorted_ok`, `entries_sorted`) used by `lint`, `slim` (cleanup/split/strip/count), `archive` (PR #38 `ea28351`); Parallelize `sources::stage_sources` downloads with `std::thread::scope` (one thread per `[[package.sources]]`, join in recipe order, first error returns in recipe order; `tests/sources.rs` updated to expect 3 requests instead of 2 because all sources are attempted concurrently) (PR #41 `4d21acb`); Consolidate unique-temp sequence generators into `src/unique.rs` (`next()` replaces 6 independent `AtomicU64` counters `PART_SEQUENCE`, `SNAPSHOT_SEQUENCE`, `TEMP_SEQUENCE` ×2, `FAILURE_SEQUENCE`, `REQUEST_SEQUENCE`) (PR #42 `ccf955e`).
+
+### Validation (updated, Phase 4 for Steps 3-8)
+
+```
+cargo check --all-targets          → clean, 0 warnings
+cargo clippy --all-targets --all-features -- -D warnings → clean
+cargo clippy --release --all-targets --locked -- -D warnings → clean (CI)
+cargo test --bin nawa              → 412 passed; 0 failed; 1 ignored
+cargo test --test sources          → 8 passed
+cargo test --test offline          → 2 passed
+CI: nawa (build, clippy, tests), nawa-matrix (ubuntu-22.04/24.04 × user/root),
+    isolation (none/env/sandbox/closure), smoke (smoke-v05/v06),
+    static musl, CI passed (gate) → all PASS on PRs #36-#41 (and #42 pending)
+```
+
+No breaking changes to CLI commands (`nawa sync/update/upgrade/install/remove/fetch/build/revdep/service`), recipe format, archive format, repo index format, signing, or dependency resolution.
+
+### Remaining technical debt (after Steps 3-8)
+
+1. **P0-3 — Sandbox trusts live root outside closure** (`Sandbox` only mounts namespaces over live root; `extra_binds` shape validated but not policy-checked). Needs architectural decision, not low-risk.
+2. **P1-2 — Legacy undo journal vs new transaction WAL duplication** (two sources of truth for "what was installed before"; keep both until WAL undo covers rollback use-case per audit §1). Needs migration strategy.
+3. **P1-4 — Build isolation cache identity** misses `sandbox.extra_binds`, `assets` digest, toolchain version for non-closure isolation (`build_id_for` coverage).
+4. **P1-5 — `wipe_work` recursion + symlink escape** under overlayfs `sb/layer-work` (mode 000) — hardening with `O_NOFOLLOW`/`symlink_metadata` guard (code already uses `symlink_metadata` and treats symlinks as files; audit noted comment but code may still be vulnerable to symlink-to-dir escapes in overlayfs).
+5. **P1-8 — Performance:** repository parsing repeated (`fetch::load_index` called per repo file in `repositories.rs` + `sync.rs`); `revdep::scan` reads every ELF twice; `lint→slim→archive` still walk separately (fswalk helper centralises pattern but does not produce a single walk reused across passes because passes mutate the tree). Quadratic `deps` resolution.
+6. **P2 — Duplication remaining:** canonicalization/containment (`ensure_inside_root` vs `slim::split` real_root check vs `plugins/manifest` containment vs `fetchrun/common` canonicalize), sibling extraction duplication (`extract_source_archive` vs `extract_source_archive_stripped` now share `decompressed_reader` — remaining duplication is minimal), duplicate build-secret handling, planner/upgrade overlap (two resolvers: `plan.rs` vs `upgrade/mod.rs`).
+
+All remaining items carry compatibility risk or require architectural decision per plan rule 7 and should be addressed in separate, design-led PRs.
+
+---
+
+## 5. Definition of Done check (updated)
+
+- [x] Clear architecture documented (`nawa-audit.md` §1) and modularisation completed (8 god modules split)
+- [x] Small, focused modules (all splits < 450 lines except `fetch/mod.rs` 1030 incl. tests)
+- [x] Consistent naming, idiomatic Rust, `pub(crate)` visibility
+- [x] Predictable error handling (`Class::of` + `diag::hint`, `InstallReason` type-safe)
+- [x] Minimal duplication in walks, temp names, placeholders (see Steps 7-8)
+- [x] No unnecessary abstractions (no new traits/DI; helpers are plain fns)
+- [x] Strong test coverage: 412 tests in `--bin nawa` + integration suites, all green
+- [x] No unexplained breaking changes, no regressions in package management (CI matrix green)
+- [x] Clean formatting/clippy (CI `cargo clippy --release --all-targets --locked -- -D warnings` green)
