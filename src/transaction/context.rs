@@ -315,7 +315,7 @@ fn rustix_uid() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{Db, Entry};
+    use crate::db::Db;
     use crate::testutil::{entry, tmpdir};
 
     #[test]

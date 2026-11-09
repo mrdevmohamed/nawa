@@ -464,7 +464,7 @@ pub fn history_undo(root: &Path, id: u64, yes: bool) -> Result<()> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use crate::db::{Db, Entry};
+    use crate::db::Db;
     use crate::testutil::{entry, tmpdir};
     use crate::transaction::context::{begin_operation, OperationCommand};
     use crate::transaction::history::{PackageChange, PackageState, StepStatus, SCHEMA_VERSION};
