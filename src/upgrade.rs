@@ -497,11 +497,7 @@ pub fn upgrade(
                 install::install_archive_pinned(
                     &src,
                     root,
-                    opts.force,
-                    opts.allow_unsigned,
-                    None,
-                    "keep",
-                    Some(&re.sha256),
+                    install::InstallOpts { force: opts.force, allow_unsigned: opts.allow_unsigned, key: None, reason: "keep", pinned_sha: Some(&re.sha256) },
                 )
             }
         });

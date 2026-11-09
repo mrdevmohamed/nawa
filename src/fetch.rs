@@ -706,27 +706,7 @@ pub fn download_content_addressed(
     // is checked against the digest, so a mirror serving wrong bytes lets
     // the next one speak
     let tmp = unique_part_path(dest);
-    let mut last_err = None;
-    for cand in candidate_urls_with(url, mirrors) {
-        if cand != url {
-            crate::nawa_info_stderr!("trying alternate mirror {cand}");
-        }
-        let res = download(&cand, &tmp).and_then(|_| verify_sha256(&tmp, sha256));
-        match res {
-            Ok(()) => {
-                last_err = None;
-                break;
-            }
-            Err(e) => {
-                crate::nawa_info_stderr!("{e}");
-                let _ = std::fs::remove_file(&tmp);
-                last_err = Some(e);
-            }
-        }
-    }
-    if let Some(e) = last_err {
-        return Err(e);
-    }
+    try_candidates(url, mirrors, &tmp, |tmp| verify_sha256(tmp, sha256))?;
     std::fs::rename(&tmp, dest)
         .with_context(|| format!("activate cached download {}", dest.display()))?;
     strip_write_permission(dest);
@@ -814,6 +794,41 @@ pub fn candidate_urls_with(url: &str, extra: &[String]) -> Vec<String> {
     v
 }
 
+/// Download `url` (then every candidate mirror) into `tmp`, running
+/// `verify` on each transfer. Shared by the legacy and
+/// content-addressed paths so mirror/verify policy (log, tmp
+/// cleanup, last error wins) cannot drift. On success `tmp` holds
+/// the verified bytes; the caller renames it into place.
+fn try_candidates(
+    url: &str,
+    mirrors: &[String],
+    tmp: &Path,
+    verify: impl Fn(&Path) -> Result<()>,
+) -> Result<()> {
+    let mut last_err = None;
+    for cand in candidate_urls_with(url, mirrors) {
+        if cand != url {
+            crate::nawa_info_stderr!("trying alternate mirror {cand}");
+        }
+        let res = download(&cand, tmp).and_then(|_| verify(tmp));
+        match res {
+            Ok(()) => {
+                last_err = None;
+                break;
+            }
+            Err(e) => {
+                crate::nawa_info_stderr!("{e}");
+                let _ = std::fs::remove_file(tmp);
+                last_err = Some(e);
+            }
+        }
+    }
+    if let Some(e) = last_err {
+        return Err(e);
+    }
+    Ok(())
+}
+
 /// Download `url` into `dest` unless a copy is already cached.
 /// With `expect_sha256`, a cached copy is reused only after re-verifying it,
 /// so a corrupted or truncated cache entry is transparently re-downloaded.
@@ -848,30 +863,10 @@ pub fn download_cached_with_mirrors(
     // each candidate and the last error would name a fallback mirror)
     check_offline(url, offline())?;
     let tmp = dest.with_extension("part");
-    let mut last_err = None;
-    for cand in candidate_urls_with(url, mirrors) {
-        if cand != url {
-            crate::nawa_info_stderr!("trying alternate mirror {cand}");
-        }
-        let res = download(&cand, &tmp).and_then(|_| match expect_sha256 {
-            Some(e) => verify_sha256(&tmp, e),
-            None => Ok(()),
-        });
-        match res {
-            Ok(()) => {
-                last_err = None;
-                break;
-            }
-            Err(e) => {
-                crate::nawa_info_stderr!("{e}");
-                let _ = std::fs::remove_file(&tmp);
-                last_err = Some(e);
-            }
-        }
-    }
-    if let Some(e) = last_err {
-        return Err(e);
-    }
+    try_candidates(url, mirrors, &tmp, |tmp| match expect_sha256 {
+        Some(e) => verify_sha256(tmp, e),
+        None => Ok(()),
+    })?;
     std::fs::rename(&tmp, dest)
         .with_context(|| format!("activate cached download {}", dest.display()))?;
     Ok(())

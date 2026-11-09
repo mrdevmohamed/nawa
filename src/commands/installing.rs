@@ -366,8 +366,8 @@ fn install_one(
         pinned => {
             let expected = pinned.unwrap_or(target.artifact_sha256.as_str());
             install::install_archive_pinned(
-                archive, &ctx.root, flags.force, flags.allow_unsigned, None,
-                effective_reason, Some(expected),
+                archive, &ctx.root,
+                install::InstallOpts { force: flags.force, allow_unsigned: flags.allow_unsigned, key: None, reason: effective_reason, pinned_sha: Some(expected) },
             )
         },
     };
@@ -923,7 +923,8 @@ pub(crate) fn install_archive_file(
         &pkg_name, action, before.as_ref(), Some(&target), &digest,
     )?;
     let result = install::install_archive_pinned(
-        file, &ctx.root, force, allow_unsigned, key.as_deref(), "explicit", Some(&digest),
+        file, &ctx.root,
+        install::InstallOpts { force, allow_unsigned, key: key.as_deref(), reason: "explicit", pinned_sha: Some(&digest) },
     );
     match &result {
         Ok(entry) => {
