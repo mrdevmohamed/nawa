@@ -75,9 +75,9 @@ const FAIL_TAIL_LINES: usize = 30;
 /// fetches invalidates old `--use-cache` sidecars. The lockfile bytes are
 /// deliberately NOT an input of the id (§10.3) — the recipe's pinned source
 /// digests cover them.
-pub const FETCH_GO_SCHEMA_VERSION: &str = "1";
+pub(crate) const FETCH_GO_SCHEMA_VERSION: &str = "1";
 /// Same for `[fetch.cargo]` → `fetch-cargo=<v>`.
-pub const FETCH_CARGO_SCHEMA_VERSION: &str = "1";
+pub(crate) const FETCH_CARGO_SCHEMA_VERSION: &str = "1";
 
 /// The versioned, unambiguous first field of every ecosystem key (§11).
 const FETCH_CACHE_ENCODING: &[u8] = b"nawa-fetch-v1";

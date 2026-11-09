@@ -25,7 +25,7 @@ struct ProfileFile {
 /// The `[build]` table: isolation defaults for every build
 /// (docs/design/build-isolation.md §8).
 #[derive(Debug, Clone, Default, Deserialize)]
-pub struct BuildProfile {
+pub(crate) struct BuildProfile {
     /// `none` | `env` | `sandbox` | `closure`; `nawa build --isolation` wins.
     /// Stored as a raw string because the default (`""`) must mean `none`
     /// without making every older profile invalid.
@@ -45,7 +45,7 @@ pub struct BuildProfile {
 /// The `[profile]` table. Sub-tables (`[profile.toolchain]`,
 /// `[profile.bootstrap]`) are informational for now and ignored here.
 #[derive(Debug, Clone, Default, Deserialize)]
-pub struct Profile {
+pub(crate) struct Profile {
     #[serde(default)]
     pub arch: String,
     #[serde(default)]

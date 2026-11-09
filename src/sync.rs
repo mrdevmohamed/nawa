@@ -14,17 +14,17 @@ use std::path::{Path, PathBuf};
 use crate::fetch::{self, RepoRef};
 use crate::{repo, upgrade};
 
-pub struct SyncOpts {
+pub(crate) struct SyncOpts {
     pub force: bool,
     pub allow_unsigned: bool,
 }
 
 /// Where the synced revision is recorded (`nawa config show` / debugging).
-pub fn rev_file(root: &Path) -> PathBuf {
+pub(crate) fn rev_file(root: &Path) -> PathBuf {
     root.join("var/lib/nawa/recipes.rev")
 }
 
-pub fn sync(root: &Path, repo_ref: &RepoRef, dest: &Path, opts: &SyncOpts) -> Result<()> {
+pub(crate) fn sync(root: &Path, repo_ref: &RepoRef, dest: &Path, opts: &SyncOpts) -> Result<()> {
     let open = upgrade::open_repo(root, repo_ref, opts.allow_unsigned, opts.force)?;
     let rec = match &open.index.recipes {
         Some(r) => r.clone(),

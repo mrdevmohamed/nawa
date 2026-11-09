@@ -17,7 +17,7 @@ use crate::slim;
 
 /// What to do with a recipe's `[build] check` section (its test suite).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CheckMode {
+pub(crate) enum CheckMode {
     /// Skip it (default — test suites are slow and some, like glibc's, have
     /// known failures).
     Off,
@@ -28,7 +28,7 @@ pub enum CheckMode {
 }
 
 #[derive(Debug, Clone)]
-pub struct BuildOpts {
+pub(crate) struct BuildOpts {
     pub jobs: u32,
     pub builddir: PathBuf,
     pub outdir: PathBuf,
@@ -93,7 +93,7 @@ impl Default for BuildOpts {
 /// How many trailing output lines are quoted when a section fails.
 const FAIL_TAIL_LINES: usize = 25;
 
-pub struct BuildResult {
+pub(crate) struct BuildResult {
     pub archive: PathBuf,
     #[allow(dead_code)]
     pub pkginfo: String,
@@ -142,7 +142,7 @@ fn wipe_tree(path: &Path) -> std::io::Result<()> {
     }
 }
 
-pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
+pub(crate) fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
     // ---- offline gate (fetch-phase.md §12/§15) ----------------------------
     fetch::set_offline(opts.offline);
     // --offline and network-needing recipes are contradictory by design:
@@ -1078,7 +1078,7 @@ fn overlay_probe_ok() -> bool {
 /// `nawa build --rebuild-check` (§6): build twice in different directories at
 /// different times and compare archive hashes — the regression test for the
 /// whole reproducibility pipeline.
-pub fn rebuild_check(rec: &Recipe, opts: &BuildOpts) -> Result<()> {
+pub(crate) fn rebuild_check(rec: &Recipe, opts: &BuildOpts) -> Result<()> {
     let mut results: Vec<(PathBuf, String)> = Vec::new();
     for tag in ["rebuild-a", "rebuild-b"] {
         let mut o = opts.clone();

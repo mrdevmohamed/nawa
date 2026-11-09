@@ -22,7 +22,7 @@ use crate::repo;
 use crate::sign;
 use crate::version::vercmp;
 
-pub struct UpgradeOpts {
+pub(crate) struct UpgradeOpts {
     pub dry_run: bool,
     pub force: bool,
     pub allow_unsigned: bool,
@@ -32,7 +32,7 @@ pub struct UpgradeOpts {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ArchiveAuth {
+pub(crate) enum ArchiveAuth {
     /// Legacy v1 policy: each archive needs its own detached signature.
     DetachedSignature,
     /// V2 policy: a trusted signed index authenticates the archive SHA-256.
@@ -41,7 +41,7 @@ pub enum ArchiveAuth {
 
 /// A repository materialized on disk: for a local repo its own directory,
 /// for a remote one the per-URL cache holding the freshly fetched index.
-pub struct OpenRepo {
+pub(crate) struct OpenRepo {
     /// directory holding `index.toml` (and, locally, the archives)
     pub dir: PathBuf,
     /// `Some(url)` for a remote repository — archives are fetched on demand
@@ -65,7 +65,7 @@ pub struct OpenRepo {
 /// Fetch (remote) or locate (local) a repository, then parse and
 /// authenticate its index: trust policy for remote repos, signature check,
 /// rollback/freeze protection. Shared by `nawa upgrade` and `nawa install`.
-pub fn open_repo(
+pub(crate) fn open_repo(
     root: &Path,
     repo_ref: &RepoRef,
     allow_unsigned: bool,
@@ -274,7 +274,7 @@ pub(crate) fn archive_download_url(
 /// downloaded into the cache (remote) or located in the repo dir (local),
 /// then sha256 against the index, signature policy, and the `.PKGINFO`
 /// must match what the index promised.
-pub fn fetch_entry(
+pub(crate) fn fetch_entry(
     root: &Path,
     open: &OpenRepo,
     re: &repo::RepoEntry,
@@ -371,7 +371,7 @@ pub fn fetch_entry(
     Ok(src)
 }
 
-pub fn upgrade(
+pub(crate) fn upgrade(
     root: &Path,
     repo_ref: &RepoRef,
     recipes: &Path,

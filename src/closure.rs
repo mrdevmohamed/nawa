@@ -28,10 +28,10 @@ use crate::recipe::Recipe;
 
 /// The meta recipe that defines the base toolchain set: after it exists,
 /// `depends.build` means "beyond base-devel" (§5.1).
-pub const BASE_DEVEL: &str = "base-devel";
+pub(crate) const BASE_DEVEL: &str = "base-devel";
 
 /// closure(S) = S plus, transitively, each member's `depends.run`.
-pub fn closure_of(
+pub(crate) fn closure_of(
     seeds: &[String],
     known: &BTreeMap<String, Recipe>,
 ) -> Result<Vec<String>> {
@@ -51,7 +51,7 @@ pub fn closure_of(
 
 /// The packages whose archives make up the build root for `target`
 /// (§5.1). `with_check` adds `depends.check` (built with `--check`).
-pub fn buildroot(target: &Recipe, known: &BTreeMap<String, Recipe>, with_check: bool) -> Result<Vec<String>> {
+pub(crate) fn buildroot(target: &Recipe, known: &BTreeMap<String, Recipe>, with_check: bool) -> Result<Vec<String>> {
     let mut seeds: Vec<String> = Vec::new();
     if target.package.name == BASE_DEVEL {
         // base-devel DEFINES the base layer, so its own build root cannot
@@ -72,12 +72,12 @@ pub fn buildroot(target: &Recipe, known: &BTreeMap<String, Recipe>, with_check: 
 /// Where a dependency's archive comes from (§5.2): `<builddir>/out`.
 /// A missing archive means "build that dependency first" — exactly what
 /// `deps-all` ordering guarantees.
-pub fn archive_for(rec: &Recipe, outdir: &Path) -> PathBuf {
+pub(crate) fn archive_for(rec: &Recipe, outdir: &Path) -> PathBuf {
     outdir.join(format!("{}.nawa.tar.zst", rec.id()))
 }
 
 /// The assembled build root plus the index lint needs.
-pub struct AssembledRoot {
+pub(crate) struct AssembledRoot {
     /// Host path of the root directory (owned by this build; deleted after).
     pub dir: PathBuf,
     /// soname (e.g. `libz.so.1`) → owning package, for the run-dep check.
@@ -122,7 +122,7 @@ fn verified_archive(
 /// Extract every closure archive into `dir` (v1: extract-per-build).
 /// Signatures are verified with the install-time policy first.
 #[allow(clippy::too_many_arguments)]
-pub fn assemble(
+pub(crate) fn assemble(
     members: &[String],
     known: &BTreeMap<String, Recipe>,
     outdir: &Path,
@@ -169,7 +169,7 @@ pub fn assemble(
 /// signature-verified against the install-time policy on every assembly
 /// (cache hits included) — the same guarantee as `nawa install`.
 #[allow(clippy::too_many_arguments)]
-pub fn assemble_cached(
+pub(crate) fn assemble_cached(
     members: &[String],
     known: &BTreeMap<String, Recipe>,
     outdir: &Path,

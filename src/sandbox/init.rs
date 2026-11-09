@@ -17,7 +17,7 @@ use super::{EXIT_TIMEOUT, EXEC_MUST_NOT_RETURN, PID1_SETUP_FAILED};
 
 /// The sync fd the parent (build engine) passes pre_exec; see
 /// [sys::sync_announce] for the byte protocol.
-pub use crate::sys::SYNC_FD;
+pub(crate) use crate::sys::SYNC_FD;
 
 // ---------------------------------------------------------------------------
 // Entry point (`nawa sandbox-init <spec.toml>`)

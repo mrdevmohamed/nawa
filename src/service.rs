@@ -18,24 +18,24 @@ use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub fn sv_dir(root: &Path) -> PathBuf {
+pub(crate) fn sv_dir(root: &Path) -> PathBuf {
     root.join("etc/sv")
 }
 
-pub fn enabled_dir(root: &Path) -> PathBuf {
+pub(crate) fn enabled_dir(root: &Path) -> PathBuf {
     root.join("etc/runit/runsvdir/default")
 }
 
 /// Markers for services an admin disabled on purpose: `<root>/etc/runit/disabled/<n>`.
 /// Packages ship their default runsvdir links, so without this a package
 /// upgrade would silently re-enable a service the admin turned off.
-pub fn disabled_dir(root: &Path) -> PathBuf {
+pub(crate) fn disabled_dir(root: &Path) -> PathBuf {
     root.join("etc/runit/disabled")
 }
 
 /// True when installing `dest` would recreate a runsvdir link the admin
 /// disabled: the install step then skips that one file.
-pub fn keep_disabled(root: &Path, dest: &Path) -> bool {
+pub(crate) fn keep_disabled(root: &Path, dest: &Path) -> bool {
     let Some(name) = dest.file_name().and_then(|n| n.to_str()) else {
         return false;
     };
@@ -47,7 +47,7 @@ pub fn keep_disabled(root: &Path, dest: &Path) -> bool {
 }
 
 #[derive(Debug, Clone)]
-pub struct ServiceInfo {
+pub(crate) struct ServiceInfo {
     pub name: String,
     pub enabled: bool,
     pub has_run: bool,
@@ -55,7 +55,7 @@ pub struct ServiceInfo {
 
 /// Enabled = the runsvdir entry exists and is a symlink (dangling counts:
 /// that is exactly what a freshly enabled service is before stage 1 mounts).
-pub fn is_enabled(root: &Path, name: &str) -> Result<bool> {
+pub(crate) fn is_enabled(root: &Path, name: &str) -> Result<bool> {
     let link = enabled_dir(root).join(name);
     Ok(link
         .symlink_metadata()
@@ -64,7 +64,7 @@ pub fn is_enabled(root: &Path, name: &str) -> Result<bool> {
 }
 
 /// All available services, sorted by name.
-pub fn list(root: &Path) -> Result<Vec<ServiceInfo>> {
+pub(crate) fn list(root: &Path) -> Result<Vec<ServiceInfo>> {
     let sv = sv_dir(root);
     if !sv.is_dir() {
         bail!(
@@ -104,7 +104,7 @@ fn validate_name(name: &str) -> Result<()> {
 /// Link a service into the default runsvdir. The symlink target is absolute
 /// (`/etc/sv/<name>`), matching what the runit-services recipe ships and
 /// resolving correctly inside the real system once booted.
-pub fn enable(root: &Path, name: &str) -> Result<()> {
+pub(crate) fn enable(root: &Path, name: &str) -> Result<()> {
     validate_name(name)?;
     let src = sv_dir(root).join(name);
     if !src.is_dir() || !src.join("run").exists() {
@@ -128,7 +128,7 @@ pub fn enable(root: &Path, name: &str) -> Result<()> {
 
 /// Remove the runsvdir link. Refuses to touch anything that is not a
 /// symlink, so an operator's real directory can never be deleted by mistake.
-pub fn disable(root: &Path, name: &str) -> Result<()> {
+pub(crate) fn disable(root: &Path, name: &str) -> Result<()> {
     validate_name(name)?;
     let link = enabled_dir(root).join(name);
     let md = link
@@ -162,7 +162,7 @@ fn sv_path(root: &Path, name: &str) -> PathBuf {
 }
 
 /// runsv has created `supervise/ok` for this service, i.e. it is supervised.
-pub fn is_supervised(root: &Path, name: &str) -> bool {
+pub(crate) fn is_supervised(root: &Path, name: &str) -> bool {
     sv_path(root, name).join("supervise/ok").exists()
 }
 
@@ -206,25 +206,25 @@ fn require_enabled_supervised(root: &Path, name: &str) -> Result<()> {
 }
 
 /// Start a service now (it must be enabled).
-pub fn start(root: &Path, name: &str) -> Result<()> {
+pub(crate) fn start(root: &Path, name: &str) -> Result<()> {
     require_enabled_supervised(root, name)?;
     sv_run(root, "start", name)
 }
 
 /// Stop a service now, without disabling it: it stays down until `start`,
 /// `restart` or the next boot.
-pub fn stop(root: &Path, name: &str) -> Result<()> {
+pub(crate) fn stop(root: &Path, name: &str) -> Result<()> {
     require_enabled_supervised(root, name)?;
     sv_run(root, "stop", name)
 }
 
-pub fn restart(root: &Path, name: &str) -> Result<()> {
+pub(crate) fn restart(root: &Path, name: &str) -> Result<()> {
     require_enabled_supervised(root, name)?;
     sv_run(root, "restart", name)
 }
 
 /// `enable --now`: link, wait for runsv to pick it up, then wait until it runs.
-pub fn enable_now(root: &Path, name: &str) -> Result<()> {
+pub(crate) fn enable_now(root: &Path, name: &str) -> Result<()> {
     require_live_root(root)?;
     enable(root, name)?;
     if !wait_supervised(root, name, 10) {
@@ -234,7 +234,7 @@ pub fn enable_now(root: &Path, name: &str) -> Result<()> {
 }
 
 /// `disable --now`: stop first (clean TERM + wait), then drop the link.
-pub fn disable_now(root: &Path, name: &str) -> Result<()> {
+pub(crate) fn disable_now(root: &Path, name: &str) -> Result<()> {
     validate_name(name)?;
     require_live_root(root)?;
     if is_supervised(root, name) {
@@ -260,7 +260,7 @@ fn live_status(root: &Path, name: &str) -> String {
     }
 }
 
-pub fn print_list(root: &Path) -> Result<()> {
+pub(crate) fn print_list(root: &Path) -> Result<()> {
     let services = list(root)?;
     if services.is_empty() {
         crate::nawa_info!("no services under {}", sv_dir(root).display());
@@ -278,7 +278,7 @@ pub fn print_list(root: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn print_status(root: &Path, name: Option<&str>) -> Result<()> {
+pub(crate) fn print_status(root: &Path, name: Option<&str>) -> Result<()> {
     let services = list(root)?;
     let chosen: Vec<ServiceInfo> = match name {
         Some(n) => match services.iter().find(|s| s.name == n) {

@@ -36,7 +36,7 @@ use crate::fetch;
 use crate::recipe::Recipe;
 
 /// The staged source workspace of a new-schema recipe.
-pub struct SourcesStaged {
+pub(crate) struct SourcesStaged {
     /// The source workspace root (`<work>/src`): `%{srcroot}` /
     /// `NAWA_SRCROOT`, the parent of the working directory (§4.3).
     pub srcroot: PathBuf,
@@ -59,7 +59,7 @@ type Claims = BTreeMap<PathBuf, Claim>;
 /// Stage every `[[package.sources]]` of `rec` into `<work>/src` and return
 /// the workspace layout. `cache` is the source cache root (`$NAWA_SRCCACHE`,
 /// default `<builddir>/distfiles`) — the same value the legacy branch uses.
-pub fn stage_sources(rec: &Recipe, work: &Path, src: &Path, cache: &Path, jobs: u32) -> Result<SourcesStaged> {
+pub(crate) fn stage_sources(rec: &Recipe, work: &Path, src: &Path, cache: &Path, jobs: u32) -> Result<SourcesStaged> {
     // the per-source extraction directory: same filesystem as `src/`, so
     // the rename merge never copies (§4.2)
     let stage = work.join("stage");

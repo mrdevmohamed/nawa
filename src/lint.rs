@@ -28,7 +28,7 @@ use std::io::Read;
 use std::path::Path;
 
 /// Top-level trees a package may install files into.
-pub const ALLOWED_TOP: &[&str] = &["bin", "boot", "etc", "lib", "lib64", "opt", "run", "sbin", "srv", "usr", "var"];
+pub(crate) const ALLOWED_TOP: &[&str] = &["bin", "boot", "etc", "lib", "lib64", "opt", "run", "sbin", "srv", "usr", "var"];
 
 /// Top-level dirs a package may stage as bare mount points only — the FHS
 /// skeleton owned by `base-files`. Content under them is an error:
@@ -36,7 +36,7 @@ pub const ALLOWED_TOP: &[&str] = &["bin", "boot", "etc", "lib", "lib64", "opt", 
 /// `home`, `media`, `mnt` stay empty for the site. The one documented
 /// exception is the root account's shell rc file (`root/.bashrc`), which
 /// ships with the skeleton.
-pub const SKELETON_TOP: &[&str] = &["dev", "home", "media", "mnt", "proc", "root", "sys", "tmp"];
+pub(crate) const SKELETON_TOP: &[&str] = &["dev", "home", "media", "mnt", "proc", "root", "sys", "tmp"];
 
 /// Skeleton trees where not even a subdirectory may be staged — the kernel
 /// owns everything below them at runtime.
@@ -44,7 +44,7 @@ const KERNEL_MANAGED: &[&str] = &["dev", "proc", "sys", "tmp"];
 
 /// Everything the checks found. Errors abort the build; warnings do not.
 #[derive(Debug, Default)]
-pub struct LintReport {
+pub(crate) struct LintReport {
     pub errors: Vec<String>,
     pub warnings: Vec<String>,
     pub elf_count: usize,
@@ -57,7 +57,7 @@ impl LintReport {
 }
 
 /// Context for [`run`].
-pub struct LintCtx<'a> {
+pub(crate) struct LintCtx<'a> {
     /// The staging dir (`%{pkgdir}`).
     pub pkgdir: &'a Path,
     /// `depends.run` of the recipe under test.
@@ -73,7 +73,7 @@ pub struct LintCtx<'a> {
     pub extra_leak_paths: Vec<&'static str>,
 }
 
-pub fn run(ctx: &LintCtx) -> LintReport {
+pub(crate) fn run(ctx: &LintCtx) -> LintReport {
     let mut rep = LintReport::default();
     for entry in walkdir::WalkDir::new(ctx.pkgdir).sort_by_file_name() {
         let Ok(e) = entry else { continue };
@@ -285,7 +285,7 @@ fn looks_texty(data: &[u8]) -> bool {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Default, Clone)]
-pub struct ElfInfo {
+pub(crate) struct ElfInfo {
     pub needed: Vec<String>,
     pub rpath: Option<String>,
     pub runpath: Option<String>,
@@ -310,7 +310,7 @@ pub struct ElfInfo {
 /// goblin is bounds-checked throughout: truncated headers, oversized field
 /// values and dangling string offsets are reported as errors instead of
 /// panics — this function must stay safe to call on adversarial bytes.
-pub fn parse_elf(data: &[u8]) -> Result<Option<ElfInfo>> {
+pub(crate) fn parse_elf(data: &[u8]) -> Result<Option<ElfInfo>> {
     if data.len() < 16 || &data[..4] != b"\x7fELF" {
         bail!("not an ELF");
     }
@@ -358,7 +358,7 @@ fn last_non_empty(paths: &[&str]) -> Option<String> {
 /// `build_id = sha256(recipe.toml bytes ‖ source sha256 ‖ sorted closure
 /// archive sha256s ‖ profile flags)` — "is this archive up to date?"
 /// becomes a hash comparison.
-pub fn build_id(
+pub(crate) fn build_id(
     recipe_bytes: &[u8],
     source_sha256: &str,
     closure_archives: &[std::path::PathBuf],
@@ -372,7 +372,7 @@ pub fn build_id(
 /// (asset-tree digest, per-backend fetch-schema versions — fetch-phase.md
 /// §10.3); `build_id` forwards an empty slice, so legacy recipes hash
 /// exactly today's bytes by construction.
-pub fn build_id_with(
+pub(crate) fn build_id_with(
     recipe_bytes: &[u8],
     source_sha256: &str,
     closure_archives: &[std::path::PathBuf],

@@ -14,7 +14,7 @@ use crate::fetch::RepoRef;
 
 /// One configured repository (roadmap §8.2).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RepoConfig {
+pub(crate) struct RepoConfig {
     pub id: String,
     #[serde(default)]
     pub name: String,
@@ -34,7 +34,7 @@ fn default_priority() -> u32 {
 }
 
 /// Validate a repository id: conservative identifier charset.
-pub fn check_repo_id(id: &str) -> Result<()> {
+pub(crate) fn check_repo_id(id: &str) -> Result<()> {
     if !crate::db::valid_name(id) {
         bail!("invalid repository id {id:?} (letters, digits, + _ . - only)");
     }
@@ -45,7 +45,7 @@ pub fn check_repo_id(id: &str) -> Result<()> {
 /// * explicit `[[repositories]]` entries are the set;
 /// * otherwise the legacy scalar `repo` becomes one `default` repository;
 /// * both present: entries win and the legacy value is ignored (warned).
-pub fn effective(cfg: &Config) -> Result<Vec<RepoConfig>> {
+pub(crate) fn effective(cfg: &Config) -> Result<Vec<RepoConfig>> {
     let entries = parse_file_entries(cfg)?;
     if !entries.is_empty() {
         if cfg.repo.is_some() {
@@ -96,7 +96,7 @@ fn parse_file_entries(cfg: &Config) -> Result<Vec<RepoConfig>> {
 
 /// `nawa repolist [--all|--enabled]` — configuration + cached state, no
 /// downloads (roadmap §8.6).
-pub fn cmd_repolist(cfg: &Config, all: bool) -> Result<()> {
+pub(crate) fn cmd_repolist(cfg: &Config, all: bool) -> Result<()> {
     let repos = effective(cfg)?;
     if repos.is_empty() {
         crate::nawa_info!("no repositories configured");
@@ -121,7 +121,7 @@ pub fn cmd_repolist(cfg: &Config, all: bool) -> Result<()> {
 
 /// `nawa makecache` — refresh enabled repositories' metadata through the
 /// existing authentication/freshness path (roadmap §8.10).
-pub fn cmd_makecache(cfg: &Config, root: &Path, allow_unsigned: bool, force: bool) -> Result<()> {
+pub(crate) fn cmd_makecache(cfg: &Config, root: &Path, allow_unsigned: bool, force: bool) -> Result<()> {
     let repos = effective(cfg)?;
     let enabled: Vec<&RepoConfig> = repos.iter().filter(|r| r.enabled).collect();
     if enabled.is_empty() {
@@ -154,7 +154,7 @@ pub fn cmd_makecache(cfg: &Config, root: &Path, allow_unsigned: bool, force: boo
 
 /// `nawa repoquery <name>` — query enabled repositories' cached metadata
 /// without downloading any archive (roadmap §8.9).
-pub fn cmd_repoquery(cfg: &Config, root: &Path, name: &str, repo_id: Option<&str>, info: bool) -> Result<()> {
+pub(crate) fn cmd_repoquery(cfg: &Config, root: &Path, name: &str, repo_id: Option<&str>, info: bool) -> Result<()> {
     let repos = effective(cfg)?;
     let enabled: Vec<&RepoConfig> = repos
         .iter()
@@ -211,7 +211,7 @@ pub fn cmd_repoquery(cfg: &Config, root: &Path, name: &str, repo_id: Option<&str
 /// shared with other tools/users) and unrelated entries are left alone. A
 /// `.lock` held by a live fetch keeps its file; read-only cache entries get
 /// owner-write restored before removal.
-pub fn cmd_clean(ctx: &crate::Ctx, category: &str, dry_run: bool) -> Result<()> {
+pub(crate) fn cmd_clean(ctx: &crate::Ctx, category: &str, dry_run: bool) -> Result<()> {
     let cat = category.to_ascii_lowercase();
     if !matches!(cat.as_str(), "metadata" | "packages" | "sources" | "layers" | "all") {
         bail!("unknown clean category {cat:?} (metadata | packages | sources | layers | all)");

@@ -30,7 +30,7 @@ use crate::recipe::Recipe;
 
 /// A staged assets snapshot: the directory the build sees and the digest
 /// recorded in the build id (§5.3 "two moments, one digest").
-pub struct AssetsStaged {
+pub(crate) struct AssetsStaged {
     /// `<work>/assets`, bound read-only at `<build_inside>/assets`.
     pub dir: PathBuf,
     /// sha256 over the snapshot's records (§5.3.2).
@@ -210,7 +210,7 @@ fn digest_of(records: &[Record]) -> String {
 /// `build()` **before any download**, so a missing path fails in seconds
 /// (§16 Assets 3). The same walker that the snapshot runs later, so validity
 /// and the probe digest can never disagree with the staged tree.
-pub fn precheck(rec: &Recipe) -> Result<()> {
+pub(crate) fn precheck(rec: &Recipe) -> Result<()> {
     sweep(rec, None).map(|_| ())
 }
 
@@ -219,7 +219,7 @@ pub fn precheck(rec: &Recipe) -> Result<()> {
 /// digest *recorded* in the archive comes from `snapshot`; they differ only
 /// if the checkout changes in between, and then the recorded id describes
 /// what was actually built.
-pub fn probe_digest(rec: &Recipe) -> Result<String> {
+pub(crate) fn probe_digest(rec: &Recipe) -> Result<String> {
     Ok(digest_of(&sweep(rec, None)?))
 }
 
@@ -228,7 +228,7 @@ pub fn probe_digest(rec: &Recipe) -> Result<String> {
 /// 0555 by the owner-execute bit, directories 0555 — which at
 /// `none`/`env` isolation is the whole story (`chmod`, best effort, no
 /// security boundary), and below the sandbox bind a harmless belt.
-pub fn snapshot(rec: &Recipe, work: &Path) -> Result<AssetsStaged> {
+pub(crate) fn snapshot(rec: &Recipe, work: &Path) -> Result<AssetsStaged> {
     let dir = work.join("assets");
     // <work> is wiped on every build, but a prior failed run inside the
     // same build must never leave its bytes behind. The wipe needs a walk:
