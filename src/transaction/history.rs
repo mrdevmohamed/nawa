@@ -176,6 +176,22 @@ impl PackageState {
     }
 }
 
+/// Did a failed step still commit the target, leaving its hook to retry?
+/// Shared by every install-like command so the hook outcome cannot drift
+/// between call sites. `retry_hook` is `install::hook_needs_retry` for the
+/// same package — a hook that still needs a run counts even when the
+/// db state already matches the target.
+pub fn committed_hook_failed(
+    current: Option<&Entry>,
+    before: Option<&Entry>,
+    target: &PackageState,
+    retry_hook: bool,
+) -> bool {
+    let target_is_current = current.is_some_and(|entry| target.matches_entry(entry));
+    target_is_current
+        && (before.is_none_or(|old| !target.matches_entry(old)) || retry_hook)
+}
+
 /// One package change inside a transaction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackageChange {
@@ -506,13 +522,7 @@ pub fn referenced_artifacts(root: &Path) -> Result<std::collections::BTreeSet<St
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn tmpdir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("nawa-hist-{}-{}", tag, std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
-    }
+    use crate::testutil::tmpdir;
 
     fn sample(id: u64) -> TransactionRecord {
         TransactionRecord {

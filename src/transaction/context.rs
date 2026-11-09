@@ -130,25 +130,37 @@ impl OperationHandle {
         RecorderHandle { op: self }
     }
 
-    /// Persist the preparing/running record (id, command, requested names).
-    fn persist_initial(&mut self) -> Result<()> {
-        let Some(tx) = self.tx else { return Ok(()) };
-        let record = TransactionRecord {
+    /// Shared record assembly for `persist_initial` / `finish`.
+    /// `changes` is moved in by `finish` so no list is cloned twice.
+    fn record(
+        &self,
+        id: u64,
+        status: TxStatus,
+        finished_at: Option<u64>,
+        changes: Vec<PackageChange>,
+    ) -> TransactionRecord {
+        TransactionRecord {
             schema: SCHEMA_VERSION,
-            id: tx,
+            id,
             command: self.command.as_str().to_string(),
-            status: TxStatus::Preparing.as_str().to_string(),
+            status: status.as_str().to_string(),
             started_at: self.started_at,
-            finished_at: None,
-            duration_seconds: None,
+            finished_at,
+            duration_seconds: finished_at.map(|f| f.saturating_sub(self.started_at)),
             initiated_by: format!("uid:{}", rustix_uid()),
             requested_packages: self.requested.clone(),
             repository_ids: self.repositories.clone(),
-            package_changes: Vec::new(),
+            package_changes: changes,
             undone_by: None,
-            undoes: None,
+            undoes: self.undo_target,
             groups: self.groups.clone(),
-        };
+        }
+    }
+
+    /// Persist the preparing/running record (id, command, requested names).
+    fn persist_initial(&mut self) -> Result<()> {
+        let Some(tx) = self.tx else { return Ok(()) };
+        let record = self.record(tx, TxStatus::Preparing, None, Vec::new());
         crate::transaction::history::write_record(&self.root, &record)
     }
 
@@ -163,7 +175,7 @@ impl OperationHandle {
     /// outcomes and persist the final record. Must be called while the
     /// caller still holds the exclusive db lock (or immediately after the
     /// last step).
-    pub fn finish(self, error: Option<&anyhow::Error>) -> Result<()> {
+    pub fn finish(mut self, error: Option<&anyhow::Error>) -> Result<()> {
         let Some(tx) = self.tx else { return Ok(()) };
         let failed = error.is_some();
         let any_committed = self
@@ -182,22 +194,8 @@ impl OperationHandle {
             TxStatus::Failed
         };
         let finished_at = crate::artifact::now_secs();
-        let record = TransactionRecord {
-            schema: SCHEMA_VERSION,
-            id: tx,
-            command: self.command.as_str().to_string(),
-            status: status.as_str().to_string(),
-            started_at: self.started_at,
-            finished_at: Some(finished_at),
-            duration_seconds: Some(finished_at.saturating_sub(self.started_at)),
-            initiated_by: format!("uid:{}", rustix_uid()),
-            requested_packages: self.requested.clone(),
-            repository_ids: self.repositories.clone(),
-            package_changes: self.changes.clone(),
-            undone_by: None,
-            undoes: self.undo_target,
-            groups: self.groups.clone(),
-        };
+        let changes = std::mem::take(&mut self.changes);
+        let record = self.record(tx, status, Some(finished_at), changes);
         crate::transaction::history::write_record(&self.root, &record)?;
         // Publish a durable observer outbox record while the transaction id
         // and result are known. Actual plugin execution happens after the DB
@@ -318,27 +316,7 @@ fn rustix_uid() -> u32 {
 mod tests {
     use super::*;
     use crate::db::{Db, Entry};
-
-    fn tmpdir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("nawa-opctx-{}-{}", tag, std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
-    }
-
-    fn entry(name: &str, version: &str, digest: &str) -> Entry {
-        Entry {
-            name: name.into(),
-            version: version.into(),
-            rel: 1,
-            arch: String::new(),
-            reason: "explicit".into(),
-            run: vec![],
-            install_date: 0,
-            size: 0,
-            artifact_sha256: digest.into(),
-        }
-    }
+    use crate::testutil::{entry, tmpdir};
 
     #[test]
     fn full_operation_lifecycle_records_steps() {

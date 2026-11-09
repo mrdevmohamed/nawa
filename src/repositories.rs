@@ -7,7 +7,7 @@
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::config::Config;
 use crate::fetch::RepoRef;
@@ -224,9 +224,7 @@ pub fn cmd_clean(ctx: &crate::Ctx, category: &str, dry_run: bool) -> Result<()> 
         removed += clean_dir(&dir, dry_run);
     }
     if cat == "sources" || cat == "all" {
-        let srccache = std::env::var_os("NAWA_SRCCACHE")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| ctx.builddir.join("distfiles"));
+        let srccache = crate::config::srccache_dir(&ctx.builddir, None);
         let (freed, kept) = clean_sources(&srccache, dry_run)?;
         removed += freed;
         retained += kept;

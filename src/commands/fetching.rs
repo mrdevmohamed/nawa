@@ -86,10 +86,7 @@ pub(crate) fn cmd_fetch(
     let builddir = std::fs::canonicalize(&builddir)
         .with_context(|| format!("resolve build directory {}", builddir.display()))?;
 
-    let srccache = std::env::var_os("NAWA_SRCCACHE")
-        .map(PathBuf::from)
-        .map(|path| if path.is_absolute() { path } else { cwd.join(path) })
-        .unwrap_or_else(|| builddir.join("distfiles"));
+    let srccache = crate::config::srccache_dir(&builddir, Some(&cwd));
     info_mode(&recs, sources_only, offline);
 
     for rec in &recs {

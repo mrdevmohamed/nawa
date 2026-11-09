@@ -465,29 +465,9 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use crate::db::{Db, Entry};
+    use crate::testutil::{entry, tmpdir};
     use crate::transaction::context::{begin_operation, OperationCommand};
     use crate::transaction::history::{PackageChange, PackageState, StepStatus, SCHEMA_VERSION};
-
-    fn tmpdir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("nawa-undo-{}-{}", tag, std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
-    }
-
-    fn entry(name: &str, version: &str, digest: &str) -> Entry {
-        Entry {
-            name: name.into(),
-            version: version.into(),
-            rel: 1,
-            arch: String::new(),
-            reason: "explicit".into(),
-            run: vec![],
-            install_date: 0,
-            size: 0,
-            artifact_sha256: digest.into(),
-        }
-    }
 
     fn make_pkg(dir: &Path, name: &str, version: &str, body: &[u8]) -> PathBuf {
         let staging = dir.join(format!("st-{name}-{version}"));

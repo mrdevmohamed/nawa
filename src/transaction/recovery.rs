@@ -176,12 +176,7 @@ mod tests {
     use crate::db::{Db, Entry};
     use crate::transaction::history::{PackageState, SCHEMA_VERSION};
 
-    fn tmpdir(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("nawa-recov-{}-{}", tag, std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
-    }
+    use crate::testutil::tmpdir;
 
     fn add_entry(root: &std::path::Path, name: &str, version: &str, digest: &str) {
         let db = Db::new(root);

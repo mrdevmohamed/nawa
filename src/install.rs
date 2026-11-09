@@ -637,12 +637,14 @@ pub fn rollback(name: &str, root: &Path) -> Result<()> {
             Ok(entry) => Some(entry.clone()),
             Err(_) => db.entry(name)?,
         };
-        let target_is_current = current_after.as_ref()
-            .is_some_and(|entry| target.matches_entry(entry));
         let retry_hook = hook_needs_retry(root, name).unwrap_or(false);
         let committed_hook_failed = result.is_err()
-            && target_is_current
-            && (before.as_ref().is_none_or(|old| !target.matches_entry(old)) || retry_hook);
+            && crate::transaction::history::committed_hook_failed(
+                current_after.as_ref(),
+                before.as_ref(),
+                &target,
+                retry_hook,
+            );
         let step_status = if result.is_ok() {
             crate::transaction::history::StepStatus::Committed
         } else if committed_hook_failed {
@@ -1799,12 +1801,7 @@ mod tests {
     use super::*;
     use crate::archive;
 
-    fn tmpdir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("nawa-install-{}-{}", tag, std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
-    }
+    use crate::testutil::tmpdir;
 
     /// Build a fake package archive with the given files.
     fn make_pkg(dir: &Path, name: &str, version: &str, files: &[(&str, &[u8])]) -> PathBuf {

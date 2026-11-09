@@ -611,13 +611,7 @@ pub fn verify_stored(root: &Path, digest: &str) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn tmpdir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("nawa-objstore-{}-{}", tag, std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
-    }
+    use crate::testutil::tmpdir;
 
     fn write_source(dir: &Path, body: &[u8]) -> PathBuf {
         let p = dir.join("src.nawa.tar.zst");

@@ -307,13 +307,7 @@ pub fn print_status(root: &Path, name: Option<&str>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn tmpdir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("nawa-svc-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
-    }
+    use crate::testutil::tmpdir;
 
     fn mk_service(root: &Path, name: &str) {
         let dir = sv_dir(root).join(name);

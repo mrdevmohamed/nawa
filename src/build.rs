@@ -229,9 +229,7 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
         // All sources are downloaded, verified and extracted by the sources
         // engine; the workspace is `<work>/src` and `[package] workdir`
         // selects the section cwd through `staged.srcdir`.
-        let cache_dir = std::env::var_os("NAWA_SRCCACHE")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| builddir.join("distfiles"));
+        let cache_dir = crate::config::srccache_dir(&builddir, None);
         let s = crate::sources::stage_sources(rec, &work, &src, &cache_dir, opts.jobs)?;
         // normalise ownership/permissions for the sandbox's mapped identity
         grant_source_write(&s.srcroot);
@@ -266,9 +264,7 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
         // persistent, content-keyed cache instead ($NAWA_SRCCACHE, default
         // <builddir>/distfiles). A hit is re-verified against the recipe's
         // sha256, so a corrupt/truncated entry is re-downloaded.
-        let cache_dir = std::env::var_os("NAWA_SRCCACHE")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| builddir.join("distfiles"));
+        let cache_dir = crate::config::srccache_dir(&builddir, None);
         std::fs::create_dir_all(&cache_dir)
             .with_context(|| format!("create source cache {}", cache_dir.display()))?;
         let sha = rec.package.sha256.as_str();
@@ -474,9 +470,7 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
     // environment is computed (the whitelist and the sandbox spec need the
     // per-build fetch view paths).
     let fetch_env: Vec<(String, String)> = if rec.fetch.any() {
-        let srccache = std::env::var_os("NAWA_SRCCACHE")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| builddir.join("distfiles"));
+        let srccache = crate::config::srccache_dir(&builddir, None);
         // GOCACHE lives "under the HOME scratch" (§7): inside the sandbox
         // that is the mounted per-build home; at `env` the build runs on
         // the host and sees host paths (like NAWA_SRCDIR), so the scratch

@@ -490,13 +490,7 @@ fn decode_hex64(s: &str) -> Result<[u8; 64]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn tmpdir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("nawa-sign-{}-{}", tag, std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
-    }
+    use crate::testutil::tmpdir;
 
     fn fake_archive(dir: &Path, name: &str, body: &[u8]) -> PathBuf {
         let p = dir.join(format!("{name}.nawa.tar.zst"));
