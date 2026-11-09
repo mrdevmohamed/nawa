@@ -165,7 +165,7 @@ pub(crate) fn run(pkgdir: &Path, splitdir: &Path, policy: &Slim) -> Result<Repor
 /// Remove files that are never needed at run time. Returns how many.
 pub(crate) fn cleanup(pkgdir: &Path) -> usize {
     let mut n = 0;
-    for e in walkdir::WalkDir::new(pkgdir).into_iter().filter_map(|e| e.ok()) {
+    for e in crate::fswalk::entries_sorted_ok(pkgdir) {
         // symlinks are not `is_file()` here: a link is never junk
         if !e.file_type().is_file() {
             continue;
@@ -272,7 +272,7 @@ pub(crate) fn split(pkgdir: &Path, splitdir: &Path) -> Result<Vec<SubPackage>> {
                 Ok(c) if c.starts_with(&real_root) => {}
                 _ => continue,
             }
-            for e in walkdir::WalkDir::new(&root).sort_by_file_name() {
+            for e in crate::fswalk::entries_sorted(&root) {
                 let e = e?;
                 if e.file_type().is_dir() {
                     continue;
@@ -328,9 +328,8 @@ pub(crate) fn split(pkgdir: &Path, splitdir: &Path) -> Result<Vec<SubPackage>> {
 }
 
 fn count_non_dirs(root: &Path) -> usize {
-    walkdir::WalkDir::new(root)
-        .into_iter()
-        .filter_map(|e| e.ok())
+    crate::fswalk::entries_sorted_ok(root)
+        .iter()
         .filter(|e| !e.file_type().is_dir())
         .count()
 }
@@ -540,7 +539,7 @@ fn strip_group(files: &[PathBuf], flag: &str) -> Option<(usize, u64)> {
 fn strip(pkgdir: &Path, rep: &mut Report) {
     let mut linked: Vec<PathBuf> = Vec::new();
     let mut debug_only: Vec<PathBuf> = Vec::new();
-    for e in walkdir::WalkDir::new(pkgdir).into_iter().filter_map(|e| e.ok()) {
+    for e in crate::fswalk::entries_sorted_ok(pkgdir) {
         if !e.file_type().is_file() {
             continue;
         }
