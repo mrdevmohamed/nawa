@@ -82,7 +82,9 @@ pub fn migrate_install_dates(root: &Path) -> Result<Vec<String>> {
         if fixed == entry.install_date {
             continue;
         }
-        // recoverable backup, only when not already present
+        // Recoverable backup, only when not already present. The rewrite
+        // itself is a durable atomic publication (fsync file + parent dir),
+        // so a crash cannot leave a half-written desc behind.
         let bak = dir.join("desc.pre-seconds.bak");
         if !bak.exists() {
             std::fs::copy(&desc, &bak).with_context(|| format!("back up {}", desc.display()))?;
@@ -90,9 +92,7 @@ pub fn migrate_install_dates(root: &Path) -> Result<Vec<String>> {
         let mut e = entry.clone();
         e.install_date = fixed;
         let new = toml::to_string_pretty(&e)?;
-        let tmp = dir.join(".desc.migrate.tmp");
-        std::fs::write(&tmp, new)?;
-        std::fs::rename(&tmp, &desc)?;
+        crate::transaction::atomic::write_atomic(&desc, new.as_bytes(), 0o644)?;
         changed.push(format!(
             "{}: install date migrated from nanoseconds to seconds",
             e.name
@@ -223,21 +223,28 @@ impl Db {
 
     pub fn add(&self, e: &Entry, files: &[String], hashes: &HashMap<String, String>) -> Result<()> {
         let dir = self.checked_dir(&e.name)?;
-        std::fs::create_dir_all(&dir)?;
-        // write temp + rename so an interrupted install can't leave a
-        // half-written entry behind
+        // Durable atomic publication for each file (follows
+        // transaction/atomic.rs): a crash leaves the previous, fully-valid
+        // entry or the new, fully-valid entry — never a half-written one.
+        // `write_atomic` creates parent directories durably, so no
+        // separate `create_dir_all` is needed here.
         let desc = toml::to_string_pretty(e)?;
-        std::fs::write(dir.join(".desc.tmp"), desc)?;
-        std::fs::rename(dir.join(".desc.tmp"), dir.join("desc"))?;
-        std::fs::write(dir.join(".files.tmp"), files.join("\n") + "\n")?;
-        std::fs::rename(dir.join(".files.tmp"), dir.join("files"))?;
+        crate::transaction::atomic::write_atomic(&dir.join("desc"), desc.as_bytes(), 0o644)?;
+        crate::transaction::atomic::write_atomic(
+            &dir.join("files"),
+            (files.join("\n") + "\n").as_bytes(),
+            0o644,
+        )?;
         let mut h: Vec<String> = hashes
             .iter()
             .map(|(p, s)| format!("{s}  {p}"))
             .collect();
         h.sort();
-        std::fs::write(dir.join(".hashes.tmp"), h.join("\n") + "\n")?;
-        std::fs::rename(dir.join(".hashes.tmp"), dir.join("hashes"))?;
+        crate::transaction::atomic::write_atomic(
+            &dir.join("hashes"),
+            (h.join("\n") + "\n").as_bytes(),
+            0o644,
+        )?;
         Ok(())
     }
 
