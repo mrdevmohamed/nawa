@@ -85,34 +85,49 @@ pub(crate) fn stage_sources(rec: &Recipe, work: &Path, src: &Path, cache: &Path,
         archived: bool,
     }
 
-    let mut fetched: Vec<Fetched> = Vec::new();
-    for spec in &rec.package.sources {
-        let url = rec.expand(&spec.url, &ctx);
-        let mirrors: Vec<String> = spec.mirrors.iter().map(|m| rec.expand(m, &ctx)).collect();
-        let dest = fetch::digest_cache_dir(cache).join(&spec.sha256);
-        fetch::download_content_addressed(&url, &mirrors, &spec.sha256, &dest)
-            .with_context(|| {
-                format!("fetch source `{}` of recipe {}", spec.name, rec.package.name)
-            })?;
-        crate::nawa_success!("source `{}` verified: {}", spec.name, dest.display());
-
-        // unpack = true demands an archive; unpack = false always stages the
-        // raw file; omitted detects by content, like the legacy path (§4.2)
-        let archived = match spec.unpack {
-            Some(true) => true,
-            Some(false) => false,
-            None => fetch::detect_source_format(&dest).is_some(),
-        };
-        if archived && spec.unpack.is_some() || spec.unpack == Some(true) {
-            // the error fires below, after format detection on the cache
-            // entry — kept as a single decision point (see extract loop)
+    // Download all sources in parallel (network-bound); extraction and
+    // merge stay in recipe order. `jobs` is the build parallelism knob;
+    // one thread per source is fine because recipes rarely have > few
+    // `[[package.sources]]`.
+    let download_results: Vec<Result<Fetched>> = std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for spec in &rec.package.sources {
+            let ctx = &ctx;
+            let h = scope.spawn(move || {
+                let url = rec.expand(&spec.url, ctx);
+                let mirrors: Vec<String> = spec
+                    .mirrors
+                    .iter()
+                    .map(|m| rec.expand(m, ctx))
+                    .collect();
+                let dest = fetch::digest_cache_dir(cache).join(&spec.sha256);
+                fetch::download_content_addressed(&url, &mirrors, &spec.sha256, &dest)
+                    .with_context(|| {
+                        format!("fetch source `{}` of recipe {}", spec.name, rec.package.name)
+                    })?;
+                crate::nawa_success!("source `{}` verified: {}", spec.name, dest.display());
+                let archived = match spec.unpack {
+                    Some(true) => true,
+                    Some(false) => false,
+                    None => fetch::detect_source_format(&dest).is_some(),
+                };
+                Ok::<_, anyhow::Error>(Fetched {
+                    spec,
+                    cache_path: dest,
+                    url,
+                    archived,
+                })
+            });
+            handles.push(h);
         }
-        fetched.push(Fetched {
-            spec,
-            cache_path: dest,
-            url,
-            archived,
-        });
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("download thread panicked"))
+            .collect::<Vec<Result<Fetched>>>()
+    });
+    let mut fetched: Vec<Fetched> = Vec::with_capacity(download_results.len());
+    for r in download_results {
+        fetched.push(r?);
     }
 
     // ---- extract archives into stage/<name>

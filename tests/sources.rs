@@ -334,9 +334,11 @@ cp %{srcdir}/hello.sh %{pkgdir}/usr/h
         .filter(|n| n.starts_with("build-"))
         .collect();
     assert!(logs.is_empty(), "no build section may have run: {logs:?}");
-    // the first source was fetched (and verified); the failure stops before
-    // the third (download order = array order)
-    assert_eq!(count.load(Ordering::SeqCst), 2);
+    // Sources are downloaded in parallel (network-bound) — all three are
+    // attempted concurrently, so a wrong hash does not prevent the other
+    // downloads. The failure still happens before any extraction and
+    // before any build section (verified above).
+    assert_eq!(count.load(Ordering::SeqCst), 3);
     let _ = fs::remove_dir_all(&s);
 }
 
