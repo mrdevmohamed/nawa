@@ -249,9 +249,6 @@ const KINDS: [Kind; 2] = [
 /// `splitdir/<suffix>`. A kind that is absent, or that would leave the main
 /// package without any file, is skipped.
 pub(crate) fn split(pkgdir: &Path, splitdir: &Path) -> Result<Vec<SubPackage>> {
-    let real_root = pkgdir
-        .canonicalize()
-        .with_context(|| format!("resolve {}", pkgdir.display()))?;
     let mut out = Vec::new();
 
     for kind in &KINDS {
@@ -268,9 +265,8 @@ pub(crate) fn split(pkgdir: &Path, splitdir: &Path) -> Result<Vec<SubPackage>> {
                 continue;
             }
             // never walk out of the package through a symlinked parent
-            match root.canonicalize() {
-                Ok(c) if c.starts_with(&real_root) => {}
-                _ => continue,
+            if !crate::pathutil::is_under_root(pkgdir, &root).unwrap_or(false) {
+                continue;
             }
             for e in crate::fswalk::entries_sorted(&root) {
                 let e = e?;
