@@ -3,6 +3,35 @@
 //! File contents are synced before rename and the containing directory is
 //! synced afterwards. A successful return includes both the data and the
 //! published directory entry in the filesystem durability boundary.
+//!
+//! # Durability policy (Step 3)
+//!
+//! Use [`crate::transaction::atomic::write_atomic`] (this module's `write_atomic`)
+//! when a crash must not leave a torn or missing file that a later start would
+//! treat as authoritative:
+//!
+//! * `db::Db::{add,migrate_install_dates}` — `local/<name>/{desc,files,hashes}` (0o644)
+//! * `sign::sign` — `index.toml.sig` (0o644)
+//! * `repo::write_index_atomic` — `index.toml` (0o644)
+//! * `groups::membership::save` — group membership records (0o644)
+//! * `plugins::events::{enqueue_transaction,store_failure}` — plugin event queue (0o600, dir 0o700)
+//! * `transaction::{journal,history}` — WAL/history records (already durable)
+//!
+//! Keep the ephemeral `write(tmp)+rename` + `remove_file(tmp)` pattern only for
+//! throw-away staging that can be regenerated on the next run and is never treated
+//! as authoritative on restart:
+//!
+//! * `<work>/stage/*`, `<builddir>/distfiles` download `.part` sidecars
+//! * `<work>/src` / `<work>/pkg` staged package tree (`pkgdir`)
+//! * `artifact` staging objects (content-addressed, verified before publish)
+//! * `closure` layer staging dirs
+//! * install `payload` staging (`install/payload.rs` `.archive-*.tmp`, `.signature-*.tmp`)
+//! * `sandbox` scratch (`sb/layer-work`)
+//!
+//! The split is intentional: fsyncing every staged file would slow builds
+//! without improving crash consistency, because the whole `<work>` tree is
+//! wiped on the next build (`build::wipe_work`) and the archive is only
+//! published after lint/slim verification.
 
 use anyhow::{bail, Context, Result};
 use std::fs::{self, File, OpenOptions};
