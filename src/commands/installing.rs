@@ -124,7 +124,6 @@ pub(crate) fn cmd_install_with_why(
     }
     // one transaction for the whole command (roadmap §5.1): the id is
     // allocated under the exclusive db lock inside begin_operation
-    let requested: Vec<String> = remaining_targets.clone();
     let repo_ids: Vec<String> = sourcing
         .open
         .as_ref()
@@ -141,7 +140,7 @@ pub(crate) fn cmd_install_with_why(
         let mut op = transaction::begin_operation(
             &ctx.root,
             command,
-            &requested,
+            &remaining_targets,
             &repo_ids,
         )?;
         if let Some(id) = group_id {
@@ -751,7 +750,6 @@ pub(crate) fn cmd_update(
         }
     }
 
-    let requested = targets.clone();
     let repo_ids: Vec<String> = sourcing
         .open
         .as_ref()
@@ -763,7 +761,7 @@ pub(crate) fn cmd_update(
         transaction::begin_operation(
             &ctx.root,
             transaction::OperationCommand::Update,
-            &requested,
+            &targets,
             &repo_ids,
         )?
     };

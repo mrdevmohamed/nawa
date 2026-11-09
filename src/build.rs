@@ -517,7 +517,6 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
         let spec_srcroot = has_sources.then(|| view_srcroot.clone());
         let spec_assetsdir = staged_assets.as_ref().map(|_| view_assets.clone());
         let spec_env = buildenv::EnvSpec {
-            isolation: opts.isolation,
             profile_env: &opts.env,
             jobs: opts.jobs,
             srcdir: &view_src,
@@ -638,7 +637,7 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
     if opts.isolation >= Isolation::Env {
         let sonames: BTreeMap<String, String> = match &assembled {
             Some(root) => root.sonames.clone(),
-            None => installed_sonames(&opts.root).unwrap_or_default(),
+            None => installed_sonames(&opts.root)?,
         };
         // inside the sandbox the build only ever sees /build/... (or the
         // fallback base); outside it the host build dir must not leak either
@@ -1158,28 +1157,13 @@ fn diff_archives(a: &Path, b: &Path) -> Result<Vec<String>> {
 
 /// The soname → owner index for `sandbox`-level lint: the installed db.
 fn installed_sonames(root: &Path) -> Result<BTreeMap<String, String>> {
-    use std::collections::HashMap;
     let db = crate::db::Db::new(root);
     let mut out = BTreeMap::new();
-    let owners: HashMap<String, String> = db
-        .file_owners()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(k, v)| (k.trim_start_matches('/').to_string(), v))
-        .collect();
-    for name in owners.keys() {
-        for f in db.files(name)? {
-            let f = f.trim_start_matches('/');
-            if let Some(base) = f.rsplit('/').next() {
-                let is_libdir = f.starts_with("usr/lib") || f.starts_with("lib");
-                if is_libdir
-                    && base.starts_with("lib")
-                    && base.contains(".so")
-                    && !base.ends_with(".a")
-                    && !base.ends_with(".la")
-                {
-                    out.entry(base.to_string()).or_insert_with(|| name.clone());
-                }
+    for entry in db.installed()? {
+        for f in db.files(&entry.name)? {
+            let rel = f.trim_start_matches('/');
+            if let Some(soname) = crate::closure::soname_of(rel) {
+                out.entry(soname).or_insert_with(|| entry.name.clone());
             }
         }
     }
@@ -1512,5 +1496,63 @@ mod wipe_tests {
         assert!(!root.exists());
         // a missing tree is not an error
         wipe_work(&root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod installed_sonames_tests {
+    use super::installed_sonames;
+    use crate::db::{Db, Entry};
+
+    fn entry(name: &str) -> Entry {
+        Entry {
+            name: name.into(),
+            version: "1.0".into(),
+            rel: 1,
+            arch: String::new(),
+            reason: "explicit".into(),
+            run: vec![],
+            install_date: 0,
+            size: 0,
+            artifact_sha256: String::new(),
+        }
+    }
+
+    #[test]
+    fn sonames_map_libs_to_their_owners() {
+        let root = std::env::temp_dir().join(format!(
+            "nawa-sonames-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let db = Db::new(&root);
+        db.add(
+            &entry("hello"),
+            &[
+                "/usr/lib/libfoo.so.1".to_string(),
+                "/usr/bin/hello".to_string(),
+            ],
+            &Default::default(),
+        )
+        .unwrap();
+        db.add(
+            &entry("world"),
+            &[
+                "/lib64/libbar.so".to_string(),
+                "/usr/lib/libbaz.so.a".to_string(),
+                "/usr/lib/notalib".to_string(),
+                "/etc/world.conf".to_string(),
+            ],
+            &Default::default(),
+        )
+        .unwrap();
+
+        let map = installed_sonames(&root).unwrap();
+        assert_eq!(map.get("libfoo.so.1").map(String::as_str), Some("hello"));
+        assert_eq!(map.get("libbar.so").map(String::as_str), Some("world"));
+        assert!(!map.contains_key("libbaz.so.a"), ".a files are not sonames: {map:?}");
+        assert_eq!(map.len(), 2, "only lib sonames, owners correct: {map:?}");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

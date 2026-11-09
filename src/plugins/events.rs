@@ -171,7 +171,7 @@ fn dispatch_record(
     record: &TransactionRecord,
 ) -> Vec<ObserverFailure> {
     let state = PluginState::load_effective(project_config, system_config);
-    let discovered = match discovery::discover(rustix::process::geteuid().is_root()) {
+    let discovered = match discovery::discover(crate::diag::is_root()) {
         Ok(plugins) => plugins,
         Err(error) => {
             return vec![failure(record.id, "discovery", "transaction.observe", format!("{error:#}"))];

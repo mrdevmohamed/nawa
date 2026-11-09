@@ -1639,12 +1639,6 @@ fn load_hooks(db: &Db, name: &str) -> archive::Hooks {
         .unwrap_or_default()
 }
 
-/// True when this process runs as root. Uses the effective uid directly:
-/// it must not depend on /proc being mounted (it is not inside a fresh chroot).
-fn running_as_root() -> bool {
-    rustix::process::geteuid().is_root()
-}
-
 /// Does `path` exist as seen from inside a chroot at `root`? Symlinks are
 /// resolved relative to `root` (an absolute target like `/usr/bin` means
 /// `root/usr/bin`, not the host's), unlike `root.join(path).exists()`, which
@@ -1756,7 +1750,7 @@ fn run_hook(label: &str, script: &str, root: &Path) -> Result<()> {
             .into_iter()
             .find(|sh| exists_in_root(root, sh));
         match shell {
-            Some(sh) if running_as_root() => {
+            Some(sh) if crate::diag::is_root() => {
                 crate::nawa_info!("running {label} hook in chroot {}", root.display());
                 let status = chroot_command(root, sh, script)?;
                 if !status.success() {

@@ -473,7 +473,7 @@ pub fn copy_local(src: &Path, dest: &Path) -> Result<()> {
         return Ok(());
     }
     std::fs::create_dir_all(dest).with_context(|| format!("create {}", dest.display()))?;
-    let as_root = rustix::process::geteuid().is_root();
+    let as_root = crate::diag::is_root();
     let mut seen: HashMap<(u64, u64), PathBuf> = HashMap::new(); // (dev, ino) -> first copy
     let mut dir_times: Vec<(PathBuf, PathBuf)> = Vec::new();
     for entry in walkdir::WalkDir::new(src).follow_links(false) {

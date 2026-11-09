@@ -81,10 +81,6 @@ pub const SANDBOX_PKG: &str = "/build/pkg";
 /// * `srcdir` / `pkgdir` — paths *as the build sees them*: the host paths at
 ///   `none`/`env`, the `/build/{src,pkg}` bind points at `sandbox`/`closure`.
 pub struct EnvSpec<'a> {
-    /// Informational: the whitelist is the same from `env` up; kept so the
-    /// caller documents what it is building for.
-    #[allow(dead_code)]
-    pub isolation: Isolation,
     pub profile_env: &'a [(String, String)],
     pub jobs: u32,
     pub srcdir: &'a Path,
@@ -253,7 +249,6 @@ mod tests {
     fn whitelist_contains_exactly_the_design_set() {
         let profile = profile();
         let spec = EnvSpec {
-            isolation: Isolation::Env,
             profile_env: &profile,
             jobs: 8,
             srcdir: Path::new(SANDBOX_SRC),
@@ -295,7 +290,6 @@ mod tests {
         let profile = profile();
         let mk = |srcroot: Option<&Path>, assetsdir: Option<&Path>, fetch_env: &[(String, String)]| {
             let spec = EnvSpec {
-                isolation: Isolation::Env,
                 profile_env: &profile,
                 jobs: 8,
                 srcdir: Path::new(SANDBOX_SRC),
@@ -361,7 +355,6 @@ mod tests {
         let profile = profile();
         let base = |fetch_env: Vec<(String, String)>| {
             let spec = EnvSpec {
-                isolation: Isolation::Env,
                 profile_env: &profile,
                 jobs: 8,
                 srcdir: Path::new(SANDBOX_SRC),
