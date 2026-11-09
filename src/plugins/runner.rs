@@ -11,7 +11,6 @@ use serde::Serialize;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
@@ -20,7 +19,7 @@ use super::protocol::{self, EventRequest, HelloRequest, HelloResponse, RunReques
 
 /// Default wall-clock limit for each plugin handshake, command, or event.
 pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
-static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
 
 type PendingWrite = (Vec<u8>, mpsc::Sender<std::result::Result<(), String>>);
 
@@ -218,7 +217,7 @@ impl PluginProcess {
             "run-{}-{}-{}",
             std::process::id(),
             self.hello.plugin_id,
-            REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            crate::unique::next()
         );
         let request = RunRequest {
             protocol: protocol::PROTOCOL_NAME,
@@ -242,7 +241,7 @@ impl PluginProcess {
             "event-{}-{}-{}",
             std::process::id(),
             self.hello.plugin_id,
-            REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            crate::unique::next()
         );
         let request = EventRequest {
             protocol: protocol::PROTOCOL_NAME,

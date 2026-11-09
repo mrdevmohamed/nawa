@@ -55,7 +55,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(test)]
 use std::os::unix::process::CommandExt;
 #[cfg(test)]
@@ -99,11 +98,6 @@ pub(crate) const MARKER: &str = "nawa-complete";
 
 /// §12 fetch profile: 30 s would kill `go`; the timeout is the bound.
 pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 1800;
-
-
-/// Unique suffix for sibling temporary populate directories.
-pub(crate) static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-
 
 /// Everything `build()` hands to the runner once. Paths are host paths.
 pub(crate) struct FetchRun<'a> {
@@ -173,7 +167,7 @@ pub(crate) fn build_toolchain_identity(
             let probe_root = std::env::temp_dir().join(format!(
                 "nawa-toolchain-id-{}-{}",
                 std::process::id(),
-                TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+                crate::unique::next()
             ));
             std::fs::create_dir(&probe_root)
                 .with_context(|| format!("create toolchain identity scratch {}", probe_root.display()))?;
@@ -201,7 +195,7 @@ pub(crate) fn build_toolchain_identity(
             let cwd = std::env::temp_dir().join(format!(
                 "nawa-go-version-{}-{}",
                 std::process::id(),
-                TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+                crate::unique::next()
             ));
             std::fs::create_dir(&cwd)
                 .with_context(|| format!("create Go version probe cwd {}", cwd.display()))?;
@@ -307,7 +301,7 @@ mod resolver_path_tests {
         let root = std::env::temp_dir().join(format!(
             "nawa-resolver-path-{}-{}",
             std::process::id(),
-            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            crate::unique::next()
         ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("etc")).unwrap();

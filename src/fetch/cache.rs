@@ -5,7 +5,6 @@ use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::checksum::verify_sha256;
 use super::http::{check_offline, download, offline};
@@ -51,10 +50,8 @@ pub(crate) fn lock_digest_entry(path: &Path) -> Result<CacheLock> {
 /// which shares one `<file>.part` per destination — every new-form transfer
 /// gets its own file name so two concurrent builds of the same digest can
 /// never corrupt each other's partial bytes.
-static PART_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-
 pub(crate) fn unique_part_path(dest: &Path) -> PathBuf {
-    let seq = PART_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let seq = crate::unique::next();
     let base = dest
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())

@@ -9,10 +9,9 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,7 +88,7 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     for attempt in 0..32u32 {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH)
             .unwrap_or_default().as_nanos();
-        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let sequence = crate::unique::next();
         let temporary = parent.join(format!(
             ".{name}.{}.{}.{sequence}.{attempt}.tmp", std::process::id(), nanos
         ));
@@ -140,7 +139,7 @@ mod tests {
     fn temp_dir() -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "nawa-atomic-{}-{}", std::process::id(),
-            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            crate::unique::next()
         ));
         fs::create_dir_all(&path).unwrap();
         path
