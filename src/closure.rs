@@ -92,6 +92,33 @@ pub struct AssembledRoot {
     pub layer_dirs: Vec<PathBuf>,
 }
 
+/// Locate + signature-verify one closure archive (install-time policy).
+/// Shared by the v1 and v2 assembly paths so verification policy
+/// cannot drift between them.
+fn verified_archive(
+    name: &String,
+    known: &BTreeMap<String, Recipe>,
+    outdir: &Path,
+    root: &Path,
+    allow_unsigned: bool,
+) -> Result<PathBuf> {
+    let rec = known
+        .get(name.as_str())
+        .with_context(|| format!("closure member `{name}` has no recipe"))?;
+    let archive = archive_for(rec, outdir);
+    if !archive.is_file() {
+        bail!(
+            "dependency archive for `{}` not found: {}\n\
+             (build it first — `nawa deps-all` prints a valid order)",
+            name,
+            archive.display()
+        );
+    }
+    crate::sign::verify_for_install(&archive, root, None, allow_unsigned)
+        .with_context(|| format!("verify {}", archive.display()))?;
+    Ok(archive)
+}
+
 /// Extract every closure archive into `dir` (v1: extract-per-build).
 /// Signatures are verified with the install-time policy first.
 #[allow(clippy::too_many_arguments)]
@@ -114,20 +141,7 @@ pub fn assemble(
     members.sort();
 
     for name in members {
-        let rec = known
-            .get(name.as_str())
-            .with_context(|| format!("closure member `{name}` has no recipe"))?;
-        let archive = archive_for(rec, outdir);
-        if !archive.is_file() {
-            bail!(
-                "dependency archive for `{}` not found: {}\n\
-                 (build it first — `nawa deps-all` prints a valid order)",
-                name,
-                archive.display()
-            );
-        }
-        crate::sign::verify_for_install(&archive, root, None, allow_unsigned)
-            .with_context(|| format!("verify {}", archive.display()))?;
+        let archive = verified_archive(name, known, outdir, root, allow_unsigned)?;
         progress(name);
         extract_and_index(&archive, dir, name, &mut sonames)
             .with_context(|| format!("extract {} into the build root", archive.display()))?;
@@ -180,20 +194,7 @@ pub fn assemble_cached(
     let mut layer_dirs: Vec<PathBuf> = Vec::new();
 
     for name in ordered {
-        let rec = known
-            .get(name.as_str())
-            .with_context(|| format!("closure member `{name}` has no recipe"))?;
-        let archive = archive_for(rec, outdir);
-        if !archive.is_file() {
-            bail!(
-                "dependency archive for `{}` not found: {}\n\
-                 (build it first — `nawa deps-all` prints a valid order)",
-                name,
-                archive.display()
-            );
-        }
-        crate::sign::verify_for_install(&archive, root, None, allow_unsigned)
-            .with_context(|| format!("verify {}", archive.display()))?;
+        let archive = verified_archive(name, known, outdir, root, allow_unsigned)?;
         let sha = file_sha256(&archive)
             .with_context(|| format!("hash {}", archive.display()))?;
         let layer = layers_dir.join(&sha);
