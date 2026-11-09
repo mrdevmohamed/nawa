@@ -68,7 +68,7 @@ Disable and stop a service:
 nawa service disable dbus --now
 ~~~
 
-The --root option scopes service paths to another root filesystem. Live status is available when the sv command is present and the service is actually supervised; otherwise Nawa reports the static enabled state.
+The --root option scopes service paths to another root filesystem. Live status is available when the sv command is present and the service is actually supervised; otherwise Nawa reports the static enabled state. Nawa sets `SVDIR` to `/etc/runit/runsvdir/default` for its own `sv` calls. Live start/stop/restart operations require root privileges; use `doas nawa service ...`. Faseela also provides runit's conventional `/service` path so bare `sv status NAME` commands use the same runsvdir.
 
 ## Reverse shared-library dependencies
 
