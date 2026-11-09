@@ -75,24 +75,32 @@ pub fn install_archive(
     key: Option<&Path>,
     reason: &str,
 ) -> Result<Entry> {
-    install_archive_pinned(archive_path, root, force, allow_unsigned, key, reason, None)
+    install_archive_pinned(archive_path, root, InstallOpts { force, allow_unsigned, key, reason, pinned_sha: None })
+}
+
+/// Options for [`install_archive_pinned`]: the install booleans and
+/// the pinned digest live in one struct so call sites cannot
+/// transpose `force`/`allow_unsigned` or pass a mistyped reason.
+pub struct InstallOpts<'a> {
+    pub force: bool,
+    pub allow_unsigned: bool,
+    pub key: Option<&'a Path>,
+    pub reason: &'a str,
+    pub pinned_sha: Option<&'a str>,
 }
 
 /// [`install_archive`] for an archive that a repository index already
-/// described. With `expected_sha256` the snapshot must hash to the index
+/// described. With `pinned_sha` the snapshot must hash to the index
 /// digest, so the bytes whose detached signature is checked are provably the
 /// bytes the index entry (and `.PKGINFO` check) was validated against.
 pub fn install_archive_pinned(
     archive_path: &Path,
     root: &Path,
-    force: bool,
-    allow_unsigned: bool,
-    key: Option<&Path>,
-    reason: &str,
-    expected_sha256: Option<&str>,
+    opts: InstallOpts<'_>,
 ) -> Result<Entry> {
+    let InstallOpts { force, allow_unsigned, key, reason, pinned_sha } = opts;
     let snapshot_dir = root.join(".nawa");
-    let snapshot = crate::fetch::snapshot_file(archive_path, expected_sha256, &snapshot_dir)?;
+    let snapshot = crate::fetch::snapshot_file(archive_path, pinned_sha, &snapshot_dir)?;
     let sig = sign::sig_path_for(archive_path);
     let verified = sign::verify_for_install_with_sig_reported(
         snapshot.path(),
@@ -617,11 +625,11 @@ pub fn rollback(name: &str, root: &Path) -> Result<()> {
                 "signed-index proof re-verified".to_string(),
             ),
             RestoreSource::Detached { object, digest } => (
-                install_archive_pinned(&object, root, false, true, None, "keep", Some(&digest)),
+                install_archive_pinned(&object, root, InstallOpts { force: false, allow_unsigned: true, key: None, reason: "keep", pinned_sha: Some(&digest) }),
                 "detached signature re-verified".to_string(),
             ),
             RestoreSource::Pinned { object, digest, proof } => (
-                install_archive_pinned(&object, root, false, true, None, "keep", Some(&digest)),
+                install_archive_pinned(&object, root, InstallOpts { force: false, allow_unsigned: true, key: None, reason: "keep", pinned_sha: Some(&digest) }),
                 proof,
             ),
             RestoreSource::Legacy { archive } => (
@@ -843,6 +851,20 @@ pub fn remove_with(name: &str, root: &Path, force: bool) -> Result<()> {
     Ok(())
 }
 
+/// Copy + rename onto `dest` via `tmp`, removing `tmp` on failure.
+/// Both the archive and its detached signature use this discipline.
+fn copy_atomic(src: &Path, tmp: &Path, dest: &Path, copy_ctx: &str, rename_ctx: &str) -> Result<()> {
+    let res = (|| -> Result<()> {
+        std::fs::copy(src, tmp).with_context(|| copy_ctx.to_string())?;
+        std::fs::rename(tmp, dest).with_context(|| rename_ctx.to_string())?;
+        Ok(())
+    })();
+    if res.is_err() {
+        let _ = std::fs::remove_file(tmp);
+    }
+    res
+}
+
 /// Copy verified bytes into `<root>/var/cache/nawa` (atomically, as a full
 /// copy) under the original archive filename. For legacy archives the
 /// detached signature is kept next to it; a trusted v2 index is itself the
@@ -866,17 +888,13 @@ fn cache_archive_named(
         std::process::id(),
         dest.file_name().unwrap_or_default().to_string_lossy()
     ));
-    let cache_result = (|| -> Result<()> {
-        std::fs::copy(archive_path, &tmp)
-            .with_context(|| format!("cache {}", archive_path.display()))?;
-        std::fs::rename(&tmp, &dest)
-            .with_context(|| format!("activate cached archive {}", dest.display()))?;
-        Ok(())
-    })();
-    if cache_result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    cache_result?;
+    copy_atomic(
+        archive_path,
+        &tmp,
+        &dest,
+        &format!("cache {}", archive_path.display()),
+        &format!("activate cached archive {}", dest.display()),
+    )?;
 
     let sig_dest = sign::sig_path_for(&dest);
     if copy_detached_signature {
@@ -886,17 +904,13 @@ fn cache_archive_named(
                 ".signature-{}-{stamp}.tmp",
                 std::process::id()
             ));
-            let sig_result = (|| -> Result<()> {
-                std::fs::copy(&sig, &sig_tmp)
-                    .with_context(|| format!("cache detached signature {}", sig.display()))?;
-                std::fs::rename(&sig_tmp, &sig_dest)
-                    .with_context(|| format!("activate cached signature {}", sig_dest.display()))?;
-                Ok(())
-            })();
-            if sig_result.is_err() {
-                let _ = std::fs::remove_file(&sig_tmp);
-            }
-            sig_result?;
+            copy_atomic(
+                &sig,
+                &sig_tmp,
+                &sig_dest,
+                &format!("cache detached signature {}", sig.display()),
+                &format!("activate cached signature {}", sig_dest.display()),
+            )?;
         } else if sig_dest.exists() {
             std::fs::remove_file(&sig_dest)
                 .with_context(|| format!("remove stale cached signature {}", sig_dest.display()))?;
@@ -2254,12 +2268,12 @@ mod tests {
         let digest = crate::fetch::sha256_of_file(&archive).unwrap();
 
         let wrong = "0".repeat(64);
-        let err = install_archive_pinned(&archive, &root, false, true, None, "explicit", Some(&wrong))
+        let err = install_archive_pinned(&archive, &root, InstallOpts { force: false, allow_unsigned: true, key: None, reason: "explicit", pinned_sha: Some(&wrong) })
             .unwrap_err();
         assert!(format!("{err:#}").contains("sha256 mismatch"), "{err:#}");
         assert!(!root.join("usr/share/pinned-demo").exists());
 
-        install_archive_pinned(&archive, &root, false, true, None, "explicit", Some(&digest.to_uppercase()))
+        install_archive_pinned(&archive, &root, InstallOpts { force: false, allow_unsigned: true, key: None, reason: "explicit", pinned_sha: Some(&digest.to_uppercase()) })
             .unwrap();
         assert!(root.join("usr/share/pinned-demo").exists());
         let _ = std::fs::remove_dir_all(&base);

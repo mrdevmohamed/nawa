@@ -264,20 +264,11 @@ impl TransactionRecord {
         parse_status(&self.status)?;
         for c in &self.package_changes {
             db::check_name(&c.name)?;
-            if !c.before.as_ref().is_some_and(|b| b.version.is_none() || db::valid_version(b.version.as_deref().unwrap_or("")))
-                && c.before.is_some()
-            {
-                let v = c.before.as_ref().and_then(|b| b.version.clone()).unwrap_or_default();
-                if !v.is_empty() && !db::valid_version(&v) {
-                    bail!("transaction {} has an invalid before-version for {}", self.id, c.name);
-                }
+            if let Some(b) = &c.before {
+                check_state(self.id, &c.name, "before", b)?;
             }
             if let Some(a) = &c.after {
-                if let Some(v) = &a.version {
-                    if !v.is_empty() && !db::valid_version(v) {
-                        bail!("transaction {} has an invalid after-version for {}", self.id, c.name);
-                    }
-                }
+                check_state(self.id, &c.name, "after", a)?;
             }
             if !a_artifact_ok(c.before.as_ref()) || !a_artifact_ok(c.after.as_ref()) {
                 bail!("transaction {} has an invalid artifact reference", self.id);
@@ -299,6 +290,15 @@ impl TransactionRecord {
         r.validate()?;
         Ok(r)
     }
+}
+
+fn check_state(id: u64, name: &str, kind: &str, state: &PackageState) -> Result<()> {
+    if let Some(v) = &state.version {
+        if !v.is_empty() && !db::valid_version(v) {
+            bail!("transaction {id} has an invalid {kind}-version for {name}");
+        }
+    }
+    Ok(())
 }
 
 fn a_artifact_ok(s: Option<&PackageState>) -> bool {

@@ -86,6 +86,35 @@ impl Ctx {
     }
 }
 
+/// `--build` / `--from-repo` / `--from` collapse to one install mode.
+/// Shared by `install` and `update` so flag precedence cannot drift.
+fn resolve_mode(build: bool, from_repo: bool, from: Option<&str>) -> Result<Option<InstallMode>> {
+    if build {
+        Ok(Some(InstallMode::Build))
+    } else if from_repo {
+        Ok(Some(InstallMode::Repo))
+    } else if let Some(m) = from {
+        Ok(Some(InstallMode::parse(m)?))
+    } else {
+        Ok(None)
+    }
+}
+
+/// The configured repository (flag beats config), parsed.
+/// Shared by `upgrade` and `sync` so the "no repository" bail text
+/// cannot drift.
+fn resolve_repo(ctx: &Ctx, repo: Option<String>) -> Result<fetch::RepoRef> {
+    let repo = match repo.or_else(|| ctx.repo.clone()) {
+        Some(r) => r,
+        None => bail!(
+            "no repository configured (it is switched off with `repo = \"\"`): \
+             pass --repo <dir-or-url>, set `repo` in nawa.toml or \
+             /etc/nawa/nawa.toml, or export NAWA_REPO"
+        ),
+    };
+    fetch::RepoRef::parse(&repo)
+}
+
 fn main() {
     let Cli { root, recipes, builddir, profiles, jobs, cmd } = Cli::parse();
     let overrides = Overrides {
@@ -191,28 +220,12 @@ fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             )
         }
         Cmd::Install { targets, flags, no_deps, key, build, from_repo, from, repo } => {
-            let mode = if build {
-                Some(InstallMode::Build)
-            } else if from_repo {
-                Some(InstallMode::Repo)
-            } else if let Some(m) = from {
-                Some(InstallMode::parse(&m)?)
-            } else {
-                None
-            };
+            let mode = resolve_mode(build, from_repo, from.as_deref())?;
             cmd_install(ctx, &targets, &flags, no_deps, key, mode, repo)
         }
         Cmd::Outdated => cmd_outdated(ctx),
         Cmd::Update { names, flags, build, from_repo, from, repo } => {
-            let mode = if build {
-                Some(InstallMode::Build)
-            } else if from_repo {
-                Some(InstallMode::Repo)
-            } else if let Some(m) = from {
-                Some(InstallMode::parse(&m)?)
-            } else {
-                None
-            };
+            let mode = resolve_mode(build, from_repo, from.as_deref())?;
             cmd_update(ctx, &names, &flags, mode, repo)
         },
         Cmd::Autoremove { dry_run, yes, build_deps } => {
@@ -331,15 +344,7 @@ fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             Ok(())
         }
         Cmd::Upgrade { repo, dry_run, force, allow_unsigned, yes } => {
-            let repo = match repo.or_else(|| ctx.repo.clone()) {
-                Some(r) => r,
-                None => bail!(
-                    "no repository configured (it is switched off with `repo = \"\"`): \
-                     pass --repo <dir-or-url>, set `repo` in nawa.toml or \
-                     /etc/nawa/nawa.toml, or export NAWA_REPO"
-                ),
-            };
-            let repo_ref = fetch::RepoRef::parse(&repo)?;
+            let repo_ref = resolve_repo(ctx, repo)?;
             upgrade::upgrade(
                 &ctx.root,
                 &repo_ref,
@@ -348,15 +353,7 @@ fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             )
         }
         Cmd::Sync { repo, force, allow_unsigned } => {
-            let repo = match repo.or_else(|| ctx.repo.clone()) {
-                Some(r) => r,
-                None => bail!(
-                    "no repository configured (it is switched off with `repo = \"\"`): \
-                     pass --repo <dir-or-url>, set `repo` in nawa.toml or \
-                     /etc/nawa/nawa.toml, or export NAWA_REPO"
-                ),
-            };
-            let repo_ref = fetch::RepoRef::parse(&repo)?;
+            let repo_ref = resolve_repo(ctx, repo)?;
             sync::sync(&ctx.root, &repo_ref, &ctx.recipes, &sync::SyncOpts { force, allow_unsigned })
         }
         Cmd::Repolist { all } => repositories::cmd_repolist(&ctx.cfg, all),

@@ -309,13 +309,15 @@ fn restore_object(root: &Path, object: &Path, digest: &str, reason: &str) -> Res
         Some("detached-signature") => {
             super::super::install::verify_retained_detached_proof(root, digest)?;
             super::super::install::install_archive_pinned(
-                object, root, false, true, None, reason, Some(digest),
+                object, root,
+                super::super::install::InstallOpts { force: false, allow_unsigned: true, key: None, reason, pinned_sha: Some(digest) },
             )?;
             Ok(())
         }
         _ => {
             super::super::install::install_archive_pinned(
-                object, root, false, true, None, reason, Some(digest),
+                object, root,
+                super::super::install::InstallOpts { force: false, allow_unsigned: true, key: None, reason, pinned_sha: Some(digest) },
             )?;
             Ok(())
         }

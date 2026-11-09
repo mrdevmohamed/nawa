@@ -84,7 +84,8 @@ pub(crate) fn cmd_build(
     let mut recorder = op.recorder();
     let step_no = recorder.step_intent_state(name, action, before.as_ref(), Some(&target), &digest)?;
     let result = install::install_archive_pinned(
-        &archive, &ctx.root, install_force, false, None, "explicit", Some(&digest),
+        &archive, &ctx.root,
+        install::InstallOpts { force: install_force, allow_unsigned: false, key: None, reason: "explicit", pinned_sha: Some(&digest) },
     );
     match &result {
         Ok(entry) => {
