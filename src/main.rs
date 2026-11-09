@@ -16,6 +16,7 @@ mod confirm;
 mod db;
 mod deps;
 mod diag;
+mod error;
 mod fetch;
 mod fetchrun;
 mod fswalk;

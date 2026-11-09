@@ -10,6 +10,7 @@
 //! well-known failure kinds get a one-line, actionable hint.
 
 use crate::color::Palette;
+use crate::error::Class;
 use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -70,7 +71,7 @@ fn strip_os_error(s: &str) -> &str {
 }
 
 fn hint(e: &anyhow::Error, env: &Env) -> Option<String> {
-    if !env.root && has_io_kind(e, ErrorKind::PermissionDenied) {
+    if !env.root && Class::of(e) == Class::Io && has_io_kind(e, ErrorKind::PermissionDenied) {
         let how = match env.privilege_helper {
             Some(h) => format!("with: {h} nawa {}", env.args).trim_end().to_string(),
             None => "as root".to_string(),
