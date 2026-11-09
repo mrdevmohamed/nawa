@@ -2,13 +2,11 @@
 
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
 use std::os::unix::fs::PermissionsExt;
 
 use super::common::{ecosystem_key, eco_cache_dir, entry_complete, copy_into_view, publish_entry, cleanup_failed_populate, spawn_fetch_child, fetch_path, fetch_timeout_secs, stream_and_wait};
 use super::FetchRun;
 use crate::recipe::FetchSpec;
-use super::TEMP_SEQUENCE;
 
 /// The Go backend (§7): plan, populate or hit, then expose the module cache.
 pub(crate) fn run_go(r: &FetchRun<'_>, spec: &FetchSpec) -> Result<Vec<(String, String)>> {
@@ -160,7 +158,7 @@ pub(crate) fn ensure_go_entry(r: &FetchRun, plan: &GoPlan, key: &str) -> Result<
         "{}.tmp-{}-{}",
         key,
         std::process::id(),
-        TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        crate::unique::next()
     ));
     let _ = std::fs::remove_dir_all(&temp);
     std::fs::create_dir_all(&temp)

@@ -44,6 +44,7 @@ mod sys;
 #[cfg(test)]
 mod testutil;
 mod transaction;
+mod unique;
 mod upgrade;
 mod version;
 

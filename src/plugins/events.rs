@@ -11,7 +11,6 @@ use rustix::fs::{flock, FlockOperation};
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::transaction::history::TransactionRecord;
 use super::discovery::{self, PluginState};
@@ -26,7 +25,7 @@ fn failures_dir(root: &Path) -> PathBuf {
     root.join("var/lib/nawa/plugins/failures")
 }
 
-static FAILURE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
 
 /// Serialize event dispatchers without holding the package database lock.
 /// A non-blocking lock also avoids deadlocking a plugin that invokes Nawa.
@@ -315,7 +314,7 @@ fn store_failure(root: &Path, failure: &ObserverFailure) -> Result<()> {
     let dir = failures_dir(root);
     std::fs::create_dir_all(&dir)?;
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
-    let sequence = FAILURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let sequence = crate::unique::next();
     let target = dir.join(format!(
         "{:010}-{}-{}-{}-{}-{sequence}.toml",
         failure.transaction_id,

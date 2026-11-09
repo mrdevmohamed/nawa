@@ -7,7 +7,6 @@ use std::fs::{File, OpenOptions};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Private, cleanup-on-drop copy of a file whose bytes were hashed while copying.
 /// Callers must use this path for all subsequent parsing or extraction.
@@ -27,7 +26,7 @@ impl Drop for VerifiedSnapshot {
     }
 }
 
-static SNAPSHOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
 
 /// Remove `verified-<pid>-<n>.tmp` snapshots left behind by processes that
 /// died before their `Drop` ran (SIGKILL, power loss). Only acts when /proc is
@@ -83,7 +82,7 @@ pub(crate) fn snapshot_file(
         .with_context(|| format!("open {}", source_path.display()))?;
     let mut created: Option<(File, PathBuf)> = None;
     for _ in 0..128 {
-        let sequence = SNAPSHOT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let sequence = crate::unique::next();
         let path = snapshot_dir.join(format!(
             "verified-{}-{sequence}.tmp",
             std::process::id()

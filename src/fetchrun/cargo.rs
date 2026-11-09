@@ -2,7 +2,6 @@
 
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
 use std::os::unix::fs::PermissionsExt;
 
 use super::common::{
@@ -12,7 +11,6 @@ use super::common::{
 };
 use super::FetchRun;
 use crate::recipe::FetchSpec;
-use super::TEMP_SEQUENCE;
 
 /// The §8 precondition + detection result. Everything is checked around the
 /// *downloaded source*, after staging.
@@ -317,7 +315,7 @@ pub(crate) fn ensure_cargo_entry(r: &FetchRun, plan: &CargoPlan, key: &str) -> R
         "{}.tmp-{}-{}",
         key,
         std::process::id(),
-        TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        crate::unique::next()
     ));
     let _ = std::fs::remove_dir_all(&temp);
     std::fs::create_dir_all(&temp)
@@ -354,7 +352,7 @@ pub(crate) fn isolated_cargo_cwd() -> Result<PathBuf> {
     let cwd = std::env::temp_dir().join(format!(
         "nawa-cargo-cwd-{}-{}",
         std::process::id(),
-        TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        crate::unique::next()
     ));
     std::fs::create_dir(&cwd).with_context(|| format!("create isolated Cargo cwd {}", cwd.display()))?;
     std::fs::set_permissions(&cwd, std::fs::Permissions::from_mode(0o777))?;
