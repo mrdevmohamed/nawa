@@ -43,7 +43,7 @@ const KNOWN_PACKAGE_KEYS: &[&str] = &[
 
 pub(crate) fn cmd_recipe_check(ctx: &Ctx, name: Option<&str>, all: bool) -> Result<()> {
     let recs: Vec<recipe::Recipe> = if all {
-        let mut v: Vec<recipe::Recipe> = recipe::load_all(&ctx.recipes)?
+        let mut v: Vec<recipe::Recipe> = ctx.load_all()?
             .values()
             .cloned()
             .collect();

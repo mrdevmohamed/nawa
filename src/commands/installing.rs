@@ -45,7 +45,7 @@ pub(crate) fn cmd_install_with_why(
         bail!("--key only applies to archive files (package names come from the repository or are built locally)");
     }
 
-    let known = recipe::load_all(&ctx.recipes)?;
+    let known = ctx.load_all()?;
     let installed = installed_map(ctx)?;
 
     // Complete interrupted (or legacy, untracked) hooks before consulting the
@@ -678,7 +678,7 @@ pub(crate) fn run_plan(
 }
 
 pub(crate) fn cmd_outdated(ctx: &Ctx) -> Result<()> {
-    let known = recipe::load_all(&ctx.recipes)?;
+    let known = ctx.load_all()?;
     let installed = db::Db::new(&ctx.root).installed()?;
     let list = plan::outdated(&installed, &known);
     if list.is_empty() {
@@ -709,7 +709,7 @@ pub(crate) fn cmd_update(
         if repo.is_some() { InstallMode::Repo } else { InstallMode::Build }
     });
 
-    let known = recipe::load_all(&ctx.recipes)?;
+    let known = ctx.load_all()?;
     let installed = installed_map(ctx)?;
     for n in names {
         if !installed.contains_key(n) {
@@ -781,7 +781,7 @@ pub(crate) fn cmd_update(
 }
 
 pub(crate) fn cmd_autoremove(ctx: &Ctx, dry_run: bool, yes: bool, build_deps: bool) -> Result<()> {
-    let known = recipe::load_all(&ctx.recipes)?;
+    let known = ctx.load_all()?;
     if known.is_empty() && !build_deps {
         bail!(
             "no recipes under {} — cannot tell which dependencies are build tools to keep \
