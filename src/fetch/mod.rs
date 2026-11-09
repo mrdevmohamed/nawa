@@ -19,11 +19,11 @@
 //!     semantics (ownership never restored, suid bits dropped, mtime kept)
 //!     and GNU-tar-style path sanitisation.
 
-
-
-//! Submodules split from the monolithic `fetch.rs` (2213 lines) to keep
-//! responsibilities small (audit 2026-11-09, plan Step 2). Public paths
-//! (`crate::fetch::download`, etc.) are preserved via re-exports below.
+//!
+//! The original monolithic `fetch.rs` (2213 lines) is split into
+//! `checksum`, `snapshot`, `http`, `cache`, `local`, and `extract`
+//! submodules. Public paths (`crate::fetch::download`, etc.) are
+//! preserved via re-exports in this module.
 
 #[cfg(test)]
 use sha2::{Digest, Sha256};
