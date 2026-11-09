@@ -24,7 +24,7 @@
 use anyhow::{bail, Context, Result};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use sha2::{Digest, Sha256};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 pub const SEC_NAME: &str = "nawa.sec";
@@ -135,32 +135,8 @@ pub fn sign(file: &Path, key_path: &Path) -> Result<PathBuf> {
         hex::encode(sig.to_bytes()),
         hex::encode(sk.verifying_key().to_bytes()),
     );
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let tmp = sig_path.with_file_name(format!(
-        ".{}.tmp-{}-{stamp}",
-        sig_path.file_name().unwrap_or_default().to_string_lossy(),
-        std::process::id()
-    ));
-    let result = (|| -> Result<()> {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)
-            .with_context(|| format!("create temporary signature {}", tmp.display()))?;
-        f.write_all(body.as_bytes())?;
-        f.sync_all()?;
-        drop(f);
-        std::fs::rename(&tmp, &sig_path)
-            .with_context(|| format!("activate signature {}", sig_path.display()))?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result?;
+    crate::transaction::atomic::write_atomic(&sig_path, body.as_bytes(), 0o644)
+        .with_context(|| format!("activate signature {}", sig_path.display()))?;
     Ok(sig_path)
 }
 

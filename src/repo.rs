@@ -461,30 +461,13 @@ pub fn create_index_with_locations_and_groups(
     Ok(index)
 }
 
-/// Serialise an index and activate it with a temporary file plus rename, so a
-/// reader never sees a half-written index.
+/// Serialise an index and activate it with a durable atomic write
+/// (fsync file + parent dir), so a reader never sees a half-written index
+/// and a crash cannot lose the directory entry.
 fn write_index_atomic(index: &Index, out: &Path) -> Result<()> {
     let raw = toml::to_string_pretty(index)?;
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let tmp = out.with_file_name(format!(
-        ".{}.tmp-{}-{stamp}",
-        out.file_name().unwrap_or_default().to_string_lossy(),
-        std::process::id()
-    ));
-    let write_result = (|| -> Result<()> {
-        std::fs::write(&tmp, raw.as_bytes())
-            .with_context(|| format!("write temporary index {}", tmp.display()))?;
-        std::fs::rename(&tmp, out)
-            .with_context(|| format!("activate index {}", out.display()))?;
-        Ok(())
-    })();
-    if write_result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    write_result
+    crate::transaction::atomic::write_atomic(out, raw.as_bytes(), 0o644)
+        .with_context(|| format!("activate index {}", out.display()))
 }
 
 /// What changed since a base index (see `update_index`).

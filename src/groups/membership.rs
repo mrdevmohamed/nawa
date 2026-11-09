@@ -56,20 +56,10 @@ pub fn save(root: &Path, record: &MembershipRecord) -> Result<()> {
         crate::db::check_name(p)
             .with_context(|| format!("group {} has an invalid member", record.group_id))?;
     }
-    let dir = installed_dir(root);
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("create {}", dir.display()))?;
     let path = record_path(root, &record.group_id)?;
-    let tmp = dir.join(format!(".{}.{}.tmp", record.group_id, std::process::id()));
-    let write = (|| -> Result<()> {
-        std::fs::write(&tmp, toml::to_string_pretty(record)?)?;
-        std::fs::rename(&tmp, &path)?;
-        Ok(())
-    })();
-    if write.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    write
+    let bytes = toml::to_string_pretty(record)?;
+    crate::transaction::atomic::write_atomic(&path, bytes.as_bytes(), 0o644)
+        .with_context(|| format!("publish membership {}", path.display()))
 }
 
 /// Load one group's membership, when the group is installed locally.
