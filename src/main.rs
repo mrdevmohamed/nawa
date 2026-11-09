@@ -26,6 +26,7 @@ mod install;
 mod interrupt;
 mod lint;
 mod lock;
+mod pathutil;
 mod plan;
 mod plugins;
 mod profile;

@@ -441,48 +441,8 @@ pub(crate) fn stage_tree(staged: &Path) -> Result<(Vec<String>, std::collections
     Ok((files, etc_hashes))
 }
 
-/// Refuse to touch `path` when resolving it (following symlinks) would leave
-/// `root`. The target root is a *tree*, not a chroot: nawa runs from another
-/// root (e.g. a build chroot installing into `/sysroot`), so an absolute
-/// symlink inside the target such as `usr/lib64 -> /usr/lib` resolves to the
-/// RUNNING system's `/usr/lib` and an install would silently rewrite that
-/// instead. Relative links that stay inside `root` (merged-usr `lib -> usr/lib`)
-/// are fine; with `root` = `/` everything is inside.
-pub(crate) fn ensure_inside_root(root: &Path, path: &Path) -> Result<()> {
-    let real_root = std::fs::canonicalize(root)
-        .with_context(|| format!("resolve root {}", root.display()))?;
-    // resolve the nearest ancestor that exists (path itself, else a parent)
-    let mut cur = path;
-    let resolved = loop {
-        match std::fs::canonicalize(cur) {
-            Ok(p) => break p,
-            Err(_) => {
-                // a dangling or looping symlink cannot be resolved, so it
-                // cannot be shown to stay inside root
-                if std::fs::symlink_metadata(cur).map(|m| m.is_symlink()).unwrap_or(false) {
-                    bail!(
-                        "refusing to write through unresolvable symlink {} (target root {})",
-                        cur.display(),
-                        root.display()
-                    );
-                }
-                match cur.parent() {
-                    Some(p) => cur = p,
-                    None => return Ok(()),
-                }
-            }
-        }
-    };
-    if !resolved.starts_with(&real_root) {
-        bail!(
-            "refusing to write through symlink: {} resolves to {}, outside the target root {}",
-            path.display(),
-            resolved.display(),
-            real_root.display()
-        );
-    }
-    Ok(())
-}
+/// Re-export of the shared containment check (see `src/pathutil.rs`).
+pub(crate) use crate::pathutil::ensure_inside_root;
 
 /// Recursively move `src` into `dst`, merging directories.
 ///
