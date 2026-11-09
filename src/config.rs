@@ -162,6 +162,20 @@ pub fn sysconf_dir() -> PathBuf {
     }
 }
 
+/// The source cache root: `$NAWA_SRCCACHE` if set, else
+/// `<builddir>/distfiles`. When `anchor` is given, a relative value is
+/// resolved against it (the `fetch` command's semantics; every other
+/// caller keeps the value exactly as given).
+pub fn srccache_dir(builddir: &Path, anchor: Option<&Path>) -> PathBuf {
+    std::env::var_os("NAWA_SRCCACHE")
+        .map(PathBuf::from)
+        .map(|path| match (anchor, path.is_absolute()) {
+            (Some(dir), false) => dir.join(path),
+            _ => path,
+        })
+        .unwrap_or_else(|| builddir.join("distfiles"))
+}
+
 /// The system-wide config file (`/etc/nawa/nawa.toml` by default).
 pub fn system_file() -> PathBuf {
     sysconf_dir().join(CONFIG_FILE)

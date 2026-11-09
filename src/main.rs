@@ -39,6 +39,8 @@ mod sources;
 mod suggest;
 mod sync;
 mod sys;
+#[cfg(test)]
+mod testutil;
 mod transaction;
 mod upgrade;
 mod version;

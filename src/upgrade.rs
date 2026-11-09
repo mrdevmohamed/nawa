@@ -512,10 +512,10 @@ pub fn upgrade(
             }
             Err(error) => {
                 let current = db_here.entry(name)?;
-                let target_is_current = current.as_ref().is_some_and(|entry| target.matches_entry(entry));
                 let retry_hook = install::hook_needs_retry(root, name).unwrap_or(false);
-                let committed_hook_failed = target_is_current
-                    && (before.as_ref().is_none_or(|old| !target.matches_entry(old)) || retry_hook);
+                let committed_hook_failed = crate::transaction::history::committed_hook_failed(
+                    current.as_ref(), before.as_ref(), &target, retry_hook,
+                );
                 recorder.step_result(
                     step_no, name, crate::transaction::history::StepAction::Upgrade,
                     if committed_hook_failed {
@@ -743,12 +743,7 @@ mod tests {
     use crate::archive;
     use std::path::PathBuf;
 
-    fn tmpdir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("nawa-upgrade-{}-{}", tag, std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
-    }
+    use crate::testutil::tmpdir;
 
     fn make_pkg(dir: &Path, name: &str, version: &str, rel: u32, body: &[u8]) -> PathBuf {
         let staging = dir.join(format!("staging-{name}-{version}-{rel}"));

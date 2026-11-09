@@ -139,13 +139,7 @@ pub fn group_owned_packages(root: &Path, exclude: Option<&str>) -> Result<BTreeS
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn tmpdir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("nawa-grpmem-{}-{}", tag, std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
-    }
+    use crate::testutil::tmpdir;
 
     fn sample(group: &str, pkgs: &[&str]) -> MembershipRecord {
         MembershipRecord {

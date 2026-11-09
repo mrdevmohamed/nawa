@@ -199,12 +199,7 @@ mod tests {
     use super::*;
     use crate::transaction::history::PackageState;
 
-    fn tmpdir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("nawa-jrnl-{}-{}", tag, std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
-    }
+    use crate::testutil::tmpdir;
 
     fn intent(tx: u64, step: u32, pkg: &str) -> StepIntent {
         StepIntent {
