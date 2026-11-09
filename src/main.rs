@@ -18,6 +18,7 @@ mod deps;
 mod diag;
 mod fetch;
 mod fetchrun;
+mod fswalk;
 mod groups;
 mod humanize;
 mod install;

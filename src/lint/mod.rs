@@ -73,8 +73,7 @@ pub(crate) struct LintCtx<'a> {
 
 pub(crate) fn run(ctx: &LintCtx) -> LintReport {
     let mut rep = LintReport::default();
-    for entry in walkdir::WalkDir::new(ctx.pkgdir).sort_by_file_name() {
-        let Ok(e) = entry else { continue };
+    for e in crate::fswalk::entries_sorted_ok(ctx.pkgdir) {
         let rel = match e.path().strip_prefix(ctx.pkgdir) {
             Ok(r) if !r.as_os_str().is_empty() => r.to_path_buf(),
             _ => continue,

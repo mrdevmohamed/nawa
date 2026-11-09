@@ -123,8 +123,8 @@ fn create_with_normalisation(
     }
 
     // payload tree
-    for entry in walkdir::WalkDir::new(pkgdir).sort_by_file_name() {
-        let e = entry?;
+    for e in crate::fswalk::entries_sorted(pkgdir) {
+        let e = e?;
         let rel = e.path().strip_prefix(pkgdir)?;
         if rel.as_os_str().is_empty() {
             continue;
