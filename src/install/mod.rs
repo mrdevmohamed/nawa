@@ -76,7 +76,7 @@ pub(crate) fn install_archive(
     force: bool,
     allow_unsigned: bool,
     key: Option<&Path>,
-    reason: &str,
+    reason: crate::db::InstallReason,
 ) -> Result<Entry> {
     install_archive_pinned(archive_path, root, InstallOpts { force, allow_unsigned, key, reason, pinned_sha: None })
 }
@@ -88,7 +88,7 @@ pub(crate) struct InstallOpts<'a> {
     pub force: bool,
     pub allow_unsigned: bool,
     pub key: Option<&'a Path>,
-    pub reason: &'a str,
+    pub reason: crate::db::InstallReason,
     pub pinned_sha: Option<&'a str>,
 }
 
@@ -145,7 +145,7 @@ pub(crate) fn install_archive_from_index_proof(
     root: &Path,
     force: bool,
     expected_sha256: &str,
-    reason: &str,
+    reason: crate::db::InstallReason,
     proof: Option<IndexProof<'_>>,
 ) -> Result<Entry> {
     let snapshot_dir = root.join(".nawa");
@@ -180,7 +180,7 @@ pub(crate) struct IndexProof<'a> {
 /// removals without guessing.
 pub(crate) fn inspect_archive_state(
     archive_path: &Path,
-    reason: &str,
+    reason: crate::db::InstallReason,
     previous: Option<&Entry>,
 ) -> Result<crate::transaction::history::PackageState> {
     let raw = archive::read_pkginfo(archive_path)
@@ -198,10 +198,10 @@ pub(crate) fn inspect_archive_state(
     let arch = info.get("arch").cloned().unwrap_or_default();
     let digest = crate::fetch::sha256_of_file(archive_path)
         .with_context(|| format!("hash package archive {}", archive_path.display()))?;
-    let effective_reason = if reason == "keep" {
+    let effective_reason = if reason == crate::db::InstallReason::Keep {
         previous.map(|entry| entry.reason.clone()).unwrap_or_else(|| "explicit".to_string())
     } else {
-        reason.to_string()
+        reason.as_str().to_string()
     };
     Ok(crate::transaction::history::PackageState {
         version: Some(version),
@@ -271,7 +271,7 @@ mod tests {
             version: "1.0".into(),
             rel: 1,
             arch: "x86_64".into(),
-            reason: "explicit".into(),
+            reason: "explicit".to_string(),
             run: vec![],
             install_date: 1,
             size: 1,
@@ -326,7 +326,7 @@ mod tests {
             version: "1.0".into(),
             rel: 1,
             arch: "x86_64".into(),
-            reason: "explicit".into(),
+            reason: "explicit".to_string(),
             run: vec![],
             install_date: 1,
             size: 1,
@@ -341,10 +341,10 @@ mod tests {
     fn identical_symlink_is_not_a_conflict_with_another_packages_claim() {
         let base = tmpdir("same-symlink");
         let root = base.join("root");
-        install_archive(&make_base_with_bin_symlink(&base, "1"), &root, false, true, None, "explicit").unwrap();
+        install_archive(&make_base_with_bin_symlink(&base, "1"), &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
         claim_bin_dir(&root, "zshadow");
         // upgrade of the base package re-ships the very same /bin link
-        install_archive(&make_base_with_bin_symlink(&base, "2"), &root, false, true, None, "explicit")
+        install_archive(&make_base_with_bin_symlink(&base, "2"), &root, false, true, None, crate::db::InstallReason::Explicit)
             .expect("an identical symlink must not be reported as a file conflict");
         assert_eq!(std::fs::read_link(root.join("bin")).unwrap(), Path::new("usr/bin"));
         let _ = std::fs::remove_dir_all(&base);
@@ -357,7 +357,7 @@ mod tests {
         claim_bin_dir(&root, "zshadow");
         std::fs::create_dir_all(&root).unwrap();
         std::os::unix::fs::symlink("elsewhere", root.join("bin")).unwrap();
-        let err = install_archive(&make_base_with_bin_symlink(&base, "1"), &root, false, true, None, "explicit")
+        let err = install_archive(&make_base_with_bin_symlink(&base, "1"), &root, false, true, None, crate::db::InstallReason::Explicit)
             .unwrap_err();
         assert!(format!("{err:#}").contains("/bin (owned by zshadow)"), "{err:#}");
         let _ = std::fs::remove_dir_all(&base);
@@ -367,12 +367,12 @@ mod tests {
     fn upgrade_keeps_paths_another_package_still_lists() {
         let base = tmpdir("shared-upgrade");
         let root = base.join("root");
-        install_archive(&make_base_with_bin_symlink(&base, "1"), &root, false, true, None, "explicit").unwrap();
+        install_archive(&make_base_with_bin_symlink(&base, "1"), &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
         claim_bin_dir(&root, "zshadow");
         // zshadow 2.0 no longer ships /bin: the old entry is obsolete for it,
         // but base's /bin symlink must survive
         let v2 = make_pkg(&base, "zshadow", "2.0", &[("/usr/bin/su", b"su2")]);
-        install_archive(&v2, &root, true, true, None, "explicit").unwrap();
+        install_archive(&v2, &root, true, true, None, crate::db::InstallReason::Explicit).unwrap();
         assert_eq!(std::fs::read_link(root.join("bin")).unwrap(), Path::new("usr/bin"));
         assert!(root.join("usr/bin/su").is_file());
         let _ = std::fs::remove_dir_all(&base);
@@ -382,7 +382,7 @@ mod tests {
     fn remove_keeps_paths_another_package_still_lists() {
         let base = tmpdir("shared-remove");
         let root = base.join("root");
-        install_archive(&make_base_with_bin_symlink(&base, "1"), &root, false, true, None, "explicit").unwrap();
+        install_archive(&make_base_with_bin_symlink(&base, "1"), &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
         claim_bin_dir(&root, "zshadow");
         remove_with("zshadow", &root, true).unwrap();
         assert_eq!(std::fs::read_link(root.join("bin")).unwrap(), Path::new("usr/bin"));
@@ -402,10 +402,10 @@ mod tests {
             ("/usr/bin/demo", b"v2"),
         ]);
 
-        install_archive(&v1, &root, false, true, None, "explicit").unwrap();
+        install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
         assert_eq!(std::fs::read(root.join("usr/bin/demo")).unwrap(), b"v1");
 
-        install_archive(&v2, &root, false, true, None, "explicit").unwrap();
+        install_archive(&v2, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
         assert_eq!(std::fs::read(root.join("usr/bin/demo")).unwrap(), b"v2");
         // obsolete file was removed
         assert!(!root.join("usr/lib/demo/old.so").exists());
@@ -429,11 +429,11 @@ mod tests {
             ("/usr/bin/srv", b"bin2"),
         ]);
 
-        install_archive(&v1, &root, false, true, None, "explicit").unwrap();
+        install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
         // admin edits the config
         std::fs::write(root.join("etc/srv.conf"), b"locally edited\n").unwrap();
 
-        install_archive(&v2, &root, false, true, None, "explicit").unwrap();
+        install_archive(&v2, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
 
         // local edit preserved, upstream change diverted to .nawa-new
         assert_eq!(std::fs::read(root.join("etc/srv.conf")).unwrap(), b"locally edited\n");
@@ -452,8 +452,8 @@ mod tests {
         let root = base.join("root");
         let v1 = make_pkg(&base, "srv", "1.0", &[("/etc/srv.conf", b"same\n")]);
         let v2 = make_pkg(&base, "srv", "2.0", &[("/etc/srv.conf", b"same\n")]);
-        install_archive(&v1, &root, false, true, None, "explicit").unwrap();
-        install_archive(&v2, &root, false, true, None, "explicit").unwrap();
+        install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+        install_archive(&v2, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
         assert!(root.join("etc/srv.conf").exists());
         assert!(!root.join("etc/srv.conf.nawa-new").exists());
         let _ = std::fs::remove_dir_all(&base);
@@ -467,8 +467,8 @@ mod tests {
         let root = base.join("root");
         let v1 = make_pkg(&base, "srv", "1.0", &[("/etc/srv.conf", b"stock v1\n")]);
         let v2 = make_pkg(&base, "srv", "2.0", &[("/etc/srv.conf", b"stock v2\n")]);
-        install_archive(&v1, &root, false, true, None, "explicit").unwrap();
-        install_archive(&v2, &root, false, true, None, "explicit").unwrap();
+        install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+        install_archive(&v2, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
         assert_eq!(std::fs::read(root.join("etc/srv.conf")).unwrap(), b"stock v2\n");
         assert!(!root.join("etc/srv.conf.nawa-new").exists());
         let _ = std::fs::remove_dir_all(&base);
@@ -482,11 +482,11 @@ mod tests {
         let root = base.join("root");
         let v1 = make_pkg(&base, "srv", "1.0", &[("/etc/srv.conf", b"v1\n")]);
         let v2 = make_pkg(&base, "srv", "2.0", &[("/etc/srv.conf", b"v2\n")]);
-        install_archive(&v1, &root, false, true, None, "explicit").unwrap();
+        install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
         // wipe the baseline to emulate a pre-v0.5 database
         let db = Db::new(&root);
         std::fs::remove_file(db.local_dir().join("srv/hashes")).unwrap();
-        install_archive(&v2, &root, false, true, None, "explicit").unwrap();
+        install_archive(&v2, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
         assert_eq!(std::fs::read(root.join("etc/srv.conf")).unwrap(), b"v1\n");
         assert_eq!(std::fs::read(root.join("etc/srv.conf.nawa-new")).unwrap(), b"v2\n");
         let _ = std::fs::remove_dir_all(&base);
@@ -499,8 +499,8 @@ mod tests {
         let v1 = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1")]);
         let v2 = make_pkg(&base, "demo", "2.0", &[("/usr/bin/demo", b"v2")]);
 
-        install_archive(&v1, &root, false, true, None, "explicit").unwrap();
-        install_archive(&v2, &root, false, true, None, "explicit").unwrap();
+        install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+        install_archive(&v2, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
         assert_eq!(std::fs::read(root.join("usr/bin/demo")).unwrap(), b"v2");
 
         // roll back to 1.0
@@ -524,7 +524,7 @@ mod tests {
         let base = tmpdir("rmrollback");
         let root = base.join("root");
         let v1 = make_pkg(&base, "gone", "1.0", &[("/usr/bin/gone", b"x")]);
-        install_archive(&v1, &root, false, true, None, "explicit").unwrap();
+        install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
         remove("gone", &root).unwrap();
         assert!(!root.join("usr/bin/gone").exists());
         rollback("gone", &root).unwrap();
@@ -543,10 +543,10 @@ mod tests {
         let root = base.join("root");
         let v1 = make_pkg(&base, "r", "1.0", &[("/usr/bin/r", b"a")]);
         let v2 = make_pkg(&base, "r", "2.0", &[("/usr/bin/r", b"b")]);
-        install_archive(&v1, &root, false, true, None, "dependency").unwrap();
+        install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Dependency).unwrap();
         let db = Db::new(&root);
         assert_eq!(db.entry("r").unwrap().unwrap().reason, "dependency");
-        install_archive(&v2, &root, false, true, None, "keep").unwrap();
+        install_archive(&v2, &root, false, true, None, crate::db::InstallReason::Keep).unwrap();
         assert_eq!(db.entry("r").unwrap().unwrap().reason, "dependency");
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -566,8 +566,8 @@ mod tests {
             &app,
         )
         .unwrap();
-        install_archive(&lib, &root, false, true, None, "explicit").unwrap();
-        install_archive(&app, &root, false, true, None, "explicit").unwrap();
+        install_archive(&lib, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+        install_archive(&app, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
 
         assert!(remove("libx", &root).is_err());
         assert!(root.join("usr/lib/libx").exists());
@@ -676,7 +676,7 @@ mod tests {
         std::os::unix::fs::symlink(&other, root.join("usr/lib64")).unwrap();
         let pkg = make_pkg(&base, "demo", "1.0", &[("/usr/lib64/ld-linux.so.2", b"new")]);
 
-        assert!(install_archive(&pkg, &root, false, true, None, "explicit").is_err());
+        assert!(install_archive(&pkg, &root, false, true, None, crate::db::InstallReason::Explicit).is_err());
         assert_eq!(std::fs::read(other.join("ld-linux.so.2")).unwrap(), b"REAL LOADER");
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -707,12 +707,12 @@ mod tests {
         let digest = crate::fetch::sha256_of_file(&archive).unwrap();
 
         let wrong = "0".repeat(64);
-        let err = install_archive_pinned(&archive, &root, InstallOpts { force: false, allow_unsigned: true, key: None, reason: "explicit", pinned_sha: Some(&wrong) })
+        let err = install_archive_pinned(&archive, &root, InstallOpts { force: false, allow_unsigned: true, key: None, reason: crate::db::InstallReason::Explicit, pinned_sha: Some(&wrong) })
             .unwrap_err();
         assert!(format!("{err:#}").contains("sha256 mismatch"), "{err:#}");
         assert!(!root.join("usr/share/pinned-demo").exists());
 
-        install_archive_pinned(&archive, &root, InstallOpts { force: false, allow_unsigned: true, key: None, reason: "explicit", pinned_sha: Some(&digest.to_uppercase()) })
+        install_archive_pinned(&archive, &root, InstallOpts { force: false, allow_unsigned: true, key: None, reason: crate::db::InstallReason::Explicit, pinned_sha: Some(&digest.to_uppercase()) })
             .unwrap();
         assert!(root.join("usr/share/pinned-demo").exists());
         let _ = std::fs::remove_dir_all(&base);
@@ -776,7 +776,7 @@ mod tests {
         let pkg = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1")]);
 
         interrupt::simulate_interrupt();
-        let err = install_archive(&pkg, &root, false, true, None, "explicit").unwrap_err();
+        let err = install_archive(&pkg, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap_err();
         interrupt::clear_simulated_interrupt();
 
         assert!(err.downcast_ref::<interrupt::Interrupted>().is_some(), "{err:#}");
@@ -792,10 +792,10 @@ mod tests {
         let root = base.join("root");
         let v1 = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1")]);
         let v2 = make_pkg(&base, "demo", "2.0", &[("/usr/bin/demo", b"v2"), ("/usr/bin/extra", b"x")]);
-        install_archive(&v1, &root, false, true, None, "explicit").unwrap();
+        install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
 
         interrupt::simulate_interrupt();
-        let err = install_archive(&v2, &root, false, true, None, "explicit").unwrap_err();
+        let err = install_archive(&v2, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap_err();
         interrupt::clear_simulated_interrupt();
 
         assert!(err.downcast_ref::<interrupt::Interrupted>().is_some());
@@ -810,7 +810,7 @@ mod tests {
         let base = tmpdir("intr-remove");
         let root = base.join("root");
         let v1 = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1"), ("/usr/bin/two", b"2")]);
-        install_archive(&v1, &root, false, true, None, "explicit").unwrap();
+        install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
 
         interrupt::simulate_interrupt();
         let err = remove_with("demo", &root, false).unwrap_err();
@@ -849,7 +849,7 @@ mod tests {
         let base = tmpdir("recover-kill");
         let root = base.join("root");
         let v1 = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1"), ("/etc/demo.conf", b"c1")]);
-        install_archive(&v1, &root, false, true, None, "explicit").unwrap();
+        install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
         let db = Db::new(&root);
         let before_desc = std::fs::read(db.entry_dir("demo").unwrap().join("desc")).unwrap();
         let before_files = std::fs::read(db.entry_dir("demo").unwrap().join("files")).unwrap();
@@ -985,7 +985,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        install_archive(&v1, &root, false, true, None, "explicit").unwrap();
+        install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
 
         let db = Db::new(&root);
         let e = db.entry("demo").unwrap().unwrap();
@@ -1010,8 +1010,8 @@ mod tests {
         let root = base.join("root");
         let v1 = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1")]);
         let v2 = make_pkg(&base, "demo", "2.0", &[("/usr/bin/demo", b"v2")]);
-        install_archive(&v1, &root, false, true, None, "explicit").unwrap();
-        install_archive(&v2, &root, false, true, None, "explicit").unwrap();
+        install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+        install_archive(&v2, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
         // tamper with the stored object of the OLD version
         let old_digest = crate::fetch::sha256_of_file(&v1).unwrap();
         let obj = crate::artifact::object_path(&root, &old_digest).unwrap();
@@ -1028,8 +1028,8 @@ mod tests {
         let root = base.join("root");
         let v1 = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1")]);
         let v2 = make_pkg(&base, "demo", "2.0", &[("/usr/bin/demo", b"v2")]);
-        install_archive(&v1, &root, false, true, None, "explicit").unwrap();
-        install_archive(&v2, &root, false, true, None, "explicit").unwrap();
+        install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+        install_archive(&v2, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
         let old_digest = crate::fetch::sha256_of_file(&v1).unwrap();
         let obj = crate::artifact::object_path(&root, &old_digest).unwrap();
         std::fs::remove_file(&obj).unwrap();
@@ -1046,8 +1046,8 @@ mod tests {
         let root = base.join("root");
         let v1 = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1")]);
         let v2 = make_pkg(&base, "demo", "2.0", &[("/usr/bin/demo", b"v2")]);
-        install_archive(&v1, &root, false, true, None, "explicit").unwrap();
-        install_archive(&v2, &root, false, true, None, "explicit").unwrap();
+        install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+        install_archive(&v2, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
         // remove the legacy named caches: the object store is now the only source
         let _ = std::fs::remove_file(root.join("var/cache/nawa/demo-1.0-1.nawa.tar.zst"));
         let _ = std::fs::remove_file(root.join("var/cache/nawa/demo-2.0-1.nawa.tar.zst"));
@@ -1071,8 +1071,8 @@ mod tests {
         let root = base.join("root");
         let v1 = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1")]);
         let v2 = make_pkg(&base, "demo", "2.0", &[("/usr/bin/demo", b"v2")]);
-        install_archive(&v1, &root, false, true, None, "explicit").unwrap();
-        install_archive(&v2, &root, false, true, None, "explicit").unwrap();
+        install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+        install_archive(&v2, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
 
         rollback("demo", &root).unwrap();
         let records = crate::transaction::history::list_records(&root).unwrap();
@@ -1122,7 +1122,7 @@ mod tests {
         // reconstruct the signer public bytes for the proof bundle
         let signer_pub: Vec<u8> = std::fs::read(secret.with_file_name("nawa.pub")).unwrap();
         install_archive_from_index_proof(
-            &archive, &root, false, &re.sha256, "explicit",
+            &archive, &root, false, &re.sha256, crate::db::InstallReason::Explicit,
             Some(crate::install::IndexProof {
                 index_bytes: Some(&index_bytes),
                 index_signature: sig_bytes.as_deref(),

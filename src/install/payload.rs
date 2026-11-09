@@ -18,7 +18,7 @@ pub(crate) fn install_archive_payload(
     cache_name_source: &Path,
     root: &Path,
     force: bool,
-    reason: &str,
+    reason: crate::db::InstallReason,
     cache_detached_signature: bool,
     auth: InstallAuth,
 ) -> Result<Entry> {
@@ -250,8 +250,8 @@ pub(crate) fn install_archive_payload(
 
     // ---- register in db (atomic: temp file + rename) -------------------------
     let reason = match reason {
-        "keep" => old.as_ref().map(|o| o.reason.clone()).unwrap_or_else(|| "explicit".into()),
-        r => r.to_string(),
+        crate::db::InstallReason::Keep => old.as_ref().map(|o| o.reason.clone()).unwrap_or_else(|| "explicit".into()),
+        r => r.as_str().to_string(),
     };
     let entry = Entry {
         name: name.clone(),

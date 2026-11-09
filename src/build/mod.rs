@@ -1049,7 +1049,7 @@ mod installed_sonames_tests {
             version: "1.0".into(),
             rel: 1,
             arch: String::new(),
-            reason: "explicit".into(),
+            reason: "explicit".to_string(),
             run: vec![],
             install_date: 0,
             size: 0,

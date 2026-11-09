@@ -31,12 +31,12 @@ pub(crate) enum Why {
 
 impl Why {
     /// the `reason` argument of `install::install_archive`
-    pub fn db_reason(self) -> &'static str {
+    pub fn db_reason(self) -> crate::db::InstallReason {
         match self {
-            Why::Explicit => "explicit",
-            Why::Dependency => "dependency",
-            Why::Group => "group",
-            Why::Update => "keep",
+            Why::Explicit => crate::db::InstallReason::Explicit,
+            Why::Dependency => crate::db::InstallReason::Dependency,
+            Why::Group => crate::db::InstallReason::Group,
+            Why::Update => crate::db::InstallReason::Keep,
         }
     }
 
@@ -412,7 +412,7 @@ mod tests {
     fn group_install_reason_is_distinct_from_explicit() {
         let known = tree(vec![rec("dev-tool", "1", &[], &[])]);
         let plan = install_plan(&["dev-tool".into()], &HashMap::new(), &known, Why::Group, true).unwrap();
-        assert_eq!(plan.items[0].why.db_reason(), "group");
+        assert_eq!(plan.items[0].why.db_reason(), crate::db::InstallReason::Group);
         assert_eq!(plan.items[0].why.label(), "group");
     }
 

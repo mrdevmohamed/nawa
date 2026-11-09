@@ -32,9 +32,56 @@ pub(crate) struct Entry {
     pub artifact_sha256: String,
 }
 
+/// Why a package was installed, as recorded in `Entry.reason`.
+///
+/// The stored form is a string for backwards-compatibility of the on-disk
+/// `desc` files; this enum is the type-safe spelling used by the install
+/// pipeline (`InstallOpts`, `inspect_archive_state`, plan/upgrade). The
+/// special `Keep` variant is not stored in the db — it means “preserve the
+/// existing reason” and is only used as an install-time request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum InstallReason {
+    /// Named on the command line.
+    Explicit,
+    /// Pulled in as a dependency.
+    Dependency,
+    /// Requested as a member of a package group.
+    Group,
+    /// Preserve the existing db reason (only for reinstall/upgrade).
+    Keep,
+}
+
+impl InstallReason {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit",
+            Self::Dependency => "dependency",
+            Self::Group => "group",
+            Self::Keep => "keep",
+        }
+    }
+
+    pub(crate) fn parse(s: &str) -> Option<Self> {
+        match s {
+            "explicit" => Some(Self::Explicit),
+            "dependency" => Some(Self::Dependency),
+            "group" => Some(Self::Group),
+            "keep" => Some(Self::Keep),
+            _ => None,
+        }
+    }
+}
+
 impl Entry {
     pub fn version_full(&self) -> String {
         format!("{}-{}-{}", self.name, self.version, self.rel)
+    }
+
+    #[allow(dead_code)]
+    /// The recorded install reason as an enum, if the stored string is a
+    /// known value (legacy entries may have empty or unknown values).
+    pub fn reason_kind(&self) -> Option<InstallReason> {
+        InstallReason::parse(&self.reason)
     }
 }
 
@@ -348,7 +395,7 @@ mod tests {
             version: "1".into(),
             rel: 1,
             arch: String::new(),
-            reason: "explicit".into(),
+            reason: "explicit".to_string(),
             run: vec![],
             // what pre-roadmap nawa actually wrote (nanos)
             install_date: 1_762_000_000_000_000_000,

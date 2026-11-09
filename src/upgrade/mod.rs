@@ -488,7 +488,7 @@ pub(crate) fn upgrade(
                     root,
                     opts.force,
                     &re.sha256,
-                    "keep",
+                    crate::db::InstallReason::Keep,
                     Some(install::IndexProof {
                         index_bytes: Some(&open.index_bytes),
                         index_signature: open.index_signature.as_deref(),
@@ -500,7 +500,7 @@ pub(crate) fn upgrade(
                 install::install_archive_pinned(
                     &src,
                     root,
-                    install::InstallOpts { force: opts.force, allow_unsigned: opts.allow_unsigned, key: None, reason: "keep", pinned_sha: Some(&re.sha256) },
+                    install::InstallOpts { force: opts.force, allow_unsigned: opts.allow_unsigned, key: None, reason: crate::db::InstallReason::Keep, pinned_sha: Some(&re.sha256) },
                 )
             }
         });
@@ -647,7 +647,7 @@ mod tests {
 
         // v1.0 installed directly from an archive outside the repo
         let v1 = make_pkg(&base, "demo", "1.0", 1, b"one");
-        install::install_archive(&v1, &root, false, true, None, "explicit").unwrap();
+        install::install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
 
         // repo contains 1.0-2 (rel bump)
         let v2 = make_pkg(&base, "demo", "1.0", 2, b"two");
@@ -683,7 +683,7 @@ mod tests {
         let base = tmpdir("tamper");
         let root = base.join("root");
         let v1 = make_pkg(&base, "demo", "1.0", 1, b"one");
-        install::install_archive(&v1, &root, false, true, None, "explicit").unwrap();
+        install::install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
         let v2 = make_pkg(&base, "demo", "2.0", 1, b"two");
         let repo = setup_repo(&base, &[v2]);
 
@@ -793,7 +793,7 @@ mod tests {
         let base = tmpdir("order-e2e");
         let root = base.join("root");
         let v1 = make_pkg(&base, "a", "1.0", 1, b"one");
-        install::install_archive(&v1, &root, false, true, None, "explicit").unwrap();
+        install::install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
         let v2 = make_pkg(&base, "a", "2.0", 1, b"two");
         let repo = setup_repo(&base, &[v2]);
 

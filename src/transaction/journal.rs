@@ -213,7 +213,7 @@ mod tests {
                 version: Some("1.0".into()),
                 rel: Some(1),
                 arch: String::new(),
-                reason: "explicit".into(),
+                reason: "explicit".to_string(),
                 artifact_sha256: String::new(),
             }),
             artifact_sha256: String::new(),

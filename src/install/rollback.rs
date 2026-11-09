@@ -84,7 +84,7 @@ pub(crate) fn rollback(name: &str, root: &Path) -> Result<()> {
     };
     // Preserve an installed package's current reason; reinstalls after removal
     // become explicit, matching the established "keep" behavior.
-    let target = inspect_archive_state(archive_for_snapshot, "keep", before.as_ref())?;
+    let target = inspect_archive_state(archive_for_snapshot, crate::db::InstallReason::Keep, before.as_ref())?;
     let digest = target.artifact_sha256.clone();
     let mut operation = crate::transaction::begin_operation(
         root,
@@ -104,19 +104,19 @@ pub(crate) fn rollback(name: &str, root: &Path) -> Result<()> {
 
         let (result, proof) = match source {
             RestoreSource::SignedIndex { object, digest } => (
-                install_archive_from_index_proof(&object, root, false, &digest, "keep", None),
+                install_archive_from_index_proof(&object, root, false, &digest, crate::db::InstallReason::Keep, None),
                 "signed-index proof re-verified".to_string(),
             ),
             RestoreSource::Detached { object, digest } => (
-                install_archive_pinned(&object, root, InstallOpts { force: false, allow_unsigned: true, key: None, reason: "keep", pinned_sha: Some(&digest) }),
+                install_archive_pinned(&object, root, InstallOpts { force: false, allow_unsigned: true, key: None, reason: crate::db::InstallReason::Keep, pinned_sha: Some(&digest) }),
                 "detached signature re-verified".to_string(),
             ),
             RestoreSource::Pinned { object, digest, proof } => (
-                install_archive_pinned(&object, root, InstallOpts { force: false, allow_unsigned: true, key: None, reason: "keep", pinned_sha: Some(&digest) }),
+                install_archive_pinned(&object, root, InstallOpts { force: false, allow_unsigned: true, key: None, reason: crate::db::InstallReason::Keep, pinned_sha: Some(&digest) }),
                 proof,
             ),
             RestoreSource::Legacy { archive } => (
-                install_archive(&archive, root, false, true, None, "keep"),
+                install_archive(&archive, root, false, true, None, crate::db::InstallReason::Explicit),
                 "legacy cached archive (no recorded authentication proof)".to_string(),
             ),
         };
