@@ -21,12 +21,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 static OFFLINE: AtomicBool = AtomicBool::new(false);
 
 /// Set the process-wide offline switch (§12): false = `--offline` absent.
-pub fn set_offline(on: bool) {
+pub(crate) fn set_offline(on: bool) {
     OFFLINE.store(on, Ordering::SeqCst);
 }
 
 /// Whether network access is forbidden process-wide (§12/§15).
-pub fn offline() -> bool {
+pub(crate) fn offline() -> bool {
     OFFLINE.load(Ordering::SeqCst)
 }
 
@@ -256,7 +256,7 @@ fn fetch_to_file(agent: &ureq::Agent, url: &str, dest: &Path, attempts: u32) -> 
 
 /// Download `url` into `dest` with the in-process HTTP stack
 /// (retries + fail on HTTP error — including 4xx, like `curl -f`).
-pub fn download(url: &str, dest: &Path) -> Result<()> {
+pub(crate) fn download(url: &str, dest: &Path) -> Result<()> {
     check_offline(url, offline())?;
     let a = agent();
     match fetch_to_file(&a, url, dest, DOWNLOAD_ATTEMPTS)? {
@@ -269,7 +269,7 @@ pub fn download(url: &str, dest: &Path) -> Result<()> {
 /// returns `false` instead of failing (used for optional `.sig` sidecars).
 /// Server errors (5xx) are retried and still surface as an error, so a
 /// broken mirror can no longer make a signature look unpublished.
-pub fn download_opt(url: &str, dest: &Path) -> Result<bool> {
+pub(crate) fn download_opt(url: &str, dest: &Path) -> Result<bool> {
     check_offline(url, offline())?;
     let a = agent();
     Ok(matches!(

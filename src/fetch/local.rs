@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-pub fn copy_local(src: &Path, dest: &Path) -> Result<()> {
+pub(crate) fn copy_local(src: &Path, dest: &Path) -> Result<()> {
     use std::collections::HashMap;
     use std::os::unix::fs::MetadataExt;
 

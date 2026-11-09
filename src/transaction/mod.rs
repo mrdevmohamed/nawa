@@ -11,19 +11,19 @@
 //! the installer uses) — no second lock, no lock-ordering cycle. Builds and
 //! downloads stay outside the lock, exactly as before.
 
-pub mod atomic;
-pub mod context;
-pub mod history;
-pub mod journal;
-pub mod recovery;
-pub mod undo;
+pub(crate) mod atomic;
+pub(crate) mod context;
+pub(crate) mod history;
+pub(crate) mod journal;
+pub(crate) mod recovery;
+pub(crate) mod undo;
 
 // The full module surface is re-exported for the CLI layers; individual
 // items may be consumed only by later roadmap phases.
 #[allow(unused_imports)]
-pub use context::{begin_operation, no_history, OperationCommand, OperationHandle, RecorderHandle};
+pub(crate) use context::{begin_operation, no_history, OperationCommand, OperationHandle, RecorderHandle};
 #[allow(unused_imports)]
-pub use history::{
+pub(crate) use history::{
     PackageChange, PackageState, StepAction, StepStatus, TransactionRecord, TxStatus,
     SCHEMA_VERSION,
 };

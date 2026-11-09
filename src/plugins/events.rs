@@ -58,7 +58,7 @@ fn acquire_dispatch_lock(dir: &Path) -> Result<Option<File>> {
 }
 
 /// Queue one finalized transaction. The rename publishes a complete record.
-pub fn enqueue_transaction(root: &Path, record: &TransactionRecord) -> Result<()> {
+pub(crate) fn enqueue_transaction(root: &Path, record: &TransactionRecord) -> Result<()> {
     let dir = outbox_dir(root);
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
@@ -82,7 +82,7 @@ struct ObserverFailure {
 }
 
 /// Dispatch pending events. Malformed records remain in the outbox for review.
-pub fn dispatch_pending(
+pub(crate) fn dispatch_pending(
     root: &Path,
     project_config: Option<&Path>,
     system_config: Option<&Path>,

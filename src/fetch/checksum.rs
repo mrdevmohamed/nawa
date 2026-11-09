@@ -7,7 +7,7 @@ use std::path::Path;
 
 // ---- checksums -------------------------------------------------------------
 
-pub fn sha256_of_file(path: &Path) -> Result<String> {
+pub(crate) fn sha256_of_file(path: &Path) -> Result<String> {
     let mut f = std::fs::File::open(path)
         .with_context(|| format!("cannot open {} for hashing", path.display()))?;
     let mut hasher = Sha256::new();
@@ -22,7 +22,7 @@ pub fn sha256_of_file(path: &Path) -> Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
-pub fn verify_sha256(path: &Path, expected: &str) -> Result<()> {
+pub(crate) fn verify_sha256(path: &Path, expected: &str) -> Result<()> {
     if expected.trim().is_empty() {
         bail!("missing sha256 for {} — refusing to build unverified source", path.display());
     }

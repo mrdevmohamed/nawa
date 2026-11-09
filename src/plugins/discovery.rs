@@ -25,10 +25,10 @@ use std::path::{Path, PathBuf};
 use super::manifest::{PluginManifest, HOST_API_VERSION};
 
 /// The manifest file name inside a plugin directory.
-pub const MANIFEST_NAME: &str = "nawa-plugin.toml";
+pub(crate) const MANIFEST_NAME: &str = "nawa-plugin.toml";
 
 /// Built-in, system-wide discovery directories.
-pub fn system_dirs() -> Vec<PathBuf> {
+pub(crate) fn system_dirs() -> Vec<PathBuf> {
     vec![
         PathBuf::from("/usr/lib/nawa/plugins"),
         PathBuf::from("/usr/local/lib/nawa/plugins"),
@@ -36,7 +36,7 @@ pub fn system_dirs() -> Vec<PathBuf> {
 }
 
 /// Additional directories from `$NAWA_PLUGIN_PATH` (colon-separated).
-pub fn env_dirs() -> Vec<PathBuf> {
+pub(crate) fn env_dirs() -> Vec<PathBuf> {
     std::env::var("NAWA_PLUGIN_PATH")
         .ok()
         .map(|v| {
@@ -50,7 +50,7 @@ pub fn env_dirs() -> Vec<PathBuf> {
 }
 
 /// All discovery directories, approved-for-root first, env dirs last.
-pub fn all_dirs() -> Vec<PathBuf> {
+pub(crate) fn all_dirs() -> Vec<PathBuf> {
     let mut v = system_dirs();
     for d in env_dirs() {
         if !v.contains(&d) {
@@ -62,7 +62,7 @@ pub fn all_dirs() -> Vec<PathBuf> {
 
 /// One discovered plugin.
 #[derive(Debug, Clone)]
-pub struct Discovered {
+pub(crate) struct Discovered {
     pub manifest: PluginManifest,
     pub dir: PathBuf,
     /// true when the discovery directory is approved for privileged use.
@@ -74,7 +74,7 @@ pub struct Discovered {
 /// Discover every plugin in every directory. Deterministic order: by
 /// directory order, then by manifest path. A duplicate id across directories
 /// is an error for whichever comes later in the order.
-pub fn discover(root_user: bool) -> Result<Vec<Discovered>> {
+pub(crate) fn discover(root_user: bool) -> Result<Vec<Discovered>> {
     let mut out: Vec<Discovered> = Vec::new();
     let mut seen_ids: BTreeMap<String, PathBuf> = BTreeMap::new();
     let env = env_dirs();
@@ -164,7 +164,7 @@ fn broken(dir: PathBuf) -> PluginManifest {
 
 /// Persisted enable/disable state (the `[plugins]` table of nawa.toml).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PluginState {
+pub(crate) struct PluginState {
     #[serde(default)]
     pub enabled: Vec<String>,
     #[serde(default)]
@@ -285,7 +285,7 @@ impl PluginState {
 
 /// Administrator files and every parent must be root-owned, non-symlinked,
 /// and not writable by group or other users.
-pub fn secure_admin_config(path: &Path) -> bool {
+pub(crate) fn secure_admin_config(path: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     let mut current = Some(path);
     while let Some(entry) = current {

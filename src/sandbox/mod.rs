@@ -27,18 +27,18 @@
 //! trusted code (design §2 non-goals).
 
 mod init;
-pub mod mounts;
+pub(crate) mod mounts;
 mod probe;
-pub mod spec;
+pub(crate) mod spec;
 
 use crate::sys;
 
-pub use init::{first_untraversable_ancestor, init, parent_sync, spawn_init};
-pub use probe::{probe, PROBES};
-pub use spec::{BuildPaths, RootSpec, SandboxSpec};
+pub(crate) use init::{first_untraversable_ancestor, init, parent_sync, spawn_init};
+pub(crate) use probe::{probe, PROBES};
+pub(crate) use spec::{BuildPaths, RootSpec, SandboxSpec};
 
 /// Exit code convention: 124 = timed out (like timeout(1)).
-pub const EXIT_TIMEOUT: i32 = 124;
+pub(crate) const EXIT_TIMEOUT: i32 = 124;
 
 /// Exit code PID 1 returns when its exec must not have returned.
 pub(crate) const EXEC_MUST_NOT_RETURN: i32 = 126;

@@ -33,7 +33,7 @@ fn maybe_fail(point: FailPoint) -> Result<()> {
 }
 
 /// Sync a directory so its current entries are durable.
-pub fn sync_directory(path: &Path) -> Result<()> {
+pub(crate) fn sync_directory(path: &Path) -> Result<()> {
     File::open(path)
         .with_context(|| format!("open directory {} for fsync", path.display()))?
         .sync_all()
@@ -78,7 +78,7 @@ fn create_dir_all_durable(path: &Path) -> Result<()> {
 
 /// Atomically replace `path` with `bytes`. The temp file is exclusive and
 /// receives its final permissions at creation time.
-pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     let parent = path.parent().filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     create_dir_all_durable(parent)?;

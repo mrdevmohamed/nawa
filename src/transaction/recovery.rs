@@ -19,7 +19,7 @@ use super::journal;
 /// the finished record (status `interrupted` if the process died before
 /// finishing, with per-step outcomes inferred where they are unambiguous).
 /// Must run while holding the exclusive database lock.
-pub fn reconcile(root: &Path, tx: u64) -> Result<Option<TransactionRecord>> {
+pub(crate) fn reconcile(root: &Path, tx: u64) -> Result<Option<TransactionRecord>> {
     let Some(state) = read_state(root, tx)? else { return Ok(None) };
     let existing = super::history::load_record(root, tx).ok();
     let db = crate::db::Db::new(root);
@@ -137,7 +137,7 @@ fn read_state(root: &Path, tx: u64) -> Result<Option<journal::TxState>> {
 /// Reconcile every journaled transaction without a finished record, write
 /// the results, and clean up the unambiguous journals. Returns human notes.
 /// Must run while holding the exclusive database lock.
-pub fn reconcile_incomplete(root: &Path) -> Result<Vec<String>> {
+pub(crate) fn reconcile_incomplete(root: &Path) -> Result<Vec<String>> {
     let mut notes = Vec::new();
     for tx in journal::journaled_transactions(root)? {
         let pending = journal::pending_steps(root, tx)?;

@@ -24,7 +24,7 @@ pub(crate) use crate::sys::SYNC_FD;
 // ---------------------------------------------------------------------------
 
 /// Run the spec; returns the exit code the build engine should observe.
-pub fn init(path: &Path) -> Result<i32> {
+pub(crate) fn init(path: &Path) -> Result<i32> {
     let spec = SandboxSpec::load(path)?;
 
     // -- 1. user namespace + identity (§4.3) ------------------------------
@@ -256,7 +256,7 @@ pub(crate) fn ensure_identity(euid: u32, egid: u32) -> Result<()> {
 /// layer cache the user nawa reads happily (a `sudo` run against a `--root`
 /// under a mode-700 home directory is the common case) can therefore still
 /// be unreachable from the build.
-pub fn first_untraversable_ancestor(path: &Path) -> Option<PathBuf> {
+pub(crate) fn first_untraversable_ancestor(path: &Path) -> Option<PathBuf> {
     use std::os::unix::fs::MetadataExt;
 
     let euid = sys::geteuid();
@@ -311,7 +311,7 @@ pub fn first_untraversable_ancestor(path: &Path) -> Option<PathBuf> {
 /// Spawn `nawa sandbox-init <spec>` with the sync channel on fd 3 and stdout
 /// piped for log streaming. Returns the child; the caller keeps the socket
 /// end to install the ranged uid map when running as root.
-pub fn spawn_init(
+pub(crate) fn spawn_init(
     exe: &Path,
     spec_path: &Path,
 ) -> std::io::Result<(std::process::Child, std::os::unix::net::UnixStream)> {
@@ -347,7 +347,7 @@ pub fn spawn_init(
 /// map (only possible for real root, §4.3: inside 0 → the caller's own id,
 /// inside 1..65535 → outside 100000..); then release the child with `G`. The socket is always
 /// closed at the end — EOF also releases the child (self-written map).
-pub fn parent_sync(child: &std::process::Child, sock: std::os::unix::net::UnixStream) {
+pub(crate) fn parent_sync(child: &std::process::Child, sock: std::os::unix::net::UnixStream) {
     use std::io::{Read as _, Write as _};
     let mut sock = sock;
     let mut buf = [0u8; 1];

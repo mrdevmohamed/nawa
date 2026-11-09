@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Private, cleanup-on-drop copy of a file whose bytes were hashed while copying.
 /// Callers must use this path for all subsequent parsing or extraction.
-pub struct VerifiedSnapshot {
+pub(crate) struct VerifiedSnapshot {
     path: PathBuf,
 }
 
@@ -59,7 +59,7 @@ fn remove_stale_snapshots(dir: &Path) {
 /// state, restricted to 0700) and optionally authenticate the copied bytes
 /// against an expected SHA-256. Callers must use the snapshot, not the source,
 /// for everything that follows.
-pub fn snapshot_file(
+pub(crate) fn snapshot_file(
     source_path: &Path,
     expected_sha256: Option<&str>,
     snapshot_dir: &Path,

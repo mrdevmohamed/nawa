@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 /// A recorded group installation.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MembershipRecord {
+pub(crate) struct MembershipRecord {
     pub schema: u32,
     pub group_id: String,
     /// Revision/digest of the definition used at install time, when known.
@@ -32,7 +32,7 @@ pub struct MembershipRecord {
     pub packages: Vec<String>,
 }
 
-pub fn groups_dir(root: &Path) -> PathBuf {
+pub(crate) fn groups_dir(root: &Path) -> PathBuf {
     root.join("var/lib/nawa/groups")
 }
 
@@ -47,7 +47,7 @@ fn record_path(root: &Path, group_id: &str) -> Result<PathBuf> {
 
 /// Persist a membership record atomically.
 #[allow(dead_code)]
-pub fn save(root: &Path, record: &MembershipRecord) -> Result<()> {
+pub(crate) fn save(root: &Path, record: &MembershipRecord) -> Result<()> {
     if record.schema != 1 {
         anyhow::bail!("unsupported membership schema {}", record.schema);
     }
@@ -63,7 +63,7 @@ pub fn save(root: &Path, record: &MembershipRecord) -> Result<()> {
 }
 
 /// Load one group's membership, when the group is installed locally.
-pub fn load(root: &Path, group_id: &str) -> Result<Option<MembershipRecord>> {
+pub(crate) fn load(root: &Path, group_id: &str) -> Result<Option<MembershipRecord>> {
     let path = record_path(root, group_id)?;
     if !path.exists() {
         return Ok(None);
@@ -80,7 +80,7 @@ pub fn load(root: &Path, group_id: &str) -> Result<Option<MembershipRecord>> {
 
 /// Remove a membership record (the group is no longer installed). The
 /// packages themselves are removed by the group-remove plan, not here.
-pub fn remove(root: &Path, group_id: &str) -> Result<()> {
+pub(crate) fn remove(root: &Path, group_id: &str) -> Result<()> {
     let path = record_path(root, group_id)?;
     if path.exists() {
         std::fs::remove_file(&path)
@@ -90,7 +90,7 @@ pub fn remove(root: &Path, group_id: &str) -> Result<()> {
 }
 
 /// Every installed group's membership, ordered by group id.
-pub fn load_all(root: &Path) -> Result<Vec<MembershipRecord>> {
+pub(crate) fn load_all(root: &Path) -> Result<Vec<MembershipRecord>> {
     let dir = installed_dir(root);
     let mut out = Vec::new();
     let rd = match std::fs::read_dir(&dir) {
@@ -115,7 +115,7 @@ pub fn load_all(root: &Path) -> Result<Vec<MembershipRecord>> {
 
 /// Every package still owned by at least one installed group (after
 /// excluding `exclude`, used while removing one group).
-pub fn group_owned_packages(root: &Path, exclude: Option<&str>) -> Result<BTreeSet<String>> {
+pub(crate) fn group_owned_packages(root: &Path, exclude: Option<&str>) -> Result<BTreeSet<String>> {
     let mut out = BTreeSet::new();
     for r in load_all(root)? {
         if Some(r.group_id.as_str()) == exclude {

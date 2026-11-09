@@ -7,10 +7,10 @@ use std::path::{Path, PathBuf};
 use crate::db::{self, Entry};
 use super::atomic;
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub(crate) const SCHEMA_VERSION: u32 = 1;
 
 /// `<root>/var/lib/nawa/history`
-pub fn history_dir(root: &Path) -> PathBuf {
+pub(crate) fn history_dir(root: &Path) -> PathBuf {
     root.join("var/lib/nawa/history")
 }
 
@@ -26,7 +26,7 @@ fn transaction_path(root: &Path, id: u64) -> PathBuf {
 /// `failed`: package state may have changed before the process died.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum TxStatus {
+pub(crate) enum TxStatus {
     /// ID allocated, plan being assembled.
     Preparing,
     /// At least one step may execute.
@@ -63,7 +63,7 @@ impl TxStatus {
 /// What one step did to one package.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum StepAction {
+pub(crate) enum StepAction {
     Install,
     Upgrade,
     Downgrade,
@@ -90,7 +90,7 @@ impl StepAction {
 /// Per-step status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum StepStatus {
+pub(crate) enum StepStatus {
     /// The package database commit for this step finished.
     Committed,
     /// The step was planned but never reached (later step failed first).
@@ -122,7 +122,7 @@ impl StepStatus {
 
 /// Snapshot of one package's identity at a point in time.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct PackageState {
+pub(crate) struct PackageState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -181,7 +181,7 @@ impl PackageState {
 /// between call sites. `retry_hook` is `install::hook_needs_retry` for the
 /// same package — a hook that still needs a run counts even when the
 /// db state already matches the target.
-pub fn committed_hook_failed(
+pub(crate) fn committed_hook_failed(
     current: Option<&Entry>,
     before: Option<&Entry>,
     target: &PackageState,
@@ -194,7 +194,7 @@ pub fn committed_hook_failed(
 
 /// One package change inside a transaction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PackageChange {
+pub(crate) struct PackageChange {
     pub name: String,
     pub action: String,
     pub status: String,
@@ -215,7 +215,7 @@ pub struct PackageChange {
 
 /// An immutable record of one completed (or interrupted) transaction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TransactionRecord {
+pub(crate) struct TransactionRecord {
     pub schema: u32,
     pub id: u64,
     /// Normalized command kind ("install", "update", "history-undo", ...).
@@ -309,7 +309,7 @@ fn a_artifact_ok(s: Option<&PackageState>) -> bool {
     }
 }
 
-pub fn parse_status(s: &str) -> Result<TxStatus> {
+pub(crate) fn parse_status(s: &str) -> Result<TxStatus> {
     match s {
         "preparing" => Ok(TxStatus::Preparing),
         "running" => Ok(TxStatus::Running),
@@ -364,7 +364,7 @@ fn max_persisted_id(root: &Path) -> Result<u64> {
 /// Allocate the next monotonic transaction id. Gaps after crashes are
 /// acceptable; reusing an id is not. Reconstruct a missing/stale marker from
 /// persisted records and journal directories.
-pub fn allocate_id(root: &Path) -> Result<u64> {
+pub(crate) fn allocate_id(root: &Path) -> Result<u64> {
     let last_path = history_dir(root).join("last-id");
     let recorded = match std::fs::read_to_string(&last_path) {
         Ok(raw) => raw.trim().parse::<u64>().context("corrupt history last-id")?,
@@ -391,7 +391,7 @@ fn store_record(root: &Path, record: &TransactionRecord, replace: bool) -> Resul
 /// Publish a new transaction record, or finalize the one preparing record
 /// created by `begin_operation`. A terminal record is never overwritten by
 /// this API; administrative annotations must use `rewrite_record`.
-pub fn write_record(root: &Path, record: &TransactionRecord) -> Result<()> {
+pub(crate) fn write_record(root: &Path, record: &TransactionRecord) -> Result<()> {
     let path = transaction_path(root, record.id);
     if path.exists() {
         let existing = load_record(root, record.id)?;
@@ -412,7 +412,7 @@ pub fn write_record(root: &Path, record: &TransactionRecord) -> Result<()> {
 
 /// Replace an existing record for allowed administrative annotations.
 /// Retain the previous byte-for-byte record in `.old/`.
-pub fn rewrite_record(root: &Path, record: &TransactionRecord) -> Result<()> {
+pub(crate) fn rewrite_record(root: &Path, record: &TransactionRecord) -> Result<()> {
     record.validate()?;
     let path = transaction_path(root, record.id);
     let old = std::fs::read(&path)
@@ -430,7 +430,7 @@ pub fn rewrite_record(root: &Path, record: &TransactionRecord) -> Result<()> {
 /// committed package in the original transaction to its recorded before-state.
 /// A Partial undo can still be complete at the package level when a post-operation
 /// hook failed after the package mutation was committed.
-pub fn undo_restored_original(root: &Path, original_id: u64, undo_id: u64) -> Result<bool> {
+pub(crate) fn undo_restored_original(root: &Path, original_id: u64, undo_id: u64) -> Result<bool> {
     let undo = load_record(root, undo_id)?;
     if undo.undoes != Some(original_id)
         || !matches!(undo.status()?, TxStatus::Completed | TxStatus::Partial)
@@ -456,7 +456,7 @@ pub fn undo_restored_original(root: &Path, original_id: u64, undo_id: u64) -> Re
 
 /// Mark the original transaction undone only after its compensating transaction
 /// is durable and the live package database matches the original before-state.
-pub fn mark_undone_by(root: &Path, original_id: u64, undo_id: u64) -> Result<()> {
+pub(crate) fn mark_undone_by(root: &Path, original_id: u64, undo_id: u64) -> Result<()> {
     if !undo_restored_original(root, original_id, undo_id)? {
         bail!("transaction {undo_id} has not fully restored transaction {original_id}");
     }
@@ -471,7 +471,7 @@ pub fn mark_undone_by(root: &Path, original_id: u64, undo_id: u64) -> Result<()>
 }
 
 /// Load one record by id.
-pub fn load_record(root: &Path, id: u64) -> Result<TransactionRecord> {
+pub(crate) fn load_record(root: &Path, id: u64) -> Result<TransactionRecord> {
     let path = transaction_path(root, id);
     if !path.exists() {
         bail!("no transaction {id} in the history");
@@ -482,7 +482,7 @@ pub fn load_record(root: &Path, id: u64) -> Result<TransactionRecord> {
 }
 
 /// List every record, oldest first (by numeric id, not by filename alone).
-pub fn list_records(root: &Path) -> Result<Vec<TransactionRecord>> {
+pub(crate) fn list_records(root: &Path) -> Result<Vec<TransactionRecord>> {
     let dir = transactions_dir(root);
     if !dir.exists() {
         return Ok(Vec::new());
@@ -505,7 +505,7 @@ pub fn list_records(root: &Path) -> Result<Vec<TransactionRecord>> {
 
 /// Collect every artifact digest referenced by any record (mark phase of
 /// the clean/retention model, roadmap §5.10 / §8.11).
-pub fn referenced_artifacts(root: &Path) -> Result<std::collections::BTreeSet<String>> {
+pub(crate) fn referenced_artifacts(root: &Path) -> Result<std::collections::BTreeSet<String>> {
     let mut out = std::collections::BTreeSet::new();
     for r in list_records(root)? {
         for c in &r.package_changes {

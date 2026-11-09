@@ -12,7 +12,7 @@ use super::history::{PackageState, StepAction, TransactionRecord, TxStatus};
 
 /// What undo will do to one package.
 #[derive(Debug, Clone, PartialEq)]
-pub enum UndoAction {
+pub(crate) enum UndoAction {
     /// The transaction installed it (and nothing needed it before): remove.
     Remove,
     /// The transaction upgraded/downgraded/reinstalled it: restore the exact
@@ -27,7 +27,7 @@ pub enum UndoAction {
 
 /// One planned compensation.
 #[derive(Debug, Clone)]
-pub struct UndoStep {
+pub(crate) struct UndoStep {
     pub package: String,
     pub action: UndoAction,
     /// The before-state recorded by the original transaction.
@@ -42,7 +42,7 @@ pub struct UndoStep {
 
 /// A fully preflighted undo plan.
 #[derive(Debug)]
-pub struct UndoPlan {
+pub(crate) struct UndoPlan {
     pub original_id: u64,
     pub steps: Vec<UndoStep>,
 }
@@ -52,7 +52,7 @@ pub struct UndoPlan {
 /// a mismatch (later operation touched it) is a conflict. All required
 /// archive objects are located and digest-verified here, before any
 /// mutation. Must be called while holding the exclusive db lock.
-pub fn plan_undo(root: &Path, id: u64) -> Result<UndoPlan> {
+pub(crate) fn plan_undo(root: &Path, id: u64) -> Result<UndoPlan> {
     let record: TransactionRecord = crate::transaction::history::load_record(root, id)?;
     if record.schema != super::history::SCHEMA_VERSION {
         bail!("transaction {id} uses unsupported schema {}", record.schema);
@@ -210,7 +210,7 @@ pub fn plan_undo(root: &Path, id: u64) -> Result<UndoPlan> {
 /// Apply a preflighted undo plan through the ordinary installer/remover.
 /// Each step rechecks its preconditions under the exclusive db lock right
 /// before mutating. Returns the per-step outcomes for the history record.
-pub struct AppliedStep {
+pub(crate) struct AppliedStep {
     #[allow(dead_code)]
     pub package: String,
     #[allow(dead_code)]
@@ -220,7 +220,7 @@ pub struct AppliedStep {
     pub failure: Option<String>,
 }
 
-pub fn apply_undo(
+pub(crate) fn apply_undo(
     root: &Path, plan: &UndoPlan,
     recorder: &mut super::context::RecorderHandle<'_>, force: bool,
 ) -> Result<Vec<AppliedStep>> {
@@ -325,7 +325,7 @@ fn restore_object(root: &Path, object: &Path, digest: &str, reason: &str) -> Res
 }
 
 /// The `nawa history` table (roadmap §5.8): newest first, stable ids.
-pub fn print_history(root: &Path, limit: usize) -> Result<()> {
+pub(crate) fn print_history(root: &Path, limit: usize) -> Result<()> {
     let records = crate::transaction::history::list_records(root)?;
     if records.is_empty() {
         crate::nawa_info!("no transaction history yet");
@@ -350,7 +350,7 @@ pub fn print_history(root: &Path, limit: usize) -> Result<()> {
 }
 
 /// `nawa history info <ID>`: the full story of one transaction.
-pub fn print_info(root: &Path, id: u64) -> Result<()> {
+pub(crate) fn print_info(root: &Path, id: u64) -> Result<()> {
     let r = crate::transaction::history::load_record(root, id)?;
     println!("Transaction {}", r.id);
     println!("  Command:   {} {}", r.command, r.requested_packages.join(" "));
@@ -414,7 +414,7 @@ impl super::history::PackageChange {
 
 /// `nawa history undo <ID>`: plan, confirm, then apply as a new transaction
 /// linked to the original. Returns Ok(()) even when the user declined.
-pub fn history_undo(root: &Path, id: u64, yes: bool) -> Result<()> {
+pub(crate) fn history_undo(root: &Path, id: u64, yes: bool) -> Result<()> {
     // main::run owns the exclusive database lock for history commands.
     // A second flock on another open file description would deadlock here.
     let plan = plan_undo(root, id)?;

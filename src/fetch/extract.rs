@@ -6,7 +6,7 @@ use std::path::{Component, Path, PathBuf};
 
 /// Supported source archive formats, detected by magic bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SourceFormat {
+pub(crate) enum SourceFormat {
     Tar,
     TarGz,
     TarBz2,
@@ -18,7 +18,7 @@ pub enum SourceFormat {
 /// block, look for a tar header directly (uncompressed tar) or behind the
 /// gzip/xz/bzip2/zstd magic. Returns `None` for everything else — a bare
 /// `.gz` of a single file is *not* an archive and stays one (see build.rs).
-pub fn detect_source_format(path: &Path) -> Option<SourceFormat> {
+pub(crate) fn detect_source_format(path: &Path) -> Option<SourceFormat> {
     let mut f = std::fs::File::open(path).ok()?;
     let mut head = [0u8; 512];
     let n = read_up_to(&mut f, &mut head)?;
@@ -127,7 +127,7 @@ fn octal_field(field: &[u8]) -> Option<u64> {
 ///     refused, so a tampered tarball cannot escape the staging directory;
 ///   * hard links are created even when their target appears later in the
 ///     archive (GNU tar is order independent here), degrading to a copy.
-pub fn extract_source_archive(tarball: &Path, dest: &Path) -> Result<()> {
+pub(crate) fn extract_source_archive(tarball: &Path, dest: &Path) -> Result<()> {
     let fmt = detect_source_format(tarball)
         .with_context(|| format!("{} is not a recognized tar archive", tarball.display()))?;
     std::fs::create_dir_all(dest).with_context(|| format!("create {}", dest.display()))?;
@@ -168,7 +168,7 @@ fn decompressed_reader(tarball: &Path, fmt: SourceFormat) -> Result<Box<dyn Read
 ///   sanitised (`..`, absolute) aborts the staging instead of being skipped
 ///   with a warning — §16 expects traversal attempts rejected for
 ///   new-schema sources.
-pub fn extract_source_archive_stripped(
+pub(crate) fn extract_source_archive_stripped(
     tarball: &Path,
     dest: &Path,
     strip_components: u32,

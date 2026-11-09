@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use super::checksum::verify_sha256;
 use super::http::{check_offline, download, offline};
 
-pub fn digest_cache_dir(src_cache: &Path) -> PathBuf {
+pub(crate) fn digest_cache_dir(src_cache: &Path) -> PathBuf {
     src_cache.join("sha256")
 }
 
@@ -90,7 +90,7 @@ fn strip_write_permission(path: &Path) {
 ///  * the transfer lands in a unique `.part` sibling and is renamed
 ///    atomically after verification; the published entry is marked
 ///    read-only.
-pub fn download_content_addressed(
+pub(crate) fn download_content_addressed(
     url: &str,
     mirrors: &[String],
     sha256: &str,
@@ -184,7 +184,7 @@ pub fn download_content_addressed(
 #[derive(Debug, Clone, PartialEq, Eq)]
 
 // ---- package repositories ----------------------------------------------------
-pub enum RepoRef {
+pub(crate) enum RepoRef {
     Local(PathBuf),
     /// Base URL without a trailing slash, e.g. `https://mirror/stable`
     Remote(String),
@@ -206,7 +206,7 @@ impl RepoRef {
 /// Stable per-URL cache directory: `<root>/var/cache/nawa/remote/<key>`.
 /// The key is the first 12 hex chars of sha256(base_url), so the same
 /// repository always maps to the same cache and different URLs never clash.
-pub fn remote_cache_dir(root: &Path, base_url: &str) -> PathBuf {
+pub(crate) fn remote_cache_dir(root: &Path, base_url: &str) -> PathBuf {
     let mut h = Sha256::new();
     h.update(base_url.as_bytes());
     let key = hex::encode(&h.finalize()[..6]);
@@ -218,7 +218,7 @@ pub fn remote_cache_dir(root: &Path, base_url: &str) -> PathBuf {
 /// The URL itself, then equivalent mirrors for well-known GNU hosts, so one
 /// unreachable mirror does not fail the whole build. Content is always
 /// checked against the recipe's pinned sha256, so mirrors need no trust.
-pub fn candidate_urls(url: &str) -> Vec<String> {
+pub(crate) fn candidate_urls(url: &str) -> Vec<String> {
     let mut v = vec![url.to_string()];
     for prefix in [
         "https://mirrors.kernel.org/gnu/",
@@ -247,7 +247,7 @@ pub fn candidate_urls(url: &str) -> Vec<String> {
 
 /// [`candidate_urls`] plus the recipe's own `mirrors`, appended in order
 /// (duplicates dropped). Built-in GNU fallbacks come first, then the recipe's.
-pub fn candidate_urls_with(url: &str, extra: &[String]) -> Vec<String> {
+pub(crate) fn candidate_urls_with(url: &str, extra: &[String]) -> Vec<String> {
     let mut v = candidate_urls(url);
     for m in extra {
         if !v.contains(m) {
@@ -296,7 +296,7 @@ fn try_candidates(
 /// With `expect_sha256`, a cached copy is reused only after re-verifying it,
 /// so a corrupted or truncated cache entry is transparently re-downloaded.
 /// The transfer lands in a `.part` sibling first and is renamed atomically.
-pub fn download_cached(url: &str, dest: &Path, expect_sha256: Option<&str>) -> Result<()> {
+pub(crate) fn download_cached(url: &str, dest: &Path, expect_sha256: Option<&str>) -> Result<()> {
     download_cached_with_mirrors(url, &[], dest, expect_sha256)
 }
 
@@ -304,7 +304,7 @@ pub fn download_cached(url: &str, dest: &Path, expect_sha256: Option<&str>) -> R
 /// fails it also tries `mirrors` — the recipe's `package.mirrors`. Every
 /// candidate is checked against `expect_sha256`, so a mirror serving the
 /// wrong bytes is rejected and the next one is tried.
-pub fn download_cached_with_mirrors(
+pub(crate) fn download_cached_with_mirrors(
     url: &str,
     mirrors: &[String],
     dest: &Path,

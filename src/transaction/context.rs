@@ -20,7 +20,7 @@ use super::journal;
 /// environment (roadmap §4.2).
 #[allow(dead_code)] // GroupInstall/GroupRemove are wired by the Phase 5 group commands
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OperationCommand {
+pub(crate) enum OperationCommand {
     Install,
     Update,
     Upgrade,
@@ -55,7 +55,7 @@ impl OperationCommand {
 /// Begin an operation: allocate the transaction id and write the write-ahead
 /// state. MUST be called while the caller holds the exclusive database lock
 /// (ID allocation is serialized by that lock — roadmap §5.6).
-pub fn begin_operation(
+pub(crate) fn begin_operation(
     root: &Path,
     command: OperationCommand,
     requested: &[String],
@@ -90,7 +90,7 @@ pub fn begin_operation(
 
 /// A handle that records nothing (commands that opt out, unit tests).
 #[allow(dead_code)]
-pub fn no_history() -> OperationHandle {
+pub(crate) fn no_history() -> OperationHandle {
     OperationHandle {
         root: PathBuf::new(),
         command: OperationCommand::Install,
@@ -105,7 +105,7 @@ pub fn no_history() -> OperationHandle {
 }
 
 /// The live operation context handed to package steps.
-pub struct OperationHandle {
+pub(crate) struct OperationHandle {
     root: PathBuf,
     command: OperationCommand,
     tx: Option<u64>,
@@ -222,7 +222,7 @@ impl OperationHandle {
 }
 
 /// Per-step recording surface handed to the package installer wrapper.
-pub struct RecorderHandle<'a> {
+pub(crate) struct RecorderHandle<'a> {
     op: &'a mut OperationHandle,
 }
 

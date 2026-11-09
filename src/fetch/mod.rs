@@ -34,16 +34,16 @@ use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::os::unix::fs::PermissionsExt;
 
-pub mod cache;
-pub mod checksum;
-pub mod extract;
-pub mod http;
-pub mod local;
-pub mod snapshot;
+pub(crate) mod cache;
+pub(crate) mod checksum;
+pub(crate) mod extract;
+pub(crate) mod http;
+pub(crate) mod local;
+pub(crate) mod snapshot;
 
 // ---- public re-exports (preserving the pre-split API) --------------------
 #[allow(unused_imports)]
-pub use cache::{
+pub(crate) use cache::{
     candidate_urls, candidate_urls_with, digest_cache_dir, download_cached,
     download_cached_with_mirrors, download_content_addressed, remote_cache_dir,
     RepoRef,
@@ -51,17 +51,17 @@ pub use cache::{
 #[allow(unused_imports)]
 pub(crate) use cache::{CacheLock, lock_digest_entry, unique_part_path};
 #[allow(unused_imports)]
-pub use checksum::{sha256_of_file, verify_sha256};
+pub(crate) use checksum::{sha256_of_file, verify_sha256};
 #[allow(unused_imports)]
-pub use extract::{detect_source_format, extract_source_archive, extract_source_archive_stripped, SourceFormat};
+pub(crate) use extract::{detect_source_format, extract_source_archive, extract_source_archive_stripped, SourceFormat};
 #[allow(unused_imports)]
-pub use http::{download, download_opt, set_offline, offline};
+pub(crate) use http::{download, download_opt, set_offline, offline};
 #[allow(unused_imports)]
 pub(crate) use http::{check_offline, is_retryable, redirect_target, progress_line, progress_label, Outcome};
 #[allow(unused_imports)]
-pub use local::copy_local;
+pub(crate) use local::copy_local;
 #[allow(unused_imports)]
-pub use snapshot::{snapshot_file, VerifiedSnapshot};
+pub(crate) use snapshot::{snapshot_file, VerifiedSnapshot};
 
 #[cfg(test)]
 mod tests {

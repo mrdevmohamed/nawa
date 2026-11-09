@@ -9,13 +9,13 @@
 //! (local admin) and `$NAWA_PLUGIN_PATH` entries. A root nawa never executes
 //! a plugin discovered in a user's home directory.
 
-pub mod discovery;
-pub mod events;
-pub mod manifest;
-pub mod protocol;
-pub mod runner;
-pub mod sandbox;
+pub(crate) mod discovery;
+pub(crate) mod events;
+pub(crate) mod manifest;
+pub(crate) mod protocol;
+pub(crate) mod runner;
+pub(crate) mod sandbox;
 
 // Public surface re-export (used by the command layer and tests).
 #[allow(unused_imports)]
-pub use manifest::{Capability, PluginManifest};
+pub(crate) use manifest::{Capability, PluginManifest};
