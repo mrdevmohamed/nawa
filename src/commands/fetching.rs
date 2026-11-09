@@ -34,7 +34,7 @@ pub(crate) fn cmd_fetch(
     // --offline contradicts recipes that need the network mid-build, the
     // same way build refuses them (§12)
     let load = |wanted: &dyn Fn(&recipe::Recipe) -> bool| -> Result<Vec<recipe::Recipe>> {
-        let known = recipe::load_all(&ctx.recipes)?;
+        let known = ctx.load_all()?;
         let mut recs: Vec<recipe::Recipe> = known
             .values()
             .filter(|r| wanted(r))
@@ -209,7 +209,7 @@ fn fetch_one(
     // against the live root (RootSpec::default()); none/env: no sandbox.
     let mut assembled: Option<closure::AssembledRoot> = None;
     if opts.isolation == buildenv::Isolation::Closure {
-        let known = recipe::load_all(&ctx.recipes)?;
+        let known = ctx.load_all()?;
         let members =
             closure::buildroot(rec, &known, false).context("compute build root")?;
         crate::nawa_info!(

@@ -69,6 +69,12 @@ struct Ctx {
     install_mode: InstallMode,
     /// the resolved configuration, kept for `config show` (sources + file)
     cfg: Config,
+    /// Per-command cache for `recipe::load_all(&recipes)` — cached after the
+    /// first successful load so repeated lookups in the same `nawa` process
+    /// (install/upgrade/build each walk the recipes tree multiple times)
+    /// do not re-parse every `recipe.toml`. Safe because the recipes tree
+    /// does not change during a single command execution.
+    recipe_cache: std::cell::RefCell<Option<std::collections::BTreeMap<String, recipe::Recipe>>>,
 }
 
 impl Ctx {
@@ -82,7 +88,20 @@ impl Ctx {
             repo: cfg.repo.clone(),
             install_mode: cfg.install_mode,
             cfg: cfg.clone(),
+            recipe_cache: std::cell::RefCell::new(None),
         }
+    }
+
+    /// Cached [`recipe::load_all`] for this command's recipes root.
+    fn load_all(&self) -> Result<std::collections::BTreeMap<String, recipe::Recipe>> {
+        let cached = self.recipe_cache.borrow();
+        if let Some(map) = cached.as_ref() {
+            return Ok(map.clone());
+        }
+        drop(cached);
+        let loaded = crate::recipe::load_all(&self.recipes)?;
+        *self.recipe_cache.borrow_mut() = Some(loaded.clone());
+        Ok(loaded)
     }
 }
 

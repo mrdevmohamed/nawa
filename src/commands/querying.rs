@@ -3,7 +3,7 @@
 use crate::*;
 
 pub(crate) fn cmd_search(ctx: &Ctx, term: &str, glob: bool) -> Result<()> {
-    let all = recipe::load_all(&ctx.recipes)?;
+    let all = ctx.load_all()?;
     let db = db::Db::new(&ctx.root);
     let installed: HashSet<String> = db.installed()?.into_iter().map(|e| e.name).collect();
     let pal = Palette::auto(Stream::Stdout);
@@ -163,7 +163,7 @@ pub(crate) fn cmd_why(ctx: &Ctx, name: &str, tree: bool) -> Result<()> {
     }
 
     if tree {
-        let all = recipe::load_all(&ctx.recipes)?;
+        let all = ctx.load_all()?;
         let mut rdeps: Vec<(String, Vec<&str>)> = Vec::new();
         for (n, r) in &all {
             if n == name {
@@ -204,7 +204,7 @@ pub(crate) fn cmd_deps(ctx: &Ctx, name: &str) -> Result<()> {
     let db = db::Db::new(&ctx.root);
     let installed: HashSet<String> =
         db.installed()?.into_iter().map(|e| e.name).collect();
-    let known = recipe::load_all(&ctx.recipes)?;
+    let known = ctx.load_all()?;
     let order = deps::resolve_target(name, &installed, &known)?;
     let pal = Palette::auto(Stream::Stdout);
     for (i, r) in order.iter().enumerate() {
@@ -224,7 +224,7 @@ pub(crate) fn cmd_deps(ctx: &Ctx, name: &str) -> Result<()> {
 }
 
 pub(crate) fn cmd_deps_all(ctx: &Ctx, include_installed: bool) -> Result<()> {
-    let all = recipe::load_all(&ctx.recipes)?;
+    let all = ctx.load_all()?;
     if all.is_empty() {
         bail!("no recipes found under {}", ctx.recipes.display());
     }
@@ -355,7 +355,7 @@ pub(crate) fn cmd_revdep(
     let sug = if no_suggest || missing.is_empty() {
         revdep::Suggestions::new()
     } else {
-        let recipes: Vec<String> = recipe::load_all(&ctx.recipes)
+        let recipes: Vec<String> = ctx.load_all()
             .map(|m| m.into_keys().collect())
             .unwrap_or_default();
         let installed: std::collections::HashSet<String> =
@@ -482,7 +482,7 @@ pub(crate) fn warn_revdep(ctx: &Ctx, changed: &[String]) {
 /// Every known package name: the recipes tree plus the local db. One bare
 /// name per line — the completion scripts call this dynamically.
 pub(crate) fn cmd_complete_pkgs(ctx: &Ctx) -> Result<()> {
-    let mut names: BTreeSet<String> = recipe::load_all(&ctx.recipes)?
+    let mut names: BTreeSet<String> = ctx.load_all()?
         .into_keys()
         .collect();
     for e in db::Db::new(&ctx.root).installed()? {
