@@ -615,6 +615,7 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
 
     // ---- collect staged files -------------------------------------------
     let mut files: Vec<String> = Vec::new();
+    let mut size: u64 = 0;
     for e in walkdir::WalkDir::new(&pkg).sort_by_file_name() {
         let e = e?;
         let rel = e.path().strip_prefix(&pkg)?;
@@ -622,6 +623,11 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
             continue;
         }
         files.push(format!("/{}", rel.display()));
+        if let Ok(m) = e.metadata() {
+            if m.is_file() {
+                size += m.len();
+            }
+        }
     }
     if files.is_empty() {
         bail!("build produced no files — check the install section");
@@ -688,14 +694,6 @@ pub fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
     }
 
     // ---- .PKGINFO + archive ----------------------------------------------
-    let size: u64 = walkdir::WalkDir::new(&pkg)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter_map(|e| e.metadata().ok())
-        .filter(|m| m.is_file())
-        .map(|m| m.len())
-        .sum();
-
     let mut pkginfo = format!(
         "pkgname = {}\npkgver = {}\npkgrel = {}\narch = {}\nrundeps = {}\nsize = {}\n",
         name,

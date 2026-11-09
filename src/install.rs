@@ -266,7 +266,7 @@ fn install_archive_payload(
     let is_upgrade = old.is_some();
 
     // ---- conflict check against the database ------------------------------
-    let staged_files = list_staged_files(&tmp)?;
+    let (staged_files, staged_hashes) = stage_tree(&tmp)?;
     let owners = db.file_owners()?;
     if !force {
         let mut conflicts: Vec<String> = Vec::new();
@@ -303,9 +303,6 @@ fn install_archive_payload(
             );
         }
     }
-
-    // ---- hash the staged /etc files (baseline for config protection) ---------
-    let staged_hashes = hash_staged_etc(&tmp)?;
 
     // ---- remember the previous version for rollback -------------------------
     if let Some(prev) = &old {
@@ -926,17 +923,27 @@ fn save_undo(db: &Db, root: &Path, prev: &Entry) -> Result<()> {
     Ok(())
 }
 
-fn list_staged_files(staged: &Path) -> Result<Vec<String>> {
-    let mut out = Vec::new();
+/// One walk over the staging tree: every file to install plus the
+/// `/etc` hash baseline (config protection). Sorted, like both
+/// former walks, so conflict order is unchanged.
+fn stage_tree(staged: &Path) -> Result<(Vec<String>, std::collections::HashMap<String, String>)> {
+    let mut files = Vec::new();
+    let mut etc_hashes = std::collections::HashMap::new();
     for e in walkdir::WalkDir::new(staged).sort_by_file_name() {
         let e = e?;
         let rel = e.path().strip_prefix(staged)?;
         if rel.as_os_str().is_empty() {
             continue;
         }
-        out.push(format!("/{}", rel.display()));
+        let pkgpath = format!("/{}", rel.display());
+        files.push(pkgpath.clone());
+        if rel.components().next().is_some_and(|c| c.as_os_str() == "etc") {
+            if let Some(h) = path_hash(e.path()) {
+                etc_hashes.insert(pkgpath, h);
+            }
+        }
     }
-    Ok(out)
+    Ok((files, etc_hashes))
 }
 
 /// Refuse to touch `path` when resolving it (following symlinks) would leave
@@ -1460,25 +1467,6 @@ fn is_under_etc(p: &Path, root: &Path) -> bool {
             .unwrap_or(false),
         Err(_) => false,
     }
-}
-
-/// sha256 map for every /etc file in the staging tree: path (as it will be
-/// on the target, e.g. "/etc/foo.conf") -> hash. Symlinks hash their target
-/// string so the baseline stays stable across identical reinstalls.
-fn hash_staged_etc(staged: &Path) -> Result<std::collections::HashMap<String, String>> {
-    let mut out = std::collections::HashMap::new();
-    for e in walkdir::WalkDir::new(staged).sort_by_file_name() {
-        let e = e?;
-        let rel = e.path().strip_prefix(staged)?;
-        if rel.as_os_str().is_empty() || rel.components().next().map(|c| c.as_os_str() != "etc").unwrap_or(true) {
-            continue;
-        }
-        let pkgpath = format!("/{}", rel.display());
-        if let Some(h) = path_hash(e.path()) {
-            out.insert(pkgpath, h);
-        }
-    }
-    Ok(out)
 }
 
 /// sha256 of a file's bytes; for symlinks, of the target path string.
