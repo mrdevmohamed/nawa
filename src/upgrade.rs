@@ -10,7 +10,7 @@
 //! and sha256-verified before install.
 
 use anyhow::{bail, Context, Result};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::db::Db;
@@ -382,8 +382,12 @@ pub fn upgrade(
 
     // ---- compute the upgrade plan -------------------------------------------
     let db = Db::new(root);
+    let installed_map: HashMap<String, crate::db::Entry> =
+        db.installed()?.into_iter().map(|e| (e.name.clone(), e)).collect();
     let mut plan: Vec<(&repo::RepoEntry, String)> = Vec::new(); // (entry, new full version)
-    for e in db.installed()? {
+    let mut entries: Vec<&crate::db::Entry> = installed_map.values().collect();
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    for e in entries {
         let re = match index.find(&e.name) {
             Some(r) => r,
             None => continue, // not in this repo -> untouched
@@ -397,7 +401,7 @@ pub fn upgrade(
     }
 
     if plan.is_empty() {
-        crate::nawa_info!("everything up to date ({} installed)", db.installed()?.len());
+        crate::nawa_info!("everything up to date ({} installed)", installed_map.len());
         return Ok(());
     }
 
@@ -407,7 +411,7 @@ pub fn upgrade(
     let names: Vec<String> = plan.iter().map(|(r, _)| r.name.clone()).collect();
     let ordered: Vec<String> = match recipe::load_all(recipes) {
         Ok(tree) if !tree.is_empty() => {
-            let installed: HashSet<String> = db.installed()?.into_iter().map(|e| e.name).collect();
+            let installed: HashSet<String> = installed_map.keys().cloned().collect();
             order_with_fallback(&names, &installed, &tree)
         }
         _ => {
@@ -422,7 +426,7 @@ pub fn upgrade(
     crate::nawa_info!("{} package(s) to upgrade:", plan.len());
     for name in &ordered {
         let (_, new) = plan.iter().find(|(r, _)| &r.name == name).unwrap();
-        let cur = db.entry(name)?.map(|e| e.version_full()).unwrap_or_default();
+        let cur = installed_map.get(name).map(|e| e.version_full()).unwrap_or_default();
         println!(
             "  {} {} {} {}",
             pal.name(&format!("{name:<24}")),
