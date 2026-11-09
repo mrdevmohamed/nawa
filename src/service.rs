@@ -148,6 +148,15 @@ pub(crate) fn disable(root: &Path, name: &str) -> Result<()> {
 
 /// Live control only makes sense against the running system: runsvdir of a
 /// throwaway `--root` is not supervising anything.
+fn require_root() -> Result<()> {
+    // runit control sockets are normally writable only by root. Fail early
+    // instead of letting `sv` block while waiting for a response.
+    if unsafe { libc::geteuid() } != 0 {
+        bail!("service control needs root privileges; run this command again with `doas nawa service ...`");
+    }
+    Ok(())
+}
+
 fn require_live_root(root: &Path) -> Result<()> {
     if root != Path::new("/") {
         bail!("live service control works on the running system only (got --root {})", root.display());
@@ -182,8 +191,9 @@ fn wait_supervised(root: &Path, name: &str, secs: u64) -> bool {
 /// runit's own `ok: run: name: (pid N) 2s` / `timeout:` line.
 fn sv_run(root: &Path, action: &str, name: &str) -> Result<()> {
     let st = Command::new("sv")
+        .env("SVDIR", enabled_dir(root))
         .arg(action)
-        .arg(sv_path(root, name))
+        .arg(name)
         .status()
         .with_context(|| "cannot run `sv` (is the runit package installed?)")?;
     if !st.success() {
@@ -195,6 +205,7 @@ fn sv_run(root: &Path, action: &str, name: &str) -> Result<()> {
 fn require_enabled_supervised(root: &Path, name: &str) -> Result<()> {
     validate_name(name)?;
     require_live_root(root)?;
+    require_root()?;
     if !is_enabled(root, name)? {
         bail!("service `{name}` is not enabled: run `nawa service enable {name}` first");
     }
@@ -226,6 +237,7 @@ pub(crate) fn restart(root: &Path, name: &str) -> Result<()> {
 /// `enable --now`: link, wait for runsv to pick it up, then wait until it runs.
 pub(crate) fn enable_now(root: &Path, name: &str) -> Result<()> {
     require_live_root(root)?;
+    require_root()?;
     enable(root, name)?;
     if !wait_supervised(root, name, 10) {
         bail!("`{name}` was enabled but runsvdir did not start supervising it within 10 s");
@@ -237,6 +249,7 @@ pub(crate) fn enable_now(root: &Path, name: &str) -> Result<()> {
 pub(crate) fn disable_now(root: &Path, name: &str) -> Result<()> {
     validate_name(name)?;
     require_live_root(root)?;
+    require_root()?;
     if is_supervised(root, name) {
         sv_run(root, "stop", name)?;
     }
@@ -248,7 +261,12 @@ fn live_status(root: &Path, name: &str) -> String {
     if !is_supervised(root, name) {
         return "waiting for runsvdir (not supervised yet)".to_string();
     }
-    match Command::new("sv").arg("status").arg(sv_path(root, name)).output() {
+    match Command::new("sv")
+        .env("SVDIR", enabled_dir(root))
+        .arg("status")
+        .arg(name)
+        .output()
+    {
         Ok(o) => {
             let mut t = String::from_utf8_lossy(&o.stdout).trim().to_string();
             if t.is_empty() {
