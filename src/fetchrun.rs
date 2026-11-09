@@ -1256,7 +1256,7 @@ fn resolver_binds(r: &FetchRun) -> Result<Vec<ExtraBind>> {
 }
 
 fn privileged() -> bool {
-    rustix::process::geteuid().is_root()
+    crate::diag::is_root()
 }
 
 /// Publication (§11): normalise ownership (the sandbox identity may have

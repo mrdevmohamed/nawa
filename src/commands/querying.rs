@@ -46,7 +46,7 @@ pub(crate) fn cmd_search(ctx: &Ctx, term: &str, glob: bool) -> Result<()> {
 }
 
 pub(crate) fn cmd_info(ctx: &Ctx, name: &str) -> Result<()> {
-    let rec = recipe::load_by_name(&ctx.recipes, name)?;
+    let (rec, recipe_path) = recipe::locate(&ctx.recipes, name)?;
     let db = db::Db::new(&ctx.root);
     let entry = db.entry(name)?;
     let pal = Palette::auto(Stream::Stdout);
@@ -55,7 +55,6 @@ pub(crate) fn cmd_info(ctx: &Ctx, name: &str) -> Result<()> {
         println!("{:<10} {}", pal.header(&format!("{label}:")), value);
     };
 
-    let recipe_path = recipe::find_recipe_path(&ctx.recipes, name)?;
     row("name", pal.name(name));
     row("recipe", recipe_path.display().to_string());
     row(

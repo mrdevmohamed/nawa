@@ -80,7 +80,6 @@ pub fn begin_operation(
         requested: requested.to_vec(),
         repositories: repositories.to_vec(),
         changes: Vec::new(),
-        disabled: false,
         groups: Vec::new(),
         undo_target: None,
     };
@@ -100,7 +99,6 @@ pub fn no_history() -> OperationHandle {
         requested: Vec::new(),
         repositories: Vec::new(),
         changes: Vec::new(),
-        disabled: true,
         groups: Vec::new(),
         undo_target: None,
     }
@@ -115,7 +113,6 @@ pub struct OperationHandle {
     requested: Vec<String>,
     repositories: Vec<String>,
     changes: Vec<PackageChange>,
-    disabled: bool,
     groups: Vec<String>,
     undo_target: Option<u64>,
 }
@@ -249,7 +246,6 @@ impl RecorderHandle<'_> {
         before: Option<&crate::db::Entry>, target: Option<&PackageState>,
         artifact_sha256: &str,
     ) -> Result<u32> {
-        if self.op.disabled { return Ok(0); }
         let Some(tx) = self.op.tx else { return Ok(0) };
         let step = (self.op.changes.len() + 1) as u32;
         let intent = journal::StepIntent {
@@ -277,9 +273,6 @@ impl RecorderHandle<'_> {
         failure: Option<String>,
         hook: Option<String>,
     ) -> Result<()> {
-        if self.op.disabled {
-            return Ok(());
-        }
         let Some(tx) = self.op.tx else { return Ok(()) };
         journal::write_result(
             &self.op.root,

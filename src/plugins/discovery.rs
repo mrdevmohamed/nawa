@@ -80,7 +80,7 @@ pub fn discover(root_user: bool) -> Result<Vec<Discovered>> {
     let env = env_dirs();
     for dir in all_dirs() {
         let approved_for_root = system_dirs().contains(&dir);
-        if root_user && !approved_for_root && !dir_is_root_safe(&dir) {
+        if root_user && !approved_for_root && !secure_admin_config(&dir) {
             // a root nawa must not execute a user-writable plugin just
             // because it is discoverable (roadmap §6.3)
             continue;
@@ -160,28 +160,6 @@ fn broken(dir: PathBuf) -> PluginManifest {
         requested_capabilities: Vec::new(),
         events: Vec::new(),
     }
-}
-
-/// A user-provided directory is only usable by root when it (and its
-/// parents) are root-owned and not group/world-writable — the same rule the
-/// shell applies to PATH lookups of privileged binaries.
-fn dir_is_root_safe(dir: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    let mut cur = Some(dir);
-    while let Some(d) = cur {
-        if let Ok(md) = std::fs::symlink_metadata(d) {
-            if md.file_type().is_symlink() {
-                return false;
-            }
-            if md.uid() != 0 || md.mode() & 0o022 != 0 {
-                return false;
-            }
-        } else {
-            return false;
-        }
-        cur = d.parent();
-    }
-    true
 }
 
 /// Persisted enable/disable state (the `[plugins]` table of nawa.toml).
@@ -376,7 +354,7 @@ mod tests {
         // Root discovery correctly rejects fixtures under world-writable
         // /tmp. Put root-run tests under /root so they exercise the privileged
         // path without weakening the production directory policy.
-        let base = if rustix::process::geteuid().is_root() {
+        let base = if crate::diag::is_root() {
             PathBuf::from("/root")
         } else {
             std::env::temp_dir()

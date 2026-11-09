@@ -443,11 +443,10 @@ pub fn upgrade(
 
     // ---- apply ----------------------------------------------------------------
     let repo_ids: Vec<String> = open.base_url.clone().into_iter().collect();
-    let requested: Vec<String> = ordered.clone();
     let mut op = crate::transaction::begin_operation(
         root,
         crate::transaction::OperationCommand::Upgrade,
-        &requested,
+        &ordered,
         &repo_ids,
     )?;
     let db_here = Db::new(root);
@@ -663,7 +662,7 @@ fn check_archive_matches_index(
     };
     let arch = get("arch");
     let host = std::env::var("NAWA_ARCH").unwrap_or_else(|_| std::env::consts::ARCH.to_string());
-    if !arch.is_empty() && !matches!(arch.as_str(), "any" | "noarch" | "all") && arch != host {
+    if !crate::commands::arch_fits(&arch) {
         bail!("archive {} is built for {arch}, this system is {host}", re.file);
     }
     if get("pkgname") != re.name || get("pkgver") != re.version || rel != re.rel || arch != re.arch {

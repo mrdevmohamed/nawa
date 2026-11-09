@@ -660,7 +660,7 @@ pub fn load_by_name(root: &Path, name: &str) -> Result<Recipe> {
 }
 
 /// Load one recipe by name and also report where its `recipe.toml` lives
-/// (single walk — `load_by_name` and `find_recipe_path` share this).
+/// (single walk — `load_by_name` drops the path).
 pub fn locate(root: &Path, name: &str) -> Result<(Recipe, PathBuf)> {
     for entry in walkdir::WalkDir::new(root)
         .into_iter()
@@ -683,11 +683,6 @@ pub fn locate(root: &Path, name: &str) -> Result<(Recipe, PathBuf)> {
         root.display(),
         crate::suggest::hint(name, &names)
     )
-}
-
-/// Where a package's `recipe.toml` lives, for `nawa info`.
-pub fn find_recipe_path(root: &Path, name: &str) -> Result<PathBuf> {
-    Ok(locate(root, name)?.1)
 }
 
 #[cfg(test)]
