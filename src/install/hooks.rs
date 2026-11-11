@@ -133,9 +133,30 @@ pub(crate) fn load_hooks(db: &Db, name: &str) -> archive::Hooks {
 /// directory, in deterministic filename order. Symlinks are deliberately
 /// ignored so a package cannot redirect execution outside the target root.
 fn transaction_trigger_scripts(root: &Path) -> Result<Vec<(String, PathBuf)>> {
-    let Some(directory) = resolve_in_root(root, "/usr/lib/nawa/transaction-hooks.d") else {
-        return Ok(Vec::new());
+    // Canonicalize both roots before reading. resolve_in_root() is intended
+    // for paths inside a root, but a chain of ".." symlink components must
+    // never let a package redirect this privileged scan onto the host.
+    let canonical_root = std::fs::canonicalize(root)
+        .with_context(|| format!("resolve target root {}", root.display()))?;
+    let candidate = canonical_root.join("usr/lib/nawa/transaction-hooks.d");
+    let directory = match std::fs::canonicalize(&candidate) {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Vec::new());
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("resolve transaction trigger directory {}", candidate.display())
+            });
+        }
     };
+    if !directory.starts_with(&canonical_root) {
+        anyhow::bail!(
+            "transaction trigger directory {} escapes target root {}",
+            directory.display(),
+            canonical_root.display()
+        );
+    }
     if !directory.is_dir() {
         return Ok(Vec::new());
     }
@@ -228,6 +249,31 @@ mod transaction_trigger_tests {
     fn missing_trigger_directory_is_a_noop() {
         let base = tmpdir("transaction-triggers-absent");
         assert!(transaction_trigger_scripts(&base).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_trigger_directory_symlink_that_escapes_target_root() {
+        use std::os::unix::fs::symlink;
+
+        let base = tmpdir("transaction-triggers-escape");
+        let root = base.join("root");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(root.join("usr/lib/nawa")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("evil.sh"), "true\\n").unwrap();
+        symlink(
+            &outside,
+            root.join("usr/lib/nawa/transaction-hooks.d"),
+        )
+        .unwrap();
+
+        let error = transaction_trigger_scripts(&root).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("escapes target root"),
+            "unexpected error: {error:#}"
+        );
         let _ = std::fs::remove_dir_all(base);
     }
 }
