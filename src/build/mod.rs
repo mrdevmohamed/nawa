@@ -735,6 +735,7 @@ pub(crate) fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
         post_install: rec.hooks.post_install.clone(),
         pre_remove: rec.hooks.pre_remove.clone(),
         post_remove: rec.hooks.post_remove.clone(),
+        post_transaction: rec.hooks.post_transaction.clone(),
     };
 
     crate::nawa_info!(
