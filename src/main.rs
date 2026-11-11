@@ -159,8 +159,12 @@ fn main() {
         }
     };
     let ctx = Ctx::from_config(&cfg);
-    let run_transaction_hooks = should_run_post_transaction_hooks(&cmd)
-        && std::env::var_os("NAWA_POST_TRANSACTION_HOOKS_RUNNING").is_none();
+    // Package lifecycle hooks already run under their parent's package
+    // database lock. A nested Nawa invocation from one of those hooks must
+    // not dispatch system triggers before the outer package transaction ends.
+    let hooks_suppressed = std::env::var_os(lock::HELD_ENV).is_some()
+        || std::env::var_os("NAWA_POST_TRANSACTION_HOOKS_RUNNING").is_some();
+    let run_transaction_hooks = should_run_post_transaction_hooks(&cmd) && !hooks_suppressed;
     let result = run(&ctx, cmd);
     // Distribution-provided post-transaction triggers (for example, MIME and
     // desktop application cache rebuilds) run once after the package command
