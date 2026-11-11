@@ -1,6 +1,13 @@
 //! Plugin command handlers: management, capability policy and direct dispatch.
 
-use crate::*;
+use anyhow::{Result};
+use crate::ctx::Ctx;
+use crate::color::Palette;
+use std::path::PathBuf;
+use crate::color::Stream;
+use crate::config;
+use crate::plugins;
+
 use anyhow::bail;
 
 fn effective_state(ctx: &Ctx) -> plugins::discovery::PluginState {

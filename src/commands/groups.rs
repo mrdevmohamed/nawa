@@ -3,7 +3,19 @@
 //! planner (cmd_install), removals recompute reachability from the
 //! remaining explicit/group roots.
 
-use crate::*;
+use anyhow::{Context, Result};
+use crate::ctx::Ctx;
+use crate::cli::PlanFlags;
+use crate::confirm;
+use crate::db;
+use crate::fetch;
+use crate::groups;
+use crate::install;
+use crate::lock;
+use crate::plan;
+use crate::transaction;
+use crate::upgrade;
+
 use anyhow::bail;
 
 pub(crate) fn cmd_group_list(ctx: &Ctx) -> Result<()> {

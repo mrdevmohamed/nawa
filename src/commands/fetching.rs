@@ -13,8 +13,16 @@
 //! commands (§12); at `sandbox` they go through the fetch sandbox spec, and
 //! at `closure` the same build root a build would assemble is prepared first
 //! (the toolchain lives in it).
+use crate::ctx::Ctx;
+use crate::assets;
+use crate::build;
+use crate::buildenv;
+use crate::closure;
+use crate::fetch;
+use crate::fetchrun;
+use crate::recipe;
+use crate::sources;
 
-use crate::*;
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 

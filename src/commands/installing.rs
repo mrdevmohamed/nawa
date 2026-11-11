@@ -1,7 +1,35 @@
 //! install / remove / update / autoremove / outdated handlers and the plan runner.
 
+use anyhow::{bail, Context, Result};
+use crate::suggest;
+use crate::ctx::Ctx;
+use crate::config::InstallMode;
+use crate::color::Palette;
+use std::path::Path;
+use std::path::PathBuf;
+use crate::cli::PlanFlags;
+use crate::color::Stream;
+use crate::commands::build_one;
+use crate::confirm;
+use crate::db;
+use crate::fetch;
+use crate::humanize::format_date;
+use crate::humanize::format_duration;
+use crate::humanize::format_size;
+use crate::groups;
+use crate::install;
+use crate::pathutil::is_archive_arg;
+use crate::lock;
+use crate::plan;
+use crate::recipe;
+use crate::repo;
+use crate::revdep;
+use crate::transaction;
+use crate::upgrade;
+use crate::version;
+use crate::commands::warn_revdep;
+
 use crate::sys::arch_fits;
-use crate::*;
 
 pub(crate) fn cmd_install(
     ctx: &Ctx,

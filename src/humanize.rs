@@ -56,3 +56,34 @@ pub(crate) fn format_size(bytes: u64) -> String {
 
 // ---- shell completions (hand-written; no extra crates) ---------------------
 // Package names complete dynamically via `nawa __complete_pkgs`.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn date_formatting() {
+        assert_eq!(format_date(0), "-");
+        assert_eq!(format_date(86_400), "1970-01-02");
+        assert_eq!(format_date(1_700_000_000), "2023-11-14");
+        assert_eq!(format_date(1_704_067_200), "2024-01-01");
+        assert_eq!(format_date(951_782_400), "2000-02-29"); // leap day
+    }
+
+    #[test]
+    fn duration_formatting() {
+        assert_eq!(format_duration(0), "0s");
+        assert_eq!(format_duration(59), "59s");
+        assert_eq!(format_duration(185), "3m05s");
+        assert_eq!(format_duration(3720), "1h02m");
+    }
+
+    #[test]
+    fn size_formatting() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(512), "512 B");
+        assert_eq!(format_size(2048), "2.0 KiB");
+        assert_eq!(format_size(5 * 1024 * 1024), "5.0 MiB");
+        assert_eq!(format_size(3 * 1024 * 1024 * 1024), "3.0 GiB");
+    }
+}

@@ -1,7 +1,19 @@
 //! read-only query commands: search, info, why, deps, query, files, owner.
 
+use anyhow::{bail, Result};
+use std::collections::BTreeSet;
+use crate::ctx::Ctx;
+use std::collections::HashSet;
+use crate::color::Palette;
+use crate::color::Stream;
+use crate::db;
+use crate::deps;
+use crate::humanize::format_date;
+use crate::humanize::format_size;
+use crate::recipe;
+use crate::revdep;
+
 use crate::glob::glob_match;
-use crate::*;
 
 pub(crate) fn cmd_search(ctx: &Ctx, term: &str, glob: bool) -> Result<()> {
     let all = ctx.load_all()?;

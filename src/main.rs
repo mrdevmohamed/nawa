@@ -14,6 +14,7 @@ mod color;
 mod output;
 mod commands;
 mod config;
+mod ctx;
 mod confirm;
 mod db;
 mod deps;
@@ -55,92 +56,15 @@ mod version;
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
-use std::collections::{BTreeSet, HashSet};
-use std::path::{Path, PathBuf};
 
 use color::{Palette, Stream};
-use config::{Config, InstallMode, Overrides};
+use config::Overrides;
 
 // Items moved out of this file: command-line definition, command handlers and
-// formatters. Re-imported here (and, through `use crate::*`, in those modules).
+// formatters. Each module imports what it uses explicitly.
 use cli::*;
 use commands::*;
-use humanize::*;
-
-struct Ctx {
-    root: PathBuf,
-    recipes: PathBuf,
-    builddir: PathBuf,
-    profiles: PathBuf,
-    jobs: Option<u32>,
-    repo: Option<String>,
-    install_mode: InstallMode,
-    /// the resolved configuration, kept for `config show` (sources + file)
-    cfg: Config,
-    /// Per-command cache for `recipe::load_all(&recipes)` — cached after the
-    /// first successful load so repeated lookups in the same `nawa` process
-    /// (install/upgrade/build each walk the recipes tree multiple times)
-    /// do not re-parse every `recipe.toml`. Safe because the recipes tree
-    /// does not change during a single command execution.
-    recipe_cache: std::cell::RefCell<Option<std::collections::BTreeMap<String, recipe::Recipe>>>,
-}
-
-impl Ctx {
-    fn from_config(cfg: &Config) -> Self {
-        Ctx {
-            root: cfg.root.clone(),
-            recipes: cfg.recipes.clone(),
-            builddir: cfg.builddir.clone(),
-            profiles: cfg.profiles.clone(),
-            jobs: cfg.jobs,
-            repo: cfg.repo.clone(),
-            install_mode: cfg.install_mode,
-            cfg: cfg.clone(),
-            recipe_cache: std::cell::RefCell::new(None),
-        }
-    }
-
-    /// Cached [`recipe::load_all`] for this command's recipes root.
-    fn load_all(&self) -> Result<std::collections::BTreeMap<String, recipe::Recipe>> {
-        let cached = self.recipe_cache.borrow();
-        if let Some(map) = cached.as_ref() {
-            return Ok(map.clone());
-        }
-        drop(cached);
-        let loaded = crate::recipe::load_all(&self.recipes)?;
-        *self.recipe_cache.borrow_mut() = Some(loaded.clone());
-        Ok(loaded)
-    }
-}
-
-/// `--build` / `--from-repo` / `--from` collapse to one install mode.
-/// Shared by `install` and `update` so flag precedence cannot drift.
-fn resolve_mode(build: bool, from_repo: bool, from: Option<&str>) -> Result<Option<InstallMode>> {
-    if build {
-        Ok(Some(InstallMode::Build))
-    } else if from_repo {
-        Ok(Some(InstallMode::Repo))
-    } else if let Some(m) = from {
-        Ok(Some(InstallMode::parse(m)?))
-    } else {
-        Ok(None)
-    }
-}
-
-/// The configured repository (flag beats config), parsed.
-/// Shared by `upgrade` and `sync` so the "no repository" bail text
-/// cannot drift.
-fn resolve_repo(ctx: &Ctx, repo: Option<String>) -> Result<fetch::RepoRef> {
-    let repo = match repo.or_else(|| ctx.repo.clone()) {
-        Some(r) => r,
-        None => bail!(
-            "no repository configured (it is switched off with `repo = \"\"`): \
-             pass --repo <dir-or-url>, set `repo` in nawa.toml or \
-             /etc/nawa/nawa.toml, or export NAWA_REPO"
-        ),
-    };
-    fetch::RepoRef::parse(&repo)
-}
+use ctx::{resolve_mode, resolve_repo, Ctx};
 
 fn main() {
     let Cli { root, recipes, builddir, profiles, jobs, cmd } = Cli::parse();
@@ -199,7 +123,6 @@ fn main() {
         std::process::exit(1);
     }
 }
-
 
 /// Whether this command can change the installed package set. Post-transaction
 /// triggers are dispatched after these commands, including partial failures.
@@ -572,9 +495,9 @@ fn run_command(ctx: &Ctx, cmd: Cmd) -> Result<()> {
                 crate::nawa_info_stderr!("recovered: {note}");
             }
             match action {
-                None => undo::print_history(&ctx.root, limit.unwrap_or(20)),
-                Some(HistoryCmd::List) => undo::print_history(&ctx.root, limit.unwrap_or(20)),
-                Some(HistoryCmd::Info { id }) => undo::print_info(&ctx.root, id),
+                None => print_history(&ctx.root, limit.unwrap_or(20)),
+                Some(HistoryCmd::List) => print_history(&ctx.root, limit.unwrap_or(20)),
+                Some(HistoryCmd::Info { id }) => print_info(&ctx.root, id),
                 Some(HistoryCmd::Undo { id, yes }) => undo::history_undo(&ctx.root, id, yes),
             }
         }
@@ -680,7 +603,6 @@ fn run_command(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -718,40 +640,5 @@ mod tests {
         upgraded.install_date += 1;
         upgraded.artifact_sha256 = "b".repeat(64);
         assert!(installed_package_payload_changed(&before, &[upgraded]));
-    }
-
-    #[test]
-    fn date_formatting() {
-        assert_eq!(format_date(0), "-");
-        assert_eq!(format_date(86_400), "1970-01-02");
-        assert_eq!(format_date(1_700_000_000), "2023-11-14");
-        assert_eq!(format_date(1_704_067_200), "2024-01-01");
-        assert_eq!(format_date(951_782_400), "2000-02-29"); // leap day
-    }
-
-    #[test]
-    fn duration_formatting() {
-        assert_eq!(format_duration(0), "0s");
-        assert_eq!(format_duration(59), "59s");
-        assert_eq!(format_duration(185), "3m05s");
-        assert_eq!(format_duration(3720), "1h02m");
-    }
-
-    #[test]
-    fn archive_vs_name_arguments() {
-        assert!(is_archive_arg("build/out/a-1-1.nawa.tar.zst"));
-        assert!(is_archive_arg("./a"));
-        assert!(is_archive_arg("a-1-1.nawa.tar.zst"));
-        assert!(!is_archive_arg("gzip"));
-        assert!(!is_archive_arg("libstdc++"));
-    }
-
-    #[test]
-    fn size_formatting() {
-        assert_eq!(format_size(0), "0 B");
-        assert_eq!(format_size(512), "512 B");
-        assert_eq!(format_size(2048), "2.0 KiB");
-        assert_eq!(format_size(5 * 1024 * 1024), "5.0 MiB");
-        assert_eq!(format_size(3 * 1024 * 1024 * 1024), "3.0 GiB");
     }
 }

@@ -18,8 +18,10 @@
 //! hard counterparts are the parse/stage-time rules of §14A/§14C, which
 //! fail the build). The checks that need the downloaded source are §14C
 //! and are not repeated here.
+use crate::ctx::Ctx;
+use crate::humanize;
+use crate::recipe;
 
-use crate::*;
 use anyhow::Result;
 
 /// Files above this size inside `[assets]` earn the size warning (§14B).

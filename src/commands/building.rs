@@ -1,6 +1,22 @@
 //! `build` command handlers.
 
-use crate::*;
+use anyhow::{bail, Context, Result};
+use crate::ctx::Ctx;
+use crate::color::Palette;
+use std::path::PathBuf;
+use crate::cli::PlanFlags;
+use crate::color::Stream;
+use crate::build;
+use crate::buildenv;
+use crate::db;
+use crate::cli::default_jobs;
+use crate::install;
+use crate::lock;
+use crate::plan;
+use crate::profile;
+use crate::recipe;
+use crate::transaction;
+
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn cmd_build(
@@ -115,12 +131,6 @@ pub(crate) fn cmd_build(
     op.finish(result.as_ref().err())?;
     result?;
     Ok(())
-}
-
-/// `nawa install` takes archive paths *or* package names. Something that
-/// ends in `.nawa.tar.zst` or contains a `/` is a file; a bare word is a name.
-pub(crate) fn is_archive_arg(arg: &str) -> bool {
-    arg.ends_with(".nawa.tar.zst") || arg.contains('/')
 }
 
 /// Everything `build` derives from the profile and flags: jobs, flags env,
