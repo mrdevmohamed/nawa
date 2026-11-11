@@ -614,7 +614,7 @@ mod post_transaction_hook_tests {
         assert_eq!(decoded.post_transaction, hooks.post_transaction);
 
         // Archives written before this field existed remain readable.
-        let legacy: Hooks = toml::from_str("post_install = \\\"true\\\"\\n").unwrap();
+        let legacy: Hooks = toml::from_str(r#"post_install = "true""#).unwrap();
         assert_eq!(legacy.post_install, "true");
         assert!(legacy.post_transaction.is_empty());
         assert!(!legacy.is_empty());
