@@ -129,34 +129,66 @@ pub(crate) fn load_hooks(db: &Db, name: &str) -> archive::Hooks {
         .unwrap_or_default()
 }
 
-/// Run every distinct installed-package post-transaction hook once, after a
-/// package-changing Nawa command has released its transaction lock. Package
-/// triggers are distribution-neutral: a package can use them to rebuild
-/// shared system databases without making every other recipe repeat the same
-/// post-install command.
-///
-/// The exclusive lock prevents another Nawa process from removing a trigger
-/// provider while its script is running. Hooks execute in the target root
-/// using the same live-system/chroot rules as ordinary package hooks.
-pub(crate) fn run_post_transaction_hooks(root: &Path) -> Result<()> {
-    let _lock = crate::lock::acquire(root, crate::lock::Mode::Exclusive)?;
-    let db = Db::new(root);
-    let mut scripts = std::collections::BTreeMap::<String, String>::new();
-
-    for entry in db.installed()? {
-        let script = load_hooks(&db, &entry.name).post_transaction;
-        if !script.trim().is_empty() {
-            scripts.entry(script).or_insert(entry.name);
-        }
+/// Return the regular shell scripts installed in Nawa's transaction-trigger
+/// directory, in deterministic filename order. Symlinks are deliberately
+/// ignored so a package cannot redirect execution outside the target root.
+fn transaction_trigger_scripts(root: &Path) -> Result<Vec<(String, PathBuf)>> {
+    let Some(directory) = resolve_in_root(root, "/usr/lib/nawa/transaction-hooks.d") else {
+        return Ok(Vec::new());
+    };
+    if !directory.is_dir() {
+        return Ok(Vec::new());
     }
 
+    let mut scripts = Vec::new();
+    for item in std::fs::read_dir(&directory)
+        .with_context(|| format!("read transaction trigger directory {}", directory.display()))?
+    {
+        let item = item?;
+        if !item.file_type()?.is_file() {
+            continue;
+        }
+        let name = item.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') || !name.ends_with(".sh") {
+            continue;
+        }
+        scripts.push((name, item.path()));
+    }
+    scripts.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(scripts)
+}
+
+/// Run the installed transaction triggers once after a package-changing Nawa
+/// command has released its transaction lock. Distributions and packages can
+/// ship small scripts in /usr/lib/nawa/transaction-hooks.d to rebuild shared
+/// system databases (MIME, desktop applications, icon caches, etc.) without
+/// duplicating a post-install hook in every application recipe.
+///
+/// The exclusive lock prevents another Nawa process from changing the trigger
+/// set while it is running. Scripts run inside the target root using the same
+/// live-system/chroot rules as ordinary package hooks. A failure is returned
+/// to the caller, which reports a warning; the next package transaction
+/// retries the trigger.
+pub(crate) fn run_post_transaction_hooks(root: &Path) -> Result<()> {
+    let _lock = crate::lock::acquire(root, crate::lock::Mode::Exclusive)?;
+    let scripts = transaction_trigger_scripts(root)?;
     let mut failures = Vec::new();
-    for (script, package) in scripts {
+
+    for (name, path) in scripts {
+        let script = match std::fs::read_to_string(&path) {
+            Ok(script) if !script.trim().is_empty() => script,
+            Ok(_) => continue,
+            Err(error) => {
+                failures.push(format!("{name}: could not read {}: {error}", path.display()));
+                continue;
+            }
+        };
+
         // Prevent a trigger that invokes Nawa from recursively dispatching
-        // the same post-transaction triggers again.
-        let guarded_script = format!("export NAWA_POST_TRANSACTION_HOOKS_RUNNING=1\n{script}");
-        if let Err(error) = run_hook("post_transaction", &guarded_script, root) {
-            failures.push(format!("{package}: {error:#}"));
+        // the same system triggers again.
+        let guarded_script = format!("export NAWA_POST_TRANSACTION_HOOKS_RUNNING=1\\n{script}");
+        if let Err(error) = run_hook(&format!("transaction trigger {name}"), &guarded_script, root) {
+            failures.push(format!("{name}: {error:#}"));
         }
     }
 
@@ -164,9 +196,39 @@ pub(crate) fn run_post_transaction_hooks(root: &Path) -> Result<()> {
         Ok(())
     } else {
         Err(anyhow::anyhow!(
-            "one or more post-transaction hooks failed: {}",
+            "one or more transaction triggers failed: {}",
             failures.join("; ")
         ))
+    }
+}
+
+#[cfg(test)]
+mod transaction_trigger_tests {
+    use super::transaction_trigger_scripts;
+    use crate::testutil::tmpdir;
+
+    #[test]
+    fn discovers_regular_shell_triggers_in_sorted_order() {
+        let base = tmpdir("transaction-triggers");
+        let directory = base.join("usr/lib/nawa/transaction-hooks.d");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("20-late.sh"), "true\\n").unwrap();
+        std::fs::write(directory.join("10-early.sh"), "true\\n").unwrap();
+        std::fs::write(directory.join(".disabled.sh"), "true\\n").unwrap();
+        std::fs::write(directory.join("README"), "not a trigger\\n").unwrap();
+        std::fs::create_dir_all(directory.join("99-directory.sh")).unwrap();
+
+        let found = transaction_trigger_scripts(&base).unwrap();
+        let names: Vec<_> = found.into_iter().map(|(name, _)| name).collect();
+        assert_eq!(names, ["10-early.sh", "20-late.sh"]);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn missing_trigger_directory_is_a_noop() {
+        let base = tmpdir("transaction-triggers-absent");
+        assert!(transaction_trigger_scripts(&base).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(base);
     }
 }
 
