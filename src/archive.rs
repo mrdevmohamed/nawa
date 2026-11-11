@@ -36,6 +36,9 @@ pub(crate) struct Hooks {
     pub pre_remove: String,
     #[serde(default)]
     pub post_remove: String,
+    /// Idempotent package-manager trigger run once after package transactions.
+    #[serde(default)]
+    pub post_transaction: String,
 }
 
 impl Hooks {
@@ -43,6 +46,7 @@ impl Hooks {
         self.post_install.trim().is_empty()
             && self.pre_remove.trim().is_empty()
             && self.post_remove.trim().is_empty()
+            && self.post_transaction.trim().is_empty()
     }
 }
 
@@ -591,5 +595,28 @@ mod tests {
         let mut h = sha2::Sha256::new();
         h.update(std::fs::read(p).unwrap());
         hex::encode(h.finalize())
+    }
+}
+
+
+#[cfg(test)]
+mod post_transaction_hook_tests {
+    use super::Hooks;
+
+    #[test]
+    fn post_transaction_hook_roundtrips_and_old_hook_data_stays_compatible() {
+        let hooks = Hooks {
+            post_transaction: "update-desktop-database -q /usr/share/applications".into(),
+            ..Hooks::default()
+        };
+        let encoded = toml::to_string(&hooks).unwrap();
+        let decoded: Hooks = toml::from_str(&encoded).unwrap();
+        assert_eq!(decoded.post_transaction, hooks.post_transaction);
+
+        // Archives written before this field existed remain readable.
+        let legacy: Hooks = toml::from_str("post_install = \\\"true\\\"\\n").unwrap();
+        assert_eq!(legacy.post_install, "true");
+        assert!(legacy.post_transaction.is_empty());
+        assert!(!legacy.is_empty());
     }
 }
