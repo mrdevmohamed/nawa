@@ -6,7 +6,7 @@
 //!
 //! # Durability policy (Step 3)
 //!
-//! Use [`crate::transaction::atomic::write_atomic`] (this module's `write_atomic`)
+//! Use [`crate::atomic::write_atomic`] (this module's `write_atomic`)
 //! when a crash must not leave a torn or missing file that a later start would
 //! treat as authoritative:
 //!
@@ -14,7 +14,7 @@
 //! * `sign::sign` — `index.toml.sig` (0o644)
 //! * `repo::write_index_atomic` — `index.toml` (0o644)
 //! * `groups::membership::save` — group membership records (0o644)
-//! * `plugins::events::{enqueue_transaction,store_failure}` — plugin event queue (0o600, dir 0o700)
+//! * `transaction::outbox::enqueue_transaction` / `plugins::events::store_failure` — plugin event queue (0o600, dir 0o700)
 //! * `transaction::{journal,history}` — WAL/history records (already durable)
 //!
 //! Keep the ephemeral `write(tmp)+rename` + `remove_file(tmp)` pattern only for

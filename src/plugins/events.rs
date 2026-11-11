@@ -13,13 +13,10 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::transaction::history::TransactionRecord;
+use crate::transaction::outbox::outbox_dir;
 use super::discovery::{self, PluginState};
 use super::manifest::Capability;
 use super::runner::{PluginProcess, DEFAULT_TIMEOUT};
-
-fn outbox_dir(root: &Path) -> PathBuf {
-    root.join("var/lib/nawa/plugins/outbox")
-}
 
 fn failures_dir(root: &Path) -> PathBuf {
     root.join("var/lib/nawa/plugins/failures")
@@ -54,20 +51,6 @@ fn acquire_dispatch_lock(dir: &Path) -> Result<Option<File>> {
             }
         }
     }
-}
-
-/// Queue one finalized transaction. The rename publishes a complete record.
-pub(crate) fn enqueue_transaction(root: &Path, record: &TransactionRecord) -> Result<()> {
-    let dir = outbox_dir(root);
-    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
-    let target = dir.join(format!("{:010}.toml", record.id));
-    crate::transaction::atomic::write_atomic(
-        &target,
-        toml::to_string(record)?.as_bytes(),
-        0o600,
-    )
-    .with_context(|| format!("publish transaction observer event {}", target.display()))
 }
 
 #[derive(Debug, Serialize)]
@@ -323,7 +306,7 @@ fn store_failure(root: &Path, failure: &ObserverFailure) -> Result<()> {
         failure.recorded_at,
         std::process::id()
     ));
-    crate::transaction::atomic::write_atomic(
+    crate::atomic::write_atomic(
         &target,
         toml::to_string(failure)?.as_bytes(),
         0o600,

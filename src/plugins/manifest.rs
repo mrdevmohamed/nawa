@@ -143,6 +143,18 @@ pub(crate) struct PluginManifest {
 pub(crate) const HOST_API_VERSION: u32 = 1;
 const MANIFEST_NAME: &str = "nawa-plugin.toml";
 
+/// Built-in command names: a plugin can never shadow any of these
+/// (roadmap §6.6). Keep in sync with the Cmd enum — the
+/// `reserved_commands_cover_every_builtin_cli_command` test in `cli.rs` enforces it.
+pub(crate) const RESERVED_COMMANDS: &[&str] = &[
+    "build", "install", "outdated", "update", "autoremove", "search", "info",
+    "why", "deps", "deps-all", "remove", "query", "list", "files", "owner",
+    "revdep", "repo-create", "repo-update", "sync", "keygen", "sign", "verify", "trust",
+    "upgrade", "rollback", "repolist", "makecache", "repoquery", "clean",
+    "fetch", "recipe", "group", "history", "plugin", "service", "config", "init",
+    "completions", "sandbox-init", "sandbox-probe", "__complete_pkgs", "help",
+];
+
 impl PluginManifest {
     /// Parse and fully validate a manifest. `approved_dir` is the discovery
     /// directory the manifest came from: a system plugin's executable must
@@ -227,7 +239,7 @@ impl PluginManifest {
             if !crate::db::valid_name(c) {
                 bail!("plugin {} registers an invalid command name {c:?}", p.id);
             }
-            if crate::cli::RESERVED_COMMANDS.contains(&c.as_str()) {
+            if RESERVED_COMMANDS.contains(&c.as_str()) {
                 bail!(
                     "plugin command {c:?} shadows a built-in nawa command — built-ins always win"
                 );

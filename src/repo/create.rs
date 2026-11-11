@@ -183,7 +183,7 @@ pub(crate) fn create_index_with_locations_and_groups(
 /// and a crash cannot lose the directory entry.
 pub(crate) fn write_index_atomic(index: &Index, out: &Path) -> Result<()> {
     let raw = toml::to_string_pretty(index)?;
-    crate::transaction::atomic::write_atomic(out, raw.as_bytes(), 0o644)
+    crate::atomic::write_atomic(out, raw.as_bytes(), 0o644)
         .with_context(|| format!("activate index {}", out.display()))
 }
 

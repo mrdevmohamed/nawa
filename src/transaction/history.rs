@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::db::{self, Entry};
-use super::atomic;
+use crate::atomic;
 
 pub(crate) const SCHEMA_VERSION: u32 = 1;
 

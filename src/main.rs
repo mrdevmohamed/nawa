@@ -4,9 +4,11 @@
 mod archive;
 mod artifact;
 mod assets;
+mod atomic;
 mod build;
 mod buildenv;
 mod cli;
+mod checksum;
 mod closure;
 mod color;
 mod output;
@@ -20,6 +22,7 @@ mod error;
 mod fetch;
 mod fetchrun;
 mod fswalk;
+mod glob;
 mod groups;
 mod humanize;
 mod install;
@@ -45,6 +48,7 @@ mod sys;
 #[cfg(test)]
 mod testutil;
 mod transaction;
+mod undo;
 mod unique;
 mod upgrade;
 mod version;
@@ -487,10 +491,10 @@ fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
                 crate::nawa_info_stderr!("recovered: {note}");
             }
             match action {
-                None => transaction::undo::print_history(&ctx.root, limit.unwrap_or(20)),
-                Some(HistoryCmd::List) => transaction::undo::print_history(&ctx.root, limit.unwrap_or(20)),
-                Some(HistoryCmd::Info { id }) => transaction::undo::print_info(&ctx.root, id),
-                Some(HistoryCmd::Undo { id, yes }) => transaction::undo::history_undo(&ctx.root, id, yes),
+                None => undo::print_history(&ctx.root, limit.unwrap_or(20)),
+                Some(HistoryCmd::List) => undo::print_history(&ctx.root, limit.unwrap_or(20)),
+                Some(HistoryCmd::Info { id }) => undo::print_info(&ctx.root, id),
+                Some(HistoryCmd::Undo { id, yes }) => undo::history_undo(&ctx.root, id, yes),
             }
         }
         Cmd::Service { action } => match action {
@@ -598,20 +602,6 @@ fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn glob_matching() {
-        assert!(glob_match("*", "anything"));
-        assert!(glob_match("gz*", "gzip"));
-        assert!(!glob_match("gz*", "zstd"));
-        assert!(!glob_match("z?d", "zstd")); // 4 chars vs 3
-        assert!(glob_match("z?d", "zad"));
-        assert!(glob_match("*std*", "zstd"));
-        assert!(glob_match("GZ*", "gzip"), "case-insensitive");
-        assert!(glob_match("zstd", "zstd"));
-        assert!(!glob_match("", "zstd"));
-        assert!(glob_match("", ""));
-    }
 
     #[test]
     fn date_formatting() {

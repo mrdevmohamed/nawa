@@ -35,7 +35,6 @@ use std::path::{Path, PathBuf};
 use std::os::unix::fs::PermissionsExt;
 
 pub(crate) mod cache;
-pub(crate) mod checksum;
 pub(crate) mod extract;
 pub(crate) mod http;
 pub(crate) mod local;
@@ -51,7 +50,7 @@ pub(crate) use cache::{
 #[allow(unused_imports)]
 pub(crate) use cache::{CacheLock, lock_digest_entry, unique_part_path};
 #[allow(unused_imports)]
-pub(crate) use checksum::{sha256_of_file, verify_sha256};
+pub(crate) use crate::checksum::{sha256_of_file, verify_sha256};
 #[allow(unused_imports)]
 pub(crate) use extract::{detect_source_format, extract_source_archive, extract_source_archive_stripped, SourceFormat};
 #[allow(unused_imports)]

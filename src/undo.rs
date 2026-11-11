@@ -8,7 +8,7 @@ use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use super::history::{PackageState, StepAction, TransactionRecord, TxStatus};
+use crate::transaction::history::{PackageState, StepAction, TransactionRecord, TxStatus};
 
 /// What undo will do to one package.
 #[derive(Debug, Clone, PartialEq)]
@@ -54,7 +54,7 @@ pub(crate) struct UndoPlan {
 /// mutation. Must be called while holding the exclusive db lock.
 pub(crate) fn plan_undo(root: &Path, id: u64) -> Result<UndoPlan> {
     let record: TransactionRecord = crate::transaction::history::load_record(root, id)?;
-    if record.schema != super::history::SCHEMA_VERSION {
+    if record.schema != crate::transaction::history::SCHEMA_VERSION {
         bail!("transaction {id} uses unsupported schema {}", record.schema);
     }
     let status = record.status()?;
@@ -77,7 +77,7 @@ pub(crate) fn plan_undo(root: &Path, id: u64) -> Result<UndoPlan> {
             bail!("transaction {id} was already undone by transaction {}", undo.id);
         }
     }
-    let committed: Vec<&super::history::PackageChange> = record
+    let committed: Vec<&crate::transaction::history::PackageChange> = record
         .package_changes
         .iter()
         .filter(|c| c.status == "committed" || c.status == "committed-hook-failed")
@@ -222,7 +222,7 @@ pub(crate) struct AppliedStep {
 
 pub(crate) fn apply_undo(
     root: &Path, plan: &UndoPlan,
-    recorder: &mut super::context::RecorderHandle<'_>, force: bool,
+    recorder: &mut crate::transaction::context::RecorderHandle<'_>, force: bool,
 ) -> Result<Vec<AppliedStep>> {
     let db = crate::db::Db::new(root);
     let mut applied = Vec::new();
@@ -279,9 +279,9 @@ pub(crate) fn apply_undo(
             }
         }
         let after_entry = db.entry(&step.package)?;
-        let step_status = if !status { super::history::StepStatus::Failed }
-            else if hook.is_some() { super::history::StepStatus::CommittedHookFailed }
-            else { super::history::StepStatus::Committed };
+        let step_status = if !status { crate::transaction::history::StepStatus::Failed }
+            else if hook.is_some() { crate::transaction::history::StepStatus::CommittedHookFailed }
+            else { crate::transaction::history::StepStatus::Committed };
         recorder.step_result(
             step_no, &step.package, action, step_status,
             before_entry.as_ref(), after_entry.as_ref(), "history-undo",
@@ -304,24 +304,24 @@ fn restore_object(root: &Path, object: &Path, digest: &str, reason: crate::db::I
     let prov = crate::artifact::load_provenance(root, digest)?;
     match prov.as_ref().map(|p| p.authentication.as_str()) {
         Some("signed-index") => {
-            super::super::install::verify_retained_index_proof(root, digest)?;
-            super::super::install::install_archive_from_index_proof(
+            crate::install::verify_retained_index_proof(root, digest)?;
+            crate::install::install_archive_from_index_proof(
                 object, root, false, digest, reason, None,
             )?;
             Ok(())
         }
         Some("detached-signature") => {
-            super::super::install::verify_retained_detached_proof(root, digest)?;
-            super::super::install::install_archive_pinned(
+            crate::install::verify_retained_detached_proof(root, digest)?;
+            crate::install::install_archive_pinned(
                 object, root,
-                super::super::install::InstallOpts { force: false, allow_unsigned: true, key: None, reason, pinned_sha: Some(digest) },
+                crate::install::InstallOpts { force: false, allow_unsigned: true, key: None, reason, pinned_sha: Some(digest) },
             )?;
             Ok(())
         }
         _ => {
-            super::super::install::install_archive_pinned(
+            crate::install::install_archive_pinned(
                 object, root,
-                super::super::install::InstallOpts { force: false, allow_unsigned: true, key: None, reason, pinned_sha: Some(digest) },
+                crate::install::InstallOpts { force: false, allow_unsigned: true, key: None, reason, pinned_sha: Some(digest) },
             )?;
             Ok(())
         }
@@ -410,7 +410,7 @@ pub(crate) fn print_info(root: &Path, id: u64) -> Result<()> {
     Ok(())
 }
 
-impl super::history::PackageChange {
+impl crate::transaction::history::PackageChange {
     pub fn artifact_of_after(&self) -> &str {
         self.after.as_ref().map(|a| a.artifact_sha256.as_str()).unwrap_or("")
     }
@@ -443,9 +443,9 @@ pub(crate) fn history_undo(root: &Path, id: u64, yes: bool) -> Result<()> {
     if !yes {
         crate::confirm::confirm(&format!("nawa: undo transaction {id}?"), false)?;
     }
-    let mut op = super::context::begin_operation(
+    let mut op = crate::transaction::context::begin_operation(
         root,
-        super::context::OperationCommand::HistoryUndo,
+        crate::transaction::context::OperationCommand::HistoryUndo,
         &[],
         &[],
     )?;
@@ -458,7 +458,7 @@ pub(crate) fn history_undo(root: &Path, id: u64, yes: bool) -> Result<()> {
     match result {
         Ok(_) => {
             op.finish(None)?;
-            super::history::mark_undone_by(root, id, undo_id)?;
+            crate::transaction::history::mark_undone_by(root, id, undo_id)?;
             crate::nawa_info!("transaction {id} undone (recorded as transaction {undo_id})");
             Ok(())
         }

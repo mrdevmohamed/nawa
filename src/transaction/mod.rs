@@ -11,12 +11,11 @@
 //! the installer uses) — no second lock, no lock-ordering cycle. Builds and
 //! downloads stay outside the lock, exactly as before.
 
-pub(crate) mod atomic;
 pub(crate) mod context;
 pub(crate) mod history;
 pub(crate) mod journal;
+pub(crate) mod outbox;
 pub(crate) mod recovery;
-pub(crate) mod undo;
 
 // The full module surface is re-exported for the CLI layers; individual
 // items may be consumed only by later roadmap phases.

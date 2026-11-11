@@ -29,7 +29,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Read;
 use std::path::Path;
 
-use crate::commands::glob_match;
+use crate::glob::glob_match;
 use crate::db::Db;
 use crate::install::{exists_in_root, resolve_in_root};
 use crate::lint::{self, ElfInfo};

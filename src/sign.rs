@@ -125,7 +125,7 @@ pub(crate) fn load_verify_key(path: &Path) -> Result<VerifyingKey> {
 /// Sign `file` (hash + sign) and write `<file>.sig`. Returns the sig path.
 pub(crate) fn sign(file: &Path, key_path: &Path) -> Result<PathBuf> {
     let sk = load_signing_key(key_path)?;
-    let hash = crate::fetch::sha256_of_file(file)?;
+    let hash = crate::checksum::sha256_of_file(file)?;
     let msg = format!("{DOMAIN}{hash}");
     let sig = sk.sign(msg.as_bytes());
     let sig_path = sig_path_for(file);
@@ -135,7 +135,7 @@ pub(crate) fn sign(file: &Path, key_path: &Path) -> Result<PathBuf> {
         hex::encode(sig.to_bytes()),
         hex::encode(sk.verifying_key().to_bytes()),
     );
-    crate::transaction::atomic::write_atomic(&sig_path, body.as_bytes(), 0o644)
+    crate::atomic::write_atomic(&sig_path, body.as_bytes(), 0o644)
         .with_context(|| format!("activate signature {}", sig_path.display()))?;
     Ok(sig_path)
 }
@@ -179,7 +179,7 @@ pub(crate) fn read_sig_file(path: &Path) -> Result<SigFile> {
 
 /// Verify `file` against one key. Recomputes sha256 (integrity + authenticity).
 pub(crate) fn verify(file: &Path, key: &VerifyingKey, sig: &Signature) -> Result<()> {
-    let hash = crate::fetch::sha256_of_file(file)?;
+    let hash = crate::checksum::sha256_of_file(file)?;
     verify_hash(&hash, key, sig)
 }
 

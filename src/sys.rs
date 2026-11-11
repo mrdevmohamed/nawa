@@ -270,3 +270,9 @@ pub(crate) fn sync_make_cloexec() {
     let fd = unsafe { BorrowedFd::borrow_raw(SYNC_FD) };
     let _ = rustix::io::fcntl_setfd(fd, rustix::io::FdFlags::CLOEXEC);
 }
+
+/// Is an archive built for `arch` usable on this machine?
+pub(crate) fn arch_fits(arch: &str) -> bool {
+    let host = std::env::var("NAWA_ARCH").unwrap_or_else(|_| std::env::consts::ARCH.to_string());
+    arch.is_empty() || matches!(arch, "any" | "noarch" | "all") || arch == host
+}

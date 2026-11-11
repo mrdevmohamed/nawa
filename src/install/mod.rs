@@ -1083,11 +1083,11 @@ mod tests {
         assert_eq!(records[0].package_changes[0].action, "restore");
         assert_eq!(records[0].package_changes[0].source, "rollback");
 
-        let plan = crate::transaction::undo::plan_undo(&root, records[0].id).unwrap();
+        let plan = crate::undo::plan_undo(&root, records[0].id).unwrap();
         assert_eq!(plan.steps.len(), 1);
         assert!(matches!(
             &plan.steps[0].action,
-            crate::transaction::undo::UndoAction::RestorePrevious { .. }
+            crate::undo::UndoAction::RestorePrevious { .. }
         ));
         let _ = std::fs::remove_dir_all(&base);
     }
