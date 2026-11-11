@@ -159,7 +159,8 @@ fn main() {
         }
     };
     let ctx = Ctx::from_config(&cfg);
-    let run_transaction_hooks = should_run_post_transaction_hooks(&cmd)\n        && std::env::var_os("NAWA_POST_TRANSACTION_HOOKS_RUNNING").is_none();
+    let run_transaction_hooks = should_run_post_transaction_hooks(&cmd)
+        && std::env::var_os("NAWA_POST_TRANSACTION_HOOKS_RUNNING").is_none();
     let result = run(&ctx, cmd);
     // Distribution-provided post-transaction triggers (for example, MIME and
     // desktop application cache rebuilds) run once after the package command
