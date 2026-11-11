@@ -1,5 +1,6 @@
 //! install / remove / update / autoremove / outdated handlers and the plan runner.
 
+use crate::sys::arch_fits;
 use crate::*;
 
 pub(crate) fn cmd_install(
@@ -229,12 +230,6 @@ impl Sourcing {
             }
         }
     }
-}
-
-/// Is an archive built for `arch` usable on this machine?
-pub(crate) fn arch_fits(arch: &str) -> bool {
-    let host = std::env::var("NAWA_ARCH").unwrap_or_else(|_| std::env::consts::ARCH.to_string());
-    arch.is_empty() || matches!(arch, "any" | "noarch" | "all") || arch == host
 }
 
 /// Open the configured repository according to the install mode. A repository

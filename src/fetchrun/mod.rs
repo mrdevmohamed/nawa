@@ -68,7 +68,7 @@ use anyhow::{bail, Context, Result};
 #[allow(unused_imports)]
 use sha2::{Digest, Sha256};
 
-use crate::build::BuildOpts;
+use crate::buildenv::BuildOpts;
 use crate::recipe::Recipe;
 
 use self::cargo::isolated_cargo_paths;

@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-use super::atomic;
+use crate::atomic;
 use super::history::{PackageState, SCHEMA_VERSION};
 
 /// `<root>/var/lib/nawa/history/journal/<id>/`

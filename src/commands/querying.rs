@@ -1,5 +1,6 @@
 //! read-only query commands: search, info, why, deps, query, files, owner.
 
+use crate::glob::glob_match;
 use crate::*;
 
 pub(crate) fn cmd_search(ctx: &Ctx, term: &str, glob: bool) -> Result<()> {
@@ -496,20 +497,3 @@ pub(crate) fn cmd_complete_pkgs(ctx: &Ctx) -> Result<()> {
 
 // ---- presentation helpers (unit-tested below) ------------------------------
 
-/// Case-insensitive glob with `*` (any run) and `?` (any single char),
-/// anchored at both ends — `nawa search --glob`.
-pub(crate) fn glob_match(pattern: &str, text: &str) -> bool {
-    let p: Vec<char> = pattern.to_lowercase().chars().collect();
-    let t: Vec<char> = text.to_lowercase().chars().collect();
-    fn rec(p: &[char], t: &[char]) -> bool {
-        match (p.first(), t.first()) {
-            (None, None) => true,
-            (None, Some(_)) => false,
-            (Some('*'), _) => rec(&p[1..], t) || (!t.is_empty() && rec(p, &t[1..])),
-            (Some('?'), Some(_)) => rec(&p[1..], &t[1..]),
-            (Some(&c), Some(&x)) if c == x => rec(&p[1..], &t[1..]),
-            _ => false,
-        }
-    }
-    rec(&p, &t)
-}

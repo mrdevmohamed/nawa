@@ -17,7 +17,7 @@
 //! | `closure`  | the root is an assembled build root, not the live system     |
 
 use anyhow::{bail, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Isolation level for a build (see the module docs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -452,5 +452,82 @@ mod tests {
             .as_secs();
         assert_eq!(source_date_epoch_from_files(&d).unwrap(), expect);
         let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+/// What to do with a recipe's `[build] check` section (its test suite).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CheckMode {
+    /// Skip it (default — test suites are slow and some, like glibc's, have
+    /// known failures).
+    Off,
+    /// Run it after `compile`; a failure aborts the build.
+    Fatal,
+    /// Run it after `compile`; a failure only prints a warning.
+    Warn,
+}
+
+
+#[derive(Debug, Clone)]
+pub(crate) struct BuildOpts {
+    pub jobs: u32,
+    pub builddir: PathBuf,
+    pub outdir: PathBuf,
+    /// Extra environment for every build section (from the build profile).
+    pub env: Vec<(String, String)>,
+    pub check: CheckMode,
+    // ---- isolation (docs/design/build-isolation.md) ----------------------
+    pub isolation: Isolation,
+    /// Per-section wall-clock limit; only enforced inside the sandbox.
+    pub timeout_secs: u64,
+    /// `[sandbox] network = true` is not enough — the user must pass this.
+    pub allow_network: bool,
+    /// Continue when the host kernel refuses an isolation feature.
+    pub allow_degraded: bool,
+    /// Target root (trust store for closure archive verification).
+    pub root: PathBuf,
+    /// Recipes root (closure resolution).
+    pub recipes_root: PathBuf,
+    /// Accept unsigned dependency archives when trust keys exist.
+    pub allow_unsigned: bool,
+    /// Effective profile flags, for the build id.
+    pub profile_flags: String,
+    /// Opt-in (`nawa build --use-cache`, §7/§10 Phase 5): when an archive for
+    /// this package already exists and its recorded `build_id` matches the
+    /// one the current inputs would produce, skip the build entirely.
+    /// The id covers the recipe bytes, source sha256, closure archive set
+    /// and profile flags — not the wall clock, not the environment.
+    pub use_cache: bool,
+    /// Refuse every download instead of opening a connection (`--offline`,
+    /// `NAWA_OFFLINE`; fetch-phase.md §12/§15). Missing inputs are reported
+    /// with the command that populates them. A recipe that asks for
+    /// `[sandbox] network = true` contradicts this and is rejected.
+    pub offline: bool,
+    /// Post-install slimming (strip, cleanup, `-doc`/`-lang` split); see
+    /// `slim.rs`. On by default; a recipe can opt out of single passes.
+    pub slim: bool,
+}
+
+
+impl Default for BuildOpts {
+    fn default() -> Self {
+        BuildOpts {
+            jobs: 1,
+            builddir: PathBuf::from("build"),
+            outdir: PathBuf::from("build/out"),
+            env: vec![],
+            check: CheckMode::Off,
+            isolation: Isolation::None,
+            timeout_secs: 0,
+            allow_network: false,
+            allow_degraded: false,
+            root: PathBuf::from("/"),
+            recipes_root: PathBuf::from("recipes"),
+            allow_unsigned: false,
+            profile_flags: String::new(),
+            use_cache: false,
+            offline: false,
+            slim: true,
+        }
     }
 }

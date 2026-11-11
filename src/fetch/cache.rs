@@ -6,7 +6,7 @@ use std::fs::{File, OpenOptions};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-use super::checksum::verify_sha256;
+use crate::checksum::verify_sha256;
 use super::http::{check_offline, download, offline};
 
 pub(crate) fn digest_cache_dir(src_cache: &Path) -> PathBuf {

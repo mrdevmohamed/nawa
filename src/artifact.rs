@@ -215,7 +215,7 @@ pub(crate) fn verify_object_file(path: &Path, digest: &str) -> Result<()> {
     if md.file_type().is_symlink() || !md.is_file() {
         bail!("object {digest} is not a regular file — refusing to follow it");
     }
-    let got = crate::fetch::sha256_of_file(path)?;
+    let got = crate::checksum::sha256_of_file(path)?;
     if got != digest {
         bail!(
             "cached object {digest} is corrupt (actual digest {got}) — refusing to use it"
@@ -238,7 +238,7 @@ pub(crate) fn store_verified_copy(root: &Path, source: &Path, expected: Option<&
 /// verifying it (roadmap §4.4 compatibility lookup). The legacy file is left
 /// in place. Returns the digest when the import succeeded.
 pub(crate) fn import_legacy(root: &Path, legacy_path: &Path) -> Result<Option<String>> {
-    let digest = match crate::fetch::sha256_of_file(legacy_path) {
+    let digest = match crate::checksum::sha256_of_file(legacy_path) {
         Ok(d) => d,
         Err(_) => return Ok(None), // unreadable legacy entry: leave it alone
     };
@@ -513,7 +513,7 @@ pub(crate) fn retain_detached_signature(
         .join(format!("{digest}.detached.sig"));
     std::fs::copy(signature_source, &sig_dest)
         .with_context(|| format!("retain detached signature {}", signature_source.display()))?;
-    let sig_sha = crate::fetch::sha256_of_file(&sig_dest)?;
+    let sig_sha = crate::checksum::sha256_of_file(&sig_dest)?;
     let mut updated = prov;
     updated.signature = Some(SignatureProof {
         signature_sha256: sig_sha,
@@ -633,7 +633,7 @@ mod tests {
         let base = tmpdir("publish");
         let root = base.join("root");
         let src = write_source(&base, b"archive-bytes-v1");
-        let digest = crate::fetch::sha256_of_file(&src).unwrap();
+        let digest = crate::checksum::sha256_of_file(&src).unwrap();
 
         let (path1, d1) = store_verified_copy(&root, &src, None).unwrap();
         assert_eq!(d1, digest);
@@ -739,7 +739,7 @@ mod tests {
         let base = tmpdir("legacy");
         let root = base.join("root");
         let src = write_source(&base, b"legacy payload");
-        let digest = crate::fetch::sha256_of_file(&src).unwrap();
+        let digest = crate::checksum::sha256_of_file(&src).unwrap();
         let imported = import_legacy(&root, &src).unwrap();
         assert_eq!(imported.as_deref(), Some(digest.as_str()));
         assert!(object_path(&root, &digest).unwrap().exists());

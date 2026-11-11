@@ -58,7 +58,7 @@ pub(crate) fn save(root: &Path, record: &MembershipRecord) -> Result<()> {
     }
     let path = record_path(root, &record.group_id)?;
     let bytes = toml::to_string_pretty(record)?;
-    crate::transaction::atomic::write_atomic(&path, bytes.as_bytes(), 0o644)
+    crate::atomic::write_atomic(&path, bytes.as_bytes(), 0o644)
         .with_context(|| format!("publish membership {}", path.display()))
 }
 

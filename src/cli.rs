@@ -551,17 +551,6 @@ pub(crate) enum Cmd {
     External(Vec<OsString>),
 }
 
-/// Built-in command names: a plugin can never shadow any of these
-/// (roadmap §6.6). Keep in sync with the Cmd enum.
-pub(crate) const RESERVED_COMMANDS: &[&str] = &[
-    "build", "install", "outdated", "update", "autoremove", "search", "info",
-    "why", "deps", "deps-all", "remove", "query", "list", "files", "owner",
-    "revdep", "repo-create", "repo-update", "sync", "keygen", "sign", "verify", "trust",
-    "upgrade", "rollback", "repolist", "makecache", "repoquery", "clean",
-    "fetch", "recipe", "group", "history", "plugin", "service", "config", "init",
-    "completions", "sandbox-init", "sandbox-probe", "__complete_pkgs", "help",
-];
-
 /// Flags shared by the commands that build and install by name.
 #[derive(clap::Args, Clone)]
 pub(crate) struct PlanFlags {
@@ -938,7 +927,7 @@ mod tests {
         for subcommand in command.get_subcommands() {
             let name = subcommand.get_name();
             assert!(
-                RESERVED_COMMANDS.contains(&name),
+                crate::plugins::manifest::RESERVED_COMMANDS.contains(&name),
                 "built-in command {name:?} is missing from RESERVED_COMMANDS"
             );
         }
