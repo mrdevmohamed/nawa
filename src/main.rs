@@ -250,7 +250,10 @@ fn run(ctx: &Ctx, cmd: Cmd, track_package_changes: bool) -> (Result<()>, bool) {
     let snapshot_needs_shared_lock = lock_mode(&cmd).is_none();
     // held until a whole-command transaction completes
     let _db_lock = match lock_mode(&cmd) {
-        Some(mode) => lock::acquire(&ctx.root, mode).ok().flatten(),
+        Some(mode) => match lock::acquire(&ctx.root, mode) {
+            Ok(guard) => guard,
+            Err(error) => return (Err(error), false),
+        },
         None => None,
     };
     // any command that writes under the root first repairs what a killed
@@ -261,7 +264,11 @@ fn run(ctx: &Ctx, cmd: Cmd, track_package_changes: bool) -> (Result<()>, bool) {
         // one-shot, idempotent migration of legacy nanosecond install dates
         // (roadmap §4.3): only clearly-nanosecond values are rewritten, each
         // with a .bak copy of the old desc
-        for note in db::migrate_install_dates(&ctx.root).unwrap_or_default() {
+        let notes = match db::migrate_install_dates(&ctx.root) {
+            Ok(notes) => notes,
+            Err(error) => return (Err(error), false),
+        };
+        for note in notes {
             crate::nawa_info_stderr!("migrated: {note}");
         }
     }
@@ -270,12 +277,20 @@ fn run(ctx: &Ctx, cmd: Cmd, track_package_changes: bool) -> (Result<()>, bool) {
     // Install/update/build commands take short per-step locks, so take a
     // shared lock only while reading each snapshot (never across a full build).
     let package_state_before = if track_package_changes {
-        let _snapshot_lock = if snapshot_needs_shared_lock {
-            lock::acquire(&ctx.root, lock::Mode::Shared).ok().flatten()
+        let snapshot = if snapshot_needs_shared_lock {
+            match lock::acquire(&ctx.root, lock::Mode::Shared) {
+                Ok(_snapshot_lock) => db::Db::new(&ctx.root).installed(),
+                Err(error) => Err(error),
+            }
         } else {
-            None
+            db::Db::new(&ctx.root).installed()
         };
-        db::Db::new(&ctx.root).installed().ok()
+        match snapshot {
+            Ok(state) => Some(state),
+            Err(error) => {
+                return (Err(error.context("read installed package state before command")), false);
+            }
+        }
     } else {
         None
     };
@@ -284,7 +299,7 @@ fn run(ctx: &Ctx, cmd: Cmd, track_package_changes: bool) -> (Result<()>, bool) {
 
     let package_state_changed = match package_state_before {
         Some(before) => {
-            let after = if snapshot_needs_shared_lock {
+            let snapshot = if snapshot_needs_shared_lock {
                 match lock::acquire(&ctx.root, lock::Mode::Shared) {
                     Ok(_snapshot_lock) => db::Db::new(&ctx.root).installed(),
                     Err(error) => Err(error),
@@ -292,7 +307,7 @@ fn run(ctx: &Ctx, cmd: Cmd, track_package_changes: bool) -> (Result<()>, bool) {
             } else {
                 db::Db::new(&ctx.root).installed()
             };
-            match after {
+            match snapshot {
                 Ok(after) => installed_package_payload_changed(&before, &after),
                 Err(error) => {
                     crate::nawa_warn!(
@@ -301,12 +316,6 @@ fn run(ctx: &Ctx, cmd: Cmd, track_package_changes: bool) -> (Result<()>, bool) {
                     true
                 }
             }
-        }
-        None if track_package_changes => {
-            crate::nawa_warn!(
-                "could not read installed package state before command; running transaction triggers conservatively"
-            );
-            true
         }
         None => false,
     };
