@@ -186,7 +186,7 @@ pub(crate) fn run_post_transaction_hooks(root: &Path) -> Result<()> {
 
         // Prevent a trigger that invokes Nawa from recursively dispatching
         // the same system triggers again.
-        let guarded_script = format!("export NAWA_POST_TRANSACTION_HOOKS_RUNNING=1\\n{script}");
+        let guarded_script = format!("export NAWA_POST_TRANSACTION_HOOKS_RUNNING=1\n{script}");
         if let Err(error) = run_hook(&format!("transaction trigger {name}"), &guarded_script, root) {
             failures.push(format!("{name}: {error:#}"));
         }
@@ -212,15 +212,15 @@ mod transaction_trigger_tests {
         let base = tmpdir("transaction-triggers");
         let directory = base.join("usr/lib/nawa/transaction-hooks.d");
         std::fs::create_dir_all(&directory).unwrap();
-        std::fs::write(directory.join("20-late.sh"), "true\\n").unwrap();
-        std::fs::write(directory.join("10-early.sh"), "true\\n").unwrap();
-        std::fs::write(directory.join(".disabled.sh"), "true\\n").unwrap();
-        std::fs::write(directory.join("README"), "not a trigger\\n").unwrap();
+        std::fs::write(directory.join("20-late.sh"), "true\n").unwrap();
+        std::fs::write(directory.join("10-early.sh"), "true\n").unwrap();
+        std::fs::write(directory.join(".disabled.sh"), "true\n").unwrap();
+        std::fs::write(directory.join("README"), "not a trigger\n").unwrap();
         std::fs::create_dir_all(directory.join("99-directory.sh")).unwrap();
 
         let found = transaction_trigger_scripts(&base).unwrap();
         let names: Vec<_> = found.into_iter().map(|(name, _)| name).collect();
-        assert_eq!(names, ["10-early.sh", "20-late.sh"]);
+        assert_eq!(names, vec!["10-early.sh".to_string(), "20-late.sh".to_string()]);
         let _ = std::fs::remove_dir_all(base);
     }
 
