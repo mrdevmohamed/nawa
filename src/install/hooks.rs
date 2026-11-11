@@ -129,6 +129,44 @@ pub(crate) fn load_hooks(db: &Db, name: &str) -> archive::Hooks {
         .unwrap_or_default()
 }
 
+/// Run every distinct installed-package post-transaction hook once, after a
+/// package-changing Nawa command has released its transaction lock. Package
+/// triggers are distribution-neutral: a package can use them to rebuild
+/// shared system databases without making every other recipe repeat the same
+/// post-install command.
+///
+/// The exclusive lock prevents another Nawa process from removing a trigger
+/// provider while its script is running. Hooks execute in the target root
+/// using the same live-system/chroot rules as ordinary package hooks.
+pub(crate) fn run_post_transaction_hooks(root: &Path) -> Result<()> {
+    let _lock = crate::lock::acquire(root, crate::lock::Mode::Exclusive)?;
+    let db = Db::new(root);
+    let mut scripts = std::collections::BTreeMap::<String, String>::new();
+
+    for entry in db.installed()? {
+        let script = load_hooks(&db, &entry.name).post_transaction;
+        if !script.trim().is_empty() {
+            scripts.entry(script).or_insert(entry.name);
+        }
+    }
+
+    let mut failures = Vec::new();
+    for (script, package) in scripts {
+        if let Err(error) = run_hook("post_transaction", &script, root) {
+            failures.push(format!("{package}: {error:#}"));
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "one or more post-transaction hooks failed: {}",
+            failures.join("; ")
+        ))
+    }
+}
+
 /// Does `path` exist as seen from inside a chroot at `root`? Symlinks are
 /// resolved relative to `root` (an absolute target like `/usr/bin` means
 /// `root/usr/bin`, not the host's), unlike `root.join(path).exists()`, which
