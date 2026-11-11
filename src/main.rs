@@ -252,6 +252,7 @@ fn run(ctx: &Ctx, cmd: Cmd, track_package_changes: bool) -> (Result<()>, bool) {
     // makes the comparison describe only changes made by this invocation.
     let outcome = (|| -> Result<(Result<()>, bool)> {
         // held until the command and its post-state snapshot are complete
+        let snapshot_needs_shared_lock = lock_mode(&cmd).is_none();
         let _db_lock = match lock_mode(&cmd) {
             Some(mode) => lock::acquire(&ctx.root, mode)?,
             None => None,
@@ -272,6 +273,11 @@ fn run(ctx: &Ctx, cmd: Cmd, track_package_changes: bool) -> (Result<()>, bool) {
         // exclusive package lock prevents another Nawa process from changing the
         // database between these snapshots.
         let package_state_before = if track_package_changes {
+            let _snapshot_lock = if snapshot_needs_shared_lock {
+                lock::acquire(&ctx.root, lock::Mode::Shared)?
+            } else {
+                None
+            };
             Some(db::Db::new(&ctx.root).installed()?)
         } else {
             None
@@ -624,15 +630,25 @@ fn run(ctx: &Ctx, cmd: Cmd, track_package_changes: bool) -> (Result<()>, bool) {
             }
         };
         let package_state_changed = match package_state_before {
-            Some(before) => match db::Db::new(&ctx.root).installed() {
-                Ok(after) => installed_package_payload_changed(&before, &after),
-                Err(error) => {
-                    // A damaged post-state database must not suppress maintenance
-                    // after a possibly partial package transaction.
-                    crate::nawa_warn!(
-                        "could not compare installed packages after command ({error:#}); running transaction triggers conservatively"
-                    );
-                    true
+            Some(before) => {
+                let after = if snapshot_needs_shared_lock {
+                    match lock::acquire(&ctx.root, lock::Mode::Shared) {
+                        Ok(_snapshot_lock) => db::Db::new(&ctx.root).installed(),
+                        Err(error) => Err(error),
+                    }
+                } else {
+                    db::Db::new(&ctx.root).installed()
+                };
+                match after {
+                    Ok(after) => installed_package_payload_changed(&before, &after),
+                    Err(error) => {
+                        // A damaged post-state database must not suppress maintenance
+                        // after a possibly partial package transaction.
+                        crate::nawa_warn!(
+                            "could not compare installed packages after command ({error:#}); running transaction triggers conservatively"
+                        );
+                        true
+                    }
                 }
             },
             None => false,
