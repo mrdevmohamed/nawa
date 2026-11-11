@@ -159,7 +159,24 @@ fn main() {
         }
     };
     let ctx = Ctx::from_config(&cfg);
+    // Package lifecycle hooks already run under their parent's package
+    // database lock. A nested Nawa invocation from one of those hooks must
+    // not dispatch system triggers before the outer package transaction ends.
+    let hooks_suppressed = std::env::var_os(lock::HELD_ENV).is_some()
+        || std::env::var_os("NAWA_POST_TRANSACTION_HOOKS_RUNNING").is_some();
+    let run_transaction_hooks = should_run_post_transaction_hooks(&cmd) && !hooks_suppressed;
     let result = run(&ctx, cmd);
+    // Distribution-provided post-transaction triggers (for example, MIME and
+    // desktop application cache rebuilds) run once after the package command
+    // releases its lock. Run them even after a partial transaction failure:
+    // packages committed before the failure still changed the live system.
+    if run_transaction_hooks {
+        if let Err(error) = install::hooks::run_post_transaction_hooks(&ctx.root) {
+            crate::nawa_warn!(
+                "post-transaction maintenance failed ({error:#}); it will be retried after the next package transaction"
+            );
+        }
+    }
     // Observer plugins execute only after run() has dropped the package DB
     // lock; a slow notification must never block a package commit.
     plugins::events::dispatch_pending(
@@ -176,6 +193,30 @@ fn main() {
         }
         print_error(e);
         std::process::exit(1);
+    }
+}
+
+
+/// Whether this command can change the installed package set. Post-transaction
+/// triggers are dispatched after these commands, including partial failures.
+fn should_run_post_transaction_hooks(cmd: &Cmd) -> bool {
+    match cmd {
+        Cmd::Build { install, .. } => *install,
+        Cmd::Install { .. }
+        | Cmd::Update { .. }
+        | Cmd::Remove { .. }
+        | Cmd::Rollback { .. } => true,
+        Cmd::Autoremove { dry_run, .. } => !*dry_run,
+        Cmd::Upgrade { dry_run, .. } => !*dry_run,
+        Cmd::Group { action } => match action {
+            GroupCmd::Install { flags, .. } => !flags.dry_run,
+            GroupCmd::Remove { .. } => true,
+            GroupCmd::List | GroupCmd::Info { .. } => false,
+        },
+        Cmd::History { action, .. } => {
+            matches!(action, Some(HistoryCmd::Undo { .. }))
+        }
+        _ => false,
     }
 }
 

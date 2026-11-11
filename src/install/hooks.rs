@@ -129,6 +129,101 @@ pub(crate) fn load_hooks(db: &Db, name: &str) -> archive::Hooks {
         .unwrap_or_default()
 }
 
+/// Return the regular shell scripts installed in Nawa's transaction-trigger
+/// directory, in deterministic filename order. Symlinks are deliberately
+/// ignored so a package cannot redirect execution outside the target root.
+fn transaction_trigger_scripts(root: &Path) -> Result<Vec<(String, PathBuf)>> {
+    // Canonicalize both roots before reading. resolve_in_root() is intended
+    // for paths inside a root, but a chain of ".." symlink components must
+    // never let a package redirect this privileged scan onto the host.
+    let canonical_root = std::fs::canonicalize(root)
+        .with_context(|| format!("resolve target root {}", root.display()))?;
+    let candidate = canonical_root.join("usr/lib/nawa/transaction-hooks.d");
+    let directory = match std::fs::canonicalize(&candidate) {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Vec::new());
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("resolve transaction trigger directory {}", candidate.display())
+            });
+        }
+    };
+    if !directory.starts_with(&canonical_root) {
+        anyhow::bail!(
+            "transaction trigger directory {} escapes target root {}",
+            directory.display(),
+            canonical_root.display()
+        );
+    }
+    if !directory.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let mut scripts = Vec::new();
+    for item in std::fs::read_dir(&directory)
+        .with_context(|| format!("read transaction trigger directory {}", directory.display()))?
+    {
+        let item = item?;
+        if !item.file_type()?.is_file() {
+            continue;
+        }
+        let name = item.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') || !name.ends_with(".sh") {
+            continue;
+        }
+        scripts.push((name, item.path()));
+    }
+    scripts.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(scripts)
+}
+
+/// Run the installed transaction triggers once after a package-changing Nawa
+/// command has released its transaction lock. Distributions and packages can
+/// ship small scripts in /usr/lib/nawa/transaction-hooks.d to rebuild shared
+/// system databases (MIME, desktop applications, icon caches, etc.) without
+/// duplicating a post-install hook in every application recipe.
+///
+/// The exclusive lock prevents another Nawa process from changing the trigger
+/// set while it is running. Scripts run inside the target root using the same
+/// live-system/chroot rules as ordinary package hooks. A failure is returned
+/// to the caller, which reports a warning; the next package transaction
+/// retries the trigger.
+pub(crate) fn run_post_transaction_hooks(root: &Path) -> Result<()> {
+    let _lock = crate::lock::acquire(root, crate::lock::Mode::Exclusive)?;
+    let scripts = transaction_trigger_scripts(root)?;
+    let mut failures = Vec::new();
+
+    for (name, path) in scripts {
+        let script = match std::fs::read_to_string(&path) {
+            Ok(script) if !script.trim().is_empty() => script,
+            Ok(_) => continue,
+            Err(error) => {
+                failures.push(format!("{name}: could not read {}: {error}", path.display()));
+                continue;
+            }
+        };
+
+        // Prevent a trigger that invokes Nawa from recursively dispatching
+        // the same system triggers again.
+        let guarded_script = format!("export NAWA_POST_TRANSACTION_HOOKS_RUNNING=1\n{script}");
+        if let Err(error) = run_hook(&format!("transaction trigger {name}"), &guarded_script, root) {
+            failures.push(format!("{name}: {error:#}"));
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "one or more transaction triggers failed: {}",
+            failures.join("; ")
+        ))
+    }
+}
+
+
 /// Does `path` exist as seen from inside a chroot at `root`? Symlinks are
 /// resolved relative to `root` (an absolute target like `/usr/bin` means
 /// `root/usr/bin`, not the host's), unlike `root.join(path).exists()`, which
@@ -284,3 +379,57 @@ pub(crate) fn chroot_command(root: &Path, sh: &str, script: &str) -> Result<std:
     }
 }
 
+#[cfg(test)]
+mod transaction_trigger_tests {
+    use super::transaction_trigger_scripts;
+    use crate::testutil::tmpdir;
+
+    #[test]
+    fn discovers_regular_shell_triggers_in_sorted_order() {
+        let base = tmpdir("transaction-triggers");
+        let directory = base.join("usr/lib/nawa/transaction-hooks.d");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("20-late.sh"), "true\n").unwrap();
+        std::fs::write(directory.join("10-early.sh"), "true\n").unwrap();
+        std::fs::write(directory.join(".disabled.sh"), "true\n").unwrap();
+        std::fs::write(directory.join("README"), "not a trigger\n").unwrap();
+        std::fs::create_dir_all(directory.join("99-directory.sh")).unwrap();
+
+        let found = transaction_trigger_scripts(&base).unwrap();
+        let names: Vec<_> = found.into_iter().map(|(name, _)| name).collect();
+        assert_eq!(names, vec!["10-early.sh".to_string(), "20-late.sh".to_string()]);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn missing_trigger_directory_is_a_noop() {
+        let base = tmpdir("transaction-triggers-absent");
+        assert!(transaction_trigger_scripts(&base).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_trigger_directory_symlink_that_escapes_target_root() {
+        use std::os::unix::fs::symlink;
+
+        let base = tmpdir("transaction-triggers-escape");
+        let root = base.join("root");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(root.join("usr/lib/nawa")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("evil.sh"), "true\\n").unwrap();
+        symlink(
+            &outside,
+            root.join("usr/lib/nawa/transaction-hooks.d"),
+        )
+        .unwrap();
+
+        let error = transaction_trigger_scripts(&root).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("escapes target root"),
+            "unexpected error: {error:#}"
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+}
