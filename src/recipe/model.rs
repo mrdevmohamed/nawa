@@ -253,6 +253,11 @@ pub(crate) struct Hooks {
     pub pre_remove: String,
     #[serde(default)]
     pub post_remove: String,
+    /// Run once after a package-changing Nawa transaction while this package
+    /// remains installed. This is intended for idempotent system cache
+    /// rebuilds such as the desktop MIME application database.
+    #[serde(default)]
+    pub post_transaction: String,
 }
 
 /// Context used to expand `%{...}` placeholders in build scripts.
