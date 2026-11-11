@@ -95,7 +95,11 @@ Use Nawa's recipe placeholders for paths and build settings. The commonly used p
 
 ## Hooks
 
-The [hooks] table supports `post_install`, `pre_remove`, `post_remove`, and `post_transaction`. The first three run as part of the package's install or removal step. A `post_transaction` hook runs once after a package-changing Nawa command (install, update, upgrade, remove, autoremove, rollback, group changes, or `build --install`) if its package is still installed. It is intended for idempotent shared-database refreshes such as MIME/application caches; duplicate scripts are run only once. Keep hooks small, deterministic, safe to retry, and do not use them to install or remove packages. A failed post-transaction hook is reported as a warning and retried after the next package transaction.
+The [hooks] table supports `post_install`, `pre_remove`, and `post_remove`. These run as part of the package's install or removal step. Keep them small, predictable, and safe to retry. Package transaction records distinguish a committed package step from a hook failure.
+
+### System transaction triggers
+
+A package may install one or more regular `*.sh` scripts in `/usr/lib/nawa/transaction-hooks.d/`. After a package-changing command (install, update, repository upgrade, remove, autoremove, rollback, group changes, or `build --install`), Nawa runs the installed scripts once, in filename order, after the package transaction lock is released. Hidden files, non-shell files, and symlinks are ignored. This mechanism is intended for idempotent shared-database refreshes such as MIME/application caches, icon caches, and similar system-wide indexes. Triggers must be safe to retry and must not invoke Nawa to install or remove packages. A failed trigger is reported as a warning and retried after the next package transaction.
 
 ## Recipe-local assets
 
