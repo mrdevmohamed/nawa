@@ -248,8 +248,9 @@ fn print_error(e: anyhow::Error) {
 }
 
 fn run(ctx: &Ctx, cmd: Cmd, track_package_changes: bool) -> (Result<()>, bool) {
-    // Keep the package DB lock across both snapshots and the command. This
-    // makes the comparison describe only changes made by this invocation.
+    // Commands with whole-operation locks keep them throughout. Commands
+    // that lock only individual install steps use brief shared locks for the
+    // snapshots, without holding a lock across long builds.
     let outcome = (|| -> Result<(Result<()>, bool)> {
         // held until the command and its post-state snapshot are complete
         let snapshot_needs_shared_lock = lock_mode(&cmd).is_none();
@@ -269,9 +270,9 @@ fn run(ctx: &Ctx, cmd: Cmd, track_package_changes: bool) -> (Result<()>, bool) {
                 crate::nawa_info_stderr!("migrated: {note}");
             }
         }
-        // Capture after recovery/migration but before the requested command. The
-        // exclusive package lock prevents another Nawa process from changing the
-        // database between these snapshots.
+        // Capture after recovery/migration but before the requested command.
+        // Snapshot reads are protected by either the command's existing lock
+        // or a short shared lock for commands that lock individual steps.
         let package_state_before = if track_package_changes {
             let _snapshot_lock = if snapshot_needs_shared_lock {
                 lock::acquire(&ctx.root, lock::Mode::Shared)?
