@@ -154,7 +154,7 @@ pub(crate) fn run_post_transaction_hooks(root: &Path) -> Result<()> {
     for (script, package) in scripts {
         // Prevent a trigger that invokes Nawa from recursively dispatching
         // the same post-transaction triggers again.
-        let guarded_script = format!("export NAWA_POST_TRANSACTION_HOOKS_RUNNING=1\\n{script}");
+        let guarded_script = format!("export NAWA_POST_TRANSACTION_HOOKS_RUNNING=1\n{script}");
         if let Err(error) = run_hook("post_transaction", &guarded_script, root) {
             failures.push(format!("{package}: {error:#}"));
         }
