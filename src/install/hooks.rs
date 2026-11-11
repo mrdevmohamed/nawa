@@ -152,7 +152,10 @@ pub(crate) fn run_post_transaction_hooks(root: &Path) -> Result<()> {
 
     let mut failures = Vec::new();
     for (script, package) in scripts {
-        if let Err(error) = run_hook("post_transaction", &script, root) {
+        // Prevent a trigger that invokes Nawa from recursively dispatching
+        // the same post-transaction triggers again.
+        let guarded_script = format!("export NAWA_POST_TRANSACTION_HOOKS_RUNNING=1\\n{script}");
+        if let Err(error) = run_hook("post_transaction", &guarded_script, root) {
             failures.push(format!("{package}: {error:#}"));
         }
     }
