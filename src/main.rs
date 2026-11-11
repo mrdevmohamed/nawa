@@ -288,7 +288,10 @@ fn run(ctx: &Ctx, cmd: Cmd, track_package_changes: bool) -> (Result<()>, bool) {
         match snapshot {
             Ok(state) => Some(state),
             Err(error) => {
-                return (Err(error.context("read installed package state before command")), false);
+                return (
+                    Err(error.context("read installed package state before command")),
+                    false,
+                );
             }
         }
     } else {
