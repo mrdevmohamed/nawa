@@ -169,12 +169,12 @@ fn main() {
     let hooks_suppressed = std::env::var_os(lock::HELD_ENV).is_some()
         || std::env::var_os("NAWA_POST_TRANSACTION_HOOKS_RUNNING").is_some();
     let run_transaction_hooks = should_run_post_transaction_hooks(&cmd) && !hooks_suppressed;
-    let result = run(&ctx, cmd);
+    let (result, package_state_changed) = run(&ctx, cmd, run_transaction_hooks);
     // Distribution-provided post-transaction triggers (for example, MIME and
     // desktop application cache rebuilds) run once after the package command
     // releases its lock. Run them even after a partial transaction failure:
     // packages committed before the failure still changed the live system.
-    if run_transaction_hooks {
+    if run_transaction_hooks && package_state_changed {
         if let Err(error) = install::hooks::run_post_transaction_hooks(&ctx.root) {
             crate::nawa_warn!(
                 "post-transaction maintenance failed ({error:#}); it will be retried after the next package transaction"
@@ -224,6 +224,24 @@ fn should_run_post_transaction_hooks(cmd: &Cmd) -> bool {
     }
 }
 
+/// Compare package payload identity, excluding ownership-only metadata such as
+/// the explicit/dependency/group install reason. Shared cache triggers need to
+/// run only when package payloads were installed, replaced, or removed.
+fn installed_package_payload_changed(before: &[db::Entry], after: &[db::Entry]) -> bool {
+    if before.len() != after.len() {
+        return true;
+    }
+    before.iter().zip(after).any(|(old, new)| {
+        old.name != new.name
+            || old.version != new.version
+            || old.rel != new.rel
+            || old.arch != new.arch
+            || old.install_date != new.install_date
+            || old.size != new.size
+            || old.artifact_sha256 != new.artifact_sha256
+    })
+}
+
 /// `nawa: error: ...` plus indented causes and an optional hint; colors only
 /// on a real terminal (see `diag::render_error`).
 fn print_error(e: anyhow::Error) {
@@ -232,10 +250,14 @@ fn print_error(e: anyhow::Error) {
     output::write_stderr(&rendered);
 }
 
-fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
-    // held until `run` returns
+fn run(ctx: &Ctx, cmd: Cmd, track_package_changes: bool) -> (Result<()>, bool) {
+    let snapshot_needs_shared_lock = lock_mode(&cmd).is_none();
+    // held until a whole-command transaction completes
     let _db_lock = match lock_mode(&cmd) {
-        Some(mode) => lock::acquire(&ctx.root, mode)?,
+        Some(mode) => match lock::acquire(&ctx.root, mode) {
+            Ok(guard) => guard,
+            Err(error) => return (Err(error), false),
+        },
         None => None,
     };
     // any command that writes under the root first repairs what a killed
@@ -246,10 +268,69 @@ fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         // one-shot, idempotent migration of legacy nanosecond install dates
         // (roadmap §4.3): only clearly-nanosecond values are rewritten, each
         // with a .bak copy of the old desc
-        for note in db::migrate_install_dates(&ctx.root)? {
+        let notes = match db::migrate_install_dates(&ctx.root) {
+            Ok(notes) => notes,
+            Err(error) => return (Err(error), false),
+        };
+        for note in notes {
             crate::nawa_info_stderr!("migrated: {note}");
         }
     }
+
+    // Commands with whole-operation locks already have a consistent view.
+    // Install/update/build commands take short per-step locks, so take a
+    // shared lock only while reading each snapshot (never across a full build).
+    let package_state_before = if track_package_changes {
+        let snapshot = if snapshot_needs_shared_lock {
+            match lock::acquire(&ctx.root, lock::Mode::Shared) {
+                Ok(_snapshot_lock) => db::Db::new(&ctx.root).installed(),
+                Err(error) => Err(error),
+            }
+        } else {
+            db::Db::new(&ctx.root).installed()
+        };
+        match snapshot {
+            Ok(state) => Some(state),
+            Err(error) => {
+                return (
+                    Err(error.context("read installed package state before command")),
+                    false,
+                );
+            }
+        }
+    } else {
+        None
+    };
+
+    let command_result = run_command(ctx, cmd);
+
+    let package_state_changed = match package_state_before {
+        Some(before) => {
+            let snapshot = if snapshot_needs_shared_lock {
+                match lock::acquire(&ctx.root, lock::Mode::Shared) {
+                    Ok(_snapshot_lock) => db::Db::new(&ctx.root).installed(),
+                    Err(error) => Err(error),
+                }
+            } else {
+                db::Db::new(&ctx.root).installed()
+            };
+            match snapshot {
+                Ok(after) => installed_package_payload_changed(&before, &after),
+                Err(error) => {
+                    crate::nawa_warn!(
+                        "could not compare installed packages after command ({error:#}); running transaction triggers conservatively"
+                    );
+                    true
+                }
+            }
+        }
+        None => false,
+    };
+
+    (command_result, package_state_changed)
+}
+
+fn run_command(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     match cmd {
         Cmd::Build {
             name,
@@ -599,9 +680,45 @@ fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     }
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_entry(name: &str) -> db::Entry {
+        db::Entry {
+            name: name.to_string(),
+            version: "1.0.0".to_string(),
+            rel: 1,
+            arch: "x86_64".to_string(),
+            reason: "explicit".to_string(),
+            run: vec!["glibc".to_string()],
+            install_date: 1_700_000_000,
+            size: 4096,
+            artifact_sha256: "a".repeat(64),
+        }
+    }
+
+    #[test]
+    fn transaction_triggers_only_follow_installed_payload_changes() {
+        let before = vec![sample_entry("desktop-file-utils")];
+
+        let unchanged = vec![sample_entry("desktop-file-utils")];
+        assert!(!installed_package_payload_changed(&before, &unchanged));
+
+        let mut reason_only = sample_entry("desktop-file-utils");
+        reason_only.reason = "group".to_string();
+        assert!(!installed_package_payload_changed(&before, &[reason_only]));
+
+        assert!(installed_package_payload_changed(&[], &before));
+        assert!(installed_package_payload_changed(&before, &[]));
+
+        let mut upgraded = sample_entry("desktop-file-utils");
+        upgraded.rel = 2;
+        upgraded.install_date += 1;
+        upgraded.artifact_sha256 = "b".repeat(64);
+        assert!(installed_package_payload_changed(&before, &[upgraded]));
+    }
 
     #[test]
     fn date_formatting() {
