@@ -90,6 +90,10 @@ pub(crate) fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
     // In live/env modes the toolchain comes from the host root, not a pinned
     // closure archive. Capture the exact fetch PATH versions before cache lookup.
     let toolchain_identity = crate::fetchrun::build_toolchain_identity(rec, opts.isolation)?;
+    // Cache-only identity (never part of the legacy `.PKGINFO build_id`):
+    // the effective isolation level and, for host-root builds, the C/C++
+    // toolchain the build sections will actually invoke.
+    let host_toolchain_identity = cache::host_toolchain_identity(opts.isolation);
 
     // ---- build_id cache hit (opt-in, --use-cache) ------------------------
     // Everything the build id covers is known before any heavy work: the
@@ -107,7 +111,13 @@ pub(crate) fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
         } else {
             Vec::new()
         };
-        if let Some(hit) = try_cache_hit(rec, opts, &closure_paths, &toolchain_identity)? {
+        if let Some(hit) = try_cache_hit(
+            rec,
+            opts,
+            &closure_paths,
+            &toolchain_identity,
+            &host_toolchain_identity,
+        )? {
             return Ok(hit);
         }
     }
@@ -239,6 +249,7 @@ pub(crate) fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
         assembled.as_ref(),
         staged_assets.as_ref().map(|a| a.digest.as_str()),
         &toolchain_identity,
+        &host_toolchain_identity,
         &slim_report,
     )?;
 
@@ -378,7 +389,7 @@ pub mod sandbox;
 pub mod sections;
 mod stage;
 
-pub(crate) use cache::{build_id_for, try_cache_hit, buildid_sidecar};
+pub(crate) use cache::{build_id_for, buildid_sidecar, cache_id_for, try_cache_hit};
 pub(crate) use sandbox::prepare_sandbox;
 pub(crate) use sections::{diff_archives, run_sections};
 use stage::StagedSource;
