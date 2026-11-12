@@ -3,8 +3,9 @@
 **Status:** proposal, 2026-11-12. Phase 1 (FileJournal identity and the
 combined physical→logical recovery entry point) is implemented on top of
 `faa52ef`; Phase 2 (previous-slot resolver and `nawa rollback` integration) is
-implemented on top of `2ffebe7`. No CLI, package, archive, db, index,
-signature, or transaction record format changed.
+implemented on top of `2ffebe7`; Phase 3 (recovery before every per-step
+transaction) is implemented on top of `4112d1f`. No CLI, package, archive, db,
+index, signature, or transaction record format changed.
 **Scope:** remove the *duplication of truth* between the legacy package undo
 record, the transaction history/WAL, and the physical file journal, while
 preserving every existing command, format and recovery guarantee.
@@ -142,9 +143,10 @@ Recovery: `transaction::recovery::reconcile_incomplete` compares intents with
 the live db. db matches target → committed; db matches precondition → failed;
 neither matches → `needs-recovery`, and the journal is retained.
 
-**Current call-site gap:** `reconcile_incomplete` is only called by
-`cmd_history`. An install/remove/upgrade after a crash does not reconcile the
-logical WAL; it only runs the legacy physical recovery.
+**Pre-Phase-3 call-site gap (closed):** `reconcile_incomplete` was only called
+by `cmd_history`, so an install/remove/upgrade after a crash did not reconcile
+the logical WAL. Phase 3 runs the combined physical→logical pass before every
+command-opened transaction (see §7.2 and §8).
 
 ### 3.3 Physical FileJournal
 
@@ -166,12 +168,16 @@ logical WAL; it only runs the legacy physical recovery.
 - journal with `COMMIT` → delete the backup tree only;
 - `tmp-*` directories → remove (dead staging).
 
-It is called from `main::run` for every exclusive-lock command, and again
-inside `install_archive_payload` and `remove_with`. It is idempotent and
+Before Phase 3 it was called from `main::run` for every exclusive-lock
+command, and again inside `install_archive_payload` and `remove_with`. Phase 3
+now runs the combined pass in `main::run` for whole-command exclusive commands
+and inside each per-step-lock command while holding its short exclusive lock,
+before `begin_operation`; the inner calls are gone. Recovery is idempotent and
 survives torn last lines.
 
-**Current gap:** the FileJournal has no transaction id or step number. A
-physical repair cannot tell the TxWAL which step it belonged to.
+**Pre-Phase-1 gap (closed):** the FileJournal had no transaction id or step
+number, so a physical repair could not tell the TxWAL which step it belonged
+to. The additive `T` line now supplies that identity (§7.1).
 
 ### 3.4 Commit boundaries
 
@@ -205,8 +211,10 @@ slot and a history record. `history undo` does the same through
 | after StepResult, before finish | nothing | `history` reconstructs the final record from intents/results | install committed |
 | after finish, before TxWAL cleanup | nothing | terminal record already final | cleanup on next recovery |
 
-The physical side is safe. The logical side lags until `nawa history` is run,
-and the two sides are not linked.
+This table is the pre-Phase-1/3 baseline. After Phase 3 every mutating command
+runs the combined physical→logical pass before opening its transaction, so the
+logical side no longer waits for a manual `nawa history`, and the `T` line
+links a physical repair to its logical step.
 
 ---
 
@@ -489,19 +497,19 @@ This order is required: reconciliation must see the db **after** any
 
 Run it:
 
-- in `main::run` while holding the exclusive db lock, replacing the current
-  `install::recover_and_report` call;
+- in `main::run` while holding the whole-command exclusive db lock;
+- in each per-step-lock command (`install` by name, `build --install`,
+  `update`, `group install`) while holding the short exclusive lock and
+  **before** `begin_operation`;
 - from `cmd_history` with strict error propagation, preserving today's
   behavior of surfacing a corrupt/unrecoverable history record (main has
   already run the combined pass for this exclusive command, so this is a
   second idempotent check);
-- **not** from `install_archive_payload` or `remove_with`. Those keep their
-  existing physical-only recovery call. Running the logical pass there would
-  be wrong: `begin_operation` writes the current transaction's TxWAL before
-  the per-step exclusive lock is taken, so reconciliation would mistake the
-  live intent for an interrupted one. Phase 3 moves the combined pass to
-  before `begin_operation` for commands that take per-step locks, then removes
-  the inner physical calls.
+- **not** from `install_archive_payload` or `remove_with`. Running the logical
+  pass there would be wrong: `begin_operation` writes the current
+  transaction's TxWAL before the per-step exclusive lock is taken, so
+  reconciliation would mistake the live intent for an interrupted one. Phase 3
+  removed their physical-only calls after adding the pre-transaction pass.
 
 The physical replay is already idempotent and torn-line tolerant. Logical
 reconciliation is idempotent: a missing journal after a partial recovery
@@ -559,9 +567,10 @@ Files: `src/install/journal.rs`, `src/install/payload.rs`,
 - Add `T` to the FileJournal, parse it, and set it from the existing
   `OperationHandle`/`RecorderHandle` identity when the caller has one.
 - Add the top-level combined recovery entry point and call it from `main::run`
-  in place of the install-only recovery. Keep the inner calls physical-only
-  (see §7.2 for why the logical pass must not run during an active
-  operation).
+  in place of the install-only recovery. Phase 1 kept the inner calls
+  physical-only (see §7.2 for why the logical pass must not run during an
+  active operation); Phase 3 removed them after adding the pre-transaction
+  pass.
 - Keep old journal compatibility and the strict `cmd_history` path.
 - Add crash tests: intent only, mid-file move, db snapshot only, post-COMMIT,
   post-result; assert both file state and history status without running
@@ -594,6 +603,17 @@ Files: new `src/install/previous.rs`, `src/install/rollback.rs`,
   tests demonstrate the same target and the same security checks.
 
 ### Phase 3 — Logical recovery on every mutating command
+
+**Status: implemented.** `src/commands/installing.rs`,
+`src/commands/building.rs` and the group-install path run
+`recovery::recover_and_report` immediately after their short exclusive lock
+and before `begin_operation`; whole-command exclusive commands keep the
+`main::run` pass. `install_archive_payload` and `remove_with` no longer run
+their own physical-only recovery, and the now-unused
+`install::journal::recover_and_report` wrapper was removed. A command-level
+test in `tests/by_name.rs` seeds a transaction that committed its db entry but
+has no `StepResult`, runs an unrelated `install <name>`, and checks that the
+record is already reconciled to a committed step before `nawa history` runs.
 
 Files: `src/main.rs`, `src/commands/installing.rs` (or wherever
 `begin_operation` is called), `src/commands/building.rs`,
@@ -727,6 +747,8 @@ Add:
 - `nawa rollback` after `nawa history undo` (both directions, ping-pong);
 - `nawa autoremove`/`remove` crash recovery still works;
 - exclusive-lock command after a killed transaction reconciles history;
+- a per-step-lock `install <name>` reconciles a crashed transaction before
+  opening its own (`tests/by_name.rs`);
 - concurrent processes still serialize through the existing lock (no new
   lock, no new lock order).
 
@@ -777,8 +799,9 @@ involved in any row.
    without measuring the install-path cost.
 7. **One recovery entry point vs direct callers.** Removing the inner
    `recover_and_report` calls changes behavior for internal callers that do
-   not go through `main` (mostly tests). Phase 3 must update those callers
-   explicitly rather than relying on implicit repair.
+   not go through `main` (mostly tests). Phase 3 updated the production
+   callers explicitly; direct internal test callers should run `recover`
+   themselves when they rely on repair.
 8. **Locking across repair.** Combined recovery must stay under the exclusive
    db lock, exactly as the current physical recovery is. Do not introduce a
    second lock or run reconciliation during a shared-lock snapshot read.

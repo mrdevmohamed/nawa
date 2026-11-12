@@ -186,9 +186,10 @@ fn run(ctx: &Ctx, cmd: Cmd, track_package_changes: bool) -> (Result<()>, bool) {
         },
         None => None,
     };
-    // any command that writes under the root first repairs what a killed
-    // nawa left behind; holding the exclusive lock guarantees no live
-    // transaction is mistaken for a dead one
+    // commands that take one exclusive lock for the whole operation repair
+    // what a killed nawa left behind; holding the lock guarantees no live
+    // transaction is mistaken for a dead one. Per-step-lock commands run the
+    // same combined pass before `begin_operation` instead.
     if mode == Some(lock::Mode::Exclusive) {
         recovery::recover_and_report(&ctx.root);
         // one-shot, idempotent migration of legacy nanosecond install dates

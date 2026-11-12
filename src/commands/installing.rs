@@ -22,6 +22,7 @@ use crate::pathutil::is_archive_arg;
 use crate::lock;
 use crate::plan;
 use crate::recipe;
+use crate::recovery;
 use crate::repo;
 use crate::revdep;
 use crate::transaction;
@@ -85,6 +86,10 @@ pub(crate) fn cmd_install_with_why(
         if installed.contains_key(t) && install::hook_needs_retry(&ctx.root, t)? {
             crate::nawa_info!("retrying incomplete post-install hook for {t}");
             let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
+            // repair a killed transaction before touching package state; this
+            // command takes a short lock per transaction instead of one for
+            // the whole command, so `main` cannot do it for us
+            recovery::recover_and_report(&ctx.root);
             install::retry_pending_hook(t, &ctx.root)?;
             // Recipe-backed targets still go through normal source/version
             // selection after the hook is repaired.
@@ -140,6 +145,9 @@ pub(crate) fn cmd_install_with_why(
         // selected package is already present, so keep it visible in history.
         if let Some(id) = group_id.filter(|_| !flags.dry_run) {
             let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
+            // recover before `begin_operation`: its own TxWAL must never be
+            // mistaken for an abandoned transaction
+            recovery::recover_and_report(&ctx.root);
             let mut op = transaction::begin_operation(
                 &ctx.root,
                 transaction::OperationCommand::GroupInstall,
@@ -161,6 +169,9 @@ pub(crate) fn cmd_install_with_why(
         .collect();
     {
         let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
+        // this command locks per install step, so `main` has not run recovery;
+        // do it before the transaction's state and intents exist
+        recovery::recover_and_report(&ctx.root);
         let command = if group_id.is_some() {
             transaction::OperationCommand::GroupInstall
         } else {
@@ -794,6 +805,9 @@ pub(crate) fn cmd_update(
         .collect();
     let mut op = {
         let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
+        // `update` locks per install step; recover before opening its own
+        // transaction so a prior crash cannot be reconciled as this one
+        recovery::recover_and_report(&ctx.root);
         transaction::begin_operation(
             &ctx.root,
             transaction::OperationCommand::Update,

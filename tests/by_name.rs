@@ -111,6 +111,70 @@ fn install_by_name_builds_dependencies_first() {
 }
 
 #[test]
+fn install_recovers_a_crashed_transaction_before_opening_its_own() {
+    let d = scratch("recover-before-op");
+    recipe(&d, "ghost", "1", &[], &[]);
+    recipe(&d, "other", "1", &[], &[]);
+
+    // Simulate a process killed after the package db commit but before the
+    // StepResult: the db entry exists, the TxWAL still has a pending intent,
+    // and the transaction record is still "preparing".
+    let history = d.join("root/var/lib/nawa/history");
+    let ghost = d.join("root/var/lib/nawa/local/ghost");
+    fs::create_dir_all(&ghost).unwrap();
+    fs::write(
+        ghost.join("desc"),
+        "name = \"ghost\"\nversion = \"1\"\nrel = 1\narch = \"x86_64\"\n\
+         reason = \"explicit\"\nrun = []\ninstall_date = 1\nsize = 1\n",
+    )
+    .unwrap();
+    fs::create_dir_all(history.join("transactions")).unwrap();
+    fs::write(
+        history.join("transactions/0000000001.toml"),
+        "schema = 1\nid = 1\ncommand = \"install\"\nstatus = \"preparing\"\nstarted_at = 1\n",
+    )
+    .unwrap();
+    let journal = history.join("journal/0000000001");
+    fs::create_dir_all(journal.join("steps")).unwrap();
+    fs::write(
+        journal.join("state.toml"),
+        "schema = 1\ntx = 1\ncommand = \"install\"\nstarted_at = 1\n",
+    )
+    .unwrap();
+    fs::write(
+        journal.join("steps/intent-0001.toml"),
+        "schema = 1\ntx = 1\nstep = 1\npackage = \"ghost\"\naction = \"install\"\n\n\
+         [target]\nversion = \"1\"\nrel = 1\narch = \"x86_64\"\nreason = \"explicit\"\n",
+    )
+    .unwrap();
+
+    // An unrelated per-step install must reconcile that transaction before
+    // opening its own. `history` must not be the first command to see it.
+    let out = nawa(&d, &["install", "--yes", "other"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "install failed:\n{stderr}");
+    assert!(
+        stderr.contains("recovered: transaction 1 was interrupted"),
+        "install did not report the recovery:\n{stderr}"
+    );
+    let record = fs::read_to_string(history.join("transactions/0000000001.toml")).unwrap();
+    assert!(record.contains("status = \"partial\""), "{record}");
+    assert!(record.contains("name = \"ghost\""), "{record}");
+    assert!(record.contains("status = \"committed\""), "{record}");
+    assert!(!record.contains("preparing"), "{record}");
+
+    let out = nawa(&d, &["history", "info", "1"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "history failed:\n{stderr}");
+    assert!(!stderr.contains("recovered:"), "history had to reconcile again:\n{stderr}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("Status:    partial"), "{text}");
+    assert!(text.contains("ghost: install (committed)"), "{text}");
+    assert!(!journal.exists(), "the reconciled journal must be removed");
+    let _ = fs::remove_dir_all(&d);
+}
+
+#[test]
 fn outdated_update_and_autoremove() {
     let d = scratch("update");
     recipe(&d, "libfoo", "1", &[], &[]);

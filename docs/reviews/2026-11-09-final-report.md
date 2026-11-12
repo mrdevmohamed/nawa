@@ -175,14 +175,16 @@ No breaking changes to CLI commands (`nawa sync/update/upgrade/install/remove/fe
 
 > **Status 2026-11-12:** P0-3 is closed for the extra-bind host surface, P1-4 is closed, and P1-5 was verified as already mitigated. The broader P0-3 question (sandbox binds the live root outside the closure) remains open. P1-2, P1-8 and the P2 duplication list are unchanged. See §7 for commits and current validation.
 >
-> **Status 2026-11-12 (later):** P1-2 has a design
-> (`docs/design/undo-wal-consolidation.md`). Phases 1–2 are implemented:
-> FileJournal identity, one combined physical→logical recovery pass, and the
-> previous-slot resolver used by `nawa rollback`. Phase 3 (per-step-lock
-> recovery) remains.
+> **Status 2026-11-13:** P1-2 has a design
+> (`docs/design/undo-wal-consolidation.md`). Phases 1–3 are implemented:
+> FileJournal identity, one combined physical→logical recovery pass, the
+> previous-slot resolver used by `nawa rollback`, and a pre-`begin_operation`
+> recovery pass for every per-step-lock mutating command. Phase 4 (removing
+> the legacy `desc`/`files` mirror) remains an explicit compatibility
+> decision.
 
 1. **P0-3 — Sandbox trusts live root outside closure** (`Sandbox` only mounts namespaces over live root; `extra_binds` shape validated but not policy-checked). Needs architectural decision, not low-risk. **Update:** the extra-bind host policy is implemented (`463d4fb`); the live-root trust model remains.
-2. **P1-2 — Legacy undo journal vs new transaction WAL duplication** (two sources of truth for "what was installed before"; keep both until WAL undo covers rollback use-case per audit §1). **Update:** Phases 1–2 are implemented (`2ffebe7` plus the Phase 2 work; see §7); Phase 3 remains.
+2. **P1-2 — Legacy undo journal vs new transaction WAL duplication** (two sources of truth for "what was installed before"; keep both until WAL undo covers rollback use-case per audit §1). **Update:** Phases 1–3 are implemented (`2ffebe7`, `4112d1f`, plus the Phase 3 work; see §7).
 3. **P1-4 — Build isolation cache identity** misses `sandbox.extra_binds`, `assets` digest, toolchain version for non-closure isolation (`build_id_for` coverage). **Closed** by `53390ed` (assets and isolation + host toolchain; see §7).
 4. **P1-5 — `wipe_work` recursion + symlink escape** under overlayfs `sb/layer-work` (mode 000) — hardening with `O_NOFOLLOW`/`symlink_metadata` guard (code already uses `symlink_metadata` and treats symlinks as files; audit noted comment but code may still be vulnerable to symlink-to-dir escapes in overlayfs). **Verified mitigated** (see §7).
 5. **P1-8 — Performance:** repository parsing repeated (`fetch::load_index` called per repo file in `repositories.rs` + `sync.rs`); `revdep::scan` reads every ELF twice; `lint→slim→archive` still walk separately (fswalk helper centralises pattern but does not produce a single walk reused across passes because passes mutate the tree). Quadratic `deps` resolution.
@@ -227,7 +229,7 @@ Assets, fetch-schema versions and Go/Cargo versions were already inputs. The opt
 
 `wipe_tree` already uses `symlink_metadata` and treats non-directories (including symlinks) as files, so it never follows a symlink-to-directory escape. No code change was needed; the earlier audit line is retained for history.
 
-### Undo/WAL consolidation: Phases 1–2 (`docs/design/undo-wal-consolidation.md`)
+### Undo/WAL consolidation: Phases 1–3 (`docs/design/undo-wal-consolidation.md`)
 
 The P1-2 design is in `docs/design/undo-wal-consolidation.md`. Phase 1 links
 the physical FileJournal to the logical transaction/step that owns it with an
@@ -238,11 +240,10 @@ semantics and the legacy `undo/<name>/{desc,files}` mirror are unchanged.
 
 The Phase 1 unit test forces a crash after the db entry was replaced and proves
 the physical pass restores both files and db before reconciliation classifies
-the step as failed; a second pass is a no-op. The logical pass intentionally
-does not run inside `install_archive_payload`/`remove_with` (those run after
-`begin_operation` wrote the live TxWAL). Phase 3 will move the combined call
-before `begin_operation` for commands that use per-step locks, then remove the
-inner physical calls.
+the step as failed; a second pass is a no-op. The logical pass does not run
+inside `install_archive_payload`/`remove_with` (those run after
+`begin_operation` wrote the live TxWAL); their physical-only calls were
+removed in Phase 3.
 
 Phase 2 adds `src/install/previous.rs`: `nawa rollback` now resolves the
 one-slot-back target from transaction history when possible, keeps the legacy
@@ -254,6 +255,16 @@ preparing/running/needs-recovery/interrupted transaction or a pending journal
 intent. Tests cover every documented legacy edge, a history-only root, the
 legacy no-digest cache path, `/etc` config preservation, retained signed-index
 proof verification, and `history undo`-then-rollback ping-pong.
+
+Phase 3 runs the combined recovery in every per-step-lock mutating command
+(`install` by name, `build --install`, `update`, `group install`) immediately
+after its short exclusive lock and before `begin_operation`, so a prior crash
+is never mistaken for the new transaction. Whole-command exclusive commands
+keep the `main::run` pass, and `cmd_history` keeps strict error propagation.
+The redundant physical-only calls in `install_archive_payload`/`remove_with`
+are gone. A command-level test in `tests/by_name.rs` seeds a committed db entry
+with no `StepResult`, runs an unrelated `nawa install <name>`, and verifies the
+record is already reconciled before `nawa history` runs.
 
 Phase 4 (removing the `desc`/`files` mirror) remains an explicit compatibility
 decision. The full suite also surfaced pre-existing duplicate test temp-dir
@@ -267,9 +278,9 @@ cargo check --locked --all-targets                         → clean
 cargo clippy --all-targets --locked -- -D warnings         → clean
 python3 scripts/check-layering.py                          → 53 modules, no cycles
 cargo test --locked --no-fail-fast                         → 454 unit passed, 1 ignored;
-                                                              109 integration tests passed
+                                                              110 integration tests passed
 ```
 
-Remaining work: P1-2 Phase 3 (per-step-lock recovery), P1-8 (performance), P2
-duplication (path containment, planner/upgrade resolver overlap), and
-repo-wide `cargo fmt --check` drift (not enforced by CI).
+Remaining work: P1-2 Phase 4 (legacy-mirror compatibility decision), P1-8
+(performance), P2 duplication (path containment, planner/upgrade resolver
+overlap), and repo-wide `cargo fmt --check` drift (not enforced by CI).

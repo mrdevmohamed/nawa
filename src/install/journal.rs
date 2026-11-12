@@ -450,19 +450,6 @@ pub(crate) fn recover(root: &Path) -> Result<Vec<String>> {
     Ok(notes)
 }
 
-/// [`recover`], reporting on stderr. Failures to repair are warnings: the
-/// command at hand should still be able to run.
-pub(crate) fn recover_and_report(root: &Path) {
-    match recover(root) {
-        Ok(notes) => {
-            for n in notes {
-                crate::nawa_info_stderr!("recovered: {n}");
-            }
-        }
-        Err(e) => crate::nawa_warn!("could not check for an interrupted transaction: {e:#}"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

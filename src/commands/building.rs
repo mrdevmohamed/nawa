@@ -15,6 +15,7 @@ use crate::lock;
 use crate::plan;
 use crate::profile;
 use crate::recipe;
+use crate::recovery;
 use crate::transaction;
 
 
@@ -73,6 +74,9 @@ pub(crate) fn cmd_build(
     // the library functions never lock; this command-level lock covers just
     // the install step (upgrade calls install_archive the same way)
     let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
+    // this command locks per install step, so `main` has not run recovery; do
+    // it before `begin_operation` writes the live transaction's TxWAL
+    recovery::recover_and_report(&ctx.root);
     let mut op = transaction::begin_operation(
         &ctx.root,
         transaction::OperationCommand::BuildInstall,

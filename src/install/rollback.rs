@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::artifact;
 use crate::db::{Db, Entry};
 use crate::install::hooks::{load_hooks, run_hook};
-use crate::install::journal::{recover_and_report, Tx};
+use crate::install::journal::Tx;
 use crate::install::payload::save_undo;
 use crate::install::previous::{resolve_previous, synthesize_entry};
 use crate::install::{inspect_archive_state, install_archive, install_archive_from_index_proof, install_archive_pinned, FileJournalId, InstallOpts};
@@ -265,7 +265,9 @@ pub(crate) fn remove_with_linked(
 ) -> Result<()> {
     let db = Db::new(root);
     let _interrupts = interrupt::Guard::new();
-    recover_and_report(root);
+    // Crash repair is the caller's responsibility: it runs before
+    // `begin_operation`, while holding the exclusive db lock. Recovering here
+    // would see this step's own live TxWAL entry.
     let entry = match db.entry(name)? {
         Some(e) => e,
         None => bail!("`{name}` is not installed"),

@@ -9,7 +9,7 @@ use crate::archive;
 use crate::db::{Db, Entry};
 use crate::install::InstallAuth;
 use crate::install::hooks::{hook_status_path, run_tracked_hook, save_hooks};
-use crate::install::journal::{recover_and_report, FileJournalId, Tx};
+use crate::install::journal::{FileJournalId, Tx};
 use crate::interrupt;
 use crate::sign;
 
@@ -29,9 +29,9 @@ pub(crate) fn install_archive_payload(
     // function: before the commit point they roll the install back, after it
     // the install simply finishes (see `interrupt`).
     let _interrupts = interrupt::Guard::new();
-    // a previous nawa killed mid-install (SIGKILL, power cut) is repaired
-    // before anything else looks at the files or the db
-    recover_and_report(root);
+    // Crash repair is the caller's responsibility: it runs before
+    // `begin_operation`, while holding the exclusive db lock. Recovering here
+    // would see this step's own live TxWAL entry.
     // Timestamps stored in the database are Unix SECONDS (the human formatter
     // interprets them that way); temporary directory names get their own
     // uniqueness from nanoseconds + pid, decoupled from install_date.

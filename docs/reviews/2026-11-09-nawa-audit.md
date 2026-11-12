@@ -236,7 +236,7 @@ The remaining ~35 top-level modules are flat files in `src/`.
 
 - **Documentation discipline:** Almost every module opens with a crate-level `//!` doc that explains *why*, not just *what*, with tables/diagrams and references to design docs (`docs/design/*`). This is rare and valuable.
 - **Error rendering:** `diag.rs` + `output.rs` give consistent `nawa: error:` / `warning:` / `ok:` one-line prefix. Interrupts exit 130 with clear message.
-- **Locking:** `lock.rs` with shared/exclusive flock, hook escape hatch `NAWA_LOCK_HELD=1`, timeout `NAWA_LOCK_TIMEOUT`, and post-lock recovery (`install::recover_and_report`). Correct for a binary crate.
+- **Locking:** `lock.rs` with shared/exclusive flock, hook escape hatch `NAWA_LOCK_HELD=1`, timeout `NAWA_LOCK_TIMEOUT`, and post-lock recovery (`recovery::recover_and_report`). Correct for a binary crate.
 - **Testing:** 515 tests, many regression-tests with `PAUSE`/`FAILPOINT` injection for WAL (`transaction/atomic.rs` tests). No network-dependent unit tests. Temp dirs are cleaned via `Drop` or explicit `remove_dir_all` in tests.
 - **CI gate:** No-skip script ensures sandbox tests cannot silently skip. Reproducibility (`SOURCE_DATE_EPOCH`, normalised archives, zstd level 3 deterministic) tested via `rebuild_check`.
 - **Cargo hygiene:** `--locked`, MSRV `1.82`, static musl build, vendored offline bootstrap documented.
