@@ -188,7 +188,7 @@ pub(crate) fn run_sections(
                 CheckMode::Fatal => {}
                 CheckMode::Warn => {
                     if let Err(e) = run_section(
-                        rec, label, script, &ctx, &srcdir, &work, &env_vars, env_prefix,
+                        rec, label, script, ctx, srcdir, work, env_vars, env_prefix,
                         sandbox_cfg, opts,
                     ) {
                         crate::nawa_warn!("check failed for {} (continuing): {e:#}", rec.id());
@@ -198,7 +198,7 @@ pub(crate) fn run_sections(
             }
         }
         run_section(
-            rec, label, script, &ctx, &srcdir, &work, &env_vars, env_prefix,
+            rec, label, script, ctx, srcdir, work, env_vars, env_prefix,
             sandbox_cfg, opts,
         )?;
     }

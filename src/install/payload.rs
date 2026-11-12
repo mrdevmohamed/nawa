@@ -270,7 +270,7 @@ fn check_file_conflicts(
         }
     }
     if !conflicts.is_empty() {
-        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::remove_dir_all(tmp);
         bail!(
             "file conflicts installing {}:\n  {}\n(use --force to override)",
             name,

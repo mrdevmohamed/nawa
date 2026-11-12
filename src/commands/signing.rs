@@ -82,7 +82,7 @@ pub(crate) fn cmd_repo_update(
         .with_context(|| format!("invalid repository signing key {}", signing_key.display()))?;
     // Verify the exact bytes that are then parsed: an unverified base
     // must never flow into a signed index.
-    let vk = sign::load_verify_key(&trust_key)?;
+    let vk = sign::load_verify_key(trust_key)?;
     let base_bytes = std::fs::read(base)
         .with_context(|| format!("read base index {}", base.display()))?;
     let sf = sign::read_sig_file(&sign::sig_path_for(base))?;
@@ -98,7 +98,7 @@ pub(crate) fn cmd_repo_update(
     };
     repo::update_index_files(
         &base_index,
-        &dir,
+        dir,
         &out,
         repo::UpdateIndexFilesInputs {
             entries_path: add_entries,
@@ -127,7 +127,7 @@ pub(crate) fn cmd_keygen(out: Option<PathBuf>) -> Result<()> {
 /// `nawa sign`
 pub(crate) fn cmd_sign(file: &Path, key: Option<&Path>) -> Result<()> {
     let kp = sign::resolve_signing_key(key)?;
-    let sp = sign::sign(&file, &kp)?;
+    let sp = sign::sign(file, &kp)?;
     crate::nawa_info!("signed {} -> {}", file.display(), sp.display());
     Ok(())
 
@@ -135,7 +135,7 @@ pub(crate) fn cmd_sign(file: &Path, key: Option<&Path>) -> Result<()> {
 
 /// `nawa trust`
 pub(crate) fn cmd_trust(ctx: &Ctx, keyfile: &Path) -> Result<()> {
-    let dest = sign::trust(&keyfile, &ctx.root)?;
+    let dest = sign::trust(keyfile, &ctx.root)?;
     crate::nawa_info!("trusted key installed at {}", dest.display());
     Ok(())
 

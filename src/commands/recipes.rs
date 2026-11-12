@@ -232,6 +232,21 @@ fn placeholders(script: &str) -> Vec<String> {
     out
 }
 
+/// `nawa recipe <action>`
+pub(crate) fn cmd_recipe(ctx: &Ctx, action: RecipeCmd) -> Result<()> {
+    match action {
+        RecipeCmd::Check { name, all } => {
+            if name.is_none() && !all {
+                bail!("`nawa recipe check` needs a recipe name or --all");
+            }
+            if name.is_some() && all {
+                bail!("a recipe name and --all are exclusive");
+            }
+            cmd_recipe_check(ctx, name.as_deref(), all)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{KNOWN_PACKAGE_KEYS, KNOWN_TOP_TABLES, placeholders};
@@ -254,20 +269,5 @@ mod tests {
         // the same way, so the scanner flags it as a real placeholder too
         let ph = placeholders("a %{pkgdir} b %{nope} %{srcdir2} %{} %{1x} %%{escaped}");
         assert_eq!(ph, vec!["pkgdir", "nope", "srcdir2", "escaped"]);
-    }
-}
-
-/// `nawa recipe <action>`
-pub(crate) fn cmd_recipe(ctx: &Ctx, action: RecipeCmd) -> Result<()> {
-    match action {
-        RecipeCmd::Check { name, all } => {
-            if name.is_none() && !all {
-                bail!("`nawa recipe check` needs a recipe name or --all");
-            }
-            if name.is_some() && all {
-                bail!("a recipe name and --all are exclusive");
-            }
-            cmd_recipe_check(ctx, name.as_deref(), all)
-        }
     }
 }

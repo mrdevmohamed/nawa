@@ -69,7 +69,7 @@ pub(super) fn lint_stage(
             Some(work.to_string_lossy().into_owned())
         };
         let ctx = crate::lint::LintCtx {
-            pkgdir: &pkg,
+            pkgdir: pkg,
             rundeps: &rec.depends.run,
             sonames: &sonames,
             host_builddir: host_builddir.as_deref(),
@@ -171,7 +171,7 @@ pub(super) fn package_archives(
     );
     if opts.isolation >= Isolation::Env {
         archive::create_normalized(
-            &pkg,
+            pkg,
             &pkginfo,
             Some(&hooks),
             &out_path,
@@ -187,7 +187,7 @@ pub(super) fn package_archives(
         let sidecar = buildid_sidecar(&out_path);
         let _ = std::fs::write(&sidecar, format!("{bid}\n"));
     } else {
-        archive::create_with_hooks(&pkg, &pkginfo, Some(&hooks), &out_path)?;
+        archive::create_with_hooks(pkg, &pkginfo, Some(&hooks), &out_path)?;
     }
 
     // ---- sub-packages (-doc, -lang) --------------------------------------

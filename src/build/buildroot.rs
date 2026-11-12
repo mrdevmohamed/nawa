@@ -73,7 +73,7 @@ pub(super) fn assemble_build_root(
             }
         });
         let layered = layer_cache.is_some()
-            && layer_paths_are_mountable(&members, &known, &opts.outdir, &work)
+            && layer_paths_are_mountable(&members, &known, &opts.outdir, work)
             && {
                 let ok = overlay_probe_ok();
                 if !ok {
@@ -91,7 +91,7 @@ pub(super) fn assemble_build_root(
             crate::closure::assemble_cached(
                 &members,
                 &known,
-                &outdir,
+                outdir,
                 &root_dir,
                 &cache,
                 &opts.root,
@@ -103,7 +103,7 @@ pub(super) fn assemble_build_root(
             crate::closure::assemble(
                 &members,
                 &known,
-                &outdir,
+                outdir,
                 &root_dir,
                 &opts.root,
                 opts.allow_unsigned,
@@ -130,7 +130,7 @@ pub(super) fn run_fetch_phase(
     assembled: Option<&AssembledRoot>,
 ) -> Result<Vec<(String, String)>> {
     let fetch_env: Vec<(String, String)> = if rec.fetch.any() {
-        let srccache = crate::config::srccache_dir(&builddir, None);
+        let srccache = crate::config::srccache_dir(builddir, None);
         // GOCACHE lives "under the HOME scratch" (§7): inside the sandbox
         // that is the mounted per-build home; at `env` the build runs on
         // the host and sees host paths (like NAWA_SRCDIR), so the scratch
@@ -143,11 +143,11 @@ pub(super) fn run_fetch_phase(
         let fr = crate::fetchrun::FetchRun {
             rec,
             opts,
-            work: &work,
-            src: &src,
+            work,
+            src,
             srccache: &srccache,
             sandboxed,
-            build_inside: &sandbox_base,
+            build_inside: sandbox_base,
             whitelist_home: &whitelist_home,
             assembled,
         };
