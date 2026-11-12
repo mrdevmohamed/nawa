@@ -115,6 +115,7 @@ The remaining ~35 top-level modules are flat files in `src/`.
 **P1-2. Legacy undo journal vs new transaction WAL duplication**
 - `install.rs::recover` still maintains `/var/lib/nawa/undo/<name>` and `.nawa` backup dirs, while `transaction/` now has `journal.rs`, `history.rs`, `recovery.rs`, `undo.rs` with full WAL. Both paths are live: `install_archive_payload` writes legacy journal *and* transaction steps. `nawa rollback` uses legacy undo; `nawa history undo` uses transaction WAL. Two sources of truth for “what was installed before”.
 - Impact: divergence risk; recovery paths re-implement similar logic in two places; future deprecation of legacy journal requires both to be kept consistent.
+- **Resolution (2026-11-13):** `docs/design/undo-wal-consolidation.md` makes transaction history the canonical logical source (Phases 1–3: `2ffebe7`, `4112d1f`, `6b80ede`) while Phase 4A keeps the legacy `desc`/`files` mirror for old-binary rollback. No on-disk format changed; the resolver falls back to the mirror only where history cannot reproduce the slot.
 
 **P1-3. Error handling: `anyhow` everywhere, no typed errors**
 - 50 files use `anyhow::{bail, Context, Result}`. Context strings are ad-hoc: `"create directory {}"`, `"read base index {}"`, `"could not allocate..."` — same operation gets different messages in different modules.
@@ -210,7 +211,7 @@ The remaining ~35 top-level modules are flat files in `src/`.
 
 ## 4. Technical Debt Inventory
 
-1. **Legacy backup/undo vs WAL** (P1-2) — keep both, document migration, don’t delete until WAL undo covers rollback use-case.
+1. **Legacy backup/undo vs WAL** (P1-2) — resolved by the undo/WAL consolidation: history is canonical when it can answer, the legacy `desc`/`files` mirror stays as a compatibility aid, and no format changed (`docs/design/undo-wal-consolidation.md`).
 2. **Three unique-temp generators** (P2-1) — consolidate.
 3. **Ad-hoc tmp+rename vs `write_atomic`** (P0-1, P2-1) — migrate non-durable patterns to durable where they touch package db / index / trust store; keep ephemeral tmp+rename for throwaway staging (document which is which).
 4. **`install.rs` god module** (P1-1) — split, see plan.

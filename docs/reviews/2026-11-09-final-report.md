@@ -179,12 +179,13 @@ No breaking changes to CLI commands (`nawa sync/update/upgrade/install/remove/fe
 > (`docs/design/undo-wal-consolidation.md`). Phases 1–3 are implemented:
 > FileJournal identity, one combined physical→logical recovery pass, the
 > previous-slot resolver used by `nawa rollback`, and a pre-`begin_operation`
-> recovery pass for every per-step-lock mutating command. Phase 4 (removing
-> the legacy `desc`/`files` mirror) remains an explicit compatibility
-> decision.
+> recovery pass for every per-step-lock mutating command. Phase 4A was
+> accepted on 2026-11-13: the legacy `desc`/`files` mirror stays as a
+> compatibility aid for old binaries, so P1-2 is closed with no behavior
+> change.
 
 1. **P0-3 — Sandbox trusts live root outside closure** (`Sandbox` only mounts namespaces over live root; `extra_binds` shape validated but not policy-checked). Needs architectural decision, not low-risk. **Update:** the extra-bind host policy is implemented (`463d4fb`); the live-root trust model remains.
-2. **P1-2 — Legacy undo journal vs new transaction WAL duplication** (two sources of truth for "what was installed before"; keep both until WAL undo covers rollback use-case per audit §1). **Update:** Phases 1–3 are implemented (`2ffebe7`, `4112d1f`, plus the Phase 3 work; see §7).
+2. **P1-2 — Legacy undo journal vs new transaction WAL duplication** (two sources of truth for "what was installed before"; keep both until WAL undo covers rollback use-case per audit §1). **Closed** by Phases 1–3 (`2ffebe7`, `4112d1f`, `6b80ede`) and the Phase 4A decision: history is canonical whenever it can answer, while the legacy mirror remains a compatibility aid for old-binary rollback. No on-disk format changed; see §7.
 3. **P1-4 — Build isolation cache identity** misses `sandbox.extra_binds`, `assets` digest, toolchain version for non-closure isolation (`build_id_for` coverage). **Closed** by `53390ed` (assets and isolation + host toolchain; see §7).
 4. **P1-5 — `wipe_work` recursion + symlink escape** under overlayfs `sb/layer-work` (mode 000) — hardening with `O_NOFOLLOW`/`symlink_metadata` guard (code already uses `symlink_metadata` and treats symlinks as files; audit noted comment but code may still be vulnerable to symlink-to-dir escapes in overlayfs). **Verified mitigated** (see §7).
 5. **P1-8 — Performance:** repository parsing repeated (`fetch::load_index` called per repo file in `repositories.rs` + `sync.rs`); `revdep::scan` reads every ELF twice; `lint→slim→archive` still walk separately (fswalk helper centralises pattern but does not produce a single walk reused across passes because passes mutate the tree). Quadratic `deps` resolution.
@@ -229,7 +230,7 @@ Assets, fetch-schema versions and Go/Cargo versions were already inputs. The opt
 
 `wipe_tree` already uses `symlink_metadata` and treats non-directories (including symlinks) as files, so it never follows a symlink-to-directory escape. No code change was needed; the earlier audit line is retained for history.
 
-### Undo/WAL consolidation: Phases 1–3 (`docs/design/undo-wal-consolidation.md`)
+### Undo/WAL consolidation: Phases 1–3 and Phase 4A (`docs/design/undo-wal-consolidation.md`)
 
 The P1-2 design is in `docs/design/undo-wal-consolidation.md`. Phase 1 links
 the physical FileJournal to the logical transaction/step that owns it with an
@@ -266,10 +267,13 @@ are gone. A command-level test in `tests/by_name.rs` seeds a committed db entry
 with no `StepResult`, runs an unrelated `nawa install <name>`, and verifies the
 record is already reconciled before `nawa history` runs.
 
-Phase 4 (removing the `desc`/`files` mirror) remains an explicit compatibility
-decision. The full suite also surfaced pre-existing duplicate test temp-dir
-tags; one tag per colliding pair was renamed so parallel unit tests are
-deterministic.
+Phase 4A (2026-11-13) keeps the `desc`/`files` writes and the Phase 2 resolver
+fallback: history is authoritative whenever it can answer, and the mirror
+remains a compatibility aid so old binaries retain rollback. Stopping the
+mirror writes (Phase 4B) is not planned and would require a separate
+compatibility PR. The full suite also surfaced pre-existing duplicate test
+temp-dir tags; one tag per colliding pair was renamed so parallel unit tests
+are deterministic.
 
 ### Current validation
 
@@ -281,6 +285,6 @@ cargo test --locked --no-fail-fast                         → 454 unit passed, 
                                                               110 integration tests passed
 ```
 
-Remaining work: P1-2 Phase 4 (legacy-mirror compatibility decision), P1-8
-(performance), P2 duplication (path containment, planner/upgrade resolver
-overlap), and repo-wide `cargo fmt --check` drift (not enforced by CI).
+Remaining work: P1-8 (performance), P2 duplication (path containment,
+planner/upgrade resolver overlap), and repo-wide `cargo fmt --check` drift
+(not enforced by CI). P1-2 is closed by the Phase 4A decision.

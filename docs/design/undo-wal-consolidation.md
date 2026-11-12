@@ -4,15 +4,17 @@
 combined physical→logical recovery entry point) is implemented on top of
 `faa52ef`; Phase 2 (previous-slot resolver and `nawa rollback` integration) is
 implemented on top of `2ffebe7`; Phase 3 (recovery before every per-step
-transaction) is implemented on top of `4112d1f`. No CLI, package, archive, db,
-index, signature, or transaction record format changed.
+transaction) is implemented on top of `4112d1f`; Phase 4A (keep the legacy
+undo mirror) was accepted on 2026-11-13, closing P1-2 with no behavior change.
+No CLI, package, archive, db, index, signature, or transaction record format
+changed.
 **Scope:** remove the *duplication of truth* between the legacy package undo
 record, the transaction history/WAL, and the physical file journal, while
 preserving every existing command, format and recovery guarantee.
 **Companion documents:** `docs/reviews/2026-11-09-nawa-audit.md` P1-2,
 `docs/design/package-management-roadmap.md` §5.2/§5.5/§5.9/§5.10,
 `docs/reviews/2026-11-09-final-report.md` §7.
-**Verified against:** `2ffebe7` and the Phase 2 implementation.
+**Verified against:** `6b80ede` and the Phase 3 implementation.
 
 ---
 
@@ -432,12 +434,12 @@ Everything from `pick_restore_source` onward is unchanged, so the security
 properties (digest re-verification, retained signed-index proof, retained
 detached signature, legacy-cache fallback) are preserved byte-for-byte.
 
-`save_undo` remains in place during the migration and continues to write
-`desc`. The writer's `files` output is left untouched in Phases 1–3. It has no
-reader in this repository's history and duplicates `db.files`, but removing a
-file that an older out-of-tree consumer might inspect is a compatibility
-decision, not a prerequisite for making history authoritative. Revisit it in
-the Phase 4 gate.
+`save_undo` remains in place and continues to write `desc`; Phase 4A keeps the
+writer's `files` output as well. The latter has no reader in this repository's
+history and duplicates `db.files`, but removing a file that an older
+out-of-tree consumer might inspect is a compatibility decision, not a
+prerequisite for making history authoritative. It stays until a future,
+separate compatibility decision removes it.
 
 `history undo` continues to use the committed before/after states; it does
 not re-read the legacy slot. Because it installs/removes through the same
@@ -643,6 +645,14 @@ Files: `src/main.rs`, `src/commands/installing.rs` (or wherever
 This phase is optional in this design cycle and requires an explicit product
 decision because it is the only phase that can change a rollback edge.
 
+**Decision (2026-11-13): Option A — keep the mirror.** The legacy
+`undo/<name>/{desc,files}` writes stay unchanged, so old binaries retain
+rollback and the Phase 2 resolver keeps its documented legacy fallback. P1-2
+is closed as a design/consolidation finding: history is the canonical logical
+source whenever it can answer, and the mirror is a compatibility aid, not a
+second authority. Option B remains available as a separate future PR with the
+compatibility cost below; it is not planned.
+
 Two acceptable end states:
 
 **A. Keep the mirror indefinitely (recommended for now).**
@@ -789,8 +799,8 @@ involved in any row.
    the archive. Enforce that with a narrow type or a comment at the synthesis
    site; do not pass the synthetic entry to `db.add` or hooks.
 5. **`undo/files` is dead data.** The current repository history shows no
-   reader. It is left in place during the behavior-preserving phases; removing
-   it is a Phase 4 compatibility decision, not part of making history
+   reader. Phase 4A keeps it in place; removing it would be a separate
+   compatibility decision (Phase 4B or later), not part of making history
    authoritative.
 6. **Fsync of the legacy mirror.** `save_undo` currently writes+renames
    without an fsync. Once the mirror is only a compatibility aid, a lost desc
@@ -818,16 +828,18 @@ involved in any row.
 | D4 | Recover physical first, logical second, under the exclusive lock | Reconciliation must see the post-repair db |
 | D5 | Keep `nawa rollback` and `nawa history undo` separate | Different user intents; both already share the installer/remover and verification |
 | D6 | Preserve the legacy slot's failed-attempt/quirk semantics through the resolver rules | No user-visible behavior change in the migration |
-| D7 | Leave the unused `undo/<name>/files` write in place during the behavior-preserving phases | It has no reader here, but removing an on-disk artifact is a compatibility decision; revisit with Phase 4B |
-| D8 | Defer stopping `desc` writes to an explicit Phase 4 decision | The only remaining change that can alter rollback behavior or old-binary compatibility |
+| D7 | Leave the unused `undo/<name>/files` write in place during the behavior-preserving phases | It has no reader here, but removing an on-disk artifact is a compatibility decision; Phase 4A kept it |
+| D8 | Defer stopping `desc` writes to an explicit Phase 4 decision | The only remaining change that can alter rollback behavior or old-binary compatibility; resolved by D11 |
 | D9 | The resolver's history source names the transaction, not a WAL step | `PackageChange` has no step number; inventing one would mislead diagnostics. Phase 1 already links the physical journal to the exact step |
 | D10 | Rule 8 uses a 60-second mtime allowance | The legacy slot has no transaction id; requiring a clear margin avoids treating normal seconds-resolution jitter as an old-binary write |
+| D11 | Phase 4A: keep writing the legacy `desc`/`files` mirror | History is already authoritative when it can answer; the mirror preserves old-binary rollback at one small TOML file per changed package, so P1-2 needs no behavior change |
 
 ---
 
 ## 13. What this design deliberately does not do
 
-- It does not delete `/var/lib/nawa/undo` or rewrite historical records.
+- It does not delete `/var/lib/nawa/undo` or rewrite historical records;
+  Phase 4A keeps writing the mirror for old-binary rollback.
 - It does not add a new CLI command, a new dependency, or a new on-disk
   schema version.
 - It does not change rollback verification: exact bytes, retained signed-index
