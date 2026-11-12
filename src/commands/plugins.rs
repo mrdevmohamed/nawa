@@ -1,6 +1,13 @@
 //! Plugin command handlers: management, capability policy and direct dispatch.
 
-use crate::*;
+use anyhow::{Result};
+use crate::ctx::Ctx;
+use crate::color::Palette;
+use std::path::PathBuf;
+use crate::color::Stream;
+use crate::config;
+use crate::plugins;
+
 use anyhow::bail;
 
 fn effective_state(ctx: &Ctx) -> plugins::discovery::PluginState {
@@ -239,4 +246,18 @@ pub(crate) fn cmd_plugin_dispatch(ctx: &Ctx, command: &str, args: &[String]) -> 
     let result = process.run(command, args, plugins::runner::DEFAULT_TIMEOUT)?;
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
+}
+
+/// `nawa <external>`: an unknown subcommand is a plugin command.
+pub(crate) fn cmd_plugin_external(ctx: &Ctx, values: Vec<std::ffi::OsString>) -> Result<()> {
+    let mut values = values.into_iter();
+    let command = values.next()
+        .ok_or_else(|| anyhow::anyhow!("missing plugin command name"))?
+        .into_string()
+        .map_err(|_| anyhow::anyhow!("plugin command name is not valid UTF-8"))?;
+    let args: Result<Vec<String>> = values
+        .map(|value| value.into_string().map_err(|_| anyhow::anyhow!("plugin arguments must be valid UTF-8 for JSONL")))
+        .collect();
+    cmd_plugin_dispatch(ctx, &command, &args?)
+
 }

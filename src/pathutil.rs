@@ -72,3 +72,23 @@ pub(crate) fn is_under_root(root: &Path, path: &Path) -> Result<bool> {
         .with_context(|| format!("resolve path {}", path.display()))?;
     Ok(real_path.starts_with(&real_root))
 }
+
+/// `nawa install` takes archive paths *or* package names. Something that
+/// ends in `.nawa.tar.zst` or contains a `/` is a file; a bare word is a name.
+pub(crate) fn is_archive_arg(arg: &str) -> bool {
+    arg.ends_with(".nawa.tar.zst") || arg.contains('/')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn archive_vs_name_arguments() {
+        assert!(is_archive_arg("build/out/a-1-1.nawa.tar.zst"));
+        assert!(is_archive_arg("./a"));
+        assert!(is_archive_arg("a-1-1.nawa.tar.zst"));
+        assert!(!is_archive_arg("gzip"));
+        assert!(!is_archive_arg("libstdc++"));
+    }
+}

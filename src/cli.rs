@@ -1,7 +1,9 @@
 //! Command-line definition: clap types, shell completions and the lock
 //! policy per command. Pure move out of `main.rs`; no behaviour change.
+use std::path::PathBuf;
+use crate::pathutil::is_archive_arg;
+use crate::lock;
 
-use crate::*;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::ffi::OsString;
 

@@ -3,11 +3,9 @@
 //! -> lint -> create archive.
 
 use anyhow::{bail, Context, Result};
-use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use crate::archive;
 use crate::buildenv::{self, Isolation};
 use crate::fetch;
 use crate::recipe::{ExpandCtx, Recipe};
@@ -137,105 +135,8 @@ pub(crate) fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
     std::fs::create_dir_all(&pkg)?;
 
     // ---- source staging -------------------------------------------------
-    let ctx = ExpandCtx {
-        jobs: opts.jobs,
-        pkgdir: pkg.clone(),
-        srcdir: src.clone(),
-        arch: rec.arch(),
-        // new-schema fields (§4.3/§5.3); wired up with the sources schema
-        srcroot: None,
-        assetsdir: None,
-    };
-
-    let source = &rec.package.source;
-    let mut staged: Option<crate::sources::SourcesStaged> = None;
-    let mut staged_assets: Option<crate::assets::AssetsStaged> = None;
-    let srcdir: PathBuf = if rec.is_new_schema() {
-        // ---- new-schema staging (fetch-phase.md §4.2, §5, §6, §11) -------
-        // §5.2: an unreadable/missing asset path fails BEFORE any download,
-        // by the same sweep the snapshot will run (§16 Assets 3).
-        if !rec.assets.include.is_empty() {
-            crate::assets::precheck(rec)?;
-        }
-        // All sources are downloaded, verified and extracted by the sources
-        // engine; the workspace is `<work>/src` and `[package] workdir`
-        // selects the section cwd through `staged.srcdir`.
-        let cache_dir = crate::config::srccache_dir(&builddir, None);
-        let s = crate::sources::stage_sources(rec, &work, &src, &cache_dir, opts.jobs)?;
-        // normalise ownership/permissions for the sandbox's mapped identity
-        grant_source_write(&s.srcroot);
-        let sub_srcdir = s.srcdir.clone();
-        staged = Some(s);
-        // the asset snapshot runs after the sources (which may have failed
-        // with a wrong hash) but still before the build root is assembled
-        // (§3): the digest comes from the copy, and only the snapshot is
-        // copied, never the checkout again
-        if !rec.assets.include.is_empty() {
-            let a = crate::assets::snapshot(rec, &work)
-                .with_context(|| format!("stage assets of recipe {}", name))?;
-            staged_assets = Some(a);
-        }
-        sub_srcdir
-    } else if source.is_empty() {
-        src.clone() // meta package: run scripts directly in src
-    } else if let Some(local) = source.strip_prefix("local:") {
-        let p = PathBuf::from(local);
-        if !p.exists() {
-            bail!("local source {} does not exist", p.display());
-        }
-        fetch::copy_local(&p, &src)?;
-        grant_source_write(&src);  // host copies can carry foreign owners too
-        src.clone()
-    } else {
-        // expand %{version} & co. in the source URL itself
-        let source = rec.expand(source, &ctx);
-        let fname = source.rsplit('/').next().unwrap_or("source.tar");
-        // Source cache: the work dir is wiped on every build, so a tarball
-        // kept inside it was downloaded again each time. Keep it in a
-        // persistent, content-keyed cache instead ($NAWA_SRCCACHE, default
-        // <builddir>/distfiles). A hit is re-verified against the recipe's
-        // sha256, so a corrupt/truncated entry is re-downloaded.
-        let cache_dir = crate::config::srccache_dir(&builddir, None);
-        std::fs::create_dir_all(&cache_dir)
-            .with_context(|| format!("create source cache {}", cache_dir.display()))?;
-        let sha = rec.package.sha256.as_str();
-        let tarball = cache_dir.join(format!("{}-{}", sha.get(..16).unwrap_or("nosha"), fname));
-        if tarball.exists() && fetch::verify_sha256(&tarball, sha).is_ok() {
-            crate::nawa_info!("source cached: {}", tarball.display());
-        } else {
-            crate::nawa_info!("downloading {source}");
-        }
-        let mirrors: Vec<String> =
-            rec.package.mirrors.iter().map(|m| rec.expand(m, &ctx)).collect();
-        fetch::download_cached_with_mirrors(&source, &mirrors, &tarball, Some(sha))?;
-        fetch::verify_sha256(&tarball, sha)?;
-
-        // tarball or single file (e.g. a pinned CA bundle)? Detection is by
-        // content (magic bytes + tar header), not by file name.
-        let is_tar = fetch::detect_source_format(&tarball).is_some();
-        if !is_tar {
-            // single-file source: stage it as-is into srcdir
-            std::fs::copy(&tarball, src.join(fname))
-                .with_context(|| format!("stage single-file source {}", fname))?;
-            src.clone()
-        } else {
-            // In-process extraction (tar crate + native decoders) with GNU
-            // tar --no-same-owner semantics: ownership is never restored and
-            // suid bits are dropped, so the tree stays writable for the build
-            // (the sandbox §4.1 drops every capability, and the source write
-            // pass below re-applies u+w on top).
-            fetch::extract_source_archive(&tarball, &src)
-                .with_context(|| format!("failed to extract {}", tarball.display()))?;
-            grant_source_write(&src);
-            let dir = if rec.package.source_dir.is_empty() {
-                format!("{}-{}", name, rec.package.version)
-            } else {
-                rec.package.source_dir.clone()
-            };
-            let candidate = src.join(rec.expand(&dir, &ctx));
-            if candidate.is_dir() { candidate } else { src.clone() }
-        }
-    };
+    let StagedSource { srcdir, sources: staged, assets: staged_assets } =
+        stage::stage_source(rec, opts, &builddir, &work, &src, &pkg)?;
 
     // ---- isolation prep (docs/design/build-isolation.md) -----------------
     // §6: new-schema recipes carry the epoch from the sources engine (the
@@ -246,240 +147,46 @@ pub(crate) fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
         None => buildenv::source_date_epoch(&srcdir, rec.package.source_date_epoch)?,
     };
     let sandboxed = opts.isolation >= Isolation::Sandbox;
-
     // the design pins /build as the inside build base (§4.2): it exists in
     // the stage chroots and a root nawa can create it. An unprivileged host
     // falls back to a base on the sandbox's private /tmp — recipes always
     // see it through %{srcdir}/%{pkgdir}, never as a hardcoded path.
-    // `sandbox` level keeps the live root and mounts a fresh tmpfs on /tmp
-    // BEFORE binding the staging dirs, which would hide a build dir under /tmp.
-    // (`closure` mounts its tmpfs inside the assembled root and is unaffected.)
-    if opts.isolation == Isolation::Sandbox {
-        let w = std::fs::canonicalize(&work).unwrap_or_else(|_| work.clone());
-        if w.starts_with("/tmp") {
-            bail!(
-                "--isolation sandbox cannot build under /tmp ({}): the sandbox's private /tmp \
-                 would hide the build dir. Use another --builddir (e.g. /build or /var/tmp/nawa)",
-                work.display()
-            );
-        }
-    }
-    let sandbox_base = if sandboxed { sandbox_inside_base(&work) } else { String::new() };
-
-    // the build sees sandbox paths for %{srcdir}/%{pkgdir}; the spec carries
-    // the host paths for the bind mounts
-    // §4.3/§5.3: %{srcroot} is the workspace root and %{assetsdir} the
-    // assets snapshot — both live at <work>/… and are bound inside the
-    // sandbox under <build_inside>/…; inside the sandbox the whole staging
-    // dir is bound at <base>/src, so the srcroot view is that same root
-    let view_assets = match (&staged_assets, sandboxed) {
-        (Some(a), false) => a.dir.clone(),
-        (Some(a), true) => {
-            let _ = a; // a.dir is `<work>/assets`; the sandbox binds it at <base>/assets
-            PathBuf::from(format!("{}/assets", sandbox_base.trim_end_matches('/')))
-        }
-        (None, _) => PathBuf::new(),
-    };
-    let view_srcroot = if sandboxed {
-        PathBuf::from(format!("{}/src", sandbox_base.trim_end_matches('/')))
-    } else {
-        src.clone()
-    };
-    let view_src = if sandboxed {
-        // `srcdir` is the unpacked source dir (e.g. src/m4-1.4.19); the sandbox
-        // binds the whole staging dir at <base>/src, so keep the sub-path
-        let mut v = view_srcroot.clone();
-        if let Ok(rel) = srcdir.strip_prefix(&src) {
-            v.push(rel);
-        }
-        v
-    } else {
-        srcdir.clone()
-    };
-    let view_pkg = if sandboxed {
-        PathBuf::from(format!("{}/pkg", sandbox_base.trim_end_matches('/')))
-    } else {
-        pkg.clone()
-    };
+    let sandbox_base = stage::sandbox_base_for(opts, &work)?;
+    let view = stage::build_view(
+        sandboxed,
+        &sandbox_base,
+        staged_assets.as_ref().map(|a| a.dir.as_path()),
+        &src,
+        &srcdir,
+        &pkg,
+    );
 
     // ---- assemble the build root (closure level, §5) ----------------------
-    let mut assembled: Option<crate::closure::AssembledRoot> = None;
-    if opts.isolation == Isolation::Closure {
-        let known = crate::recipe::load_all(&opts.recipes_root)?;
-        let with_check = opts.check != CheckMode::Off;
-        let members =
-            crate::closure::buildroot(rec, &known, with_check).context("compute build root")?;
-        crate::nawa_info!(
-            "closure: {} package(s) in the build root ({}{}): {}",
-            members.len(),
-            crate::closure::BASE_DEVEL,
-            if with_check { " + check deps" } else { "" },
-            members.join(" ")
-        );
-        let root_dir = work.join("buildroot");
-        let _ = std::fs::remove_dir_all(&root_dir);
-
-        // Phase 5 (§5.3 v2): assemble from cached layers + one overlayfs
-        // mount when the kernel allows overlayfs in a user namespace; fall
-        // back to extract-per-build (v1) otherwise — same result, slower.
-        // The layer cache must also be traversable by the sandbox's mapped
-        // identity (§4.3): the overlayfs lowerdirs are resolved by mount(2)
-        // *inside* the sandbox, where a home directory with mode 700 owned
-        // by an unmapped uid blocks nawa's own caches (`sudo nawa` with the
-        // rootfs under $HOME is the common case). Filtering here keeps an
-        // unreachable cache from failing the build after extraction.
-        let layer_cache = layer_cache_dir(opts).and_then(|dir| {
-            // `layer_cache_dir` has created `dir`; everything below it
-            // (`layers/<sha>`) is created inside `assemble_cached` under the
-            // same parents, so the cache root is the right check target
-            // (then a brand-new cache is not read as "unreachable").
-            match crate::sandbox::first_untraversable_ancestor(&dir) {
-                None => Some(dir),
-                Some(blocker) => {
-                    eprintln!(
-                        "nawa: closure: note: the layer cache {} is not \
-                         reachable from inside the sandbox, because {} is \
-                         not traversable by the sandbox's mapped identity \
-                         (§4.3 maps only the caller's own id — a home \
-                         directory with mode 700 blocks `sudo` runs). \
-                         Using extract-per-build assembly; to use the \
-                         layer cache, keep the rootfs under the build dir \
-                         (or otherwise outside such trees), point \
-                         NAWA_LAYER_CACHE at a reachable path, or run nawa \
-                         as a normal user (rootless runs map their own \
-                         identity)",
-                        dir.display(),
-                        blocker.display()
-                    );
-                    None
-                }
-            }
-        });
-        let layered = layer_cache.is_some()
-            && layer_paths_are_mountable(&members, &known, &opts.outdir, &work)
-            && {
-                let ok = overlay_probe_ok();
-                if !ok {
-                    eprintln!(
-                        "nawa: closure: note: this kernel does not allow \
-                         overlayfs in a user namespace (needs ≥ 5.11) — \
-                         using extract-per-build assembly"
-                    );
-                }
-                ok
-            };
-        assembled = Some(if layered {
-            crate::nawa_info!("closure: assembling the build root from the layer cache (overlayfs)");
-            let cache = layer_cache.expect("checked above");
-            crate::closure::assemble_cached(
-                &members,
-                &known,
-                &outdir,
-                &root_dir,
-                &cache,
-                &opts.root,
-                opts.allow_unsigned,
-                |pkg| crate::nawa_info!("closure: extracted {pkg} (new layer)"),
-            )?
-        } else {
-            crate::nawa_info!("closure: assembling the build root (extract-per-build)");
-            crate::closure::assemble(
-                &members,
-                &known,
-                &outdir,
-                &root_dir,
-                &opts.root,
-                opts.allow_unsigned,
-                |pkg| crate::nawa_info!("closure: extracted {pkg}"),
-            )?
-        });
-    }
+    let assembled = buildroot::assemble_build_root(rec, opts, &work, &outdir)?;
 
     // ---- ecosystem fetch (fetch-phase.md §7, §11, §12) --------------------
-    // Runs after the closure assembly (the fetch sandbox reuses the same
-    // build root: the toolchain lives in it) and before the build
-    // environment is computed (the whitelist and the sandbox spec need the
-    // per-build fetch view paths).
-    let fetch_env: Vec<(String, String)> = if rec.fetch.any() {
-        let srccache = crate::config::srccache_dir(&builddir, None);
-        // GOCACHE lives "under the HOME scratch" (§7): inside the sandbox
-        // that is the mounted per-build home; at `env` the build runs on
-        // the host and sees host paths (like NAWA_SRCDIR), so the scratch
-        // is the real workspace one.
-        let whitelist_home = if sandboxed {
-            format!("{}/home", sandbox_base.trim_end_matches('/'))
-        } else {
-            work.join("sb").join("home").to_string_lossy().into_owned()
-        };
-        let fr = crate::fetchrun::FetchRun {
-            rec,
-            opts,
-            work: &work,
-            src: &src,
-            srccache: &srccache,
-            sandboxed,
-            build_inside: &sandbox_base,
-            whitelist_home: &whitelist_home,
-            assembled: assembled.as_ref(),
-        };
-        crate::fetchrun::run(&fr)?
-    } else {
-        Vec::new()
-    };
+    let fetch_env = buildroot::run_fetch_phase(
+        rec, opts, &builddir, &work, &src, sandboxed, &sandbox_base, assembled.as_ref(),
+    )?;
 
     // ---- environment ------------------------------------------------------
-    let (env_vars, env_prefix) = if opts.isolation >= Isolation::Env {
-        let home = if sandboxed {
-            format!("{}/home", sandbox_base.trim_end_matches('/'))
-        } else {
-            buildenv::SANDBOX_HOME.to_string()
-        };
-        // §4.3/§5.3: the new names follow the *tables*, not the staging
-        // structs — an assets-only recipe stages `staged` (an empty
-        // workspace) but must NOT gain NAWA_SRCROOT, exactly as
-        // `check_schema_placeholders` refuses it in raw bytes
-        let has_sources = !rec.package.sources.is_empty();
-        let spec_srcroot = has_sources.then(|| view_srcroot.clone());
-        let spec_assetsdir = staged_assets.as_ref().map(|_| view_assets.clone());
-        let spec_env = buildenv::EnvSpec {
-            profile_env: &opts.env,
-            jobs: opts.jobs,
-            srcdir: &view_src,
-            pkgdir: &view_pkg,
-            home: &home,
-            source_date_epoch: sde,
-            // new-schema names (§4.3/§5.3); joined to the whitelist only
-            // when the recipe enables them
-            srcroot: spec_srcroot.as_deref(),
-            assetsdir: spec_assetsdir.as_deref(),
-            // [fetch.*] whitelist additions (§7): paths already phrased in
-            // the build's frame by the fetch runner
-            fetch_env: fetch_env.clone(),
-        };
-        (buildenv::whitelist(&spec_env), opts.isolation.script_prefix())
-    } else {
-        // `none`: the build runs with the profile env as-is, but the fetch
-        // phase's additions (CARGO_HOME, GOFLAGS, ...) still have to reach
-        // the sections, or an offline build cannot see what was fetched.
-        let mut v = opts.env.clone();
-        v.extend(fetch_env.iter().cloned());
-        (v, "")
-    };
+    let (env_vars, env_prefix) = buildroot::build_env(
+        rec, opts, sandboxed, &sandbox_base, &view, staged_assets.is_some(), sde, &fetch_env,
+    );
 
     // ---- run build sections ---------------------------------------------
     let ctx = ExpandCtx {
         jobs: opts.jobs,
-        pkgdir: view_pkg.clone(),
-        srcdir: view_src.clone(),
+        pkgdir: view.pkg.clone(),
+        srcdir: view.src.clone(),
         arch: rec.arch(),
         // §4.3: %{srcroot} exists only for recipes with [[package.sources]]
         // — an assets-only recipe has a staged workspace but no workspace
         // root (the sandbox binds it all the same; the NAME is just off)
-        srcroot: (!rec.package.sources.is_empty()).then(|| view_srcroot.clone()),
+        srcroot: (!rec.package.sources.is_empty()).then(|| view.srcroot.clone()),
         // §5.3: same rule for %{assetsdir}
-        assetsdir: staged_assets.as_ref().map(|_| view_assets.clone()),
+        assetsdir: staged_assets.as_ref().map(|_| view.assets.clone()),
     };
-    let arch = rec.arch();
     let sandbox_cfg = if sandboxed {
         let layers: Vec<String> = assembled
             .as_ref()
@@ -491,42 +198,14 @@ pub(crate) fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
             })
             .unwrap_or_default();
         Some(prepare_sandbox(
-            rec, opts, &work, &src, &pkg, &env_vars, &sandbox_base, &view_src, layers,
+            rec, opts, &work, &src, &pkg, &env_vars, &sandbox_base, &view.src, layers,
         )?)
     } else {
         None
     };
-
-    for (label, script) in [
-        ("prepare", &rec.build.prepare),
-        ("configure", &rec.build.configure),
-        ("compile", &rec.build.compile),
-        ("check", &rec.build.check),
-        ("install", &rec.build.install),
-    ] {
-        if script.trim().is_empty() {
-            continue;
-        }
-        if label == "check" {
-            match opts.check {
-                CheckMode::Off => continue,
-                CheckMode::Fatal => {}
-                CheckMode::Warn => {
-                    if let Err(e) = run_section(
-                        rec, label, script, &ctx, &srcdir, &work, &env_vars, env_prefix,
-                        sandbox_cfg.as_ref(), opts,
-                    ) {
-                        crate::nawa_warn!("check failed for {} (continuing): {e:#}", rec.id());
-                    }
-                    continue;
-                }
-            }
-        }
-        run_section(
-            rec, label, script, &ctx, &srcdir, &work, &env_vars, env_prefix,
-            sandbox_cfg.as_ref(), opts,
-        )?;
-    }
+    run_sections(
+        rec, opts, &ctx, &srcdir, &work, &env_vars, env_prefix, sandbox_cfg.as_ref(),
+    )?;
 
     // ---- slim: cleanup, split off -doc/-lang, strip ----------------------
     let slim_report = if opts.slim {
@@ -544,182 +223,26 @@ pub(crate) fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
         let _ = std::fs::remove_file(outdir.join(stale));
     }
 
-    // ---- collect staged files -------------------------------------------
-    let mut files: Vec<String> = Vec::new();
-    let mut size: u64 = 0;
-    for e in walkdir::WalkDir::new(&pkg).sort_by_file_name() {
-        let e = e?;
-        let rel = e.path().strip_prefix(&pkg)?;
-        if rel.as_os_str().is_empty() {
-            continue;
-        }
-        files.push(format!("/{}", rel.display()));
-        if let Ok(m) = e.metadata() {
-            if m.is_file() {
-                size += m.len();
-            }
-        }
-    }
-    if files.is_empty() {
-        bail!("build produced no files — check the install section");
-    }
-
-    // ---- post-build checks ("lint", §7) ----------------------------------
+    // ---- collect staged files, lint, archive -------------------------------
+    let (files, size) = package::collect_staged_files(&pkg)?;
     if opts.isolation >= Isolation::Env {
-        let sonames: BTreeMap<String, String> = match &assembled {
-            Some(root) => root.sonames.clone(),
-            None => installed_sonames(&opts.root)?,
-        };
-        // inside the sandbox the build only ever sees /build/... (or the
-        // fallback base); outside it the host build dir must not leak either
-        let host_builddir: Option<String> = if sandboxed {
-            if sandbox_base == "/build" {
-                None // the hardcoded /build/src, /build/pkg checks cover it
-            } else {
-                Some(sandbox_base.clone())
-            }
-        } else {
-            // Match this build's own work dir (e.g. /build/perl-5.44.0-1),
-            // not the bare builddir: with builddir=/build the bare path is a
-            // substring of innocent doc text ("/build", "/builddir"...) and
-            // flagged 24 false positives in perl's man pages and modules.
-            Some(work.to_string_lossy().into_owned())
-        };
-        let ctx = crate::lint::LintCtx {
-            pkgdir: &pkg,
-            rundeps: &rec.depends.run,
-            sonames: &sonames,
-            host_builddir: host_builddir.as_deref(),
-            // §5.3/§6: the staged snapshot and the per-build fetch views
-            // are <build_inside>/assets and <build_inside>/fetch/… inside
-            // the sandbox; recipes that enable them must not leak those
-            // paths into the archive
-            extra_leak_paths: {
-                let mut leaks: Vec<&'static str> = Vec::new();
-                if staged_assets.is_some() {
-                    leaks.push("/build/assets");
-                }
-                if rec.fetch.any() {
-                    leaks.push("/build/fetch");
-                }
-                leaks
-            },
-        };
-        let rep = crate::lint::run(&ctx);
-        for w in &rep.warnings {
-            crate::nawa_warn!("lint: {w}");
-        }
-        for e in &rep.errors {
-            crate::nawa_info_stderr!("lint: {e}");
-        }
-        if !rep.ok() {
-            bail!(
-                "{} lint error(s) in {} — the archive was NOT created",
-                rep.errors.len(),
-                rec.id()
-            );
-        }
-        if rep.elf_count > 0 {
-            crate::nawa_info!("lint: checked {} ELF file(s)", rep.elf_count);
-        }
-    }
-
-    // ---- .PKGINFO + archive ----------------------------------------------
-    let mut pkginfo = format!(
-        "pkgname = {}\npkgver = {}\npkgrel = {}\narch = {}\nrundeps = {}\nsize = {}\n",
-        name,
-        rec.package.version,
-        rec.package.rel,
-        arch,
-        rec.depends.run.join(","),
-        size,
-    );
-    if opts.isolation >= Isolation::Env {
-        // deterministic inputs instead of a wall clock (§6): install time
-        // lives in the database (install_date), not in the archive
-        pkginfo.push_str(&format!("source_date_epoch = {sde}\n"));
-        let closure_shas: Vec<PathBuf> = assembled
-            .as_ref()
-            .map(|a| a.archives.clone())
-            .unwrap_or_default();
-        let bid = build_id_for(rec, opts, &closure_shas, staged_assets.as_ref().map(|a| a.digest.as_str()), &toolchain_identity);
-        pkginfo.push_str(&format!("build_id = {bid}\n"));
-        if opts.allow_network && rec.sandbox.network {
-            pkginfo.push_str("impure = network\n");
-        }
-    } else {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        pkginfo.push_str(&format!("build_date = {now}\n"));
-    }
-
-    let out_path = outdir.join(format!("{}.nawa.tar.zst", rec.id()));
-    let hooks = archive::Hooks {
-        post_install: rec.hooks.post_install.clone(),
-        pre_remove: rec.hooks.pre_remove.clone(),
-        post_remove: rec.hooks.post_remove.clone(),
-    };
-
-    crate::nawa_info!(
-        "[{}] isolation={} sde={}",
-        rec.id(),
-        opts.isolation.as_str(),
-        sde
-    );
-    if opts.isolation >= Isolation::Env {
-        archive::create_normalized(
-            &pkg,
-            &pkginfo,
-            Some(&hooks),
-            &out_path,
-            &archive::Normalize { source_date_epoch: sde },
+        package::lint_stage(
+            rec, opts, &pkg, &work, assembled.as_ref(), sandboxed, &sandbox_base,
+            staged_assets.is_some(),
         )?;
-        // the cache-hit sidecar (--use-cache): the build id this archive
-        // was produced from, next to the archive itself
-        let bid = pkginfo
-            .split("build_id = ")
-            .nth(1)
-            .and_then(|s| s.lines().next())
-            .unwrap_or("");
-        let sidecar = buildid_sidecar(&out_path);
-        let _ = std::fs::write(&sidecar, format!("{bid}\n"));
-    } else {
-        archive::create_with_hooks(&pkg, &pkginfo, Some(&hooks), &out_path)?;
     }
-
-    // ---- sub-packages (-doc, -lang) --------------------------------------
-    // Same version/rel, build inputs and normalisation as the main archive;
-    // each depends on it. repo-create / sign / upload pick them up by name.
-    for sp in &slim_report.subpackages {
-        let sub_name = format!("{}-{}", name, sp.suffix);
-        let sub_info = slim::derive_pkginfo(&pkginfo, name, &sub_name, sp.size);
-        let sub_path = outdir.join(slim::subpackage_file(
-            name,
-            sp.suffix,
-            &rec.package.version,
-            rec.package.rel,
-        ));
-        if opts.isolation >= Isolation::Env {
-            archive::create_normalized(
-                &sp.dir,
-                &sub_info,
-                None,
-                &sub_path,
-                &archive::Normalize { source_date_epoch: sde },
-            )?;
-        } else {
-            archive::create_with_hooks(&sp.dir, &sub_info, None, &sub_path)?;
-        }
-        crate::nawa_success!(
-            "built {sub_name}-{}-{} ({} files) -> {}",
-            rec.package.version,
-            rec.package.rel,
-            sp.files,
-            sub_path.display()
-        );
-    }
+    let (out_path, pkginfo) = package::package_archives(
+        rec,
+        opts,
+        &pkg,
+        &outdir,
+        size,
+        sde,
+        assembled.as_ref(),
+        staged_assets.as_ref().map(|a| a.digest.as_str()),
+        &toolchain_identity,
+        &slim_report,
+    )?;
 
     // v1/v2 assembly cleanup: the extract-per-build root is per-build
     // scratch; a layered root is only the empty mountpoint
@@ -851,15 +374,19 @@ pub(crate) fn rebuild_check(rec: &Recipe, opts: &BuildOpts) -> Result<()> {
 
 
 pub mod cache;
+mod buildroot;
+mod package;
 pub mod sandbox;
 pub mod sections;
+mod stage;
 
 #[allow(unused_imports)]
 pub(crate) use cache::{build_id_for, try_cache_hit, buildid_sidecar, fetch_ecosystems};
 #[allow(unused_imports)]
 pub(crate) use sandbox::{layer_cache_dir, layer_paths_are_mountable, overlay_probe_ok, prepare_sandbox};
 #[allow(unused_imports)]
-pub(crate) use sections::{diff_archives, installed_sonames, run_section};
+pub(crate) use sections::{diff_archives, installed_sonames, run_section, run_sections};
+use stage::StagedSource;
 
 #[cfg(test)]
 mod fetch_toolchain_identity_tests {

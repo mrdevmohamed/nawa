@@ -14,6 +14,7 @@ mod color;
 mod output;
 mod commands;
 mod config;
+mod ctx;
 mod confirm;
 mod db;
 mod deps;
@@ -53,94 +54,17 @@ mod unique;
 mod upgrade;
 mod version;
 
-use anyhow::{bail, Context, Result};
+use anyhow::Result;
 use clap::Parser;
-use std::collections::{BTreeSet, HashSet};
-use std::path::{Path, PathBuf};
 
 use color::{Palette, Stream};
-use config::{Config, InstallMode, Overrides};
+use config::Overrides;
 
 // Items moved out of this file: command-line definition, command handlers and
-// formatters. Re-imported here (and, through `use crate::*`, in those modules).
+// formatters. Each module imports what it uses explicitly.
 use cli::*;
 use commands::*;
-use humanize::*;
-
-struct Ctx {
-    root: PathBuf,
-    recipes: PathBuf,
-    builddir: PathBuf,
-    profiles: PathBuf,
-    jobs: Option<u32>,
-    repo: Option<String>,
-    install_mode: InstallMode,
-    /// the resolved configuration, kept for `config show` (sources + file)
-    cfg: Config,
-    /// Per-command cache for `recipe::load_all(&recipes)` — cached after the
-    /// first successful load so repeated lookups in the same `nawa` process
-    /// (install/upgrade/build each walk the recipes tree multiple times)
-    /// do not re-parse every `recipe.toml`. Safe because the recipes tree
-    /// does not change during a single command execution.
-    recipe_cache: std::cell::RefCell<Option<std::collections::BTreeMap<String, recipe::Recipe>>>,
-}
-
-impl Ctx {
-    fn from_config(cfg: &Config) -> Self {
-        Ctx {
-            root: cfg.root.clone(),
-            recipes: cfg.recipes.clone(),
-            builddir: cfg.builddir.clone(),
-            profiles: cfg.profiles.clone(),
-            jobs: cfg.jobs,
-            repo: cfg.repo.clone(),
-            install_mode: cfg.install_mode,
-            cfg: cfg.clone(),
-            recipe_cache: std::cell::RefCell::new(None),
-        }
-    }
-
-    /// Cached [`recipe::load_all`] for this command's recipes root.
-    fn load_all(&self) -> Result<std::collections::BTreeMap<String, recipe::Recipe>> {
-        let cached = self.recipe_cache.borrow();
-        if let Some(map) = cached.as_ref() {
-            return Ok(map.clone());
-        }
-        drop(cached);
-        let loaded = crate::recipe::load_all(&self.recipes)?;
-        *self.recipe_cache.borrow_mut() = Some(loaded.clone());
-        Ok(loaded)
-    }
-}
-
-/// `--build` / `--from-repo` / `--from` collapse to one install mode.
-/// Shared by `install` and `update` so flag precedence cannot drift.
-fn resolve_mode(build: bool, from_repo: bool, from: Option<&str>) -> Result<Option<InstallMode>> {
-    if build {
-        Ok(Some(InstallMode::Build))
-    } else if from_repo {
-        Ok(Some(InstallMode::Repo))
-    } else if let Some(m) = from {
-        Ok(Some(InstallMode::parse(m)?))
-    } else {
-        Ok(None)
-    }
-}
-
-/// The configured repository (flag beats config), parsed.
-/// Shared by `upgrade` and `sync` so the "no repository" bail text
-/// cannot drift.
-fn resolve_repo(ctx: &Ctx, repo: Option<String>) -> Result<fetch::RepoRef> {
-    let repo = match repo.or_else(|| ctx.repo.clone()) {
-        Some(r) => r,
-        None => bail!(
-            "no repository configured (it is switched off with `repo = \"\"`): \
-             pass --repo <dir-or-url>, set `repo` in nawa.toml or \
-             /etc/nawa/nawa.toml, or export NAWA_REPO"
-        ),
-    };
-    fetch::RepoRef::parse(&repo)
-}
+use ctx::{resolve_mode, resolve_repo, Ctx};
 
 fn main() {
     let Cli { root, recipes, builddir, profiles, jobs, cmd } = Cli::parse();
@@ -199,7 +123,6 @@ fn main() {
         std::process::exit(1);
     }
 }
-
 
 /// Whether this command can change the installed package set. Post-transaction
 /// triggers are dispatched after these commands, including partial failures.
@@ -395,103 +318,18 @@ fn run_command(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             cmd_revdep(ctx, &names, &lib_dirs, &ignore, no_symlinks, unowned, &scan_dirs, json, no_suggest)
         }
         Cmd::RepoCreate { dir, out, sign, key, index_version, locations, recipes, recipes_rev, groups } => {
-            if index_version >= repo::INDEX_SCHEMA_V2 && !sign {
-                bail!("repo-create --index-version {index_version} requires --sign; repository indexes v2 and newer must be authenticated");
-            }
-            if index_version == repo::INDEX_SCHEMA_V3 && locations.is_none() {
-                bail!("repo-create --index-version 3 requires --locations");
-            }
-            if index_version != repo::INDEX_SCHEMA_V3 && locations.is_some() {
-                bail!("repo-create --locations is only valid with --index-version 3");
-            }
-            if groups.is_some() && index_version < repo::INDEX_SCHEMA_V2 {
-                bail!("repo-create --groups requires --index-version 2 or 3");
-            }
-            // Resolve the key before writing anything, so a missing signing
-            // key cannot leave an unsigned v2 index in the repository.
-            let signing_key = if sign {
-                let path = sign::resolve_signing_key(key.as_deref())?;
-                sign::load_signing_key(&path)
-                    .with_context(|| format!("invalid repository signing key {}", path.display()))?;
-                Some(path)
-            } else {
-                None
-            };
-            // A relative --out lands inside the repo dir, not in the CWD.
-            let out = if out.is_absolute() { out } else { dir.join(out) };
-            let tree = match (&recipes, &recipes_rev) {
-                (Some(t), Some(r)) => Some((t.as_path(), r.as_str())),
-                _ => None,
-            };
-            repo::create_index_with_locations_and_groups(
-                &dir, &out, tree, index_version, locations.as_deref(), groups.as_deref()
-            )?;
-            if let Some(kp) = signing_key {
-                let sp = sign::sign(&out, &kp)?;
-                crate::nawa_info!("signed index -> {}", sp.display());
-            }
-            Ok(())
+            cmd_repo_create(&dir, out, sign, key.as_deref(), index_version, locations.as_deref(), recipes.as_deref(), recipes_rev.as_deref(), groups.as_deref())
         }
         Cmd::RepoUpdate { dir, base, trust_key, out, add_entries, remove, drop, locations, recipes, recipes_rev, key } => {
-            // Resolve the signing key first: an update is always signed, and a
-            // missing key must not leave an unsigned index behind.
-            let signing_key = sign::resolve_signing_key(key.as_deref())?;
-            sign::load_signing_key(&signing_key)
-                .with_context(|| format!("invalid repository signing key {}", signing_key.display()))?;
-            // Verify the exact bytes that are then parsed: an unverified base
-            // must never flow into a signed index.
-            let vk = sign::load_verify_key(&trust_key)?;
-            let base_bytes = std::fs::read(&base)
-                .with_context(|| format!("read base index {}", base.display()))?;
-            let sf = sign::read_sig_file(&sign::sig_path_for(&base))?;
-            sign::verify_bytes(&base_bytes, &vk, &sf.sig).with_context(|| {
-                format!("base index {} is not signed by {}; refusing to update an unverified index", base.display(), trust_key.display())
-            })?;
-            let base_index = repo::load_index_bytes(&base_bytes)
-                .with_context(|| format!("parse base index {}", base.display()))?;
-            let out = if out.is_absolute() { out } else { dir.join(out) };
-            let tree = match (&recipes, &recipes_rev) {
-                (Some(t), Some(r)) => Some((t.as_path(), r.as_str())),
-                _ => None,
-            };
-            repo::update_index_files(
-                &base_index,
-                &dir,
-                &out,
-                repo::UpdateIndexFilesInputs {
-                    entries_path: add_entries.as_deref(),
-                    remove_files: remove,
-                    drop_packages: drop,
-                    locations_path: locations.as_deref(),
-                    recipes: tree,
-                },
-            )?;
-            let sp = sign::sign(&out, &signing_key)?;
-            crate::nawa_info!("signed index -> {}", sp.display());
-            Ok(())
+            cmd_repo_update(&dir, &base, &trust_key, out, add_entries.as_deref(), remove, drop, locations.as_deref(), recipes.as_deref(), recipes_rev.as_deref(), key.as_deref())
         }
-        Cmd::Keygen { out } => {
-            let dir = out.unwrap_or_else(sign::default_key_dir);
-            let (sec, pub_) = sign::keygen(&dir)?;
-            crate::nawa_info!("secret key  {}  (keep safe, mode 0600)", sec.display());
-            crate::nawa_info!("public key  {}  (share / `nawa trust` on targets)", pub_.display());
-            Ok(())
-        }
-        Cmd::Sign { file, key } => {
-            let kp = sign::resolve_signing_key(key.as_deref())?;
-            let sp = sign::sign(&file, &kp)?;
-            crate::nawa_info!("signed {} -> {}", file.display(), sp.display());
-            Ok(())
-        }
+        Cmd::Keygen { out } => cmd_keygen(out),
+        Cmd::Sign { file, key } => cmd_sign(&file, key.as_deref()),
         Cmd::Verify { file, key } => {
             sign::verify_standalone(&file, &ctx.root, key.as_deref())?;
             Ok(())
         }
-        Cmd::Trust { keyfile } => {
-            let dest = sign::trust(&keyfile, &ctx.root)?;
-            crate::nawa_info!("trusted key installed at {}", dest.display());
-            Ok(())
-        }
+        Cmd::Trust { keyfile } => cmd_trust(ctx, &keyfile),
         Cmd::Upgrade { repo, dry_run, force, allow_unsigned, yes } => {
             let repo_ref = resolve_repo(ctx, repo)?;
             upgrade::upgrade(
@@ -513,30 +351,9 @@ fn run_command(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             repositories::cmd_repoquery(&ctx.cfg, &ctx.root, &name, repo_id.as_deref(), info)
         }
         Cmd::Fetch { names, all, isolation, sources_only, offline, allow_degraded } => {
-            if !all && names.is_empty() {
-                bail!("`nawa fetch` needs recipe names or --all");
-            }
-            cmd_fetch(
-                ctx,
-                &names,
-                all,
-                isolation.as_deref(),
-                sources_only,
-                offline,
-                allow_degraded,
-            )
+            cmd_fetch_checked(ctx, &names, all, isolation.as_deref(), sources_only, offline, allow_degraded)
         }
-        Cmd::Recipe { action } => match action {
-            RecipeCmd::Check { name, all } => {
-                if name.is_none() && !all {
-                    bail!("`nawa recipe check` needs a recipe name or --all");
-                }
-                if name.is_some() && all {
-                    bail!("a recipe name and --all are exclusive");
-                }
-                cmd_recipe_check(ctx, name.as_deref(), all)
-            }
-        },
+        Cmd::Recipe { action } => cmd_recipe(ctx, action),
         Cmd::Clean { category, dry_run } => repositories::cmd_clean(ctx, &category, dry_run),
         Cmd::Group { action } => match action {
             GroupCmd::List => cmd_group_list(ctx),
@@ -553,63 +370,10 @@ fn run_command(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             PluginCmd::Revoke { id, capability } => cmd_plugin_grant(ctx, &id, &capability, false),
             PluginCmd::Run { id, command, args } => cmd_plugin_run(ctx, &id, &command, &args),
         },
-        Cmd::External(values) => {
-            let mut values = values.into_iter();
-            let command = values.next()
-                .ok_or_else(|| anyhow::anyhow!("missing plugin command name"))?
-                .into_string()
-                .map_err(|_| anyhow::anyhow!("plugin command name is not valid UTF-8"))?;
-            let args: Result<Vec<String>> = values
-                .map(|value| value.into_string().map_err(|_| anyhow::anyhow!("plugin arguments must be valid UTF-8 for JSONL")))
-                .collect();
-            cmd_plugin_dispatch(ctx, &command, &args?)
-        },
+        Cmd::External(values) => cmd_plugin_external(ctx, values),
         Cmd::Rollback { name } => install::rollback(&name, &ctx.root),
-        Cmd::History { action, limit } => {
-            // the lock is already held (see lock_mode); reconcile what a
-            // killed nawa left behind before showing or undoing anything
-            for note in transaction::recovery::reconcile_incomplete(&ctx.root)? {
-                crate::nawa_info_stderr!("recovered: {note}");
-            }
-            match action {
-                None => undo::print_history(&ctx.root, limit.unwrap_or(20)),
-                Some(HistoryCmd::List) => undo::print_history(&ctx.root, limit.unwrap_or(20)),
-                Some(HistoryCmd::Info { id }) => undo::print_info(&ctx.root, id),
-                Some(HistoryCmd::Undo { id, yes }) => undo::history_undo(&ctx.root, id, yes),
-            }
-        }
-        Cmd::Service { action } => match action {
-            ServiceCmd::List => service::print_list(&ctx.root),
-            ServiceCmd::Enable { name, now } => {
-                if now {
-                    service::enable_now(&ctx.root, &name)?;
-                } else {
-                    service::enable(&ctx.root, &name)?;
-                    println!(
-                        "nawa: enabled {name} — runsvdir picks it up within ~5 s \
-                         (or: `nawa service start {name}`)"
-                    );
-                }
-                Ok(())
-            }
-            ServiceCmd::Disable { name, now } => {
-                if now {
-                    service::disable_now(&ctx.root, &name)?;
-                    crate::nawa_info!("stopped and disabled {name}");
-                } else {
-                    service::disable(&ctx.root, &name)?;
-                    println!(
-                        "nawa: disabled {name} — runsvdir stops it within ~5 s \
-                         (or use `nawa service disable --now {name}`)"
-                    );
-                }
-                Ok(())
-            }
-            ServiceCmd::Start { name } => service::start(&ctx.root, &name),
-            ServiceCmd::Stop { name } => service::stop(&ctx.root, &name),
-            ServiceCmd::Restart { name } => service::restart(&ctx.root, &name),
-            ServiceCmd::Status { name } => service::print_status(&ctx.root, name.as_deref()),
-        },
+        Cmd::History { action, limit } => cmd_history(ctx, action, limit),
+        Cmd::Service { action } => cmd_service(ctx, action),
         Cmd::Config { action } => match action {
             ConfigCmd::Show => cmd_config_show(ctx),
         },
@@ -623,63 +387,9 @@ fn run_command(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             let code = sandbox::init(&spec)?;
             std::process::exit(code);
         }
-        Cmd::SandboxProbe { op } => {
-            // a single probe runs in this process; the full mode spawns one
-            // process per op, because each probe creates namespaces and
-            // nesting them in one process corrupts the results
-            match op {
-                Some(o) => {
-                    let ok = match sandbox::probe(&o) {
-                        Ok(true) => {
-                            println!("PASS  {o}");
-                            true
-                        }
-                        Ok(false) => {
-                            println!("FAIL  {o}");
-                            false
-                        }
-                        Err(e) => {
-                            println!("ERROR {o}: {e:#}");
-                            false
-                        }
-                    };
-                    std::process::exit(if ok { 0 } else { 1 });
-                }
-                None => {
-                    let exe = std::env::current_exe().context("locate the nawa binary")?;
-                    let mut all_ok = true;
-                    for o in sandbox::PROBES {
-                        let out = std::process::Command::new(&exe)
-                            .arg("sandbox-probe")
-                            .arg(o)
-                            .output()
-                            .with_context(|| format!("run probe {o}"))?;
-                        let text = String::from_utf8_lossy(&out.stdout);
-                        let one_line = text
-                            .lines()
-                            .find(|l| l.starts_with("PASS") || l.starts_with("FAIL"))
-                            .unwrap_or_default();
-                        println!("{one_line}");
-                        if !out.status.success() {
-                            all_ok = false;
-                        }
-                    }
-                    if all_ok {
-                        println!("sandbox probe: OK — all features available");
-                    } else {
-                        println!("sandbox probe: some features are missing (restricted kernel/container?)");
-                        println!(
-                            "nawa build refuses to weaken isolation silently; pass \
-                             --allow-degraded to continue"
-                        );
-                    }
-                    std::process::exit(if all_ok { 0 } else { 1 });
-                }
-            }
-        }
+        Cmd::SandboxProbe { op } => cmd_sandbox_probe(op),
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -718,40 +428,5 @@ mod tests {
         upgraded.install_date += 1;
         upgraded.artifact_sha256 = "b".repeat(64);
         assert!(installed_package_payload_changed(&before, &[upgraded]));
-    }
-
-    #[test]
-    fn date_formatting() {
-        assert_eq!(format_date(0), "-");
-        assert_eq!(format_date(86_400), "1970-01-02");
-        assert_eq!(format_date(1_700_000_000), "2023-11-14");
-        assert_eq!(format_date(1_704_067_200), "2024-01-01");
-        assert_eq!(format_date(951_782_400), "2000-02-29"); // leap day
-    }
-
-    #[test]
-    fn duration_formatting() {
-        assert_eq!(format_duration(0), "0s");
-        assert_eq!(format_duration(59), "59s");
-        assert_eq!(format_duration(185), "3m05s");
-        assert_eq!(format_duration(3720), "1h02m");
-    }
-
-    #[test]
-    fn archive_vs_name_arguments() {
-        assert!(is_archive_arg("build/out/a-1-1.nawa.tar.zst"));
-        assert!(is_archive_arg("./a"));
-        assert!(is_archive_arg("a-1-1.nawa.tar.zst"));
-        assert!(!is_archive_arg("gzip"));
-        assert!(!is_archive_arg("libstdc++"));
-    }
-
-    #[test]
-    fn size_formatting() {
-        assert_eq!(format_size(0), "0 B");
-        assert_eq!(format_size(512), "512 B");
-        assert_eq!(format_size(2048), "2.0 KiB");
-        assert_eq!(format_size(5 * 1024 * 1024), "5.0 MiB");
-        assert_eq!(format_size(3 * 1024 * 1024 * 1024), "3.0 GiB");
     }
 }

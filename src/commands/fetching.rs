@@ -13,8 +13,16 @@
 //! commands (§12); at `sandbox` they go through the fetch sandbox spec, and
 //! at `closure` the same build root a build would assemble is prepared first
 //! (the toolchain lives in it).
+use crate::ctx::Ctx;
+use crate::assets;
+use crate::build;
+use crate::buildenv;
+use crate::closure;
+use crate::fetch;
+use crate::fetchrun;
+use crate::recipe;
+use crate::sources;
 
-use crate::*;
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -284,4 +292,20 @@ fn fetch_legacy_source(
         .with_context(|| format!("verify the fetched source of recipe {}", rec.package.name))?;
     crate::nawa_info!("source verified: {}", tarball.display());
     Ok(())
+}
+
+/// `nawa fetch` with its argument check: names or `--all`, never neither.
+pub(crate) fn cmd_fetch_checked(
+    ctx: &Ctx,
+    names: &[String],
+    all: bool,
+    isolation: Option<&str>,
+    sources_only: bool,
+    offline: bool,
+    allow_degraded: bool,
+) -> Result<()> {
+    if !all && names.is_empty() {
+        bail!("`nawa fetch` needs recipe names or --all");
+    }
+    cmd_fetch(ctx, names, all, isolation, sources_only, offline, allow_degraded)
 }

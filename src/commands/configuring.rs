@@ -1,6 +1,12 @@
 //! `config show` and `init`.
 
-use crate::*;
+use anyhow::{bail, Context, Result};
+use crate::ctx::Ctx;
+use crate::color::Palette;
+use std::path::PathBuf;
+use crate::color::Stream;
+use crate::config;
+
 
 pub(crate) fn cmd_config_show(ctx: &Ctx) -> Result<()> {
     // the config resolved at startup, flags included, so sources are truthful
