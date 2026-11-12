@@ -30,6 +30,7 @@ cargo clippy --release --all-targets --offline --locked -- -D warnings
 
 The main workflow is .github/workflows/ci.yml. It runs:
 
+- A module-layering check (`scripts/check-layering.py`): no dependency cycles between top-level modules and no `use crate::*`. Lower layers (`atomic`, `checksum`, `db`, `transaction`, ...) never import higher ones (`install`, `plugins`, `commands`, `cli`); when two modules need the same code, move it down into a shared module. Run it locally with `python3 scripts/check-layering.py`.
 - Release-mode build, Clippy, and the Rust test suite.
 - Tests as normal user and root across supported Ubuntu runner versions.
 - Real CLI builds at none, env, sandbox, and closure isolation levels.

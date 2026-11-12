@@ -43,6 +43,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Cheap structural gate: module dependency cycles and `use crate::*`
+      # are caught in seconds, before the build (scripts/check-layering.py).
+      - name: Module layering (no cycles, no glob imports)
+        run: python3 scripts/check-layering.py
+
       - name: Allow unprivileged user namespaces (needed by the sandbox tests)
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
