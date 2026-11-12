@@ -135,11 +135,12 @@ pub(crate) fn try_cache_hit(
         crate::nawa_info!("build cache: {} changed (build_id mismatch) — rebuilding", rec.id());
         return Ok(None);
     }
-    let pkginfo = archive::read_pkginfo(&out_path)?;
+    // A cache hit must still be a readable package archive.
+    archive::read_pkginfo(&out_path)?;
     crate::nawa_info!(
         "build cache hit: {} (build_id {bid}) — nothing to do",
         out_path.display()
     );
-    Ok(Some(BuildResult { archive: out_path, pkginfo }))
+    Ok(Some(BuildResult { archive: out_path }))
 }
 

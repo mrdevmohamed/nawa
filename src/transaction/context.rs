@@ -18,7 +18,6 @@ use super::journal;
 
 /// Normalized command kinds — never a dump of the caller's arguments or
 /// environment (roadmap §4.2).
-#[allow(dead_code)] // GroupInstall/GroupRemove are wired by the Phase 5 group commands
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OperationCommand {
     Install,

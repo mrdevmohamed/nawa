@@ -6,25 +6,26 @@ pub mod create;
 pub mod update;
 pub mod pack;
 
-#[allow(unused_imports)]
 pub(crate) use model::{
-    GroupsEntry, Index, RecipesEntry, RepoEntry, RepositoryMeta,
-    ARCHIVE_AUTH_SIGNED_INDEX, ARCHIVE_LOCATION_BASE_URL, ARCHIVE_LOCATION_PER_PACKAGE_URL,
-    HASH_ALGORITHM_SHA256, INDEX_SCHEMA_V2, INDEX_SCHEMA_V3, INDEX_SIGNATURE_NAWA_SIG_V1,
-    INDEX_VALIDITY_SECS, RECIPES_SUFFIX,
+    Index, RepoEntry, ARCHIVE_LOCATION_PER_PACKAGE_URL, INDEX_SCHEMA_V2, INDEX_SCHEMA_V3,
+    RECIPES_SUFFIX,
 };
-#[allow(unused_imports)]
-pub(crate) use validate::{load_index_bytes, validate_sha256};
+#[cfg(test)]
+pub(crate) use model::{
+    RepositoryMeta, ARCHIVE_AUTH_SIGNED_INDEX, ARCHIVE_LOCATION_BASE_URL, INDEX_VALIDITY_SECS,
+};
+pub(crate) use validate::load_index_bytes;
 #[cfg(test)]
 pub(crate) use validate::load_index;
-#[allow(unused_imports)]
-pub(crate) use create::{create_index_with_version, create_index_with_locations, create_index_with_locations_and_groups};
+pub(crate) use create::create_index_with_locations_and_groups;
 #[cfg(test)]
-pub(crate) use create::{create_index, create_index_with};
-#[allow(unused_imports)]
-pub(crate) use update::{update_index, update_index_files, IndexDelta, UpdateIndexFilesInputs};
-#[allow(unused_imports)]
-pub(crate) use pack::{pack_groups, pack_recipes, validate_rev};
+pub(crate) use create::{
+    create_index, create_index_with, create_index_with_locations, create_index_with_version,
+};
+pub(crate) use update::{update_index_files, UpdateIndexFilesInputs};
+#[cfg(test)]
+pub(crate) use update::{update_index, IndexDelta};
+pub(crate) use pack::validate_rev;
 
 #[cfg(test)]
 mod tests {

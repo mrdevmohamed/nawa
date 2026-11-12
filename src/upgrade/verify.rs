@@ -1,8 +1,6 @@
 //! Verification helpers.
 
-// Note: trim unused imports in later pass
-#[allow(unused_imports)]
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use std::path::Path;
 
 use crate::repo;

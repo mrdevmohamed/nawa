@@ -182,9 +182,7 @@ pub(crate) fn build_id_with(
 pub mod elf;
 pub mod layout;
 
-#[allow(unused_imports)]
-pub(crate) use elf::{parse_elf, ElfInfo, LintRead, MAX_ELF_SCAN, MAX_ELF_SCAN_MIB, read_for_lint, looks_texty};
-#[allow(unused_imports)]
+pub(crate) use elf::{parse_elf, ElfInfo, LintRead, MAX_ELF_SCAN_MIB, read_for_lint, looks_texty};
 pub(crate) use layout::{check_elf, check_layout, check_text_leaks};
 
 #[cfg(test)]
@@ -573,7 +571,7 @@ mod tests {
         let path = pkgdir.join("usr/bin/oversized-elf");
         let mut file = std::fs::File::create(&path).unwrap();
         file.write_all(b"\x7fELF").unwrap();
-        file.set_len(MAX_ELF_SCAN + 1).unwrap();
+        file.set_len(super::elf::MAX_ELF_SCAN + 1).unwrap();
 
         let rundeps = Vec::new();
         let sonames = BTreeMap::new();

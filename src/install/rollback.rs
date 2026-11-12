@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::artifact;
 use crate::db::{Db, Entry};
-use crate::install::hooks::{hook_needs_retry, load_hooks, run_hook};
+use crate::install::hooks::{load_hooks, run_hook};
 use crate::install::journal::{recover_and_report, Tx};
 use crate::install::payload::save_undo;
 use crate::install::{inspect_archive_state, install_archive, install_archive_from_index_proof, install_archive_pinned, InstallOpts};
@@ -65,40 +65,16 @@ pub(crate) fn rollback(name: &str, root: &Path) -> Result<()> {
 
         let (result, proof) = install_restore_source(source, root);
 
-        let current_after = match &result {
-            Ok(entry) => Some(entry.clone()),
-            Err(_) => db.entry(name)?,
-        };
-        let retry_hook = hook_needs_retry(root, name).unwrap_or(false);
-        let committed_hook_failed = result.is_err()
-            && crate::transaction::history::committed_hook_failed(
-                current_after.as_ref(),
-                before.as_ref(),
-                &target,
-                retry_hook,
-            );
-        let step_status = if result.is_ok() {
-            crate::transaction::history::StepStatus::Committed
-        } else if committed_hook_failed {
-            crate::transaction::history::StepStatus::CommittedHookFailed
-        } else {
-            crate::transaction::history::StepStatus::Failed
-        };
-        let after = if result.is_ok() || committed_hook_failed {
-            current_after.as_ref()
-        } else {
-            None
-        };
-        recorder.step_result(
+        crate::install::record_install_outcome(
+            &mut recorder,
+            root,
             step_no,
             name,
             crate::transaction::history::StepAction::Restore,
-            step_status,
             before.as_ref(),
-            after,
+            &target,
             "rollback",
-            result.as_ref().err().map(|error| format!("{error:#}")),
-            committed_hook_failed.then(|| "failed".to_string()),
+            &result,
         )?;
         (result, proof)
     };

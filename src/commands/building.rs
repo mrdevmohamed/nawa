@@ -103,31 +103,17 @@ pub(crate) fn cmd_build(
         &archive, &ctx.root,
         install::InstallOpts { force: install_force, allow_unsigned: false, key: None, reason: crate::db::InstallReason::Explicit, pinned_sha: Some(&digest) },
     );
-    match &result {
-        Ok(entry) => {
-            recorder.step_result(
-                step_no, &entry.name, action,
-                transaction::history::StepStatus::Committed,
-                before.as_ref(), Some(entry), "local-build", None, None,
-            )?;
-        }
-        Err(error) => {
-            let current = db.entry(name)?;
-            let retry_hook = install::hook_needs_retry(&ctx.root, name).unwrap_or(false);
-            let committed_hook_failed = crate::transaction::history::committed_hook_failed(
-                current.as_ref(), before.as_ref(), &target, retry_hook,
-            );
-            recorder.step_result(
-                step_no, name, action,
-                if committed_hook_failed { transaction::history::StepStatus::CommittedHookFailed }
-                else { transaction::history::StepStatus::Failed },
-                before.as_ref(),
-                if committed_hook_failed { current.as_ref() } else { None },
-                "local-build", Some(format!("{error:#}")),
-                committed_hook_failed.then(|| "failed".to_string()),
-            )?;
-        }
-    }
+    install::record_install_outcome(
+        &mut recorder,
+        &ctx.root,
+        step_no,
+        name,
+        action,
+        before.as_ref(),
+        &target,
+        "local-build",
+        &result,
+    )?;
     op.finish(result.as_ref().err())?;
     result?;
     Ok(())

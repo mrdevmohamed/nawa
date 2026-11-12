@@ -217,25 +217,23 @@ pub mod hooks;
 pub mod journal;
 pub mod payload;
 pub mod rollback;
+mod step;
 
-// ---- re-exports preserving the pre-split API ------------------------------
-#[allow(unused_imports)]
-pub(crate) use hooks::{
-    exists_in_root, hook_needs_retry, hook_status_path, resolve_in_root, retry_pending_hook,
-    run_tracked_hook, save_hooks, save_hook_status,
+// ---- re-exports used outside the install module ---------------------------
+pub(crate) use hooks::{exists_in_root, hook_needs_retry, resolve_in_root, retry_pending_hook};
+pub(crate) use journal::recover_and_report;
+pub(crate) use payload::install_archive_payload;
+pub(crate) use rollback::{
+    remove_with, rollback, verify_retained_detached_proof, verify_retained_index_proof,
 };
-#[allow(unused_imports)]
-pub(crate) use journal::{
-    dec, enc, recover, recover_and_report, Tx,
-};
-#[allow(unused_imports)]
-pub(crate) use payload::{
-    ensure_inside_root, install_archive_payload, save_undo, stage_tree,
-};
-#[allow(unused_imports)]
-pub(crate) use rollback::{remove, remove_with, rollback, verify_retained_detached_proof, verify_retained_index_proof};
-#[allow(unused_imports)]
-pub(crate) use hooks::HookStatus;
+pub(crate) use step::{record_install_outcome, record_remove_outcome};
+
+#[cfg(test)]
+pub(crate) use hooks::{save_hook_status, save_hooks, HookStatus};
+#[cfg(test)]
+pub(crate) use journal::{dec, enc, recover, Tx};
+#[cfg(test)]
+pub(crate) use rollback::remove;
 
 #[cfg(test)]
 mod tests {

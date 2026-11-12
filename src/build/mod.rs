@@ -21,8 +21,6 @@ const FAIL_TAIL_LINES: usize = 25;
 
 pub(crate) struct BuildResult {
     pub archive: PathBuf,
-    #[allow(dead_code)]
-    pub pkginfo: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -231,7 +229,7 @@ pub(crate) fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
             staged_assets.is_some(),
         )?;
     }
-    let (out_path, pkginfo) = package::package_archives(
+    let out_path = package::package_archives(
         rec,
         opts,
         &pkg,
@@ -262,7 +260,7 @@ pub(crate) fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
         out_path.display()
     );
 
-    Ok(BuildResult { archive: out_path, pkginfo })
+    Ok(BuildResult { archive: out_path })
 }
 
 
@@ -380,12 +378,9 @@ pub mod sandbox;
 pub mod sections;
 mod stage;
 
-#[allow(unused_imports)]
-pub(crate) use cache::{build_id_for, try_cache_hit, buildid_sidecar, fetch_ecosystems};
-#[allow(unused_imports)]
-pub(crate) use sandbox::{layer_cache_dir, layer_paths_are_mountable, overlay_probe_ok, prepare_sandbox};
-#[allow(unused_imports)]
-pub(crate) use sections::{diff_archives, installed_sonames, run_section, run_sections};
+pub(crate) use cache::{build_id_for, try_cache_hit, buildid_sidecar};
+pub(crate) use sandbox::prepare_sandbox;
+pub(crate) use sections::{diff_archives, run_sections};
 use stage::StagedSource;
 
 #[cfg(test)]
@@ -492,7 +487,7 @@ mod wipe_tests {
 
 #[cfg(test)]
 mod installed_sonames_tests {
-    use super::installed_sonames;
+    use super::sections::installed_sonames;
     use crate::db::{Db, Entry};
 
     fn entry(name: &str) -> Entry {

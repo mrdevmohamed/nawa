@@ -33,7 +33,7 @@ pub(crate) fn sync(root: &Path, repo_ref: &RepoRef, dest: &Path, opts: &SyncOpts
         ),
     };
     repo::validate_rev(&rec.rev)?;
-    upgrade::validate_entry_filename(&rec.file)?;
+    upgrade::verify::validate_entry_filename(&rec.file)?;
     if !rec.file.ends_with(repo::RECIPES_SUFFIX) {
         bail!("index lists `{}` as the recipe tree — unexpected file name", rec.file);
     }

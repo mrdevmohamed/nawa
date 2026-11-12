@@ -56,6 +56,7 @@ mod version;
 
 use anyhow::Result;
 use clap::Parser;
+use std::path::Path;
 
 use color::{Palette, Stream};
 use config::Overrides;
@@ -174,9 +175,10 @@ fn print_error(e: anyhow::Error) {
 }
 
 fn run(ctx: &Ctx, cmd: Cmd, track_package_changes: bool) -> (Result<()>, bool) {
-    let snapshot_needs_shared_lock = lock_mode(&cmd).is_none();
+    let mode = lock_mode(&cmd);
+    let snapshot_needs_shared_lock = mode.is_none();
     // held until a whole-command transaction completes
-    let _db_lock = match lock_mode(&cmd) {
+    let _db_lock = match mode {
         Some(mode) => match lock::acquire(&ctx.root, mode) {
             Ok(guard) => guard,
             Err(error) => return (Err(error), false),
@@ -186,7 +188,7 @@ fn run(ctx: &Ctx, cmd: Cmd, track_package_changes: bool) -> (Result<()>, bool) {
     // any command that writes under the root first repairs what a killed
     // nawa left behind; holding the exclusive lock guarantees no live
     // transaction is mistaken for a dead one
-    if matches!(lock_mode(&cmd), Some(lock::Mode::Exclusive)) {
+    if mode == Some(lock::Mode::Exclusive) {
         install::recover_and_report(&ctx.root);
         // one-shot, idempotent migration of legacy nanosecond install dates
         // (roadmap §4.3): only clearly-nanosecond values are rewritten, each
@@ -204,15 +206,7 @@ fn run(ctx: &Ctx, cmd: Cmd, track_package_changes: bool) -> (Result<()>, bool) {
     // Install/update/build commands take short per-step locks, so take a
     // shared lock only while reading each snapshot (never across a full build).
     let package_state_before = if track_package_changes {
-        let snapshot = if snapshot_needs_shared_lock {
-            match lock::acquire(&ctx.root, lock::Mode::Shared) {
-                Ok(_snapshot_lock) => db::Db::new(&ctx.root).installed(),
-                Err(error) => Err(error),
-            }
-        } else {
-            db::Db::new(&ctx.root).installed()
-        };
-        match snapshot {
+        match installed_snapshot(&ctx.root, snapshot_needs_shared_lock) {
             Ok(state) => Some(state),
             Err(error) => {
                 return (
@@ -228,29 +222,31 @@ fn run(ctx: &Ctx, cmd: Cmd, track_package_changes: bool) -> (Result<()>, bool) {
     let command_result = run_command(ctx, cmd);
 
     let package_state_changed = match package_state_before {
-        Some(before) => {
-            let snapshot = if snapshot_needs_shared_lock {
-                match lock::acquire(&ctx.root, lock::Mode::Shared) {
-                    Ok(_snapshot_lock) => db::Db::new(&ctx.root).installed(),
-                    Err(error) => Err(error),
-                }
-            } else {
-                db::Db::new(&ctx.root).installed()
-            };
-            match snapshot {
-                Ok(after) => installed_package_payload_changed(&before, &after),
-                Err(error) => {
-                    crate::nawa_warn!(
-                        "could not compare installed packages after command ({error:#}); running transaction triggers conservatively"
-                    );
-                    true
-                }
+        Some(before) => match installed_snapshot(&ctx.root, snapshot_needs_shared_lock) {
+            Ok(after) => installed_package_payload_changed(&before, &after),
+            Err(error) => {
+                crate::nawa_warn!(
+                    "could not compare installed packages after command ({error:#}); running transaction triggers conservatively"
+                );
+                true
             }
-        }
+        },
         None => false,
     };
 
     (command_result, package_state_changed)
+}
+
+/// Read the installed package set. Commands with a whole-operation lock already
+/// hold a consistent view; commands that lock per step take a shared lock only
+/// for this read.
+fn installed_snapshot(root: &Path, needs_shared_lock: bool) -> Result<Vec<db::Entry>> {
+    if needs_shared_lock {
+        let _snapshot_lock = lock::acquire(root, lock::Mode::Shared)?;
+        db::Db::new(root).installed()
+    } else {
+        db::Db::new(root).installed()
+    }
 }
 
 fn run_command(ctx: &Ctx, cmd: Cmd) -> Result<()> {

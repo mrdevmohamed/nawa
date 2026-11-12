@@ -65,8 +65,6 @@ use std::time::Instant;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-#[allow(unused_imports)]
-use sha2::{Digest, Sha256};
 
 use crate::buildenv::BuildOpts;
 use crate::recipe::Recipe;
@@ -229,15 +227,14 @@ pub mod cargo;
 pub mod common;
 pub mod go;
 
-#[allow(unused_imports)]
-pub(crate) use cargo::{plan_cargo, run_cargo};
-#[allow(unused_imports)]
+pub(crate) use cargo::run_cargo;
+pub(crate) use common::fetch_path;
+#[cfg(test)]
 pub(crate) use common::{
-    cleanup_failed_populate, copy_into_view, ecosystem_key, eco_cache_dir, entry_complete,
-    fetch_path, fetch_sandbox_spec, publish_entry, resolver_target_inside, stream_and_wait,
+    cleanup_failed_populate, copy_into_view, publish_entry, resolver_target_inside,
+    stream_and_wait,
 };
-#[allow(unused_imports)]
-pub(crate) use go::{plan_go, run_go};
+pub(crate) use go::run_go;
 
 #[cfg(test)]
 mod timeout_tests {

@@ -110,8 +110,7 @@ pub(super) fn lint_stage(
 }
 
 /// Write `.PKGINFO` and the main archive, then one archive per split-off
-/// sub-package (`-doc`, `-lang`). Returns the main archive path and its
-/// `.PKGINFO`.
+/// sub-package (`-doc`, `-lang`). Returns the main archive path.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn package_archives(
     rec: &Recipe,
@@ -124,7 +123,7 @@ pub(super) fn package_archives(
     assets_digest: Option<&str>,
     toolchain_identity: &[(&'static str, String)],
     slim_report: &slim::Report,
-) -> Result<(PathBuf, String)> {
+) -> Result<PathBuf> {
     let name = &rec.package.name;
     let arch = rec.arch();
     let mut pkginfo = format!(
@@ -221,5 +220,5 @@ pub(super) fn package_archives(
             sub_path.display()
         );
     }
-    Ok((out_path, pkginfo))
+    Ok(out_path)
 }

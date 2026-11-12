@@ -1,7 +1,6 @@
 //! Repository data model.
 
 //! Repository index creation and validation.
-#[allow(unused_imports)]
 use serde::{Deserialize, Serialize};
 
 
