@@ -6,7 +6,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use super::{BuildOpts, FAIL_TAIL_LINES};
+use super::{BuildOpts, CheckMode, FAIL_TAIL_LINES};
 use super::sandbox::SandboxCfg;
 use crate::recipe::{ExpandCtx, Recipe};
 
@@ -159,4 +159,49 @@ pub(crate) fn run_section(
     Ok(())
 }
 
+/// Run the recipe's build sections in order (`prepare`, `configure`,
+/// `compile`, `check`, `install`); `check` follows `--check` / `--check-nonfatal`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_sections(
+    rec: &Recipe,
+    opts: &BuildOpts,
+    ctx: &ExpandCtx,
+    srcdir: &Path,
+    work: &Path,
+    env_vars: &[(String, String)],
+    env_prefix: &str,
+    sandbox_cfg: Option<&SandboxCfg>,
+) -> Result<()> {
+    for (label, script) in [
+        ("prepare", &rec.build.prepare),
+        ("configure", &rec.build.configure),
+        ("compile", &rec.build.compile),
+        ("check", &rec.build.check),
+        ("install", &rec.build.install),
+    ] {
+        if script.trim().is_empty() {
+            continue;
+        }
+        if label == "check" {
+            match opts.check {
+                CheckMode::Off => continue,
+                CheckMode::Fatal => {}
+                CheckMode::Warn => {
+                    if let Err(e) = run_section(
+                        rec, label, script, &ctx, &srcdir, &work, &env_vars, env_prefix,
+                        sandbox_cfg, opts,
+                    ) {
+                        crate::nawa_warn!("check failed for {} (continuing): {e:#}", rec.id());
+                    }
+                    continue;
+                }
+            }
+        }
+        run_section(
+            rec, label, script, &ctx, &srcdir, &work, &env_vars, env_prefix,
+            sandbox_cfg, opts,
+        )?;
+    }
+    Ok(())
+}
 
