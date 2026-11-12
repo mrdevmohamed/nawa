@@ -439,6 +439,150 @@ fn archive_name_of(archive: &Path) -> Option<String> {
     info.get("pkgname").cloned()
 }
 
+/// How many items of the plan come from the repository (`extras` always do).
+fn count_repo(sources: &[Source], extras: &[repo::RepoEntry]) -> usize {
+    sources.iter().filter(|s| matches!(s, Source::Repo(_))).count() + extras.len()
+}
+
+/// Print the plan as a dnf-style table with sizes and the totals line.
+fn print_plan(
+    ctx: &Ctx,
+    plan: &plan::Plan,
+    extras: &[repo::RepoEntry],
+    sources: &[Source],
+    total: usize,
+) {
+    let pal = Palette::auto(Stream::Stdout);
+    let from_repo = count_repo(sources, extras);
+    crate::nawa_info!(
+        "{total} package(s) to install into {} ({from_repo} from the repository, {} to build)",
+        ctx.root.display(),
+        total - from_repo
+    );
+    // one row per package: dnf-style table with sizes
+    struct Row {
+        name: String,
+        ver: String,
+        tag: &'static str,
+        dl: u64,
+        inst: u64,
+        note: String,
+    }
+    let mut rows: Vec<Row> = Vec::with_capacity(total);
+    for (i, it) in plan.items.iter().enumerate() {
+        let (tag, dl, inst) = match &sources[i] {
+            Source::Repo(re) => ("repo", re.size, re.installed_size),
+            Source::Build => ("build", 0, 0),
+        };
+        let mut note = it.why.label().to_string();
+        if let Some(old) = &it.replaces {
+            note.push_str(&format!(" (replaces {old})"));
+        }
+        rows.push(Row {
+            name: it.rec.package.name.clone(),
+            ver: format!("{}-{}", it.rec.package.version, it.rec.package.rel),
+            tag,
+            dl,
+            inst,
+            note,
+        });
+    }
+    for re in extras {
+        rows.push(Row {
+            name: re.name.clone(),
+            ver: format!("{}-{}", re.version, re.rel),
+            tag: "repo",
+            dl: re.size,
+            inst: re.installed_size,
+            note: "explicit (no recipe: dependencies not resolved)".to_string(),
+        });
+    }
+    let size_cell = |n: u64| if n == 0 { "-".to_string() } else { format_size(n) };
+    let wn = rows.iter().map(|r| r.name.len()).max().unwrap_or(0).max("Package".len());
+    let wv = rows.iter().map(|r| r.ver.len()).max().unwrap_or(0).max("Version".len());
+    let wd = rows.iter().map(|r| size_cell(r.dl).len()).max().unwrap_or(0).max("Download".len());
+    let wi = rows.iter().map(|r| size_cell(r.inst).len()).max().unwrap_or(0).max("Installed".len());
+    println!();
+    println!(
+        "{}",
+        pal.header(&format!(
+            "  {:>3}  {:<wn$}  {:<wv$}  {:<6}  {:>wd$}  {:>wi$}  Reason",
+            "#", "Package", "Version", "Source", "Download", "Installed"
+        ))
+    );
+    for (i, r) in rows.iter().enumerate() {
+        let (dl, inst) = (size_cell(r.dl), size_cell(r.inst));
+        println!(
+            "  {:>3}  {}  {}  {}  {dl:>wd$}  {inst:>wi$}  {}",
+            i + 1,
+            pal.name(&format!("{:<wn$}", r.name)),
+            pal.ver(&format!("{:<wv$}", r.ver)),
+            pal.dim(&format!("{:<6}", r.tag)),
+            pal.dim(&r.note),
+        );
+    }
+    let dl_sum: u64 = rows.iter().map(|r| r.dl).sum();
+    let inst_sum: u64 = rows.iter().map(|r| r.inst).sum();
+    let unknown = rows.iter().filter(|r| r.inst == 0).count();
+    println!();
+    let mut line = format!(
+        "nawa: download size {}, installed size {}",
+        format_size(dl_sum),
+        format_size(inst_sum)
+    );
+    if unknown > 0 {
+        line.push_str(&format!(" (not counting {unknown} package(s) of unknown size)"));
+    }
+    println!("{line}");
+}
+
+/// Get the archive for one plan item: fetch it from the repository or build
+/// it. Returns the archive path, the repository index sha256 (repository
+/// copies only) and whether a signed index authenticated it. In `auto` mode a
+/// failed repository fetch falls back to a build (the recipe pins its
+/// sources); in strict `repo` mode it is an error.
+fn acquire_archive(
+    ctx: &Ctx,
+    it: &plan::Item,
+    flags: &PlanFlags,
+    sourcing: &Sourcing,
+    source: &Source,
+    n: usize,
+    total: usize,
+) -> Result<(PathBuf, Option<String>, bool)> {
+    let id = it.rec.id();
+    let acquired = match source {
+        Source::Build => (build_one(ctx, it, flags, n, total)?, None, false),
+        Source::Repo(re) => {
+            crate::nawa_info!("[{n}/{total}] fetching {id} from the repository");
+            let open = sourcing
+                .open
+                .as_ref()
+                .context("internal: repository source without an open repository")?;
+            match upgrade::fetch_entry(&ctx.root, open, re, flags.allow_unsigned) {
+                Ok(a) => (
+                    a,
+                    Some(re.sha256.clone()),
+                    open.archive_auth == upgrade::ArchiveAuth::SignedIndexSha256,
+                ),
+                // strict repo mode never builds behind the user's back
+                Err(e) if sourcing.mode == InstallMode::Repo => {
+                    return Err(e)
+                        .with_context(|| format!("[{n}/{total}] repository fetch of {id} failed"));
+                }
+                // auto: the recipe pins its sources, so a build is a safe fallback
+                Err(e) => {
+                    crate::nawa_warn!(
+                        "cannot use the repository copy of {id} ({e:#}) — building from source"
+                    );
+                    (build_one(ctx, it, flags, n, total)?, None, false)
+                }
+            }
+        }
+    };
+    Ok(acquired)
+}
+
 /// Show the plan, ask, then install every item in order — dependencies
 /// first, one `[n/total]` line per step. Each item comes from the repository
 /// or is built from its recipe (see [`Sourcing`]); `extras` are repository
@@ -465,94 +609,7 @@ pub(crate) fn run_plan(
         sources.push(sourcing.pick(&it.rec)?);
     }
 
-    let pal = Palette::auto(Stream::Stdout);
-    let count_repo = |sources: &[Source]| -> usize {
-        sources.iter().filter(|s| matches!(s, Source::Repo(_))).count() + extras.len()
-    };
-    let print_plan = |sources: &[Source]| {
-        let from_repo = count_repo(sources);
-        crate::nawa_info!(
-            "{total} package(s) to install into {} ({from_repo} from the repository, {} to build)",
-            ctx.root.display(),
-            total - from_repo
-        );
-        // one row per package: dnf-style table with sizes
-        struct Row {
-            name: String,
-            ver: String,
-            tag: &'static str,
-            dl: u64,
-            inst: u64,
-            note: String,
-        }
-        let mut rows: Vec<Row> = Vec::with_capacity(total);
-        for (i, it) in plan.items.iter().enumerate() {
-            let (tag, dl, inst) = match &sources[i] {
-                Source::Repo(re) => ("repo", re.size, re.installed_size),
-                Source::Build => ("build", 0, 0),
-            };
-            let mut note = it.why.label().to_string();
-            if let Some(old) = &it.replaces {
-                note.push_str(&format!(" (replaces {old})"));
-            }
-            rows.push(Row {
-                name: it.rec.package.name.clone(),
-                ver: format!("{}-{}", it.rec.package.version, it.rec.package.rel),
-                tag,
-                dl,
-                inst,
-                note,
-            });
-        }
-        for re in extras {
-            rows.push(Row {
-                name: re.name.clone(),
-                ver: format!("{}-{}", re.version, re.rel),
-                tag: "repo",
-                dl: re.size,
-                inst: re.installed_size,
-                note: "explicit (no recipe: dependencies not resolved)".to_string(),
-            });
-        }
-        let size_cell = |n: u64| if n == 0 { "-".to_string() } else { format_size(n) };
-        let wn = rows.iter().map(|r| r.name.len()).max().unwrap_or(0).max("Package".len());
-        let wv = rows.iter().map(|r| r.ver.len()).max().unwrap_or(0).max("Version".len());
-        let wd = rows.iter().map(|r| size_cell(r.dl).len()).max().unwrap_or(0).max("Download".len());
-        let wi = rows.iter().map(|r| size_cell(r.inst).len()).max().unwrap_or(0).max("Installed".len());
-        println!();
-        println!(
-            "{}",
-            pal.header(&format!(
-                "  {:>3}  {:<wn$}  {:<wv$}  {:<6}  {:>wd$}  {:>wi$}  Reason",
-                "#", "Package", "Version", "Source", "Download", "Installed"
-            ))
-        );
-        for (i, r) in rows.iter().enumerate() {
-            let (dl, inst) = (size_cell(r.dl), size_cell(r.inst));
-            println!(
-                "  {:>3}  {}  {}  {}  {dl:>wd$}  {inst:>wi$}  {}",
-                i + 1,
-                pal.name(&format!("{:<wn$}", r.name)),
-                pal.ver(&format!("{:<wv$}", r.ver)),
-                pal.dim(&format!("{:<6}", r.tag)),
-                pal.dim(&r.note),
-            );
-        }
-        let dl_sum: u64 = rows.iter().map(|r| r.dl).sum();
-        let inst_sum: u64 = rows.iter().map(|r| r.inst).sum();
-        let unknown = rows.iter().filter(|r| r.inst == 0).count();
-        println!();
-        let mut line = format!(
-            "nawa: download size {}, installed size {}",
-            format_size(dl_sum),
-            format_size(inst_sum)
-        );
-        if unknown > 0 {
-            line.push_str(&format!(" (not counting {unknown} package(s) of unknown size)"));
-        }
-        println!("{line}");
-    };
-    print_plan(sources.as_slice());
+    print_plan(ctx, plan, extras, &sources, total);
     if flags.dry_run {
         crate::nawa_info!("dry run — nothing was built or installed");
         return Ok(());
@@ -560,7 +617,7 @@ pub(crate) fn run_plan(
 
     // `install_mode = ask`: on a terminal, let the user choose the source
     // for everything the repository could supply
-    if sourcing.ask && count_repo(sources.as_slice()) > 0 {
+    if sourcing.ask && count_repo(&sources, extras) > 0 {
         let c = confirm::choose(
             "nawa: install the repository-available packages from the repository (r) or build them from source (b)?",
             'r',
@@ -589,35 +646,8 @@ pub(crate) fn run_plan(
         let n = i + 1;
         let id = it.rec.id();
         let mut step = || -> Result<()> {
-            let (archive, index_sha256, signed_index): (PathBuf, Option<String>, bool) = match &sources[i] {
-                Source::Build => (build_one(ctx, it, flags, n, total)?, None, false),
-                Source::Repo(re) => {
-                    crate::nawa_info!("[{n}/{total}] fetching {id} from the repository");
-                    let open = sourcing
-                        .open
-                        .as_ref()
-                        .context("internal: repository source without an open repository")?;
-                    match upgrade::fetch_entry(&ctx.root, open, re, flags.allow_unsigned) {
-                        Ok(a) => (
-                            a,
-                            Some(re.sha256.clone()),
-                            open.archive_auth == upgrade::ArchiveAuth::SignedIndexSha256,
-                        ),
-                        // strict repo mode never builds behind the user's back
-                        Err(e) if sourcing.mode == InstallMode::Repo => {
-                            return Err(e)
-                                .with_context(|| format!("[{n}/{total}] repository fetch of {id} failed"));
-                        }
-                        // auto: the recipe pins its sources, so a build is a safe fallback
-                        Err(e) => {
-                            crate::nawa_warn!(
-                                "cannot use the repository copy of {id} ({e:#}) — building from source"
-                            );
-                            (build_one(ctx, it, flags, n, total)?, None, false)
-                        }
-                    }
-                }
-            };
+            let (archive, index_sha256, signed_index) =
+                acquire_archive(ctx, it, flags, sourcing, &sources[i], n, total)?;
             let source = match &sources[i] {
                 Source::Repo(_) => "repository",
                 Source::Build => "local-build",
