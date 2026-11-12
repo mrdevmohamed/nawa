@@ -59,15 +59,7 @@ pub(crate) fn install_archive_payload(
     let extracted = archive::extract(archive_path, &tmp)?;
     interrupt::check()?;
     let info = archive::parse_pkginfo(&extracted.pkginfo)?;
-    let name = info.get("pkgname").cloned().unwrap_or_default();
-    let version = info.get("pkgver").cloned().unwrap_or_default();
-    let rel: u32 = info.get("pkgrel").and_then(|v| v.parse().ok()).unwrap_or(1);
-    let arch = info.get("arch").cloned().unwrap_or_default();
-    let size: u64 = info.get("size").and_then(|v| v.parse().ok()).unwrap_or(0);
-    let run: Vec<String> = info
-        .get("rundeps")
-        .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
-        .unwrap_or_default();
+    let Pkginfo { name, version, rel, arch, size, run } = Pkginfo::from_map(&info);
 
     // ---- current state of this package (if this is an upgrade/reinstall) ---
     let old = db.entry(&name)?;
@@ -81,39 +73,7 @@ pub(crate) fn install_archive_payload(
     let (staged_files, staged_hashes) = stage_tree(&tmp)?;
     let owners = db.file_owners()?;
     if !force {
-        let mut conflicts: Vec<String> = Vec::new();
-        for f in &staged_files {
-            // directories merge silently across packages — never a conflict
-            // (every distro has several packages owning /etc or /usr)
-            let p = tmp.join(f.trim_start_matches('/'));
-            if std::fs::symlink_metadata(&p).map(|m| m.is_dir()).unwrap_or(false) {
-                continue;
-            }
-            // a symlink that already points exactly where this package wants
-            // it (the merged-usr /bin, /lib, ... links) overwrites nothing:
-            // installing it is a no-op, whoever else lists the path
-            if let (Ok(new_target), Ok(cur_target)) = (
-                std::fs::read_link(&p),
-                std::fs::read_link(root.join(f.trim_start_matches('/'))),
-            ) {
-                if new_target == cur_target {
-                    continue;
-                }
-            }
-            if let Some(owner) = owners.get(f) {
-                if owner != &name {
-                    conflicts.push(format!("{f} (owned by {owner})"));
-                }
-            }
-        }
-        if !conflicts.is_empty() {
-            let _ = std::fs::remove_dir_all(&tmp);
-            bail!(
-                "file conflicts installing {}:\n  {}\n(use --force to override)",
-                name,
-                conflicts.iter().take(20).cloned().collect::<Vec<_>>().join("\n  ")
-            );
-        }
+        check_file_conflicts(&tmp, root, &name, &staged_files, &owners)?;
     }
 
     // ---- remember the previous version for rollback -------------------------
@@ -131,64 +91,13 @@ pub(crate) fn install_archive_payload(
     // the authentication provenance (roadmap §4.4/§4.5). Failures here only
     // cost the history/undo evidence, not the install itself — but a digest
     // mismatch is always fatal (the bytes are NOT what the policy verified).
-    let object_digest = match artifact::store_verified_copy(root, archive_path, None) {
-        Ok((_, digest)) => {
-            let size = std::fs::metadata(archive_path).map(|m| m.len()).unwrap_or(0);
-            let mut prov = artifact::Provenance::new(auth.kind(), &digest, size);
-            prov.package = Some(artifact::PackageIdentity {
-                name: name.clone(),
-                version: version.clone(),
-                rel,
-                arch: arch.clone(),
-            });
-            match &auth {
-                InstallAuth::SignedIndex { index_bytes, index_signature, signer_public, repo_id } => {
-                    if let Err(e) = artifact::save_provenance(root, &prov) {
-                        crate::nawa_warn!("could not record artifact provenance: {e:#}");
-                    } else if let (Some(idx), Some(key)) = (index_bytes, signer_public) {
-                        if let Err(e) = artifact::retain_repository_proof(
-                            root, &digest, idx, index_signature.as_deref(), key,
-                            repo_id.as_deref().unwrap_or("repository"), true,
-                        ) {
-                            crate::nawa_warn!("could not retain repository proof: {e:#}");
-                        }
-                    }
-                }
-                InstallAuth::Detached { trusted: true } => {
-                    if let Err(e) = artifact::save_provenance(root, &prov) {
-                        crate::nawa_warn!("could not record artifact provenance: {e:#}");
-                    } else {
-                        // retain the detached signature that verified these
-                        // bytes, so a later rollback can re-verify it
-                        let sig = sign::sig_path_for(cache_name_source);
-                        if sig.is_file() {
-                            let fingerprint = sign::read_sig_file(&sig)
-                                .ok()
-                                .map(|sf| artifact::key_fingerprint(
-                                    &sf.embedded.to_bytes(),
-                                ))
-                                .unwrap_or_default();
-                            let _ = artifact::retain_detached_signature(
-                                root,
-                                &digest,
-                                &sig,
-                                &fingerprint,
-                                true,
-                            );
-                        }
-                    }
-                }
-                _ => {
-                    let _ = artifact::save_provenance(root, &prov);
-                }
-            }
-            Some(digest)
-        }
-        Err(e) => {
-            crate::nawa_warn!("could not store the archive as a content-addressed object: {e:#}");
-            None
-        }
-    };
+    let object_digest = record_artifact(
+        root,
+        archive_path,
+        cache_name_source,
+        &auth,
+        &PackageIdentity { name: &name, version: &version, rel, arch: &arch },
+    );
     if is_upgrade {
         crate::nawa_info!(
             "upgrading {} {} -> {}-{}-{}",
@@ -215,31 +124,8 @@ pub(crate) fn install_archive_payload(
     }
 
     // ---- delete files that disappeared between the two versions -------------
-    let mut obsolete_dirs: Vec<PathBuf> = Vec::new();
-    if !old_files.is_empty() {
-        let new_set: HashSet<&String> = staged_files.iter().collect();
-        // never delete a path another installed package also lists
-        let shared = db.paths_claimed_by_others(&name)?;
-        let mut obsolete: Vec<&String> = old_files
-            .iter()
-            .filter(|f| !new_set.contains(*f))
-            .filter(|f| !shared.contains(*f))
-            .filter(|f| owners.get(*f).map(|o| o == &name).unwrap_or(false))
-            .collect();
-        obsolete.sort_by_key(|f| std::cmp::Reverse(f.len()));
-        for f in obsolete {
-            let p = root.join(f.trim_start_matches('/'));
-            match std::fs::symlink_metadata(&p) {
-                // directories are removed after the commit (only if empty)
-                Ok(md) if md.is_dir() => obsolete_dirs.push(p),
-                // files are moved into the undo journal, not deleted yet
-                Ok(_) => {
-                    let _ = tx.remove(&p);
-                }
-                Err(_) => {}
-            }
-        }
-    }
+    let obsolete_dirs =
+        retire_obsolete_files(&db, &mut tx, root, &name, &old_files, &staged_files, &owners)?;
 
     // last point where backing out is safe: the files are in place but the
     // db does not know them yet, and the journal can still undo all of it
@@ -313,6 +199,196 @@ pub(crate) fn install_archive_payload(
         crate::nawa_success!("installed {} into {}", entry.version_full(), root.display());
     }
     Ok(entry)
+}
+
+/// The fields of a package's `.PKGINFO` the install needs.
+struct Pkginfo {
+    name: String,
+    version: String,
+    rel: u32,
+    arch: String,
+    size: u64,
+    run: Vec<String>,
+}
+
+impl Pkginfo {
+    fn from_map(info: &std::collections::HashMap<String, String>) -> Self {
+        let name = info.get("pkgname").cloned().unwrap_or_default();
+        let version = info.get("pkgver").cloned().unwrap_or_default();
+        let rel: u32 = info.get("pkgrel").and_then(|v| v.parse().ok()).unwrap_or(1);
+        let arch = info.get("arch").cloned().unwrap_or_default();
+        let size: u64 = info.get("size").and_then(|v| v.parse().ok()).unwrap_or(0);
+        let run: Vec<String> = info
+            .get("rundeps")
+            .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+            .unwrap_or_default();
+        Pkginfo { name, version, rel, arch, size, run }
+    }
+}
+
+/// Identity of the package being installed, borrowed for provenance records.
+struct PackageIdentity<'a> {
+    name: &'a str,
+    version: &'a str,
+    rel: u32,
+    arch: &'a str,
+}
+
+/// Fail when the staged tree would overwrite a file another package owns.
+/// Directories merge silently, and a symlink that already points where this
+/// package wants it is a no-op.
+fn check_file_conflicts(
+    tmp: &Path,
+    root: &Path,
+    name: &str,
+    staged_files: &[String],
+    owners: &std::collections::HashMap<String, String>,
+) -> Result<()> {
+    let mut conflicts: Vec<String> = Vec::new();
+    for f in staged_files {
+        // directories merge silently across packages — never a conflict
+        // (every distro has several packages owning /etc or /usr)
+        let p = tmp.join(f.trim_start_matches('/'));
+        if std::fs::symlink_metadata(&p).map(|m| m.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        // a symlink that already points exactly where this package wants
+        // it (the merged-usr /bin, /lib, ... links) overwrites nothing:
+        // installing it is a no-op, whoever else lists the path
+        if let (Ok(new_target), Ok(cur_target)) = (
+            std::fs::read_link(&p),
+            std::fs::read_link(root.join(f.trim_start_matches('/'))),
+        ) {
+            if new_target == cur_target {
+                continue;
+            }
+        }
+        if let Some(owner) = owners.get(f) {
+            if owner != name {
+                conflicts.push(format!("{f} (owned by {owner})"));
+            }
+        }
+    }
+    if !conflicts.is_empty() {
+        let _ = std::fs::remove_dir_all(&tmp);
+        bail!(
+            "file conflicts installing {}:\n  {}\n(use --force to override)",
+            name,
+            conflicts.iter().take(20).cloned().collect::<Vec<_>>().join("\n  ")
+        );
+    }
+    Ok(())
+}
+
+/// Publish the verified archive as a content-addressed object and record its
+/// authentication provenance (roadmap §4.4/§4.5). Failures here only cost
+/// the history/undo evidence, not the install itself.
+fn record_artifact(
+    root: &Path,
+    archive_path: &Path,
+    cache_name_source: &Path,
+    auth: &InstallAuth,
+    id: &PackageIdentity<'_>,
+) -> Option<String> {
+    let (name, version, rel, arch) = (id.name, id.version, id.rel, id.arch);
+    match artifact::store_verified_copy(root, archive_path, None) {
+        Ok((_, digest)) => {
+            let size = std::fs::metadata(archive_path).map(|m| m.len()).unwrap_or(0);
+            let mut prov = artifact::Provenance::new(auth.kind(), &digest, size);
+            prov.package = Some(artifact::PackageIdentity {
+                name: name.to_string(),
+                version: version.to_string(),
+                rel,
+                arch: arch.to_string(),
+            });
+            match auth {
+                InstallAuth::SignedIndex { index_bytes, index_signature, signer_public, repo_id } => {
+                    if let Err(e) = artifact::save_provenance(root, &prov) {
+                        crate::nawa_warn!("could not record artifact provenance: {e:#}");
+                    } else if let (Some(idx), Some(key)) = (index_bytes, signer_public) {
+                        if let Err(e) = artifact::retain_repository_proof(
+                            root, &digest, idx, index_signature.as_deref(), key,
+                            repo_id.as_deref().unwrap_or("repository"), true,
+                        ) {
+                            crate::nawa_warn!("could not retain repository proof: {e:#}");
+                        }
+                    }
+                }
+                InstallAuth::Detached { trusted: true } => {
+                    if let Err(e) = artifact::save_provenance(root, &prov) {
+                        crate::nawa_warn!("could not record artifact provenance: {e:#}");
+                    } else {
+                        // retain the detached signature that verified these
+                        // bytes, so a later rollback can re-verify it
+                        let sig = sign::sig_path_for(cache_name_source);
+                        if sig.is_file() {
+                            let fingerprint = sign::read_sig_file(&sig)
+                                .ok()
+                                .map(|sf| artifact::key_fingerprint(
+                                    &sf.embedded.to_bytes(),
+                                ))
+                                .unwrap_or_default();
+                            let _ = artifact::retain_detached_signature(
+                                root,
+                                &digest,
+                                &sig,
+                                &fingerprint,
+                                true,
+                            );
+                        }
+                    }
+                }
+                _ => {
+                    let _ = artifact::save_provenance(root, &prov);
+                }
+            }
+            Some(digest)
+        }
+        Err(e) => {
+            crate::nawa_warn!("could not store the archive as a content-addressed object: {e:#}");
+            None
+        }
+    }
+}
+
+/// Move the files a previous version owned and the new one dropped into the
+/// undo journal; returns the now-obsolete directories, removed after commit.
+/// Never touches a path another installed package also lists.
+fn retire_obsolete_files(
+    db: &Db,
+    tx: &mut Tx,
+    root: &Path,
+    name: &str,
+    old_files: &[String],
+    staged_files: &[String],
+    owners: &std::collections::HashMap<String, String>,
+) -> Result<Vec<PathBuf>> {
+    let mut obsolete_dirs: Vec<PathBuf> = Vec::new();
+    if !old_files.is_empty() {
+        let new_set: HashSet<&String> = staged_files.iter().collect();
+        // never delete a path another installed package also lists
+        let shared = db.paths_claimed_by_others(name)?;
+        let mut obsolete: Vec<&String> = old_files
+            .iter()
+            .filter(|f| !new_set.contains(*f))
+            .filter(|f| !shared.contains(*f))
+            .filter(|f| owners.get(*f).map(|o| o == name).unwrap_or(false))
+            .collect();
+        obsolete.sort_by_key(|f| std::cmp::Reverse(f.len()));
+        for f in obsolete {
+            let p = root.join(f.trim_start_matches('/'));
+            match std::fs::symlink_metadata(&p) {
+                // directories are removed after the commit (only if empty)
+                Ok(md) if md.is_dir() => obsolete_dirs.push(p),
+                // files are moved into the undo journal, not deleted yet
+                Ok(_) => {
+                    let _ = tx.remove(&p);
+                }
+                Err(_) => {}
+            }
+        }
+    }
+    Ok(obsolete_dirs)
 }
 
 /// Restore a package to the version recorded in its undo log
