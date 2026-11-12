@@ -5,7 +5,10 @@
 use anyhow::Result;
 use std::path::Path;
 
+use crate::cli::HistoryCmd;
+use crate::ctx::Ctx;
 use crate::transaction::history::PackageChange;
+use crate::{transaction, undo};
 
 /// The `nawa history` table (roadmap §5.8): newest first, stable ids.
 pub(crate) fn print_history(root: &Path, limit: usize) -> Result<()> {
@@ -91,4 +94,24 @@ pub(crate) fn print_info(root: &Path, id: u64) -> Result<()> {
 
 fn artifact_of_after(change: &PackageChange) -> &str {
     change.after.as_ref().map(|a| a.artifact_sha256.as_str()).unwrap_or("")
+}
+
+/// `nawa history [list|info|undo]`
+pub(crate) fn cmd_history(
+    ctx: &Ctx,
+    action: Option<HistoryCmd>,
+    limit: Option<usize>,
+) -> Result<()> {
+    // the lock is already held (see lock_mode); reconcile what a
+    // killed nawa left behind before showing or undoing anything
+    for note in transaction::recovery::reconcile_incomplete(&ctx.root)? {
+        crate::nawa_info_stderr!("recovered: {note}");
+    }
+    match action {
+        None => print_history(&ctx.root, limit.unwrap_or(20)),
+        Some(HistoryCmd::List) => print_history(&ctx.root, limit.unwrap_or(20)),
+        Some(HistoryCmd::Info { id }) => print_info(&ctx.root, id),
+        Some(HistoryCmd::Undo { id, yes }) => undo::history_undo(&ctx.root, id, yes),
+    }
+
 }

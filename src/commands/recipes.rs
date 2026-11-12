@@ -18,11 +18,12 @@
 //! hard counterparts are the parse/stage-time rules of §14A/§14C, which
 //! fail the build). The checks that need the downloaded source are §14C
 //! and are not repeated here.
+use crate::cli::RecipeCmd;
 use crate::ctx::Ctx;
 use crate::humanize;
 use crate::recipe;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 
 /// Files above this size inside `[assets]` earn the size warning (§14B).
 const ASSET_SIZE_WARN: u64 = 32 * 1024 * 1024;
@@ -253,5 +254,20 @@ mod tests {
         // the same way, so the scanner flags it as a real placeholder too
         let ph = placeholders("a %{pkgdir} b %{nope} %{srcdir2} %{} %{1x} %%{escaped}");
         assert_eq!(ph, vec!["pkgdir", "nope", "srcdir2", "escaped"]);
+    }
+}
+
+/// `nawa recipe <action>`
+pub(crate) fn cmd_recipe(ctx: &Ctx, action: RecipeCmd) -> Result<()> {
+    match action {
+        RecipeCmd::Check { name, all } => {
+            if name.is_none() && !all {
+                bail!("`nawa recipe check` needs a recipe name or --all");
+            }
+            if name.is_some() && all {
+                bail!("a recipe name and --all are exclusive");
+            }
+            cmd_recipe_check(ctx, name.as_deref(), all)
+        }
     }
 }

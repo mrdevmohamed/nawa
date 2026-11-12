@@ -293,3 +293,19 @@ fn fetch_legacy_source(
     crate::nawa_info!("source verified: {}", tarball.display());
     Ok(())
 }
+
+/// `nawa fetch` with its argument check: names or `--all`, never neither.
+pub(crate) fn cmd_fetch_checked(
+    ctx: &Ctx,
+    names: &[String],
+    all: bool,
+    isolation: Option<&str>,
+    sources_only: bool,
+    offline: bool,
+    allow_degraded: bool,
+) -> Result<()> {
+    if !all && names.is_empty() {
+        bail!("`nawa fetch` needs recipe names or --all");
+    }
+    cmd_fetch(ctx, names, all, isolation, sources_only, offline, allow_degraded)
+}
