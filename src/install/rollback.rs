@@ -8,6 +8,7 @@ use crate::db::{Db, Entry};
 use crate::install::hooks::{load_hooks, run_hook};
 use crate::install::journal::{recover_and_report, Tx};
 use crate::install::payload::save_undo;
+use crate::install::previous::{resolve_previous, synthesize_entry};
 use crate::install::{inspect_archive_state, install_archive, install_archive_from_index_proof, install_archive_pinned, FileJournalId, InstallOpts};
 use crate::interrupt;
 use crate::sign;
@@ -15,12 +16,14 @@ use crate::sign;
 pub(crate) fn rollback(name: &str, root: &Path) -> Result<()> {
     let db = Db::new(root);
     crate::db::check_name(name)?;
-    let desc_path = root.join("var/lib/nawa/undo").join(name).join("desc");
-    if !desc_path.exists() {
-        bail!("no undo record for `{name}` — nothing to roll back");
-    }
-    let prev: Entry = toml::from_str(&std::fs::read_to_string(&desc_path)?)
-        .context("corrupt undo record")?;
+    let previous = match resolve_previous(root, name)? {
+        Some(previous) => previous,
+        None => bail!("no undo record for `{name}` — nothing to roll back"),
+    };
+    // Only identity and digest are consumed below; the installer re-reads the
+    // rest from the verified archive. Never treat this synthetic entry as db
+    // state (see `previous::synthesize_entry`).
+    let prev = synthesize_entry(name, &previous.state);
     let before = db.entry(name)?;
     if let Some(cur) = &before {
         if cur.version_full() == prev.version_full() {

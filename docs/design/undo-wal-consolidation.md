@@ -2,15 +2,16 @@
 
 **Status:** proposal, 2026-11-12. Phase 1 (FileJournal identity and the
 combined physical→logical recovery entry point) is implemented on top of
-`faa52ef`; no CLI, package, archive, db, index, signature, or transaction
-record format changed.
+`faa52ef`; Phase 2 (previous-slot resolver and `nawa rollback` integration) is
+implemented on top of `2ffebe7`. No CLI, package, archive, db, index,
+signature, or transaction record format changed.
 **Scope:** remove the *duplication of truth* between the legacy package undo
 record, the transaction history/WAL, and the physical file journal, while
 preserving every existing command, format and recovery guarantee.
 **Companion documents:** `docs/reviews/2026-11-09-nawa-audit.md` P1-2,
 `docs/design/package-management-roadmap.md` §5.2/§5.5/§5.9/§5.10,
 `docs/reviews/2026-11-09-final-report.md` §7.
-**Verified against:** `faa52ef`.
+**Verified against:** `2ffebe7` and the Phase 2 implementation.
 
 ---
 
@@ -281,7 +282,7 @@ New internal module (proposed `src/install/previous.rs`):
 
 ```rust
 enum PreviousSource {
-    History { tx: u64, step: u32 },
+    History { tx: u64 },
     LegacySlot,
 }
 
@@ -294,11 +295,16 @@ struct PreviousVersion {
 fn resolve_previous(root: &Path, name: &str) -> Result<Option<PreviousVersion>>;
 ```
 
+`TransactionRecord` stores package changes, not WAL step numbers, so the
+implementation names the owning transaction instead of fabricating a step
+identity. The physical FileJournal still carries the exact `(tx, step)` pair
+from Phase 1.
+
 The caller (`install::rollback::rollback`) synthesizes an `Entry` for the
 existing `pick_restore_source` path. Only `version`, `rel`, and
 `artifact_sha256` are consumed there; `run`, `install_date`, and `size` are
 left empty because the installer re-parses the archive before installing.
-This must be documented at the synthesis site so no future caller treats the
+This is documented at the synthesis site so no future caller treats the
 synthetic `Entry` as installable db state.
 
 ### 6.2 Inputs
@@ -364,8 +370,8 @@ history everywhere else.
    install, so the old slot still points at R and `nawa rollback N` restores
    it.
 8. **`D` is clearly newer than the newest history record** (file mtime later
-   than `finished_at` with a small clock-skew allowance): use `D`. This is the
-   old-binary-wrote-after-history case.
+   than `finished_at` by the implementation's 60-second clock-skew allowance):
+   use `D`. This is the old-binary-wrote-after-history case.
 9. **Anything else:** fail closed with a diagnostic naming both versions and
    telling the user to inspect `nawa history`. Do not silently roll back to
    one of two contradictory targets.
@@ -565,21 +571,27 @@ Files: `src/install/journal.rs`, `src/install/payload.rs`,
 
 ### Phase 2 — Previous-slot resolver and `rollback` integration
 
-Files: new `src/install/previous.rs`, `src/install/rollback.rs`,
-`src/install/payload.rs`, `src/install/mod.rs`, tests.
+**Status: implemented.** New `src/install/previous.rs`;
+`install::rollback::rollback` resolves the slot through it while
+`pick_restore_source`, the current-version check, and the `desc`/`files`
+writes are unchanged (`payload.rs` needed no change). `PreviousSource` names
+the transaction rather than a WAL step because history records do not store
+step numbers; see §6.1.
 
-- Implement `resolve_previous` exactly as §6.3. Start with unit tests over
-  synthetic `TransactionRecord`s and legacy desc fixtures; no filesystem
-  races needed for the selection rules.
-- Switch `rollback` to the resolver, keeping `pick_restore_source` and the
-  current-version check unchanged.
-- Keep the `desc` and `files` writes byte-for-byte; the mirror stays a
-  compatibility artifact during the behavior-preserving phases.
-- Add tests for every row of §6.4, including a history-only root, desc-only
-  root, failed attempt before/after `save_undo`, old-binary-newer-desc,
-  corrupt desc, corrupt history, and `history undo`-then-rollback.
-- Exit criterion: every existing rollback test passes unchanged; new tests
-  demonstrate the same target and the same security checks.
+Files: new `src/install/previous.rs`, `src/install/rollback.rs`,
+`src/install/mod.rs`, tests.
+
+- Implemented `resolve_previous` as §6.3, including the fail-closed
+  contradiction path, strict history parsing, active-transaction refusal, and
+  pending journal-intent refusal.
+- Added 17 resolver unit tests covering every §6.4 row and the corrupt/active
+  cases.
+- Added integration tests for a history-only root, a desc-only root, the
+  legacy no-digest cache path, `/etc` config preservation, retained
+  signed-index proof re-verification, and `history undo`-then-rollback
+  ping-pong.
+- Exit criterion met: every existing rollback test passes unchanged; the new
+  tests demonstrate the same target and the same security checks.
 
 ### Phase 3 — Logical recovery on every mutating command
 
@@ -671,6 +683,10 @@ No pruning is implemented in this design.
 - corrupt/unvalidated history record → error;
 - needs-recovery transaction touching the package → refuse;
 - skipped step ignored; failed step treated as attempted.
+
+Phase 2 implements these as `install::previous` unit tests. The
+`history undo`-then-rollback and retained-proof cases live in the
+`install::tests` integration module next to the existing rollback tests.
 
 ### 9.2 Rollback integration tests
 
@@ -781,6 +797,8 @@ involved in any row.
 | D6 | Preserve the legacy slot's failed-attempt/quirk semantics through the resolver rules | No user-visible behavior change in the migration |
 | D7 | Leave the unused `undo/<name>/files` write in place during the behavior-preserving phases | It has no reader here, but removing an on-disk artifact is a compatibility decision; revisit with Phase 4B |
 | D8 | Defer stopping `desc` writes to an explicit Phase 4 decision | The only remaining change that can alter rollback behavior or old-binary compatibility |
+| D9 | The resolver's history source names the transaction, not a WAL step | `PackageChange` has no step number; inventing one would mislead diagnostics. Phase 1 already links the physical journal to the exact step |
+| D10 | Rule 8 uses a 60-second mtime allowance | The legacy slot has no transaction id; requiring a clear margin avoids treating normal seconds-resolution jitter as an old-binary write |
 
 ---
 

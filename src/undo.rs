@@ -780,7 +780,7 @@ mod tests {
 
     #[test]
     fn legacy_record_without_digest_refuses() {
-        let base = tmpdir("legacy");
+        let base = tmpdir("undo-legacy");
         let root = base.join("root");
         let record = TransactionRecord {
             schema: SCHEMA_VERSION,

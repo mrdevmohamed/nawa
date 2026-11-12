@@ -668,7 +668,7 @@ mod tests {
 
     #[test]
     fn corrupt_record_surfaces_as_list_error() {
-        let base = tmpdir("corrupt");
+        let base = tmpdir("history-corrupt");
         let root = base.join("root");
         write_record(&root, &sample(1)).unwrap();
         let p = transaction_path(&root, 1);

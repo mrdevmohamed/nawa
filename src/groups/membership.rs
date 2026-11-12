@@ -168,7 +168,7 @@ mod tests {
 
     #[test]
     fn path_like_ids_and_members_are_rejected() {
-        let base = tmpdir("evil");
+        let base = tmpdir("group-membership-evil");
         let root = base.join("root");
         assert!(save(&root, &sample("../evil", &["a"])).is_err());
         let mut bad = sample("ok", &["a"]);

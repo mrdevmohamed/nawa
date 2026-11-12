@@ -228,6 +228,7 @@ pub(crate) fn inspect_archive_state(
 pub mod hooks;
 pub mod journal;
 pub mod payload;
+pub mod previous;
 pub mod rollback;
 mod step;
 
@@ -269,6 +270,47 @@ mod tests {
         let out = dir.join(format!("{name}-{version}-1.nawa.tar.zst"));
         archive::create(&staging, &pkginfo, &out).unwrap();
         out
+    }
+
+    fn history_state(entry: &Entry) -> crate::transaction::history::PackageState {
+        crate::transaction::history::PackageState::from_entry(entry)
+    }
+
+    /// Persist the transaction an upgrade would have recorded. Direct
+    /// `install_archive` calls do not open a history transaction, so rollback
+    /// tests that exercise the history resolver need this fixture.
+    fn write_upgrade_record(root: &Path, before: &Entry, after: &Entry) {
+        let now = crate::artifact::now_secs();
+        let record = crate::transaction::history::TransactionRecord {
+            schema: crate::transaction::history::SCHEMA_VERSION,
+            id: 1,
+            command: "upgrade".into(),
+            status: "completed".into(),
+            started_at: now.saturating_sub(1),
+            finished_at: Some(now),
+            duration_seconds: Some(1),
+            initiated_by: "uid:0".into(),
+            requested_packages: vec![before.name.clone()],
+            repository_ids: Vec::new(),
+            package_changes: vec![crate::transaction::history::PackageChange {
+                name: before.name.clone(),
+                action: "upgrade".into(),
+                status: "committed".into(),
+                before: Some(history_state(before)),
+                after: Some(history_state(after)),
+                source: "test".into(),
+                failure: None,
+                hook: None,
+            }],
+            undone_by: None,
+            undoes: None,
+            groups: Vec::new(),
+        };
+        crate::transaction::history::write_record(root, &record).unwrap();
+    }
+
+    fn remove_legacy_slot(root: &Path, name: &str) {
+        let _ = std::fs::remove_dir_all(root.join("var/lib/nawa/undo").join(name));
     }
 
     #[test]
@@ -885,7 +927,7 @@ mod tests {
 
     #[test]
     fn dropping_an_uncommitted_tx_rolls_back() {
-        let base = tmpdir("tx-drop");
+        let base = tmpdir("tx-drop-basic");
         let root = base.join("root");
         std::fs::create_dir_all(root.join("usr/bin")).unwrap();
         std::fs::write(root.join("usr/bin/old"), b"orig").unwrap();
@@ -1150,6 +1192,197 @@ mod tests {
             &plan.steps[0].action,
             crate::undo::UndoAction::RestorePrevious { .. }
         ));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn rollback_uses_history_when_legacy_slot_is_missing() {
+        let base = tmpdir("rollback-history-only");
+        let root = base.join("root");
+        let v1 = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1")]);
+        let v2 = make_pkg(&base, "demo", "2.0", &[("/usr/bin/demo", b"v2")]);
+        install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+        let before = Db::new(&root).entry("demo").unwrap().unwrap();
+        install_archive(&v2, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+        let after = Db::new(&root).entry("demo").unwrap().unwrap();
+        remove_legacy_slot(&root, "demo");
+        write_upgrade_record(&root, &before, &after);
+
+        rollback("demo", &root).unwrap();
+        assert_eq!(std::fs::read(root.join("usr/bin/demo")).unwrap(), b"v1");
+        assert_eq!(Db::new(&root).entry("demo").unwrap().unwrap().version, "1.0");
+
+        // Delete the mirror again: the second slot must come from the rollback
+        // transaction's recorded before-state, not a legacy file.
+        remove_legacy_slot(&root, "demo");
+        rollback("demo", &root).unwrap();
+        assert_eq!(std::fs::read(root.join("usr/bin/demo")).unwrap(), b"v2");
+        assert_eq!(Db::new(&root).entry("demo").unwrap().unwrap().version, "2.0");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn rollback_uses_legacy_cache_when_the_slot_has_no_digest() {
+        let base = tmpdir("rollback-legacy-cache");
+        let root = base.join("root");
+        let v1 = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1")]);
+        let v2 = make_pkg(&base, "demo", "2.0", &[("/usr/bin/demo", b"v2")]);
+        install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+        let mut before = Db::new(&root).entry("demo").unwrap().unwrap();
+        install_archive(&v2, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+
+        // A legacy root has no artifact digest; rollback must fall back to the
+        // named cache archive (and its established unsigned checks).
+        before.artifact_sha256.clear();
+        let undo_dir = root.join("var/lib/nawa/undo/demo");
+        std::fs::create_dir_all(&undo_dir).unwrap();
+        std::fs::write(undo_dir.join("desc"), toml::to_string_pretty(&before).unwrap()).unwrap();
+        let cache = root.join("var/cache/nawa/demo-1.0-1.nawa.tar.zst");
+        if !cache.exists() {
+            std::fs::copy(&v1, &cache).unwrap();
+        }
+
+        rollback("demo", &root).unwrap();
+        assert_eq!(std::fs::read(root.join("usr/bin/demo")).unwrap(), b"v1");
+        assert_eq!(Db::new(&root).entry("demo").unwrap().unwrap().version, "1.0");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn rollback_after_history_undo_ping_pongs() {
+        let base = tmpdir("rollback-history-undo");
+        let root = base.join("root");
+        let v1 = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1")]);
+        let v2 = make_pkg(&base, "demo", "2.0", &[("/usr/bin/demo", b"v2")]);
+        install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+        install_archive(&v2, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+
+        rollback("demo", &root).unwrap();
+        assert_eq!(std::fs::read(root.join("usr/bin/demo")).unwrap(), b"v1");
+        let original = crate::transaction::history::list_records(&root)
+            .unwrap()
+            .last()
+            .unwrap()
+            .id;
+
+        // Undo the rollback: v2 is restored and the original record is marked
+        // undone. The compensating record now owns the previous-slot truth.
+        crate::undo::history_undo(&root, original, true).unwrap();
+        assert_eq!(std::fs::read(root.join("usr/bin/demo")).unwrap(), b"v2");
+        assert_eq!(Db::new(&root).entry("demo").unwrap().unwrap().version, "2.0");
+
+        rollback("demo", &root).unwrap();
+        assert_eq!(std::fs::read(root.join("usr/bin/demo")).unwrap(), b"v1");
+        assert_eq!(Db::new(&root).entry("demo").unwrap().unwrap().version, "1.0");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn rollback_preserves_local_etc_configuration() {
+        let base = tmpdir("rollback-etc");
+        let root = base.join("root");
+        let v1 = make_pkg(&base, "demo", "1.0", &[("/etc/demo.conf", b"v1\n")]);
+        let v2 = make_pkg(&base, "demo", "2.0", &[("/etc/demo.conf", b"v2\n")]);
+        install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+        std::fs::write(root.join("etc/demo.conf"), b"local\n").unwrap();
+        install_archive(&v2, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+        // The changed local file was not overwritten by the upgrade.
+        assert_eq!(std::fs::read(root.join("etc/demo.conf")).unwrap(), b"local\n");
+        assert_eq!(std::fs::read(root.join("etc/demo.conf.nawa-new")).unwrap(), b"v2\n");
+
+        rollback("demo", &root).unwrap();
+        assert_eq!(
+            std::fs::read(root.join("etc/demo.conf")).unwrap(),
+            b"local\n",
+            "rollback must keep the local /etc file"
+        );
+        assert_eq!(std::fs::read(root.join("etc/demo.conf.nawa-new")).unwrap(), b"v1\n");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn rollback_through_history_reverifies_signed_index_proof() {
+        let base = tmpdir("rollback-index-proof");
+        let root = base.join("root");
+        let repo_dir = base.join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        let v1 = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1")]);
+        std::fs::copy(&v1, repo_dir.join("demo-1.0-1.nawa.tar.zst")).unwrap();
+        let index_path = repo_dir.join("index.toml");
+        crate::repo::create_index_with_version(
+            &repo_dir,
+            &index_path,
+            None,
+            crate::repo::INDEX_SCHEMA_V2,
+        )
+        .unwrap();
+        let (secret, _public) = crate::sign::keygen(&base.join("publisher")).unwrap();
+        crate::sign::sign(&index_path, &secret).unwrap();
+        let pub_key = std::fs::read_to_string(secret.with_file_name("nawa.pub")).unwrap();
+        let trust_file = base.join("publisher.pub");
+        std::fs::write(&trust_file, pub_key).unwrap();
+        crate::sign::trust(&trust_file, &root).unwrap();
+
+        let open = crate::upgrade::open_repo(
+            &root,
+            &crate::fetch::RepoRef::Local(repo_dir.clone()),
+            false,
+            false,
+        )
+        .unwrap();
+        let re = open.index.find("demo").unwrap().clone();
+        let archive = crate::upgrade::fetch_entry(&root, &open, &re, false).unwrap();
+        let index_bytes = std::fs::read(&index_path).unwrap();
+        let sig_bytes = std::fs::read(index_path.with_extension("toml.sig")).ok();
+        let signer_pub = std::fs::read(secret.with_file_name("nawa.pub")).unwrap();
+        install_archive_from_index_proof(
+            &archive,
+            &root,
+            false,
+            &re.sha256,
+            crate::db::InstallReason::Explicit,
+            Some(crate::install::IndexProof {
+                index_bytes: Some(&index_bytes),
+                index_signature: sig_bytes.as_deref(),
+                signer_public: Some(&signer_pub),
+                repo_id: Some("local-test"),
+            }),
+            None,
+        )
+        .unwrap();
+        let before = Db::new(&root).entry("demo").unwrap().unwrap();
+
+        // Record the upgrade in history only; the resolver must still route
+        // through the retained signed-index proof for the old artifact.
+        let v2 = make_pkg(&base, "demo", "2.0", &[("/usr/bin/demo", b"v2")]);
+        install_archive(&v2, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+        let after = Db::new(&root).entry("demo").unwrap().unwrap();
+        remove_legacy_slot(&root, "demo");
+        write_upgrade_record(&root, &before, &after);
+
+        let digest = before.artifact_sha256.clone();
+        let dir = crate::artifact::object_path(&root, &digest)
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let retained_index = dir.join(format!("{digest}.index.toml"));
+        let bytes = std::fs::read(&retained_index).unwrap();
+        std::fs::remove_file(&retained_index).unwrap();
+        let error = rollback("demo", &root).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("retained repository index"),
+            "{error:#}"
+        );
+        assert_eq!(
+            Db::new(&root).entry("demo").unwrap().unwrap().version,
+            "2.0",
+            "a proof failure must not touch the installed package"
+        );
+
+        std::fs::write(&retained_index, bytes).unwrap();
+        rollback("demo", &root).unwrap();
+        assert_eq!(std::fs::read(root.join("usr/bin/demo")).unwrap(), b"v1");
         let _ = std::fs::remove_dir_all(&base);
     }
 

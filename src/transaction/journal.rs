@@ -252,7 +252,7 @@ mod tests {
 
     #[test]
     fn path_like_package_names_are_rejected() {
-        let base = tmpdir("evil");
+        let base = tmpdir("journal-evil");
         let root = base.join("root");
         let mut i = intent(1, 1, "../evil");
         i.package = "../evil".into();

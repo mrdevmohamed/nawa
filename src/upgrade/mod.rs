@@ -371,7 +371,7 @@ mod tests {
 
     #[test]
     fn upgrade_rejects_tampered_archive() {
-        let base = tmpdir("tamper");
+        let base = tmpdir("upgrade-tamper");
         let root = base.join("root");
         let v1 = make_pkg(&base, "demo", "1.0", 1, b"one");
         install::install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
