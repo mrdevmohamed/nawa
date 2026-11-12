@@ -64,6 +64,10 @@ impl Isolation {
     }
 }
 
+/// The `PATH` every whitelisted (`env` and above) build section sees, and
+/// the lookup path for the host-toolchain identity probe.
+pub(crate) const BUILD_PATH: &str = "/usr/bin:/usr/sbin";
+
 /// Where `HOME` points inside a sandboxed build (bound to an empty dir);
 /// the §4.2 default when the build base is the pinned `/build`.
 pub(crate) const SANDBOX_HOME: &str = "/build/home";
@@ -105,7 +109,7 @@ pub(crate) struct EnvSpec<'a> {
 /// The whitelist for `env` and above — nothing else is inherited.
 pub(crate) fn whitelist(spec: &EnvSpec) -> Vec<(String, String)> {
     let mut v: Vec<(String, String)> = vec![
-        ("PATH".into(), "/usr/bin:/usr/sbin".into()),
+        ("PATH".into(), BUILD_PATH.into()),
         ("HOME".into(), spec.home.to_string()),
         ("TMPDIR".into(), "/tmp".into()),
         ("LC_ALL".into(), "C".into()),

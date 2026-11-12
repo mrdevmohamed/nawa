@@ -21,8 +21,6 @@ const FAIL_TAIL_LINES: usize = 25;
 
 pub(crate) struct BuildResult {
     pub archive: PathBuf,
-    #[allow(dead_code)]
-    pub pkginfo: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -89,9 +87,19 @@ pub(crate) fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
     // download or closure work.
     rec.check_schema_placeholders()?;
 
+    // The closure build root is needed for the cache identity and again when
+    // the build root is assembled. Keep the graph parsed for the cache lookup
+    // so a cache miss does not read every `recipe.toml` twice; without the
+    // cache the assembly step loads it as before.
+    let mut closure_known: Option<std::collections::BTreeMap<String, Recipe>> = None;
+
     // In live/env modes the toolchain comes from the host root, not a pinned
     // closure archive. Capture the exact fetch PATH versions before cache lookup.
     let toolchain_identity = crate::fetchrun::build_toolchain_identity(rec, opts.isolation)?;
+    // Cache-only identity (never part of the legacy `.PKGINFO build_id`):
+    // the effective isolation level and, for host-root builds, the C/C++
+    // toolchain the build sections will actually invoke.
+    let host_toolchain_identity = cache::host_toolchain_identity(opts.isolation);
 
     // ---- build_id cache hit (opt-in, --use-cache) ------------------------
     // Everything the build id covers is known before any heavy work: the
@@ -101,15 +109,23 @@ pub(crate) fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
     if opts.use_cache && opts.isolation >= Isolation::Env {
         let closure_paths: Vec<PathBuf> = if opts.isolation == Isolation::Closure {
             let known = crate::recipe::load_all(&opts.recipes_root)?;
-            crate::closure::buildroot(rec, &known, opts.check != CheckMode::Off)
+            let paths = crate::closure::buildroot(rec, &known, opts.check != CheckMode::Off)
                 .context("compute build root")?
                 .iter()
                 .filter_map(|n| known.get(n).map(|r| crate::closure::archive_for(r, &opts.outdir)))
-                .collect()
+                .collect();
+            closure_known = Some(known);
+            paths
         } else {
             Vec::new()
         };
-        if let Some(hit) = try_cache_hit(rec, opts, &closure_paths, &toolchain_identity)? {
+        if let Some(hit) = try_cache_hit(
+            rec,
+            opts,
+            &closure_paths,
+            &toolchain_identity,
+            &host_toolchain_identity,
+        )? {
             return Ok(hit);
         }
     }
@@ -162,7 +178,8 @@ pub(crate) fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
     );
 
     // ---- assemble the build root (closure level, §5) ----------------------
-    let assembled = buildroot::assemble_build_root(rec, opts, &work, &outdir)?;
+    let assembled =
+        buildroot::assemble_build_root(rec, opts, &work, &outdir, closure_known.as_ref())?;
 
     // ---- ecosystem fetch (fetch-phase.md §7, §11, §12) --------------------
     let fetch_env = buildroot::run_fetch_phase(
@@ -231,7 +248,7 @@ pub(crate) fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
             staged_assets.is_some(),
         )?;
     }
-    let (out_path, pkginfo) = package::package_archives(
+    let out_path = package::package_archives(
         rec,
         opts,
         &pkg,
@@ -241,6 +258,7 @@ pub(crate) fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
         assembled.as_ref(),
         staged_assets.as_ref().map(|a| a.digest.as_str()),
         &toolchain_identity,
+        &host_toolchain_identity,
         &slim_report,
     )?;
 
@@ -262,7 +280,7 @@ pub(crate) fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
         out_path.display()
     );
 
-    Ok(BuildResult { archive: out_path, pkginfo })
+    Ok(BuildResult { archive: out_path })
 }
 
 
@@ -380,12 +398,9 @@ pub mod sandbox;
 pub mod sections;
 mod stage;
 
-#[allow(unused_imports)]
-pub(crate) use cache::{build_id_for, try_cache_hit, buildid_sidecar, fetch_ecosystems};
-#[allow(unused_imports)]
-pub(crate) use sandbox::{layer_cache_dir, layer_paths_are_mountable, overlay_probe_ok, prepare_sandbox};
-#[allow(unused_imports)]
-pub(crate) use sections::{diff_archives, installed_sonames, run_section, run_sections};
+pub(crate) use cache::{build_id_for, buildid_sidecar, cache_id_for, try_cache_hit};
+pub(crate) use sandbox::prepare_sandbox;
+pub(crate) use sections::{diff_archives, run_sections};
 use stage::StagedSource;
 
 #[cfg(test)]
@@ -492,7 +507,7 @@ mod wipe_tests {
 
 #[cfg(test)]
 mod installed_sonames_tests {
-    use super::installed_sonames;
+    use super::sections::installed_sonames;
     use crate::db::{Db, Entry};
 
     fn entry(name: &str) -> Entry {

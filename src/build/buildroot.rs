@@ -2,6 +2,7 @@
 //! compute the environment the build sections run with.
 
 use anyhow::{Context, Result};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use super::sandbox::{layer_cache_dir, layer_paths_are_mountable, overlay_probe_ok};
@@ -13,19 +14,29 @@ use crate::recipe::Recipe;
 
 /// Assemble the closure-level build root (§5): cached layers + one overlayfs
 /// mount when the kernel allows it, extract-per-build otherwise. `None` for
-/// every other isolation level.
+/// every other isolation level. `known` is a recipe graph the caller already
+/// parsed for the cache identity; when absent, closure assembly loads it here.
+/// This avoids reading every `recipe.toml` twice on a cache miss.
 pub(super) fn assemble_build_root(
     rec: &Recipe,
     opts: &BuildOpts,
     work: &Path,
     outdir: &Path,
+    known: Option<&BTreeMap<String, Recipe>>,
 ) -> Result<Option<AssembledRoot>> {
     let mut assembled: Option<AssembledRoot> = None;
     if opts.isolation == Isolation::Closure {
-        let known = crate::recipe::load_all(&opts.recipes_root)?;
+        let fallback;
+        let known = match known {
+            Some(known) => known,
+            None => {
+                fallback = crate::recipe::load_all(&opts.recipes_root)?;
+                &fallback
+            }
+        };
         let with_check = opts.check != CheckMode::Off;
         let members =
-            crate::closure::buildroot(rec, &known, with_check).context("compute build root")?;
+            crate::closure::buildroot(rec, known, with_check).context("compute build root")?;
         crate::nawa_info!(
             "closure: {} package(s) in the build root ({}{}): {}",
             members.len(),
@@ -73,7 +84,7 @@ pub(super) fn assemble_build_root(
             }
         });
         let layered = layer_cache.is_some()
-            && layer_paths_are_mountable(&members, &known, &opts.outdir, work)
+            && layer_paths_are_mountable(&members, known, &opts.outdir, work)
             && {
                 let ok = overlay_probe_ok();
                 if !ok {
@@ -90,7 +101,7 @@ pub(super) fn assemble_build_root(
             let cache = layer_cache.expect("checked above");
             crate::closure::assemble_cached(
                 &members,
-                &known,
+                known,
                 outdir,
                 &root_dir,
                 &cache,
@@ -102,7 +113,7 @@ pub(super) fn assemble_build_root(
             crate::nawa_info!("closure: assembling the build root (extract-per-build)");
             crate::closure::assemble(
                 &members,
-                &known,
+                known,
                 outdir,
                 &root_dir,
                 &opts.root,

@@ -41,26 +41,21 @@ pub(crate) mod local;
 pub(crate) mod snapshot;
 
 // ---- public re-exports (preserving the pre-split API) --------------------
-#[allow(unused_imports)]
 pub(crate) use cache::{
-    candidate_urls, candidate_urls_with, digest_cache_dir, download_cached,
-    download_cached_with_mirrors, download_content_addressed, remote_cache_dir,
-    RepoRef,
+    digest_cache_dir, download_cached, download_cached_with_mirrors,
+    download_content_addressed, lock_digest_entry, remote_cache_dir, RepoRef,
 };
-#[allow(unused_imports)]
-pub(crate) use cache::{CacheLock, lock_digest_entry, unique_part_path};
-#[allow(unused_imports)]
+#[cfg(test)]
+pub(crate) use cache::{candidate_urls, candidate_urls_with, unique_part_path};
 pub(crate) use crate::checksum::{sha256_of_file, verify_sha256};
-#[allow(unused_imports)]
-pub(crate) use extract::{detect_source_format, extract_source_archive, extract_source_archive_stripped, SourceFormat};
-#[allow(unused_imports)]
-pub(crate) use http::{download, download_opt, set_offline, offline};
-#[allow(unused_imports)]
-pub(crate) use http::{check_offline, is_retryable, redirect_target, progress_line, progress_label, Outcome};
-#[allow(unused_imports)]
+pub(crate) use extract::{detect_source_format, extract_source_archive, extract_source_archive_stripped};
+#[cfg(test)]
+pub(crate) use extract::SourceFormat;
+pub(crate) use http::{download, download_opt, offline, set_offline};
+#[cfg(test)]
+pub(crate) use http::{check_offline, is_retryable, progress_label, progress_line, redirect_target};
 pub(crate) use local::copy_local;
-#[allow(unused_imports)]
-pub(crate) use snapshot::{snapshot_file, VerifiedSnapshot};
+pub(crate) use snapshot::snapshot_file;
 
 #[cfg(test)]
 mod tests {

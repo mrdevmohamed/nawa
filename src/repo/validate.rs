@@ -1,6 +1,5 @@
 //! Index validation and loading.
 
-#[allow(unused_imports)]
 use anyhow::{bail, Context, Result};
 use std::collections::HashSet;
 #[cfg(test)]

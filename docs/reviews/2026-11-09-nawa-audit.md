@@ -5,6 +5,10 @@
 **Auditor role:** Senior Rust engineer, architecture & maintainability
 **Scope:** Entire `src/`, `tests/`, `Cargo.toml`, CI workflows, docs
 
+> **Status update (2026-11-12):** this document is the original 2026-11-09 audit snapshot. P0-1, P0-2, P1-1, P1-4 and P2-4 are closed; P0-3 is closed for the extra-bind host policy, while the broader live-root trust model remains open; P1-5 was verified as already mitigated. Commits, integration coverage and current validation are recorded in `2026-11-09-final-report.md` §7.
+>
+> **Status update (2026-11-13):** P1-2 is closed by the Phase 4A mirror decision. P1-8's repository-parsing, double-ELF-read and quadratic-resolver concerns were re-checked against current call sites and no longer apply; only the staged-tree walk split remains. See `2026-11-09-final-report.md` §7.
+
 ---
 
 ## 1. Current Architecture
@@ -113,6 +117,7 @@ The remaining ~35 top-level modules are flat files in `src/`.
 **P1-2. Legacy undo journal vs new transaction WAL duplication**
 - `install.rs::recover` still maintains `/var/lib/nawa/undo/<name>` and `.nawa` backup dirs, while `transaction/` now has `journal.rs`, `history.rs`, `recovery.rs`, `undo.rs` with full WAL. Both paths are live: `install_archive_payload` writes legacy journal *and* transaction steps. `nawa rollback` uses legacy undo; `nawa history undo` uses transaction WAL. Two sources of truth for “what was installed before”.
 - Impact: divergence risk; recovery paths re-implement similar logic in two places; future deprecation of legacy journal requires both to be kept consistent.
+- **Resolution (2026-11-13):** `docs/design/undo-wal-consolidation.md` makes transaction history the canonical logical source (Phases 1–3: `2ffebe7`, `4112d1f`, `6b80ede`) while Phase 4A keeps the legacy `desc`/`files` mirror for old-binary rollback. No on-disk format changed; the resolver falls back to the mirror only where history cannot reproduce the slot.
 
 **P1-3. Error handling: `anyhow` everywhere, no typed errors**
 - 50 files use `anyhow::{bail, Context, Result}`. Context strings are ad-hoc: `"create directory {}"`, `"read base index {}"`, `"could not allocate..."` — same operation gets different messages in different modules.
@@ -153,16 +158,17 @@ The remaining ~35 top-level modules are flat files in `src/`.
 
 **P2-6. Test coverage gaps**
 - Strong coverage for: version comparison, recipe validation, archive create/extract, sign/verify, db, lint, fetch extraction edge cases, transaction WAL, sandbox spec parsing.
-- Weak: `fetchrun.rs` Go/Cargo planning (only a few unit tests), `commands/*` orchestration (covered indirectly via integration tests), `repositories::cmd_clean` (only one test), `service.rs` (requires runit, hard to test), `revdep::suggest` (name guessing), `build::rebuild_check` (integration only).
+- Weak: `fetchrun.rs` Go/Cargo planning (only a few unit tests), `commands/*` orchestration (covered indirectly via integration tests), `service.rs` (requires runit, hard to test), `build::rebuild_check` (integration only).
+- Improved (2026-11-13): `repositories::cmd_clean` helpers now have unit tests for `.part` retention, `<sha16>-` legacy detection, dry-run purity, and foreign-file/live-lock retention, plus an end-to-end `clean metadata` test. They caught two sweep bugs: `clean_dir` never unlinked regular files (it always used `remove_dir_all`), and `sweep_tree --dry-run` changed read-only cache permissions.
 - No fuzz target for `parse_pkginfo`, `unpack_tar_stream`, `decode_hex32` etc. Attack surface is tar extraction + recipe parsing; hand-rolled tar header validation (`is_tar_header`, `octal_field`) would benefit from fuzzing.
 
 **P2-7. `recipe.rs` 1374 lines — model + load + validate + expand in one file**
 - `struct Recipe` + `struct Package` + `struct Depends` + `struct Build` + `struct Fetch` + validation + `expand()` + `load_all()` + `is_lower_hex64` + `check_schema_placeholders()`.
 - `expand` does string replacement with `replace()` for each placeholder — O(n * placeholders) and does not handle `%%` escaping. A `{}`-style format string or a dedicated expander would be safer.
 
-**P2-8. Performance: repository parsing repeated**
-- `upgrade.rs::fetch_entry` / `open_repo` loads the whole index for each package? `plan.rs` walks deps repeatedly. `revdep::scan` reads every ELF twice (once for `DT_NEEDED`, once for soname index). No caching of parsed recipe graph beyond a single `load_all` per command (fixed in PR #31-32, but `build` still calls `recipe::load_all` twice when `use_cache` + `Closure`).
-- `lint.rs` walks the staged tree, then `slim::run` walks again, then `archive::create` walks a third time (PR #33 fixed double-walk in `slim`, but `lint`+`archive` still separate).
+**P2-8. Performance: staged-tree walks (re-checked 2026-11-13)**
+- The historical per-package index parsing and double ELF read no longer apply: `open_repo` parses each index once, `revdep::scan` reads each candidate once, and `plan::visit`/`deps::visit` memoise dependency traversal. No practical quadratic resolver remains; the planner's cycle stack is linear in dependency depth. `build` used to call `recipe::load_all` twice when `use_cache` + `Closure`; it now parses the graph once and reuses it for cache identity and assembly.
+- `lint.rs` walks the staged tree, then `slim::run` walks again, then `archive::create` walks a third time (PR #33 fixed double-walk in `slim`, but `lint`+`archive` still separate). Each pass mutates the tree, so merging them needs an architectural change, not a mechanical rewrite.
 
 #### P3 — Low (style, clippy, deps, polish)
 
@@ -208,7 +214,7 @@ The remaining ~35 top-level modules are flat files in `src/`.
 
 ## 4. Technical Debt Inventory
 
-1. **Legacy backup/undo vs WAL** (P1-2) — keep both, document migration, don’t delete until WAL undo covers rollback use-case.
+1. **Legacy backup/undo vs WAL** (P1-2) — resolved by the undo/WAL consolidation: history is canonical when it can answer, the legacy `desc`/`files` mirror stays as a compatibility aid, and no format changed (`docs/design/undo-wal-consolidation.md`).
 2. **Three unique-temp generators** (P2-1) — consolidate.
 3. **Ad-hoc tmp+rename vs `write_atomic`** (P0-1, P2-1) — migrate non-durable patterns to durable where they touch package db / index / trust store; keep ephemeral tmp+rename for throwaway staging (document which is which).
 4. **`install.rs` god module** (P1-1) — split, see plan.
@@ -225,7 +231,7 @@ The remaining ~35 top-level modules are flat files in `src/`.
 
 - No premature optimisation needed. SHA-256 hashing uses 64KiB buffers; `BufWriter` with 256KiB for tar rewrite; zstd level 3 for archives (level 19 for repo index — correct trade-off).
 - Parallelism: `jobs` respected for build; `fetch` is sequential per source (correct — no parallel download yet, but `sources.rs` stages sources sequentially; could parallelise `stage_sources` per source).
-- Largest waste: repeated `recipe::load_all` (parses every `recipe.toml`) in `build` (twice), `plan`, `upgrade`, `revdep`. Could cache within a single command via `OnceCell` or pass loaded graph. Mitigated by recent PR #32 single-walk change.
+- Largest waste: repeated `recipe::load_all` (parses every `recipe.toml`) in `build` (twice), `plan`, `upgrade`, `revdep`. Could cache within a single command via `OnceCell` or pass loaded graph. Mitigated by recent PR #32 single-walk change; the closure build path now loads once and passes the graph through (2026-11-13).
 - `clone()` count is high but dominated by `PathBuf` construction where ownership transfer is required; not a concern.
 
 ---
@@ -234,7 +240,7 @@ The remaining ~35 top-level modules are flat files in `src/`.
 
 - **Documentation discipline:** Almost every module opens with a crate-level `//!` doc that explains *why*, not just *what*, with tables/diagrams and references to design docs (`docs/design/*`). This is rare and valuable.
 - **Error rendering:** `diag.rs` + `output.rs` give consistent `nawa: error:` / `warning:` / `ok:` one-line prefix. Interrupts exit 130 with clear message.
-- **Locking:** `lock.rs` with shared/exclusive flock, hook escape hatch `NAWA_LOCK_HELD=1`, timeout `NAWA_LOCK_TIMEOUT`, and post-lock recovery (`install::recover_and_report`). Correct for a binary crate.
+- **Locking:** `lock.rs` with shared/exclusive flock, hook escape hatch `NAWA_LOCK_HELD=1`, timeout `NAWA_LOCK_TIMEOUT`, and post-lock recovery (`recovery::recover_and_report`). Correct for a binary crate.
 - **Testing:** 515 tests, many regression-tests with `PAUSE`/`FAILPOINT` injection for WAL (`transaction/atomic.rs` tests). No network-dependent unit tests. Temp dirs are cleaned via `Drop` or explicit `remove_dir_all` in tests.
 - **CI gate:** No-skip script ensures sandbox tests cannot silently skip. Reproducibility (`SOURCE_DATE_EPOCH`, normalised archives, zstd level 3 deterministic) tested via `rebuild_check`.
 - **Cargo hygiene:** `--locked`, MSRV `1.82`, static musl build, vendored offline bootstrap documented.

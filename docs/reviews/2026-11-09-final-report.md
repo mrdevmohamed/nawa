@@ -173,12 +173,23 @@ No breaking changes to CLI commands (`nawa sync/update/upgrade/install/remove/fe
 
 ### Remaining technical debt (after Steps 3-8)
 
-1. **P0-3 — Sandbox trusts live root outside closure** (`Sandbox` only mounts namespaces over live root; `extra_binds` shape validated but not policy-checked). Needs architectural decision, not low-risk.
-2. **P1-2 — Legacy undo journal vs new transaction WAL duplication** (two sources of truth for "what was installed before"; keep both until WAL undo covers rollback use-case per audit §1). Needs migration strategy.
-3. **P1-4 — Build isolation cache identity** misses `sandbox.extra_binds`, `assets` digest, toolchain version for non-closure isolation (`build_id_for` coverage).
-4. **P1-5 — `wipe_work` recursion + symlink escape** under overlayfs `sb/layer-work` (mode 000) — hardening with `O_NOFOLLOW`/`symlink_metadata` guard (code already uses `symlink_metadata` and treats symlinks as files; audit noted comment but code may still be vulnerable to symlink-to-dir escapes in overlayfs).
-5. **P1-8 — Performance:** repository parsing repeated (`fetch::load_index` called per repo file in `repositories.rs` + `sync.rs`); `revdep::scan` reads every ELF twice; `lint→slim→archive` still walk separately (fswalk helper centralises pattern but does not produce a single walk reused across passes because passes mutate the tree). Quadratic `deps` resolution.
-6. **P2 — Duplication remaining:** canonicalization/containment (`ensure_inside_root` vs `slim::split` real_root check vs `plugins/manifest` containment vs `fetchrun/common` canonicalize), sibling extraction duplication (`extract_source_archive` vs `extract_source_archive_stripped` now share `decompressed_reader` — remaining duplication is minimal), duplicate build-secret handling, planner/upgrade overlap (two resolvers: `plan.rs` vs `upgrade/mod.rs`).
+> **Status 2026-11-12:** P0-3 is closed for the extra-bind host surface, P1-4 is closed, and P1-5 was verified as already mitigated. The broader P0-3 question (sandbox binds the live root outside the closure) remains open. P1-2, P1-8 and the P2 duplication list are unchanged. See §7 for commits and current validation.
+>
+> **Status 2026-11-13:** P1-2 has a design
+> (`docs/design/undo-wal-consolidation.md`). Phases 1–3 are implemented:
+> FileJournal identity, one combined physical→logical recovery pass, the
+> previous-slot resolver used by `nawa rollback`, and a pre-`begin_operation`
+> recovery pass for every per-step-lock mutating command. Phase 4A was
+> accepted on 2026-11-13: the legacy `desc`/`files` mirror stays as a
+> compatibility aid for old binaries, so P1-2 is closed with no behavior
+> change.
+
+1. **P0-3 — Sandbox trusts live root outside closure** (`Sandbox` only mounts namespaces over live root; `extra_binds` shape validated but not policy-checked). Needs architectural decision, not low-risk. **Update:** the extra-bind host policy is implemented (`463d4fb`); the live-root trust model remains.
+2. **P1-2 — Legacy undo journal vs new transaction WAL duplication** (two sources of truth for "what was installed before"; keep both until WAL undo covers rollback use-case per audit §1). **Closed** by Phases 1–3 (`2ffebe7`, `4112d1f`, `6b80ede`) and the Phase 4A decision: history is canonical whenever it can answer, while the legacy mirror remains a compatibility aid for old-binary rollback. No on-disk format changed; see §7.
+3. **P1-4 — Build isolation cache identity** misses `sandbox.extra_binds`, `assets` digest, toolchain version for non-closure isolation (`build_id_for` coverage). **Closed** by `53390ed` (assets and isolation + host toolchain; see §7).
+4. **P1-5 — `wipe_work` recursion + symlink escape** under overlayfs `sb/layer-work` (mode 000) — hardening with `O_NOFOLLOW`/`symlink_metadata` guard (code already uses `symlink_metadata` and treats symlinks as files; audit noted comment but code may still be vulnerable to symlink-to-dir escapes in overlayfs). **Verified mitigated** (see §7).
+5. **P1-8 — Performance:** after re-checking current call sites, the original repository-parsing and double-ELF-read claims no longer hold: `open_repo` reads and parses each index once, `revdep::scan` reads each candidate once, and `plan::visit`/`deps::visit` memoise their traversals. No practical quadratic resolution remains; the planner's cycle stack is only linear in dependency depth. What remains is the staged-tree walk split: `lint` → `slim` → `archive` still walk separately because each pass mutates the tree; `fswalk` centralises the pattern but cannot make it one walk without an architectural change. **Fixed:** the closure build path now loads the recipe graph once for cache identity and assembly.
+6. **P2 — Duplication remaining:** the earlier list is mostly resolved or intentional. `ensure_inside_root` is lexical install-destination containment, while `plugins/manifest` and `fetchrun/common` canonicalise because their threat models are symlink escapes; `upgrade` delegates ordering to `deps::resolve`, and `plan.rs` adds installed-version decisions on top; sibling extraction shares `decompressed_reader`; build-env whitelisting and plugin path masking are different mechanisms. No further mechanical de-duplication is pending.
 
 All remaining items carry compatibility risk or require architectural decision per plan rule 7 and should be addressed in separate, design-led PRs.
 
@@ -192,6 +203,99 @@ All remaining items carry compatibility risk or require architectural decision p
 - [x] Predictable error handling (`Class::of` + `diag::hint`, `InstallReason` type-safe)
 - [x] Minimal duplication in walks, temp names, placeholders (see Steps 7-8)
 - [x] No unnecessary abstractions (no new traits/DI; helpers are plain fns)
-- [x] Strong test coverage: 412 tests in `--bin nawa` + integration suites, all green
+- [x] Strong test coverage: 412 tests in `--bin nawa` at the time of this update (428 now; see §7) plus integration suites, all green
 - [x] No unexplained breaking changes, no regressions in package management (CI matrix green)
 - [x] Clean formatting/clippy (CI `cargo clippy --release --all-targets --locked -- -D warnings` green)
+
+---
+
+## 7. Update — 2026-11-12: remaining audit follow-ups closed
+
+### Security: P0-3 extra-bind host policy (`463d4fb`)
+
+`SandboxSpec::parse` now enforces a host-path policy on every `extra_binds` source: absolute, no `..`, and refused for `/`, `/etc`, `/proc`, `/sys`, `/boot`, exact `/dev`/`/run`, and any `etc/nawa`, `var/lib/nawa` or `var/cache/nawa` tree (including custom `--root` prefixes). All producers were audited: build assets, fetch views, resolver copies, source-cache entries and Cargo temp directories remain allowed; recipes cannot contribute bind entries at all because `[sandbox]` only exposes `network` and `sysfs`. `tests/sandbox.rs::extra_bind_sources_cannot_expose_protected_host_paths` drives the real `nawa sandbox-init` entry point and proves the refusal happens before any namespace syscall.
+
+The broader trust-model finding is unchanged: at `sandbox` isolation the build root is still the live root, with namespaces and the mount policy as the barrier. That needs an architectural decision (live-root hardening vs mandatory closure), not a low-risk patch.
+
+### Cache identity: P1-4 closed (`53390ed`)
+
+Assets, fetch-schema versions and Go/Cargo versions were already inputs. The opt-in `--use-cache` sidecar is now `v2:<sha256>` over the legacy build id plus:
+
+- the effective isolation level (`env`/`sandbox`/`closure`), and
+- the host `cc`/`c++`/`ld`/`make` versions for `env`/`sandbox` builds (probed through the exact build `PATH`, absent commands skipped).
+
+`closure` remains keyed by the dependency closure archives, which pin the toolchain. `.PKGINFO build_id` keeps its legacy value byte-for-byte; pre-v2 sidecars miss once and are rewritten. The old P1-4 claim that `sandbox.extra_binds` must be hashed does not apply: recipes cannot supply binds, and every producer is a validated staging path.
+
+### P1-5 verified mitigated
+
+`wipe_tree` already uses `symlink_metadata` and treats non-directories (including symlinks) as files, so it never follows a symlink-to-directory escape. No code change was needed; the earlier audit line is retained for history.
+
+### Undo/WAL consolidation: Phases 1–3 and Phase 4A (`docs/design/undo-wal-consolidation.md`)
+
+The P1-2 design is in `docs/design/undo-wal-consolidation.md`. Phase 1 links
+the physical FileJournal to the logical transaction/step that owns it with an
+additive `T` line (old parsers ignore unknown records), and adds one combined
+recovery entry point in `src/recovery.rs`: physical restore first, then TxWAL
+reconciliation, under the exclusive lock. `nawa rollback` / `nawa history undo`
+semantics and the legacy `undo/<name>/{desc,files}` mirror are unchanged.
+
+The Phase 1 unit test forces a crash after the db entry was replaced and proves
+the physical pass restores both files and db before reconciliation classifies
+the step as failed; a second pass is a no-op. The logical pass does not run
+inside `install_archive_payload`/`remove_with` (those run after
+`begin_operation` wrote the live TxWAL); their physical-only calls were
+removed in Phase 3.
+
+Phase 2 adds `src/install/previous.rs`: `nawa rollback` now resolves the
+one-slot-back target from transaction history when possible, keeps the legacy
+`desc` authoritative wherever history cannot reproduce it exactly, and fails
+closed on contradictory non-empty digests. `pick_restore_source`, the
+current-version check, artifact/proof re-verification, and the `desc`/`files`
+writes are unchanged. The resolver refuses a package touched by a
+preparing/running/needs-recovery/interrupted transaction or a pending journal
+intent. Tests cover every documented legacy edge, a history-only root, the
+legacy no-digest cache path, `/etc` config preservation, retained signed-index
+proof verification, and `history undo`-then-rollback ping-pong.
+
+Phase 3 runs the combined recovery in every per-step-lock mutating command
+(`install` by name, `build --install`, `update`, `group install`) immediately
+after its short exclusive lock and before `begin_operation`, so a prior crash
+is never mistaken for the new transaction. Whole-command exclusive commands
+keep the `main::run` pass, and `cmd_history` keeps strict error propagation.
+The redundant physical-only calls in `install_archive_payload`/`remove_with`
+are gone. A command-level test in `tests/by_name.rs` seeds a committed db entry
+with no `StepResult`, runs an unrelated `nawa install <name>`, and verifies the
+record is already reconciled before `nawa history` runs.
+
+Phase 4A (2026-11-13) keeps the `desc`/`files` writes and the Phase 2 resolver
+fallback: history is authoritative whenever it can answer, and the mirror
+remains a compatibility aid so old binaries retain rollback. Stopping the
+mirror writes (Phase 4B) is not planned and would require a separate
+compatibility PR. The full suite also surfaced pre-existing duplicate test
+temp-dir tags; one tag per colliding pair was renamed so parallel unit tests
+are deterministic.
+
+### Clean-cache coverage and fixes
+
+`repositories::cmd_clean` helpers now have direct unit tests for `.part`
+retention, the legacy `<sha16>-` cache predicate, dry-run purity, and
+foreign-file/live-lock retention, plus an end-to-end `clean metadata` test.
+They exposed and fixed two sweep bugs: `clean_dir` silently left regular files
+because it always called `remove_dir_all`, and `sweep_tree --dry-run` restored
+write bits on read-only cache entries. Wet runs still restore the bits needed
+to unlink read-only trees; dry runs now leave permissions untouched.
+
+### Current validation
+
+```
+cargo check --locked --all-targets                         → clean
+cargo clippy --all-targets --locked -- -D warnings         → clean
+python3 scripts/check-layering.py                          → 53 modules, no cycles
+cargo test --locked --no-fail-fast                         → 458 unit passed, 1 ignored;
+                                                              111 integration tests passed
+```
+
+Remaining work: the staged-tree walk split in P1-8, P0-3's live-root sandbox
+trust model (architectural), the remaining P2-6 coverage gaps (`fetchrun`
+planning, `service`, fuzz targets), and repo-wide `cargo fmt --check` drift (not
+enforced by CI). P1-2 is closed by the Phase 4A decision.

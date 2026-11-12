@@ -164,29 +164,27 @@ pub(crate) fn cmd_group_remove(ctx: &Ctx, id: &str, yes: bool) -> Result<()> {
     let mut failure: Option<anyhow::Error> = None;
     for package in &candidates {
         let before = db.entry(package)?;
-        let step_no = {
+        let (step_no, file_journal) = {
             let mut recorder = op.recorder();
-            recorder.step_intent(
+            let step_no = recorder.step_intent(
                 package, transaction::history::StepAction::Remove,
                 before.as_ref(), None,
                 before.as_ref().map(|entry| entry.artifact_sha256.as_str()).unwrap_or(""),
-            )?
+            )?;
+            (step_no, install::FileJournalId::for_step(recorder.tx(), step_no))
         };
-        let result = install::remove_with(package, &ctx.root, false);
-        let after = db.entry(package)?;
-        let committed_hook_failed = result.is_err() && before.is_some() && after.is_none();
+        let result = install::remove_with_linked(package, &ctx.root, false, file_journal);
         {
             let mut recorder = op.recorder();
-            recorder.step_result(
-                step_no, package, transaction::history::StepAction::Remove,
-                if result.is_ok() { transaction::history::StepStatus::Committed }
-                else if committed_hook_failed { transaction::history::StepStatus::CommittedHookFailed }
-                else { transaction::history::StepStatus::Failed },
+            install::record_remove_outcome(
+                &mut recorder,
+                &ctx.root,
+                step_no,
+                package,
+                transaction::history::StepAction::Remove,
                 before.as_ref(),
-                after.as_ref(),
                 "group-remove",
-                result.as_ref().err().map(|error| format!("{error:#}")),
-                committed_hook_failed.then(|| "failed".to_string()),
+                &result,
             )?;
         }
         if let Err(error) = result { failure = Some(error); break; }

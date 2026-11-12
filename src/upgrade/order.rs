@@ -1,7 +1,5 @@
 //! Ordering helpers.
 
-// Note: trim unused imports in later pass
-#[allow(unused_imports)]
 use std::collections::{BTreeMap, HashSet};
 
 use crate::deps;

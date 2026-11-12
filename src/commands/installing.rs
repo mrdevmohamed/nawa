@@ -22,6 +22,7 @@ use crate::pathutil::is_archive_arg;
 use crate::lock;
 use crate::plan;
 use crate::recipe;
+use crate::recovery;
 use crate::repo;
 use crate::revdep;
 use crate::transaction;
@@ -85,6 +86,10 @@ pub(crate) fn cmd_install_with_why(
         if installed.contains_key(t) && install::hook_needs_retry(&ctx.root, t)? {
             crate::nawa_info!("retrying incomplete post-install hook for {t}");
             let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
+            // repair a killed transaction before touching package state; this
+            // command takes a short lock per transaction instead of one for
+            // the whole command, so `main` cannot do it for us
+            recovery::recover_and_report(&ctx.root);
             install::retry_pending_hook(t, &ctx.root)?;
             // Recipe-backed targets still go through normal source/version
             // selection after the hook is repaired.
@@ -140,6 +145,9 @@ pub(crate) fn cmd_install_with_why(
         // selected package is already present, so keep it visible in history.
         if let Some(id) = group_id.filter(|_| !flags.dry_run) {
             let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
+            // recover before `begin_operation`: its own TxWAL must never be
+            // mistaken for an abandoned transaction
+            recovery::recover_and_report(&ctx.root);
             let mut op = transaction::begin_operation(
                 &ctx.root,
                 transaction::OperationCommand::GroupInstall,
@@ -161,6 +169,9 @@ pub(crate) fn cmd_install_with_why(
         .collect();
     {
         let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
+        // this command locks per install step, so `main` has not run recovery;
+        // do it before the transaction's state and intents exist
+        recovery::recover_and_report(&ctx.root);
         let command = if group_id.is_some() {
             transaction::OperationCommand::GroupInstall
         } else {
@@ -374,6 +385,7 @@ fn install_one(
     let step_no = recorder.step_intent_state(
         &package, action, before.as_ref(), Some(&target), &target.artifact_sha256,
     )?;
+    let file_journal = install::FileJournalId::for_step(recorder.tx(), step_no);
     let installed = match request.index_sha256 {
         Some(expected) if request.signed_index => {
             let proof = open_repo.map(|open| install::IndexProof {
@@ -383,46 +395,28 @@ fn install_one(
                 repo_id: open.base_url.as_deref(),
             });
             install::install_archive_from_index_proof(
-                archive, &ctx.root, flags.force, expected, effective_reason, proof,
+                archive, &ctx.root, flags.force, expected, effective_reason, proof, file_journal,
             )
         }
         pinned => {
             let expected = pinned.unwrap_or(target.artifact_sha256.as_str());
             install::install_archive_pinned(
                 archive, &ctx.root,
-                install::InstallOpts { force: flags.force, allow_unsigned: flags.allow_unsigned, key: None, reason: effective_reason, pinned_sha: Some(expected) },
+                install::InstallOpts { force: flags.force, allow_unsigned: flags.allow_unsigned, key: None, reason: effective_reason, pinned_sha: Some(expected), file_journal },
             )
         },
     };
-    match &installed {
-        Ok(entry) => {
-            recorder.step_result(
-                step_no, &entry.name, action,
-                transaction::history::StepStatus::Committed,
-                before.as_ref(), Some(entry), request.source, None, None,
-            )?;
-        }
-        Err(error) => {
-            let current = db.entry(&package)?;
-            let retry_hook = install::hook_needs_retry(&ctx.root, &package).unwrap_or(false);
-            let committed_hook_failed = crate::transaction::history::committed_hook_failed(
-                current.as_ref(), before.as_ref(), &target, retry_hook,
-            );
-            recorder.step_result(
-                step_no, &package, action,
-                if committed_hook_failed {
-                    transaction::history::StepStatus::CommittedHookFailed
-                } else {
-                    transaction::history::StepStatus::Failed
-                },
-                before.as_ref(),
-                if committed_hook_failed { current.as_ref() } else { None },
-                request.source,
-                Some(format!("{error:#}")),
-                committed_hook_failed.then(|| "failed".to_string()),
-            )?;
-        }
-    }
+    install::record_install_outcome(
+        &mut recorder,
+        &ctx.root,
+        step_no,
+        &package,
+        action,
+        before.as_ref(),
+        &target,
+        request.source,
+        &installed,
+    )?;
     installed.with_context(|| {
         format!(
             "[{}/{}] install of {} failed",
@@ -811,6 +805,9 @@ pub(crate) fn cmd_update(
         .collect();
     let mut op = {
         let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
+        // `update` locks per install step; recover before opening its own
+        // transaction so a prior crash cannot be reconciled as this one
+        recovery::recover_and_report(&ctx.root);
         transaction::begin_operation(
             &ctx.root,
             transaction::OperationCommand::Update,
@@ -890,31 +887,21 @@ pub(crate) fn cmd_autoremove(ctx: &Ctx, dry_run: bool, yes: bool, build_deps: bo
             None,
             "",
         )?;
-        match install::remove_with(n, &ctx.root, false) {
-            Ok(()) => {
-                recorder.step_result(
-                    step_no, n, transaction::history::StepAction::Remove,
-                    transaction::history::StepStatus::Committed,
-                    before.as_ref(), None, "autoremove", None, None,
-                )?;
-            }
-            Err(e) => {
-                let after = db.entry(n)?;
-                let committed_hook_failed = before.is_some() && after.is_none();
-                recorder.step_result(
-                    step_no, n, transaction::history::StepAction::Remove,
-                    if committed_hook_failed {
-                        transaction::history::StepStatus::CommittedHookFailed
-                    } else {
-                        transaction::history::StepStatus::Failed
-                    },
-                    before.as_ref(), after.as_ref(), "autoremove", Some(format!("{e:#}")),
-                    committed_hook_failed.then(|| "failed".to_string()),
-                )?;
-                let err = e;
-                op.finish(Some(&err))?;
-                return Err(err);
-            }
+        let file_journal = install::FileJournalId::for_step(recorder.tx(), step_no);
+        let result = install::remove_with_linked(n, &ctx.root, false, file_journal);
+        install::record_remove_outcome(
+            &mut recorder,
+            &ctx.root,
+            step_no,
+            n,
+            transaction::history::StepAction::Remove,
+            before.as_ref(),
+            "autoremove",
+            &result,
+        )?;
+        if let Err(err) = result {
+            op.finish(Some(&err))?;
+            return Err(err);
         }
     }
     op.finish(None)?;
@@ -975,35 +962,22 @@ pub(crate) fn install_archive_file(
     let step_no = recorder.step_intent_state(
         &pkg_name, action, before.as_ref(), Some(&target), &digest,
     )?;
+    let file_journal = install::FileJournalId::for_step(recorder.tx(), step_no);
     let result = install::install_archive_pinned(
         file, &ctx.root,
-        install::InstallOpts { force, allow_unsigned, key: key.as_deref(), reason: crate::db::InstallReason::Explicit, pinned_sha: Some(&digest) },
+        install::InstallOpts { force, allow_unsigned, key: key.as_deref(), reason: crate::db::InstallReason::Explicit, pinned_sha: Some(&digest), file_journal },
     );
-    match &result {
-        Ok(entry) => {
-            recorder.step_result(
-                step_no, &entry.name, action,
-                transaction::history::StepStatus::Committed,
-                before.as_ref(), Some(entry), "archive", None, None,
-            )?;
-        }
-        Err(error) => {
-            let current = db.entry(&pkg_name)?;
-            let retry_hook = install::hook_needs_retry(&ctx.root, &pkg_name).unwrap_or(false);
-            let committed_hook_failed = crate::transaction::history::committed_hook_failed(
-                current.as_ref(), before.as_ref(), &target, retry_hook,
-            );
-            recorder.step_result(
-                step_no, &pkg_name, action,
-                if committed_hook_failed { transaction::history::StepStatus::CommittedHookFailed }
-                else { transaction::history::StepStatus::Failed },
-                before.as_ref(),
-                if committed_hook_failed { current.as_ref() } else { None },
-                "archive", Some(format!("{error:#}")),
-                committed_hook_failed.then(|| "failed".to_string()),
-            )?;
-        }
-    }
+    install::record_install_outcome(
+        &mut recorder,
+        &ctx.root,
+        step_no,
+        &pkg_name,
+        action,
+        before.as_ref(),
+        &target,
+        "archive",
+        &result,
+    )?;
     op.finish(result.as_ref().err())?;
     result?;
     Ok(())
@@ -1061,30 +1035,18 @@ pub(crate) fn cmd_remove(ctx: &Ctx, name: &str, force: bool, yes: bool) -> Resul
         None,
         before.as_ref().map(|b| b.artifact_sha256.as_str()).unwrap_or(""),
     )?;
-    let result = install::remove_with(name, &ctx.root, force);
-    match &result {
-        Ok(()) => {
-            recorder.step_result(
-                step_no, name, transaction::history::StepAction::Remove,
-                transaction::history::StepStatus::Committed,
-                before.as_ref(), None, "remove", None, None,
-            )?;
-        }
-        Err(e) => {
-            let after = db.entry(name)?;
-            let committed_hook_failed = before.is_some() && after.is_none();
-            recorder.step_result(
-                step_no, name, transaction::history::StepAction::Remove,
-                if committed_hook_failed {
-                    transaction::history::StepStatus::CommittedHookFailed
-                } else {
-                    transaction::history::StepStatus::Failed
-                },
-                before.as_ref(), after.as_ref(), "remove", Some(format!("{e:#}")),
-                committed_hook_failed.then(|| "failed".to_string()),
-            )?;
-        }
-    }
+    let file_journal = install::FileJournalId::for_step(recorder.tx(), step_no);
+    let result = install::remove_with_linked(name, &ctx.root, force, file_journal);
+    install::record_remove_outcome(
+        &mut recorder,
+        &ctx.root,
+        step_no,
+        name,
+        transaction::history::StepAction::Remove,
+        before.as_ref(),
+        "remove",
+        &result,
+    )?;
     op.finish(result.as_ref().err())?;
     result?;
     // the removed package is gone: this checks what depended on it

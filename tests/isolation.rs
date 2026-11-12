@@ -592,6 +592,37 @@ echo x > %{pkgdir}/usr/bin/probe
         "a cache hit must not run any build section: {so2}"
     );
 
+    // A pre-v2 sidecar (the bare legacy build id) must not alias the v2 id:
+    // the versioned encoding forces one rebuild, then converges again.
+    let sidecar = d.join("build/out/probe-1.0-1.nawa.tar.zst.buildid");
+    let legacy_id = pkginfo_of(&d)
+        .lines()
+        .find_map(|l| l.strip_prefix("build_id = ").map(str::to_string))
+        .expect("built archive has a legacy build_id");
+    fs::write(&sidecar, format!("{legacy_id}\n")).unwrap();
+    let o_legacy = build(&d);
+    assert!(o_legacy.status.success(), "{}", out_str(&o_legacy));
+    let so_legacy = String::from_utf8_lossy(&o_legacy.stdout);
+    assert!(
+        so_legacy.contains("BUILDING-NOW"),
+        "an unversioned sidecar must rebuild: {so_legacy}"
+    );
+    assert!(
+        so_legacy.contains("build_id mismatch"),
+        "the old sidecar must be reported as a mismatch: {so_legacy}"
+    );
+    assert!(
+        fs::read_to_string(&sidecar).unwrap().trim().starts_with("v2:"),
+        "the rebuild must record a versioned cache id"
+    );
+    let o_v2 = build(&d);
+    assert!(o_v2.status.success(), "{}", out_str(&o_v2));
+    assert!(
+        String::from_utf8_lossy(&o_v2.stdout).contains("build cache hit"),
+        "the v2 sidecar must hit after one rebuild: {}",
+        out_str(&o_v2)
+    );
+
     // recipe edit -> build_id mismatch -> real rebuild
     let recipe_path = d.join("recipes/probe/recipe.toml");
     let edited = fs::read_to_string(&recipe_path)

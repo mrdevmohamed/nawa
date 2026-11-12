@@ -15,7 +15,3 @@ pub(crate) mod manifest;
 pub(crate) mod protocol;
 pub(crate) mod runner;
 pub(crate) mod sandbox;
-
-// Public surface re-export (used by the command layer and tests).
-#[allow(unused_imports)]
-pub(crate) use manifest::{Capability, PluginManifest};

@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use super::sections::installed_sonames;
-use super::{buildid_sidecar, build_id_for, BuildOpts};
+use super::{buildid_sidecar, build_id_for, cache_id_for, BuildOpts};
 use crate::archive;
 use crate::buildenv::Isolation;
 use crate::closure::AssembledRoot;
@@ -110,8 +110,7 @@ pub(super) fn lint_stage(
 }
 
 /// Write `.PKGINFO` and the main archive, then one archive per split-off
-/// sub-package (`-doc`, `-lang`). Returns the main archive path and its
-/// `.PKGINFO`.
+/// sub-package (`-doc`, `-lang`). Returns the main archive path.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn package_archives(
     rec: &Recipe,
@@ -123,10 +122,12 @@ pub(super) fn package_archives(
     assembled: Option<&AssembledRoot>,
     assets_digest: Option<&str>,
     toolchain_identity: &[(&'static str, String)],
+    host_toolchain_identity: &[(&'static str, String)],
     slim_report: &slim::Report,
-) -> Result<(PathBuf, String)> {
+) -> Result<PathBuf> {
     let name = &rec.package.name;
     let arch = rec.arch();
+    let mut cache_id: Option<String> = None;
     let mut pkginfo = format!(
         "pkgname = {}\npkgver = {}\npkgrel = {}\narch = {}\nrundeps = {}\nsize = {}\n",
         name,
@@ -145,6 +146,7 @@ pub(super) fn package_archives(
             .unwrap_or_default();
         let bid = build_id_for(rec, opts, &closure_shas, assets_digest, toolchain_identity);
         pkginfo.push_str(&format!("build_id = {bid}\n"));
+        cache_id = Some(cache_id_for(&bid, opts.isolation, host_toolchain_identity));
         if opts.allow_network && rec.sandbox.network {
             pkginfo.push_str("impure = network\n");
         }
@@ -177,15 +179,13 @@ pub(super) fn package_archives(
             &out_path,
             &archive::Normalize { source_date_epoch: sde },
         )?;
-        // the cache-hit sidecar (--use-cache): the build id this archive
-        // was produced from, next to the archive itself
-        let bid = pkginfo
-            .split("build_id = ")
-            .nth(1)
-            .and_then(|s| s.lines().next())
-            .unwrap_or("");
-        let sidecar = buildid_sidecar(&out_path);
-        let _ = std::fs::write(&sidecar, format!("{bid}\n"));
+        // the cache-hit sidecar (--use-cache): the versioned cache id this
+        // archive was produced from, next to the archive itself. The
+        // `.PKGINFO build_id` keeps its legacy value.
+        if let Some(id) = &cache_id {
+            let sidecar = buildid_sidecar(&out_path);
+            let _ = std::fs::write(&sidecar, format!("{id}\n"));
+        }
     } else {
         archive::create_with_hooks(pkg, &pkginfo, Some(&hooks), &out_path)?;
     }
@@ -221,5 +221,5 @@ pub(super) fn package_archives(
             sub_path.display()
         );
     }
-    Ok((out_path, pkginfo))
+    Ok(out_path)
 }

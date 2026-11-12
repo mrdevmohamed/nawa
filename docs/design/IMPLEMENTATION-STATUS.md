@@ -96,5 +96,7 @@ clean at the time it landed.
   from unsigned data.
 
 ## Test totals
-283 unit tests + integration suites (by_name, repo_install, e2e, lock,
-sandbox, isolation, plugins, ...) green at the final commit.
+428 unit tests + 109 integration tests green at the current tree (2026-11-12);
+the one ignored test is the expensive real-package Cargo smoke build. See
+`docs/reviews/2026-11-09-final-report.md` §7 for the post-roadmap security
+hardening and cache-identity update.

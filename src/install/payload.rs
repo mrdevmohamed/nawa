@@ -9,10 +9,11 @@ use crate::archive;
 use crate::db::{Db, Entry};
 use crate::install::InstallAuth;
 use crate::install::hooks::{hook_status_path, run_tracked_hook, save_hooks};
-use crate::install::journal::{recover_and_report, Tx};
+use crate::install::journal::{FileJournalId, Tx};
 use crate::interrupt;
 use crate::sign;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn install_archive_payload(
     archive_path: &Path,
     cache_name_source: &Path,
@@ -21,15 +22,16 @@ pub(crate) fn install_archive_payload(
     reason: crate::db::InstallReason,
     cache_detached_signature: bool,
     auth: InstallAuth,
+    file_journal: Option<FileJournalId>,
 ) -> Result<Entry> {
     let db = Db::new(root);
     // Ctrl+C / SIGTERM / SIGHUP are deferred from here to the end of the
     // function: before the commit point they roll the install back, after it
     // the install simply finishes (see `interrupt`).
     let _interrupts = interrupt::Guard::new();
-    // a previous nawa killed mid-install (SIGKILL, power cut) is repaired
-    // before anything else looks at the files or the db
-    recover_and_report(root);
+    // Crash repair is the caller's responsibility: it runs before
+    // `begin_operation`, while holding the exclusive db lock. Recovering here
+    // would see this step's own live TxWAL entry.
     // Timestamps stored in the database are Unix SECONDS (the human formatter
     // interprets them that way); temporary directory names get their own
     // uniqueness from nanoseconds + pid, decoupled from install_date.
@@ -111,7 +113,10 @@ pub(crate) fn install_archive_payload(
 
     // ---- move staged tree into the root -------------------------------------
     let mut diverted: Vec<(String, String)> = Vec::new(); // (orig, diverted)
-    let mut tx = Tx::new(root, root.join(".nawa").join(format!("bak-{uniq}")));
+    let mut tx = match file_journal {
+        Some(id) => Tx::new_linked(root, root.join(".nawa").join(format!("bak-{uniq}")), id),
+        None => Tx::new(root, root.join(".nawa").join(format!("bak-{uniq}"))),
+    };
     // last clean exit before any file is touched
     interrupt::check()?;
     if let Err(e) = move_tree(&tmp, root, root, &old_hashes, &mut diverted, &mut tx) {

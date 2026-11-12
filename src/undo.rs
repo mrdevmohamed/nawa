@@ -265,6 +265,7 @@ pub(crate) fn apply_undo(
         let step_no = recorder.step_intent_state(
             &step.package, action, before_entry.as_ref(), target.as_ref(), target_digest,
         )?;
+        let file_journal = crate::install::FileJournalId::for_step(recorder.tx(), step_no);
         let (mut status, mut failure, mut hook) = (true, None, None);
         match &step.action {
             UndoAction::Nothing => {}
@@ -276,7 +277,9 @@ pub(crate) fn apply_undo(
                 if !dependents.is_empty() && !force {
                     status = false;
                     failure = Some(format!("still required by {}", dependents.join(", ")));
-                } else if let Err(error) = crate::install::remove_with(&step.package, root, force) {
+                } else if let Err(error) = crate::install::remove_with_linked(
+                    &step.package, root, force, file_journal,
+                ) {
                     failure = Some(format!("{error:#}"));
                     if before_entry.is_some() && db.entry(&step.package)?.is_none() {
                         status = true;
@@ -292,7 +295,7 @@ pub(crate) fn apply_undo(
                     .and_then(|object| {
                         let reason = crate::db::InstallReason::parse(&step.reason)
                             .unwrap_or(crate::db::InstallReason::Explicit);
-                        restore_object(root, &object, digest, reason)
+                        restore_object(root, &object, digest, reason, file_journal)
                     })
                 {
                     failure = Some(format!("{error:#}"));
@@ -327,13 +330,19 @@ pub(crate) fn apply_undo(
 
 /// Restore one object through the ordinary installer, honouring the recorded
 /// authentication kind (roadmap §4.7 rules apply here too).
-fn restore_object(root: &Path, object: &Path, digest: &str, reason: crate::db::InstallReason) -> Result<()> {
+fn restore_object(
+    root: &Path,
+    object: &Path,
+    digest: &str,
+    reason: crate::db::InstallReason,
+    file_journal: Option<crate::install::FileJournalId>,
+) -> Result<()> {
     let prov = crate::artifact::load_provenance(root, digest)?;
     match prov.as_ref().map(|p| p.authentication.as_str()) {
         Some("signed-index") => {
             crate::install::verify_retained_index_proof(root, digest)?;
             crate::install::install_archive_from_index_proof(
-                object, root, false, digest, reason, None,
+                object, root, false, digest, reason, None, file_journal,
             )?;
             Ok(())
         }
@@ -341,14 +350,14 @@ fn restore_object(root: &Path, object: &Path, digest: &str, reason: crate::db::I
             crate::install::verify_retained_detached_proof(root, digest)?;
             crate::install::install_archive_pinned(
                 object, root,
-                crate::install::InstallOpts { force: false, allow_unsigned: true, key: None, reason, pinned_sha: Some(digest) },
+                crate::install::InstallOpts { force: false, allow_unsigned: true, key: None, reason, pinned_sha: Some(digest), file_journal },
             )?;
             Ok(())
         }
         _ => {
             crate::install::install_archive_pinned(
                 object, root,
-                crate::install::InstallOpts { force: false, allow_unsigned: true, key: None, reason, pinned_sha: Some(digest) },
+                crate::install::InstallOpts { force: false, allow_unsigned: true, key: None, reason, pinned_sha: Some(digest), file_journal },
             )?;
             Ok(())
         }
@@ -771,7 +780,7 @@ mod tests {
 
     #[test]
     fn legacy_record_without_digest_refuses() {
-        let base = tmpdir("legacy");
+        let base = tmpdir("undo-legacy");
         let root = base.join("root");
         let record = TransactionRecord {
             schema: SCHEMA_VERSION,

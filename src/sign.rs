@@ -476,7 +476,7 @@ mod tests {
 
     #[test]
     fn keygen_sign_verify_roundtrip() {
-        let base = tmpdir("rt");
+        let base = tmpdir("sign-rt");
         let keys = base.join("keys");
         let (sec, pub_) = keygen(&keys).unwrap();
         assert!(sec.exists() && pub_.exists());
@@ -495,7 +495,7 @@ mod tests {
 
     #[test]
     fn tampered_archive_is_rejected() {
-        let base = tmpdir("tamper");
+        let base = tmpdir("sign-tamper");
         let (sec, _) = keygen(&base.join("keys")).unwrap();
         let archive = fake_archive(&base, "legit-1.0-1", b"payload-bytes-v1");
         sign(&archive, &sec).unwrap();

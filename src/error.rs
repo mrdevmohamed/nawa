@@ -72,8 +72,7 @@ impl Class {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[allow(unused_imports)]
-    use anyhow::{anyhow, Context};
+    use anyhow::anyhow;
 
     #[test]
     fn classify_io() {

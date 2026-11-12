@@ -5,22 +5,25 @@ use std::path::{Path, PathBuf};
 
 use crate::artifact;
 use crate::db::{Db, Entry};
-use crate::install::hooks::{hook_needs_retry, load_hooks, run_hook};
-use crate::install::journal::{recover_and_report, Tx};
+use crate::install::hooks::{load_hooks, run_hook};
+use crate::install::journal::Tx;
 use crate::install::payload::save_undo;
-use crate::install::{inspect_archive_state, install_archive, install_archive_from_index_proof, install_archive_pinned, InstallOpts};
+use crate::install::previous::{resolve_previous, synthesize_entry};
+use crate::install::{inspect_archive_state, install_archive, install_archive_from_index_proof, install_archive_pinned, FileJournalId, InstallOpts};
 use crate::interrupt;
 use crate::sign;
 
 pub(crate) fn rollback(name: &str, root: &Path) -> Result<()> {
     let db = Db::new(root);
     crate::db::check_name(name)?;
-    let desc_path = root.join("var/lib/nawa/undo").join(name).join("desc");
-    if !desc_path.exists() {
-        bail!("no undo record for `{name}` — nothing to roll back");
-    }
-    let prev: Entry = toml::from_str(&std::fs::read_to_string(&desc_path)?)
-        .context("corrupt undo record")?;
+    let previous = match resolve_previous(root, name)? {
+        Some(previous) => previous,
+        None => bail!("no undo record for `{name}` — nothing to roll back"),
+    };
+    // Only identity and digest are consumed below; the installer re-reads the
+    // rest from the verified archive. Never treat this synthetic entry as db
+    // state (see `previous::synthesize_entry`).
+    let prev = synthesize_entry(name, &previous.state);
     let before = db.entry(name)?;
     if let Some(cur) = &before {
         if cur.version_full() == prev.version_full() {
@@ -53,6 +56,7 @@ pub(crate) fn rollback(name: &str, root: &Path) -> Result<()> {
         &[name.to_string()],
         &[],
     )?;
+    let tx = operation.tx();
     let (result, proof) = {
         let mut recorder = operation.recorder();
         let step_no = recorder.step_intent_state(
@@ -62,43 +66,20 @@ pub(crate) fn rollback(name: &str, root: &Path) -> Result<()> {
             Some(&target),
             &digest,
         )?;
+        let file_journal = FileJournalId::for_step(tx, step_no);
 
-        let (result, proof) = install_restore_source(source, root);
+        let (result, proof) = install_restore_source(source, root, file_journal);
 
-        let current_after = match &result {
-            Ok(entry) => Some(entry.clone()),
-            Err(_) => db.entry(name)?,
-        };
-        let retry_hook = hook_needs_retry(root, name).unwrap_or(false);
-        let committed_hook_failed = result.is_err()
-            && crate::transaction::history::committed_hook_failed(
-                current_after.as_ref(),
-                before.as_ref(),
-                &target,
-                retry_hook,
-            );
-        let step_status = if result.is_ok() {
-            crate::transaction::history::StepStatus::Committed
-        } else if committed_hook_failed {
-            crate::transaction::history::StepStatus::CommittedHookFailed
-        } else {
-            crate::transaction::history::StepStatus::Failed
-        };
-        let after = if result.is_ok() || committed_hook_failed {
-            current_after.as_ref()
-        } else {
-            None
-        };
-        recorder.step_result(
+        crate::install::record_install_outcome(
+            &mut recorder,
+            root,
             step_no,
             name,
             crate::transaction::history::StepAction::Restore,
-            step_status,
             before.as_ref(),
-            after,
+            &target,
             "rollback",
-            result.as_ref().err().map(|error| format!("{error:#}")),
-            committed_hook_failed.then(|| "failed".to_string()),
+            &result,
         )?;
         (result, proof)
     };
@@ -158,21 +139,35 @@ fn pick_restore_source(root: &Path, name: &str, prev: &Entry) -> Result<RestoreS
 
 /// Reinstall the chosen source through the installer path that matches its
 /// authentication; returns the result and the proof text to report.
-fn install_restore_source(source: RestoreSource, root: &Path) -> (Result<Entry>, String) {
+fn install_restore_source(
+    source: RestoreSource,
+    root: &Path,
+    file_journal: Option<FileJournalId>,
+) -> (Result<Entry>, String) {
     match source {
         RestoreSource::SignedIndex { object, digest } => (
-            install_archive_from_index_proof(&object, root, false, &digest, crate::db::InstallReason::Keep, None),
+            install_archive_from_index_proof(
+                &object,
+                root,
+                false,
+                &digest,
+                crate::db::InstallReason::Keep,
+                None,
+                file_journal,
+            ),
             "signed-index proof re-verified".to_string(),
         ),
         RestoreSource::Detached { object, digest } => (
-            install_archive_pinned(&object, root, InstallOpts { force: false, allow_unsigned: true, key: None, reason: crate::db::InstallReason::Keep, pinned_sha: Some(&digest) }),
+            install_archive_pinned(&object, root, InstallOpts { force: false, allow_unsigned: true, key: None, reason: crate::db::InstallReason::Keep, pinned_sha: Some(&digest), file_journal }),
             "detached signature re-verified".to_string(),
         ),
         RestoreSource::Pinned { object, digest, proof } => (
-            install_archive_pinned(&object, root, InstallOpts { force: false, allow_unsigned: true, key: None, reason: crate::db::InstallReason::Keep, pinned_sha: Some(&digest) }),
+            install_archive_pinned(&object, root, InstallOpts { force: false, allow_unsigned: true, key: None, reason: crate::db::InstallReason::Keep, pinned_sha: Some(&digest), file_journal }),
             proof,
         ),
         RestoreSource::Legacy { archive } => (
+            // Legacy records carry no digest, so the modern linked installer
+            // cannot verify them anyway; keep the established unsigned path.
             install_archive(&archive, root, false, true, None, crate::db::InstallReason::Explicit),
             "legacy cached archive (no recorded authentication proof)".to_string(),
         ),
@@ -257,9 +252,22 @@ pub(crate) fn remove(name: &str, root: &Path) -> Result<()> {
 /// A failure to move any file aborts the removal instead of silently
 /// leaving a half-removed package behind.
 pub(crate) fn remove_with(name: &str, root: &Path, force: bool) -> Result<()> {
+    remove_with_linked(name, root, force, None)
+}
+
+/// [`remove_with`] with the logical transaction/step that owns the physical
+/// removal journal.
+pub(crate) fn remove_with_linked(
+    name: &str,
+    root: &Path,
+    force: bool,
+    file_journal: Option<FileJournalId>,
+) -> Result<()> {
     let db = Db::new(root);
     let _interrupts = interrupt::Guard::new();
-    recover_and_report(root);
+    // Crash repair is the caller's responsibility: it runs before
+    // `begin_operation`, while holding the exclusive db lock. Recovering here
+    // would see this step's own live TxWAL entry.
     let entry = match db.entry(name)? {
         Some(e) => e,
         None => bail!("`{name}` is not installed"),
@@ -295,7 +303,10 @@ pub(crate) fn remove_with(name: &str, root: &Path, force: bool) -> Result<()> {
     let shared = db.paths_claimed_by_others(name)?;
     let mut files: Vec<String> = db.files(name)?.into_iter().filter(|f| !shared.contains(f)).collect();
     files.sort_by_key(|f| std::cmp::Reverse(f.len()));
-    let mut tx = Tx::new(root, root.join(".nawa").join(format!("rm-{uniq}")));
+    let mut tx = match file_journal {
+        Some(id) => Tx::new_linked(root, root.join(".nawa").join(format!("rm-{uniq}")), id),
+        None => Tx::new(root, root.join(".nawa").join(format!("rm-{uniq}"))),
+    };
     let mut dirs: Vec<PathBuf> = Vec::new();
     let mut move_err: Option<anyhow::Error> = None;
     for f in &files {

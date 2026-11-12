@@ -15,6 +15,29 @@ pub(crate) enum Step {
     Db { dir: PathBuf, backup: Option<PathBuf> },
 }
 
+/// The logical transaction/step that owns a physical file journal.
+///
+/// The physical journal is the only record that can restore files after a
+/// crash, but it used to be anonymous: recovery could not tell which history
+/// step it belonged to. New journals carry this identity in an additive `T`
+/// line; old nawa binaries ignore that line and keep recovering the journal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FileJournalId {
+    pub(crate) tx: u64,
+    pub(crate) step: u32,
+}
+
+impl FileJournalId {
+    /// Build an identity only when history recording is enabled (`step` is 0
+    /// for a no-history operation).
+    pub(crate) fn for_step(tx: Option<u64>, step: u32) -> Option<Self> {
+        match tx {
+            Some(tx) if step > 0 => Some(FileJournalId { tx, step }),
+            _ => None,
+        }
+    }
+}
+
 /// Percent-encode a path for one journal field: bytes outside printable
 /// ASCII, plus `%`, tab and newline, become `%XX` (file names are arbitrary
 /// bytes on Linux).
@@ -66,7 +89,7 @@ pub(crate) struct Journal {
 }
 
 impl Journal {
-    pub(crate) fn create(path: PathBuf, bak_root: &Path) -> Result<Self> {
+    pub(crate) fn create(path: PathBuf, bak_root: &Path, id: Option<FileJournalId>) -> Result<Self> {
         use std::io::Write;
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
@@ -78,6 +101,11 @@ impl Journal {
             .open(&path)
             .with_context(|| format!("create journal {}", path.display()))?;
         file.write_all(format!("H\t{}\n", enc(bak_root)).as_bytes())?;
+        // Additive identity line. Old parsers treat unknown records as no-ops,
+        // so a new journal is still recoverable by an older nawa binary.
+        if let Some(id) = id {
+            file.write_all(format!("T\t{}\t{}\n", id.tx, id.step).as_bytes())?;
+        }
         file.sync_data()?;
         if let Some(dir) = path.parent() {
             if let Ok(d) = std::fs::File::open(dir) {
@@ -122,16 +150,19 @@ impl Journal {
     }
 }
 
-/// Parsed journal: the bak dir, the steps, and whether it was committed.
+/// Parsed journal: the bak dir, the steps, whether it was committed, and the
+/// optional logical transaction/step identity.
 pub(crate) struct Parsed {
     pub(crate) bak_root: PathBuf,
     pub(crate) steps: Vec<Step>,
+    pub(crate) id: Option<FileJournalId>,
     committed: bool,
 }
 
 pub(crate) fn parse_journal(text: &str, fallback_bak: PathBuf) -> Parsed {
     let mut bak_root = fallback_bak;
     let mut steps = Vec::new();
+    let mut id = None;
     let mut committed = false;
     for line in text.lines() {
         let f: Vec<&str> = line.split('\t').collect();
@@ -139,6 +170,14 @@ pub(crate) fn parse_journal(text: &str, fallback_bak: PathBuf) -> Parsed {
             ["H", b] => {
                 if let Some(p) = dec(b) {
                     bak_root = p;
+                }
+            }
+            ["T", tx, step] => {
+                // A torn or future-format identity line is ignored: the step
+                // records around it are still a complete description of what
+                // was acted on.
+                if let (Ok(tx), Ok(step)) = (tx.parse::<u64>(), step.parse::<u32>()) {
+                    id = Some(FileJournalId { tx, step });
                 }
             }
             ["C", p] => {
@@ -163,7 +202,7 @@ pub(crate) fn parse_journal(text: &str, fallback_bak: PathBuf) -> Parsed {
             _ => {}
         }
     }
-    Parsed { bak_root, steps, committed }
+    Parsed { bak_root, steps, id, committed }
 }
 
 /// Copy a (flat or nested) directory of small files.
@@ -222,6 +261,7 @@ pub(crate) struct Tx {
     pub(crate) bak_root: PathBuf,
     pub(crate) journal: Option<Journal>,
     pub(crate) steps: Vec<Step>,
+    pub(crate) id: Option<FileJournalId>,
     pub(crate) done: bool,
 }
 
@@ -232,13 +272,31 @@ pub(crate) fn journal_path(root: &Path, bak_root: &Path) -> PathBuf {
 
 impl Tx {
     pub(crate) fn new(root: &Path, bak_root: PathBuf) -> Self {
-        Tx { root: root.to_path_buf(), bak_root, journal: None, steps: Vec::new(), done: false }
+        Tx { root: root.to_path_buf(), bak_root, journal: None, steps: Vec::new(), id: None, done: false }
+    }
+
+    /// A journal linked to the logical transaction/step that owns it. The
+    /// identity is advisory recovery metadata; the physical steps remain the
+    /// authority for what must be undone.
+    pub(crate) fn new_linked(root: &Path, bak_root: PathBuf, id: FileJournalId) -> Self {
+        Tx {
+            root: root.to_path_buf(),
+            bak_root,
+            journal: None,
+            steps: Vec::new(),
+            id: Some(id),
+            done: false,
+        }
     }
 
     /// Journal `step` (creating the journal on first use), then remember it.
     pub(crate) fn log(&mut self, step: Step) -> Result<()> {
         if self.journal.is_none() {
-            self.journal = Some(Journal::create(journal_path(&self.root, &self.bak_root), &self.bak_root)?);
+            self.journal = Some(Journal::create(
+                journal_path(&self.root, &self.bak_root),
+                &self.bak_root,
+                self.id,
+            )?);
         }
         if let Some(j) = self.journal.as_mut() {
             j.record(&step)?;
@@ -367,15 +425,19 @@ pub(crate) fn recover(root: &Path) -> Result<Vec<String>> {
         let text = std::fs::read_to_string(&path).unwrap_or_default();
         let fallback = dir.join(name.trim_end_matches(".journal"));
         let parsed = parse_journal(&text, fallback);
+        let link = parsed
+            .id
+            .map(|id| format!(", tx {} step {}", id.tx, id.step))
+            .unwrap_or_default();
         if parsed.committed {
             let _ = std::fs::remove_dir_all(&parsed.bak_root);
-            notes.push(format!("finished cleaning up a completed transaction ({name})"));
+            notes.push(format!("finished cleaning up a completed transaction ({name}{link})"));
         } else if parsed.steps.is_empty() {
             let _ = std::fs::remove_dir_all(&parsed.bak_root);
         } else {
             undo_steps(&parsed.steps, &parsed.bak_root);
             notes.push(format!(
-                "rolled back an interrupted transaction ({name}, {} step(s)): \
+                "rolled back an interrupted transaction ({name}{link}, {} step(s)): \
                  the system is back to its state before it started",
                 parsed.steps.len()
             ));
@@ -388,15 +450,46 @@ pub(crate) fn recover(root: &Path) -> Result<Vec<String>> {
     Ok(notes)
 }
 
-/// [`recover`], reporting on stderr. Failures to repair are warnings: the
-/// command at hand should still be able to run.
-pub(crate) fn recover_and_report(root: &Path) {
-    match recover(root) {
-        Ok(notes) => {
-            for n in notes {
-                crate::nawa_info_stderr!("recovered: {n}");
-            }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::tmpdir;
+
+    #[test]
+    fn linked_journal_writes_and_parses_identity() {
+        let base = tmpdir("journal-identity");
+        let path = base.join("bak-1.journal");
+        let id = FileJournalId { tx: 42, step: 3 };
+        {
+            let mut journal = Journal::create(path.clone(), &base.join("bak-1"), Some(id)).unwrap();
+            journal
+                .record(&Step::Created(base.join("usr/bin/demo")))
+                .unwrap();
         }
-        Err(e) => crate::nawa_warn!("could not check for an interrupted transaction: {e:#}"),
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("T\t42\t3\n"), "{text:?}");
+        let parsed = parse_journal(&text, base.join("fallback"));
+        assert_eq!(parsed.id, Some(id));
+        assert_eq!(parsed.steps.len(), 1);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn old_journal_without_identity_still_parses() {
+        let text = "H\t/root/.nawa/bak-1\nC\t/root/usr/bin/demo\nCOMMIT\n";
+        let parsed = parse_journal(text, PathBuf::from("/fallback"));
+        assert_eq!(parsed.id, None);
+        assert_eq!(parsed.steps.len(), 1);
+        assert!(parsed.committed);
+    }
+
+    #[test]
+    fn torn_or_unknown_identity_line_is_ignored() {
+        for line in ["T\tnot-a-number\t1", "T\t42", "T\t42\tx", "T\t"] {
+            let text = format!("H\t/root/.nawa/bak-1\n{line}\nC\t/root/usr/bin/demo\n");
+            let parsed = parse_journal(&text, PathBuf::from("/fallback"));
+            assert_eq!(parsed.id, None, "{line:?}");
+            assert_eq!(parsed.steps.len(), 1, "{line:?}");
+        }
     }
 }

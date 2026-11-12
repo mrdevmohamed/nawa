@@ -857,3 +857,33 @@ fn clean_sources_sweeps_only_nawa_owned_subsets() {
         assert!(!entry.exists(), "the read-only entry must be removable");
     }
 }
+
+#[test]
+fn clean_metadata_removes_files_and_directories_but_keeps_part_files() {
+    let s = scratch("cleanmeta");
+    let root = s.join("root");
+    let remote = root.join("var/cache/nawa/remote");
+    let repo = remote.join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    fs::write(remote.join("index.toml"), b"cached index").unwrap();
+    fs::write(repo.join("index.toml"), b"repo index").unwrap();
+    fs::write(remote.join("live.part"), b"partial download").unwrap();
+
+    let out = nawa()
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "clean",
+            "metadata",
+        ])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "clean metadata failed:\n{stdout}\n{stderr}");
+    assert!(!remote.join("index.toml").exists(), "regular files must be swept");
+    assert!(!repo.exists(), "cached repository directories must be swept");
+    assert!(remote.join("live.part").exists(), "an active download must survive");
+    assert!(remote.is_dir(), "the cache root itself is never removed");
+    let _ = fs::remove_dir_all(&s);
+}

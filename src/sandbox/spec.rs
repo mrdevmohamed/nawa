@@ -70,6 +70,7 @@ pub(crate) struct SandboxSpec {
     /// is opened as an O_PATH handle before any cover (with the staging
     /// handles), bound at `inside` and, when `readonly`, remounted
     /// read-only at once. `serde(default)` keeps older specs parsing.
+    /// Protected host paths are refused; see [`ExtraBind`].
     #[serde(default)]
     pub extra_binds: Vec<ExtraBind>,
     /// Make every mount below / read-only except writable_paths.
@@ -83,7 +84,11 @@ pub(crate) struct SandboxSpec {
 /// One extra bind mount, raw data of the spec (§5.3).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ExtraBind {
-    /// Host path of the bind source.
+    /// Host path of the bind source. It must be absolute, free of `..` and
+    /// outside the host root, host configuration/kernel filesystems and
+    /// Nawa's state trees (`etc/nawa`, `var/lib/nawa`, `var/cache/nawa`,
+    /// also below a custom `--root` prefix). Build assets, fetch views,
+    /// resolver copies and sandboxed fetch cache entries remain allowed.
     pub host: String,
     /// Absolute path *inside* the sandbox, under `build_inside` (validated
     /// like `readonly_paths`: absolute, no `..`).
@@ -144,6 +149,48 @@ pub(crate) struct BuildPaths {
     pub scratch: String,
 }
 
+/// Host-path policy for an extra bind (§5.3 + the P0-3 audit). Legitimate
+/// bind sources are the per-build assets/fetch/resolver paths and the
+/// sandboxed fetch cache entries. Everything else is not a build input, so
+/// the policy refuses the host root, host configuration/kernel filesystems
+/// and Nawa's own state trees — including when `--root` places them below an
+/// arbitrary prefix. Custom `$NAWA_SRCCACHE` and temporary Cargo cwd paths
+/// stay allowed.
+fn validate_extra_bind_host(host: &str, inside: &str) -> Result<()> {
+    let host = Path::new(host);
+    if !host.is_absolute() {
+        bail!("sandbox extra bind host must be absolute: {host:?} (inside {inside:?})");
+    }
+    if host
+        .components()
+        .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        bail!("sandbox extra bind host must not contain '..': {host:?} (inside {inside:?})");
+    }
+    // `etc/nawa` is the trust store and configuration, `var/lib/nawa` the
+    // package db/journal/lock and `var/cache/nawa` the repository/archive
+    // caches. Matching the component suffix covers `--root <prefix>` too.
+    let nawa_state = host.ancestors().any(|path| {
+        path.ends_with("etc/nawa")
+            || path.ends_with("var/lib/nawa")
+            || path.ends_with("var/cache/nawa")
+    });
+    let kernel_interface = host.starts_with("/etc")
+        || host.starts_with("/proc")
+        || host.starts_with("/sys")
+        || host.starts_with("/boot");
+    let host_root =
+        host == Path::new("/") || host == Path::new("/dev") || host == Path::new("/run");
+    if nawa_state || kernel_interface || host_root {
+        bail!(
+            "sandbox extra bind host {} is a protected host path and cannot be \
+             exposed to the sandbox (inside {inside:?})",
+            host.display()
+        );
+    }
+    Ok(())
+}
+
 impl SandboxSpec {
     pub fn parse(text: &str) -> Result<Self> {
         let spec: SandboxSpec = toml::from_str(text).context("bad sandbox spec")?;
@@ -176,6 +223,7 @@ impl SandboxSpec {
             if b.host.trim().is_empty() {
                 bail!("sandbox extra bind for {:?} has no host path", b.inside);
             }
+            validate_extra_bind_host(&b.host, &b.inside)?;
             match b.kind.as_str() {
                 "dir" | "file" => {}
                 other => bail!(
@@ -326,6 +374,70 @@ kind = "file"
             SandboxSpec::parse(&base.replace("host = \"/s/.conf\"", "host = \"\"")).is_err(),
             "missing host path is refused"
         );
+    }
+
+    /// The P0-3 policy: extra binds must not expose Nawa's state trees
+    /// (trust store, package db, caches), the host root or kernel/config
+    /// filesystems, while per-build inputs and sandboxed fetch cache entries
+    /// stay allowed.
+    #[test]
+    fn extra_binds_refuse_protected_host_paths() {
+        let base = r#"
+version = 1
+script = "true"
+[build]
+src_host = "/w/src"
+pkg_host = "/w/pkg"
+home_host = "/w/home"
+scratch = "/w/sb"
+
+[[extra_binds]]
+host = "HOST"
+inside = "/build/input"
+kind = "dir"
+"#;
+        let parse = |host: &str| SandboxSpec::parse(&base.replace("HOST", host));
+
+        // assets, fetch views, resolver copies and sandboxed fetch entries
+        parse("/w/assets").unwrap();
+        parse("/w/fetch/go").unwrap();
+        parse("/w/fetch/etc/resolv.conf").unwrap();
+        parse("/w").unwrap();
+        parse("/home/builder/build/distfiles/fetch/go/entry.tmp").unwrap();
+        parse("/tmp/nawa-cargo-cwd-1234").unwrap();
+        parse("/dev/shm/nawa-build/assets").unwrap();
+        parse("/run/user/1000/nawa-build/fetch").unwrap();
+
+        for host in [
+            "/",
+            "/etc",
+            "/etc/shadow",
+            "/etc/ssl/certs",
+            "/boot",
+            "/etc/nawa",
+            "/etc/nawa/trusted-keys",
+            "/var/lib/nawa",
+            "/var/lib/nawa/local/demo",
+            "/var/cache/nawa",
+            "/var/cache/nawa/layers/abc",
+            // custom --root prefixes carry the same state trees
+            "/tmp/testroot/etc/nawa/trusted-keys",
+            "/tmp/testroot/var/lib/nawa",
+            "/tmp/testroot/var/cache/nawa/remote",
+            "/proc",
+            "/proc/self",
+            "/sys",
+            "/sys/class/net",
+            "/dev",
+            "/run",
+            "/w/../etc/nawa",
+            "w/assets",
+        ] {
+            assert!(
+                parse(host).is_err(),
+                "extra bind source {host:?} must be refused"
+            );
+        }
     }
 
     #[test]

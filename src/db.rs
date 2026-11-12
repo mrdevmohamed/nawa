@@ -76,13 +76,6 @@ impl Entry {
     pub fn version_full(&self) -> String {
         format!("{}-{}-{}", self.name, self.version, self.rel)
     }
-
-    #[allow(dead_code)]
-    /// The recorded install reason as an enum, if the stored string is a
-    /// known value (legacy entries may have empty or unknown values).
-    pub fn reason_kind(&self) -> Option<InstallReason> {
-        InstallReason::parse(&self.reason)
-    }
 }
 
 /// Interpret a stored `install_date` as it should be displayed.

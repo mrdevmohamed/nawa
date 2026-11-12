@@ -321,6 +321,64 @@ fn timeout_kills_the_whole_section() {
 }
 
 #[test]
+fn extra_bind_sources_cannot_expose_protected_host_paths() {
+    // `SandboxSpec::parse` rejects the policy violation before the first
+    // namespace syscall, so this test needs no kernel probes: it proves the
+    // real `nawa sandbox-init` entry point applies the host-path policy.
+    let d = scratch("bind-policy");
+    let cases = [
+        "/etc/nawa/trusted-keys".to_string(),
+        "/var/lib/nawa".to_string(),
+        d.join("root/var/cache/nawa/remote").display().to_string(),
+        "/".to_string(),
+    ];
+    for host in cases {
+        let spec = format!(
+            r#"
+version = 1
+script = "true"
+
+[build]
+src_host = "{src}"
+pkg_host = "{pkg}"
+home_host = "{home}"
+scratch = "{scratch}"
+
+[[extra_binds]]
+host = "{host}"
+inside = "/tmp/.nawa-sbx/input"
+kind = "dir"
+"#,
+            src = d.join("src").display(),
+            pkg = d.join("pkg").display(),
+            home = d.join("home").display(),
+            scratch = d.display(),
+            host = host,
+        );
+        let path = d.join("protected-bind.toml");
+        fs::write(&path, spec).unwrap();
+        let o = nawa().arg("sandbox-init").arg(&path).output().unwrap();
+        assert!(
+            !o.status.success(),
+            "sandbox-init accepted protected extra bind {host:?}: {}",
+            out_str(&o)
+        );
+        let se = String::from_utf8_lossy(&o.stderr);
+        assert!(
+            se.contains("protected host path"),
+            "the refusal for {host:?} must name the policy: {}",
+            out_str(&o)
+        );
+        assert!(
+            se.contains(&host),
+            "the refusal for {host:?} must name the offending path: {}",
+            out_str(&o)
+        );
+    }
+    let _ = fs::remove_dir_all(&d);
+}
+
+#[test]
 fn refusing_degradation_by_default() {
     let p = probe_all();
     if should_skip(&p, !p.userns, "user namespaces") {

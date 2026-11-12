@@ -5,18 +5,16 @@ pub mod validate;
 pub mod expand;
 pub mod load;
 
-#[allow(unused_imports)]
-pub(crate) use model::{Recipe, Package, SourceSpec, AssetSpec, Fetch, FetchSpec, Depends, Build, Sandbox, Hooks, ExpandCtx, SCHEMA_MARKER, GO_TOOLCHAIN, CARGO_TOOLCHAIN, CA_BUNDLE};
-#[allow(unused_imports)]
-pub(crate) use validate::{is_lower_hex64};
-#[allow(unused_imports)]
+pub(crate) use model::{Recipe, SourceSpec, FetchSpec, ExpandCtx};
+#[cfg(test)]
+pub(crate) use model::{CARGO_TOOLCHAIN, CA_BUNDLE, GO_TOOLCHAIN, SCHEMA_MARKER};
+pub(crate) use validate::is_lower_hex64;
 pub(crate) use load::{load_all, load_by_name, locate};
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[allow(unused_imports)]
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
     const SAMPLE: &str = r#"
         [package]

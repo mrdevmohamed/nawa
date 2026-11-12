@@ -38,11 +38,15 @@ Implementation notes that refine the text below:
   `:` cannot be expressed in an overlayfs data string; the builder falls
   back to v1 for them (with a note).
 * **build_id cache hits (implemented, opt-in):** `nawa build --use-cache`
-  compares the `build_id` recorded next to the archive (`<out>/<archive>.buildid`)
-  with the id the current inputs produce (recipe bytes, source sha256,
-  closure archive set, profile flags). On a match the build is skipped
-  entirely — before even downloading the source. `--rebuild-check` always
-  ignores the cache (it exists to prove builds reproduce).
+  compares the versioned cache id recorded next to the archive
+  (`<out>/<archive>.buildid`) with the id the current inputs produce (recipe
+  bytes, source sha256, closure archive set, profile flags, the effective
+  isolation level, and the host `cc`/`c++`/`ld`/`make` versions at
+  `env`/`sandbox`; `closure` pins its toolchain through the closure
+  archives). The sidecar holds `v2:<sha256>`; a pre-v2 sidecar misses once
+  and is rewritten. On a match the build is skipped entirely — before even
+  downloading the source. `--rebuild-check` always ignores the cache (it
+  exists to prove builds reproduce).
 * **Rootless (Phase 7, implemented):** `nawa build` works unchanged as a
   normal user at every level including `closure`: the sandbox self-writes
   its `0 → <caller-uid>` map, `/build` falls back to a base on the
@@ -236,7 +240,7 @@ Run inside the sandbox on `/build/pkg` before the archive is created (needs only
 3. **Layout**: nothing outside the allowed trees, no world-writable files, no `/usr/local`, no stray `/tmp`.
 4. **Empty/doc-only package** warnings as today.
 
-`.PKGINFO` also records `build_id = sha256(recipe.toml bytes ‖ source sha256 ‖ sorted closure archive sha256s ‖ profile flags)`, so "is this archive up to date?" becomes a hash comparison and a cache hit can skip the build.
+`.PKGINFO` also records `build_id = sha256(recipe.toml bytes ‖ source sha256 ‖ sorted closure archive sha256s ‖ profile flags)`, so "is this archive up to date?" becomes a hash comparison and a cache hit can skip the build. The `--use-cache` sidecar uses a separate `v2:<sha256>` id derived from that value plus the effective isolation level and the host C/C++ toolchain versions, so `.PKGINFO build_id` stays byte-compatible while a cache hit can never cross isolation levels or compiler upgrades.
 
 ## 8. Recipe / profile surface
 

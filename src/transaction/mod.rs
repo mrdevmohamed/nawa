@@ -17,12 +17,4 @@ pub(crate) mod journal;
 pub(crate) mod outbox;
 pub(crate) mod recovery;
 
-// The full module surface is re-exported for the CLI layers; individual
-// items may be consumed only by later roadmap phases.
-#[allow(unused_imports)]
-pub(crate) use context::{begin_operation, no_history, OperationCommand, OperationHandle, RecorderHandle};
-#[allow(unused_imports)]
-pub(crate) use history::{
-    PackageChange, PackageState, StepAction, StepStatus, TransactionRecord, TxStatus,
-    SCHEMA_VERSION,
-};
+pub(crate) use context::{begin_operation, OperationCommand, OperationHandle};

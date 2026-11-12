@@ -310,7 +310,13 @@ fn clean_dir(dir: &Path, dry_run: bool) -> u64 {
             freed += md.len();
         }
         if !dry_run {
-            let _ = std::fs::remove_dir_all(&p);
+            // `remove_dir_all` refuses regular files; pick the right unlink
+            // without following symlinks.
+            let _ = if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                std::fs::remove_dir_all(&p)
+            } else {
+                std::fs::remove_file(&p)
+            };
         }
     }
     freed
@@ -400,14 +406,110 @@ fn sweep_tree(dir: &Path, dry_run: bool) -> Result<u64> {
         if md.is_file() {
             freed += md.len();
         }
-        let mut perm = md.permissions();
-        if perm.mode() & 0o200 == 0 {
-            perm.set_mode(perm.mode() | 0o200);
-            let _ = std::fs::set_permissions(e.path(), perm);
+        if !dry_run {
+            let mut perm = md.permissions();
+            if perm.mode() & 0o200 == 0 {
+                perm.set_mode(perm.mode() | 0o200);
+                let _ = std::fs::set_permissions(e.path(), perm);
+            }
         }
     }
     if !dry_run {
         std::fs::remove_dir_all(dir).with_context(|| format!("remove {}", dir.display()))?;
     }
     Ok(freed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::tmpdir;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn clean_dir_keeps_active_part_files() {
+        let d = tmpdir("clean-dir");
+        std::fs::write(d.join("old.bin"), b"old").unwrap();
+        std::fs::create_dir(d.join("tree")).unwrap();
+        std::fs::write(d.join("tree/nested"), b"nested").unwrap();
+        std::fs::write(d.join("live.part"), b"partial").unwrap();
+
+        assert!(clean_dir(&d, true) > 0);
+        assert!(d.join("old.bin").exists());
+        assert!(d.join("tree/nested").exists());
+        assert!(d.join("live.part").exists());
+
+        clean_dir(&d, false);
+        assert!(!d.join("old.bin").exists());
+        assert!(!d.join("tree").exists());
+        assert!(d.join("live.part").exists(), "a live worker's part file must survive");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn legacy_cache_entry_requires_a_sha16_dash_prefix() {
+        assert!(legacy_cache_entry(&format!("{}-pkg.tar.zst", "0123456789abcdef")));
+        assert!(legacy_cache_entry(&format!("{}-file", "a".repeat(16))));
+        assert!(!legacy_cache_entry("short-file"));
+        assert!(!legacy_cache_entry(&format!("{}-file", "a".repeat(15))));
+        assert!(!legacy_cache_entry(&format!("{}-file", "g".repeat(16))));
+        assert!(!legacy_cache_entry(&format!("{}file", "a".repeat(16))));
+    }
+
+    #[test]
+    fn sweep_tree_dry_run_does_not_change_permissions() {
+        let d = tmpdir("clean-sweep");
+        let entry = d.join("sha256");
+        std::fs::create_dir(&entry).unwrap();
+        let file = entry.join("object");
+        std::fs::write(&file, b"bytes").unwrap();
+        std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o555)).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        assert_eq!(sweep_tree(&entry, true).unwrap(), 5);
+        assert_eq!(std::fs::metadata(&entry).unwrap().permissions().mode() & 0o777, 0o555);
+        assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o444);
+        assert!(file.exists(), "a dry run must not remove anything");
+
+        sweep_tree(&entry, false).unwrap();
+        assert!(!entry.exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn clean_sources_sweeps_nawa_data_but_keeps_foreign_files_and_live_locks() {
+        let d = tmpdir("clean-sources");
+        let cache = d.join("cache");
+        std::fs::create_dir_all(cache.join("sha256")).unwrap();
+        std::fs::create_dir_all(cache.join("fetch/go")).unwrap();
+        std::fs::write(cache.join("sha256/object"), b"object").unwrap();
+        std::fs::write(cache.join("fetch/go/entry"), b"entry").unwrap();
+        let legacy = format!("{}-legacy.tar.gz", "a".repeat(16));
+        std::fs::write(cache.join(&legacy), b"legacy").unwrap();
+        std::fs::write(cache.join("keep.txt"), b"foreign").unwrap();
+        std::fs::write(cache.join("dead.lock"), b"").unwrap();
+        let live = cache.join("live.lock");
+        std::fs::write(&live, b"live").unwrap();
+        let held = std::fs::OpenOptions::new().read(true).open(&live).unwrap();
+        rustix::fs::flock(&held, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+
+        let (freed, retained) = clean_sources(&cache, true).unwrap();
+        assert!(freed > 0);
+        assert!(retained > 0);
+        assert!(cache.join("sha256/object").exists());
+        assert!(cache.join("fetch/go/entry").exists());
+        assert!(cache.join(&legacy).exists());
+        assert!(cache.join("dead.lock").exists());
+        assert!(cache.join("keep.txt").exists());
+
+        assert!(clean_sources(&cache, false).unwrap().0 > 0);
+        assert!(!cache.join("sha256").exists());
+        assert!(!cache.join("fetch").exists());
+        assert!(!cache.join(&legacy).exists());
+        assert!(!cache.join("dead.lock").exists());
+        assert!(cache.join("keep.txt").exists(), "unowned files must survive");
+        assert!(live.exists(), "a held lock must survive");
+        drop(held);
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }
