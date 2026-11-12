@@ -53,6 +53,37 @@ pub(crate) struct UndoPlan {
 /// archive objects are located and digest-verified here, before any
 /// mutation. Must be called while holding the exclusive db lock.
 pub(crate) fn plan_undo(root: &Path, id: u64) -> Result<UndoPlan> {
+    let record = load_undoable_record(root, id)?;
+    let committed: Vec<&crate::transaction::history::PackageChange> = record
+        .package_changes
+        .iter()
+        .filter(|c| c.status == "committed" || c.status == "committed-hook-failed")
+        .collect();
+    if committed.is_empty() {
+        bail!("transaction {id} has no committed package changes to compensate");
+    }
+
+    let db = crate::db::Db::new(root);
+    let prior_undos: Vec<_> = crate::transaction::history::list_records(root)?
+        .into_iter()
+        .filter(|candidate| candidate.undoes == Some(id))
+        .collect();
+    let mut steps = Vec::new();
+    for change in &committed {
+        if let Some(step) = plan_step(root, &db, id, change, &prior_undos)? {
+            steps.push(step);
+        }
+    }
+    if steps.is_empty() {
+        bail!("transaction {id} has no compensable package changes");
+    }
+    let ordered = order_steps(&db, steps)?;
+    Ok(UndoPlan { original_id: id, steps: ordered })
+}
+
+/// Load transaction `id` and check it can be undone at all: a supported
+/// schema, a completed/partial/undone status and no earlier successful undo.
+fn load_undoable_record(root: &Path, id: u64) -> Result<TransactionRecord> {
     let record: TransactionRecord = crate::transaction::history::load_record(root, id)?;
     if record.schema != crate::transaction::history::SCHEMA_VERSION {
         bail!("transaction {id} uses unsupported schema {}", record.schema);
@@ -77,110 +108,106 @@ pub(crate) fn plan_undo(root: &Path, id: u64) -> Result<UndoPlan> {
             bail!("transaction {id} was already undone by transaction {}", undo.id);
         }
     }
-    let committed: Vec<&crate::transaction::history::PackageChange> = record
-        .package_changes
-        .iter()
-        .filter(|c| c.status == "committed" || c.status == "committed-hook-failed")
-        .collect();
-    if committed.is_empty() {
-        bail!("transaction {id} has no committed package changes to compensate");
-    }
+    Ok(record)
+}
 
-    let db = crate::db::Db::new(root);
-    let prior_undos: Vec<_> = crate::transaction::history::list_records(root)?
-        .into_iter()
-        .filter(|candidate| candidate.undoes == Some(id))
-        .collect();
-    let mut steps = Vec::new();
-    for change in &committed {
-        let current = db.entry(&change.name)?;
-        let was_compensated = prior_undos.iter().any(|undo| {
-            undo.package_changes.iter().any(|step| {
-                step.name == change.name
-                    && (step.status == "committed" || step.status == "committed-hook-failed")
-            })
-        });
-        if was_compensated {
-            let desired_before = change.before.clone().unwrap_or(PackageState::absent());
-            let already_at_before = if desired_before.is_installed() {
-                current.as_ref().is_some_and(|entry| desired_before.matches_entry(entry))
-            } else {
-                current.is_none()
-            };
-            if already_at_before {
-                // A previous partial undo committed this compensation. Do not
-                // compare it against the original after-state or apply it twice.
-                continue;
-            }
-        }
-        // optimistic concurrency (roadmap §5.9): the current state must still
-        // correspond to the after-state this transaction created
-        let after = change.after.clone().unwrap_or(PackageState::absent());
-        match (&current, after.is_installed()) {
-            (Some(cur), true) if !after.matches_entry(cur) => bail!(
-                "conflict: `{}` was changed by a later operation (now {}-{}), \
-                 but transaction {id} left it at {} — refusing to undo",
-                change.name,
-                cur.version,
-                cur.rel,
-                after.version.clone().unwrap_or_default()
-            ),
-            (None, true) => bail!(
-                "conflict: `{}` is no longer installed, so transaction {id}'s \
-                 result has been superseded — refusing to undo",
-                change.name
-            ),
-            (Some(_), false) => bail!(
-                "conflict: `{}` is installed although transaction {id} removed it — \
-                 refusing to undo",
-                change.name
-            ),
-            _ => {}
-        }
-        let before = change.before.clone().unwrap_or(PackageState::absent());
-        let action = if !before.is_installed() {
-            // the transaction installed it new
-            // (a removal below rechecks current reverse dependencies)
-            UndoAction::Remove
-        } else if before.artifact_sha256.is_empty() {
-            bail!(
-                "transaction {id} records no artifact digest for the previous \
-                 version of `{}` (legacy record) — cannot restore exact bytes; \
-                 use `nawa rollback {name}` instead",
-                change.name,
-                name = change.name
-            );
-        } else if after.is_installed() {
-            UndoAction::RestorePrevious { digest: before.artifact_sha256.clone() }
+/// The undo step for one committed package change, or `None` when a previous
+/// partial undo already restored it. Fails on a conflict with a later
+/// operation and when the archived original cannot be verified.
+fn plan_step(
+    root: &Path,
+    db: &crate::db::Db,
+    id: u64,
+    change: &crate::transaction::history::PackageChange,
+    prior_undos: &[TransactionRecord],
+) -> Result<Option<UndoStep>> {
+    let current = db.entry(&change.name)?;
+    let was_compensated = prior_undos.iter().any(|undo| {
+        undo.package_changes.iter().any(|step| {
+            step.name == change.name
+                && (step.status == "committed" || step.status == "committed-hook-failed")
+        })
+    });
+    if was_compensated {
+        let desired_before = change.before.clone().unwrap_or(PackageState::absent());
+        let already_at_before = if desired_before.is_installed() {
+            current.as_ref().is_some_and(|entry| desired_before.matches_entry(entry))
         } else {
-            UndoAction::Reinstall { digest: before.artifact_sha256.clone() }
+            current.is_none()
         };
-        let before_snapshot = before.clone();
-        // preflight every required archive object right here, before the
-        // first mutation (roadmap §5.9 step 8)
-        if let UndoAction::RestorePrevious { digest } | UndoAction::Reinstall { digest } = &action {
-            crate::artifact::verify_stored(root, digest).with_context(|| {
-                format!(
-                    "cannot undo transaction {id}: the archived original of `{}` \
-                     is missing or fails verification",
-                    change.name
-                )
-            })?;
+        if already_at_before {
+            // A previous partial undo committed this compensation. Do not
+            // compare it against the original after-state or apply it twice.
+            return Ok(None);
         }
-        steps.push(UndoStep {
-            package: change.name.clone(),
-            action,
-            before: Some(before_snapshot),
-            after: Some(after),
-            reason: before.reason.clone(),
-        });
     }
-    if steps.is_empty() {
-        bail!("transaction {id} has no compensable package changes");
+    // optimistic concurrency (roadmap §5.9): the current state must still
+    // correspond to the after-state this transaction created
+    let after = change.after.clone().unwrap_or(PackageState::absent());
+    match (&current, after.is_installed()) {
+        (Some(cur), true) if !after.matches_entry(cur) => bail!(
+            "conflict: `{}` was changed by a later operation (now {}-{}), \
+             but transaction {id} left it at {} — refusing to undo",
+            change.name,
+            cur.version,
+            cur.rel,
+            after.version.clone().unwrap_or_default()
+        ),
+        (None, true) => bail!(
+            "conflict: `{}` is no longer installed, so transaction {id}'s \
+             result has been superseded — refusing to undo",
+            change.name
+        ),
+        (Some(_), false) => bail!(
+            "conflict: `{}` is installed although transaction {id} removed it — \
+             refusing to undo",
+            change.name
+        ),
+        _ => {}
     }
-    // Preserve dependency-first order for upgrades. Undoing removals
-    // reinstalls dependencies first (reverse original removal order).
-    // Undoing new installs removes dependents first using the shared planner.
+    let before = change.before.clone().unwrap_or(PackageState::absent());
+    let action = if !before.is_installed() {
+        // the transaction installed it new
+        // (a removal below rechecks current reverse dependencies)
+        UndoAction::Remove
+    } else if before.artifact_sha256.is_empty() {
+        bail!(
+            "transaction {id} records no artifact digest for the previous \
+             version of `{}` (legacy record) — cannot restore exact bytes; \
+             use `nawa rollback {name}` instead",
+            change.name,
+            name = change.name
+        );
+    } else if after.is_installed() {
+        UndoAction::RestorePrevious { digest: before.artifact_sha256.clone() }
+    } else {
+        UndoAction::Reinstall { digest: before.artifact_sha256.clone() }
+    };
+    let before_snapshot = before.clone();
+    // preflight every required archive object right here, before the
+    // first mutation (roadmap §5.9 step 8)
+    if let UndoAction::RestorePrevious { digest } | UndoAction::Reinstall { digest } = &action {
+        crate::artifact::verify_stored(root, digest).with_context(|| {
+            format!(
+                "cannot undo transaction {id}: the archived original of `{}` \
+                 is missing or fails verification",
+                change.name
+            )
+        })?;
+    }
+    Ok(Some(UndoStep {
+        package: change.name.clone(),
+        action,
+        before: Some(before_snapshot),
+        after: Some(after),
+        reason: before.reason.clone(),
+    }))
+}
+
+/// Preserve dependency-first order for upgrades. Undoing removals
+/// reinstalls dependencies first (reverse original removal order).
+/// Undoing new installs removes dependents first using the shared planner.
+fn order_steps(db: &crate::db::Db, steps: Vec<UndoStep>) -> Result<Vec<UndoStep>> {
     let mut restore_previous = Vec::new();
     let mut reinstall = Vec::new();
     let mut remove = Vec::new();
@@ -204,7 +231,7 @@ pub(crate) fn plan_undo(root: &Path, id: u64) -> Result<UndoPlan> {
         if let Some(step) = by_name.remove(&name) { ordered.push(step); }
     }
     ordered.extend(by_name.into_values());
-    Ok(UndoPlan { original_id: id, steps: ordered })
+    Ok(ordered)
 }
 
 /// Apply a preflighted undo plan through the ordinary installer/remover.

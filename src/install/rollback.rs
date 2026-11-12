@@ -33,48 +33,9 @@ pub(crate) fn rollback(name: &str, root: &Path) -> Result<()> {
         prev.version_full()
     );
 
-    enum RestoreSource {
-        SignedIndex { object: PathBuf, digest: String },
-        Detached { object: PathBuf, digest: String },
-        Pinned { object: PathBuf, digest: String, proof: String },
-        Legacy { archive: PathBuf },
-    }
-
     // Verify exact archived bytes and retained authentication evidence before
     // opening a transaction or touching the installed package.
-    let source = if !prev.artifact_sha256.is_empty() {
-        let digest = prev.artifact_sha256.clone();
-        let object = artifact::verify_stored(root, &digest)
-            .map_err(|e| e.context(format!(
-                "cannot verify the archived original of {name} — rollback refused"
-            )))?;
-        let provenance = artifact::load_provenance(root, &digest)?;
-        match provenance.as_ref().map(|p| p.authentication.as_str()) {
-            Some("signed-index") => {
-                verify_retained_index_proof(root, &digest)?;
-                RestoreSource::SignedIndex { object, digest }
-            }
-            Some("detached-signature") => {
-                verify_retained_detached_proof(root, &digest)?;
-                RestoreSource::Detached { object, digest }
-            }
-            Some("local-build") | Some("unsigned-bootstrap") | None => {
-                let proof = provenance.as_ref()
-                    .map(|p| p.authentication.clone())
-                    .unwrap_or_else(|| "no provenance record".to_string());
-                RestoreSource::Pinned { object, digest, proof }
-            }
-            Some(other) => bail!("unsupported provenance authentication {other:?}"),
-        }
-    } else {
-        let archive = root.join("var/cache/nawa")
-            .join(format!("{}.nawa.tar.zst", prev.version_full()));
-        if !archive.exists() {
-            bail!("cached archive {} is missing — cannot roll back", archive.display());
-        }
-        let _ = artifact::import_legacy(root, &archive);
-        RestoreSource::Legacy { archive }
-    };
+    let source = pick_restore_source(root, name, &prev)?;
 
     let archive_for_snapshot = match &source {
         RestoreSource::SignedIndex { object, .. }
@@ -102,24 +63,7 @@ pub(crate) fn rollback(name: &str, root: &Path) -> Result<()> {
             &digest,
         )?;
 
-        let (result, proof) = match source {
-            RestoreSource::SignedIndex { object, digest } => (
-                install_archive_from_index_proof(&object, root, false, &digest, crate::db::InstallReason::Keep, None),
-                "signed-index proof re-verified".to_string(),
-            ),
-            RestoreSource::Detached { object, digest } => (
-                install_archive_pinned(&object, root, InstallOpts { force: false, allow_unsigned: true, key: None, reason: crate::db::InstallReason::Keep, pinned_sha: Some(&digest) }),
-                "detached signature re-verified".to_string(),
-            ),
-            RestoreSource::Pinned { object, digest, proof } => (
-                install_archive_pinned(&object, root, InstallOpts { force: false, allow_unsigned: true, key: None, reason: crate::db::InstallReason::Keep, pinned_sha: Some(&digest) }),
-                proof,
-            ),
-            RestoreSource::Legacy { archive } => (
-                install_archive(&archive, root, false, true, None, crate::db::InstallReason::Explicit),
-                "legacy cached archive (no recorded authentication proof)".to_string(),
-            ),
-        };
+        let (result, proof) = install_restore_source(source, root);
 
         let current_after = match &result {
             Ok(entry) => Some(entry.clone()),
@@ -163,6 +107,76 @@ pub(crate) fn rollback(name: &str, root: &Path) -> Result<()> {
     let entry = result?;
     report_restored(&entry, &proof);
     Ok(())
+}
+
+/// Where the version being restored comes from, and how it is authenticated.
+enum RestoreSource {
+    SignedIndex { object: PathBuf, digest: String },
+    Detached { object: PathBuf, digest: String },
+    Pinned { object: PathBuf, digest: String, proof: String },
+    Legacy { archive: PathBuf },
+}
+
+/// Verify the exact archived bytes and the retained authentication evidence
+/// of the version to restore, before any transaction is opened.
+fn pick_restore_source(root: &Path, name: &str, prev: &Entry) -> Result<RestoreSource> {
+    let source = if !prev.artifact_sha256.is_empty() {
+        let digest = prev.artifact_sha256.clone();
+        let object = artifact::verify_stored(root, &digest)
+            .map_err(|e| e.context(format!(
+                "cannot verify the archived original of {name} — rollback refused"
+            )))?;
+        let provenance = artifact::load_provenance(root, &digest)?;
+        match provenance.as_ref().map(|p| p.authentication.as_str()) {
+            Some("signed-index") => {
+                verify_retained_index_proof(root, &digest)?;
+                RestoreSource::SignedIndex { object, digest }
+            }
+            Some("detached-signature") => {
+                verify_retained_detached_proof(root, &digest)?;
+                RestoreSource::Detached { object, digest }
+            }
+            Some("local-build") | Some("unsigned-bootstrap") | None => {
+                let proof = provenance.as_ref()
+                    .map(|p| p.authentication.clone())
+                    .unwrap_or_else(|| "no provenance record".to_string());
+                RestoreSource::Pinned { object, digest, proof }
+            }
+            Some(other) => bail!("unsupported provenance authentication {other:?}"),
+        }
+    } else {
+        let archive = root.join("var/cache/nawa")
+            .join(format!("{}.nawa.tar.zst", prev.version_full()));
+        if !archive.exists() {
+            bail!("cached archive {} is missing — cannot roll back", archive.display());
+        }
+        let _ = artifact::import_legacy(root, &archive);
+        RestoreSource::Legacy { archive }
+    };
+    Ok(source)
+}
+
+/// Reinstall the chosen source through the installer path that matches its
+/// authentication; returns the result and the proof text to report.
+fn install_restore_source(source: RestoreSource, root: &Path) -> (Result<Entry>, String) {
+    match source {
+        RestoreSource::SignedIndex { object, digest } => (
+            install_archive_from_index_proof(&object, root, false, &digest, crate::db::InstallReason::Keep, None),
+            "signed-index proof re-verified".to_string(),
+        ),
+        RestoreSource::Detached { object, digest } => (
+            install_archive_pinned(&object, root, InstallOpts { force: false, allow_unsigned: true, key: None, reason: crate::db::InstallReason::Keep, pinned_sha: Some(&digest) }),
+            "detached signature re-verified".to_string(),
+        ),
+        RestoreSource::Pinned { object, digest, proof } => (
+            install_archive_pinned(&object, root, InstallOpts { force: false, allow_unsigned: true, key: None, reason: crate::db::InstallReason::Keep, pinned_sha: Some(&digest) }),
+            proof,
+        ),
+        RestoreSource::Legacy { archive } => (
+            install_archive(&archive, root, false, true, None, crate::db::InstallReason::Explicit),
+            "legacy cached archive (no recorded authentication proof)".to_string(),
+        ),
+    }
 }
 
 pub(crate) fn report_restored(entry: &Entry, how: &str) {

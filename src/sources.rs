@@ -77,14 +77,53 @@ pub(crate) fn stage_sources(rec: &Recipe, work: &Path, src: &Path, cache: &Path,
     };
 
     // ---- all sources, downloaded and verified, before any extraction (§6)
+    let fetched = download_sources(rec, &ctx, cache)?;
 
-    struct Fetched<'a> {
-        spec: &'a crate::recipe::SourceSpec,
-        cache_path: PathBuf,
-        url: String,
-        archived: bool,
-    }
+    // ---- extract archives into stage/<name>
+    extract_archives(&fetched, &stage)?;
 
+    // ---- merge archives into the workspace, in recipe order (§4.2)
+    let mut claims: Claims = BTreeMap::new();
+    merge_archives(&fetched, &stage, src, &mut claims)?;
+
+    // ---- SOURCE_DATE_EPOCH: pinned, else the newest regular-file mtime
+    // from the archives (§6: computed before plain files are copied in)
+    let sde = source_date_epoch(rec, src)?;
+
+    // ---- plain sources: copied into place and stamped with the epoch
+    stage_plain_sources(&fetched, src, sde, &mut claims)?;
+
+    // ---- workdir: must exist after assembly (§4.3)
+    let srcdir = resolve_workdir(rec, src)?;
+
+    // ---- the staging tree is transient (§6 layout keeps only src/assets/…)
+
+    std::fs::remove_dir_all(&stage)
+        .with_context(|| format!("remove source staging dir {}", stage.display()))?;
+
+    Ok(SourcesStaged {
+        srcroot: src.to_path_buf(),
+        srcdir,
+        source_date_epoch: sde,
+    })
+}
+
+/// One downloaded and verified `[[package.sources]]` entry.
+struct Fetched<'a> {
+    spec: &'a crate::recipe::SourceSpec,
+    cache_path: PathBuf,
+    url: String,
+    archived: bool,
+}
+
+/// Download and verify every source into the content-addressed cache. All of
+/// them are fetched before any extraction, so a bad hash fails the build
+/// before any other work (§6).
+fn download_sources<'a>(
+    rec: &'a Recipe,
+    ctx: &crate::recipe::ExpandCtx,
+    cache: &Path,
+) -> Result<Vec<Fetched<'a>>> {
     // Download all sources in parallel (network-bound); extraction and
     // merge stay in recipe order. `jobs` is the build parallelism knob;
     // one thread per source is fine because recipes rarely have > few
@@ -129,10 +168,12 @@ pub(crate) fn stage_sources(rec: &Recipe, work: &Path, src: &Path, cache: &Path,
     for r in download_results {
         fetched.push(r?);
     }
+    Ok(fetched)
+}
 
-    // ---- extract archives into stage/<name>
-
-    for f in &fetched {
+/// Extract every archive source into `<stage>/<name>`.
+fn extract_archives(fetched: &[Fetched<'_>], stage: &Path) -> Result<()> {
+    for f in fetched {
         if !f.archived {
             if f.spec.unpack == Some(true) {
                 bail!(
@@ -154,11 +195,17 @@ pub(crate) fn stage_sources(rec: &Recipe, work: &Path, src: &Path, cache: &Path,
                 )
             })?;
     }
+    Ok(())
+}
 
-    // ---- merge archives into the workspace, in recipe order (§4.2)
-
-    let mut claims: Claims = BTreeMap::new();
-    for f in &fetched {
+/// Merge the extracted archives into the workspace, in recipe order.
+fn merge_archives(
+    fetched: &[Fetched<'_>],
+    stage: &Path,
+    src: &Path,
+    claims: &mut Claims,
+) -> Result<()> {
+    for f in fetched {
         if !f.archived {
             continue;
         }
@@ -167,23 +214,32 @@ pub(crate) fn stage_sources(rec: &Recipe, work: &Path, src: &Path, cache: &Path,
         } else {
             PathBuf::from(&f.spec.into)
         };
-        merge_staged(&stage.join(&f.spec.name), &into, &f.spec.name, src, &mut claims)
+        merge_staged(&stage.join(&f.spec.name), &into, &f.spec.name, src, claims)
             .with_context(|| format!("merge source `{}`", f.spec.name))?;
     }
+    Ok(())
+}
 
-    // ---- SOURCE_DATE_EPOCH: pinned, else the newest regular-file mtime
-    // from the archives (§6: computed before plain files are copied in)
-
+/// `SOURCE_DATE_EPOCH`: the recipe-pinned value, else the newest regular-file
+/// mtime among the extracted archives.
+fn source_date_epoch(rec: &Recipe, src: &Path) -> Result<u64> {
     let sde = match rec.package.source_date_epoch {
         Some(p) => p,
         None => crate::buildenv::source_date_epoch_from_files(src).with_context(|| {
             format!("derive SOURCE_DATE_EPOCH for recipe {}", rec.package.name)
         })?,
     };
+    Ok(sde)
+}
 
-    // ---- plain sources: copied into place and stamped with the epoch
-
-    for f in &fetched {
+/// Copy the `unpack = false` sources into place, stamped with the epoch.
+fn stage_plain_sources(
+    fetched: &[Fetched<'_>],
+    src: &Path,
+    sde: u64,
+    claims: &mut Claims,
+) -> Result<()> {
+    for f in fetched {
         if f.archived {
             continue;
         }
@@ -193,12 +249,15 @@ pub(crate) fn stage_sources(rec: &Recipe, work: &Path, src: &Path, cache: &Path,
         } else {
             PathBuf::from(&f.spec.into)
         };
-        stage_plain_source(&f.cache_path, &into, &f.spec.name, src, sde, &mut claims)
+        stage_plain_source(&f.cache_path, &into, &f.spec.name, src, sde, claims)
             .with_context(|| format!("stage source `{}`", f.spec.name))?;
     }
+    Ok(())
+}
 
-    // ---- workdir: must exist after assembly (§4.3)
-
+/// The working directory of the build sections: the workspace root plus
+/// `[package] workdir`, which must exist after assembly (§4.3).
+fn resolve_workdir(rec: &Recipe, src: &Path) -> Result<PathBuf> {
     let srcdir = if rec.package.workdir.is_empty() {
         src.to_path_buf()
     } else {
@@ -215,17 +274,7 @@ pub(crate) fn stage_sources(rec: &Recipe, work: &Path, src: &Path, cache: &Path,
         }
         d
     };
-
-    // ---- the staging tree is transient (§6 layout keeps only src/assets/…)
-
-    std::fs::remove_dir_all(&stage)
-        .with_context(|| format!("remove source staging dir {}", stage.display()))?;
-
-    Ok(SourcesStaged {
-        srcroot: src.to_path_buf(),
-        srcdir,
-        source_date_epoch: sde,
-    })
+    Ok(srcdir)
 }
 
 /// Move the contents of the per-source extraction dir `from` into the
