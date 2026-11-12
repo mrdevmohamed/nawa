@@ -598,6 +598,57 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// Like `dropping_an_uncommitted_tx_rolls_back`, but with the upgrade shapes
+    /// that matter: a replaced file, a new file and an obsolete file moved aside.
+    /// An early `?` return (or a panic) between `move_tree` and `commit()`
+    /// leaves the `Tx` to its destructor: the files must come back.
+    #[test]
+    fn dropping_an_uncommitted_tx_also_restores_removed_and_replaced_files() {
+        let base = tmpdir("tx-drop");
+        let root = base.join("root");
+        std::fs::create_dir_all(root.join("usr/bin")).unwrap();
+        std::fs::write(root.join("usr/bin/old"), b"orig").unwrap();
+        std::fs::write(root.join("usr/bin/obsolete"), b"dropped by upgrade").unwrap();
+        let stage = base.join("stage");
+        std::fs::create_dir_all(&stage).unwrap();
+        std::fs::write(stage.join("new-content"), b"new").unwrap();
+        std::fs::write(stage.join("fresh"), b"fresh").unwrap();
+
+        {
+            let mut tx = Tx::new(&root, base.join("bak"));
+            tx.place(&stage.join("new-content"), &root.join("usr/bin/old")).unwrap();
+            tx.place(&stage.join("fresh"), &root.join("usr/bin/fresh")).unwrap();
+            tx.remove(&root.join("usr/bin/obsolete")).unwrap();
+            assert_eq!(std::fs::read(root.join("usr/bin/old")).unwrap(), b"new");
+            assert!(!root.join("usr/bin/obsolete").exists());
+            // no rollback(), no commit(): leave the scope like an error return
+        }
+
+        assert_eq!(std::fs::read(root.join("usr/bin/old")).unwrap(), b"orig");
+        assert_eq!(std::fs::read(root.join("usr/bin/obsolete")).unwrap(), b"dropped by upgrade");
+        assert!(!root.join("usr/bin/fresh").exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The other half of the contract: after `commit()` nothing is undone.
+    #[test]
+    fn tx_committed_is_not_undone_on_drop() {
+        let base = tmpdir("tx-commit");
+        let root = base.join("root");
+        std::fs::create_dir_all(root.join("usr/bin")).unwrap();
+        std::fs::write(root.join("usr/bin/old"), b"orig").unwrap();
+        let stage = base.join("stage");
+        std::fs::create_dir_all(&stage).unwrap();
+        std::fs::write(stage.join("new-content"), b"new").unwrap();
+
+        let mut tx = Tx::new(&root, base.join("bak"));
+        tx.place(&stage.join("new-content"), &root.join("usr/bin/old")).unwrap();
+        tx.commit(); // consumes the Tx and drops it
+
+        assert_eq!(std::fs::read(root.join("usr/bin/old")).unwrap(), b"new");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn tx_remove_is_reversible() {
         let base = tmpdir("tx-remove");
