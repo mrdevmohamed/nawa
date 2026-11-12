@@ -173,10 +173,12 @@ No breaking changes to CLI commands (`nawa sync/update/upgrade/install/remove/fe
 
 ### Remaining technical debt (after Steps 3-8)
 
-1. **P0-3 — Sandbox trusts live root outside closure** (`Sandbox` only mounts namespaces over live root; `extra_binds` shape validated but not policy-checked). Needs architectural decision, not low-risk.
+> **Status 2026-11-12:** P0-3 is closed for the extra-bind host surface, P1-4 is closed, and P1-5 was verified as already mitigated. The broader P0-3 question (sandbox binds the live root outside the closure) remains open. P1-2, P1-8 and the P2 duplication list are unchanged. See §7 for commits and current validation.
+
+1. **P0-3 — Sandbox trusts live root outside closure** (`Sandbox` only mounts namespaces over live root; `extra_binds` shape validated but not policy-checked). Needs architectural decision, not low-risk. **Update:** the extra-bind host policy is implemented (`463d4fb`); the live-root trust model remains.
 2. **P1-2 — Legacy undo journal vs new transaction WAL duplication** (two sources of truth for "what was installed before"; keep both until WAL undo covers rollback use-case per audit §1). Needs migration strategy.
-3. **P1-4 — Build isolation cache identity** misses `sandbox.extra_binds`, `assets` digest, toolchain version for non-closure isolation (`build_id_for` coverage).
-4. **P1-5 — `wipe_work` recursion + symlink escape** under overlayfs `sb/layer-work` (mode 000) — hardening with `O_NOFOLLOW`/`symlink_metadata` guard (code already uses `symlink_metadata` and treats symlinks as files; audit noted comment but code may still be vulnerable to symlink-to-dir escapes in overlayfs).
+3. **P1-4 — Build isolation cache identity** misses `sandbox.extra_binds`, `assets` digest, toolchain version for non-closure isolation (`build_id_for` coverage). **Closed** by `53390ed` (assets and isolation + host toolchain; see §7).
+4. **P1-5 — `wipe_work` recursion + symlink escape** under overlayfs `sb/layer-work` (mode 000) — hardening with `O_NOFOLLOW`/`symlink_metadata` guard (code already uses `symlink_metadata` and treats symlinks as files; audit noted comment but code may still be vulnerable to symlink-to-dir escapes in overlayfs). **Verified mitigated** (see §7).
 5. **P1-8 — Performance:** repository parsing repeated (`fetch::load_index` called per repo file in `repositories.rs` + `sync.rs`); `revdep::scan` reads every ELF twice; `lint→slim→archive` still walk separately (fswalk helper centralises pattern but does not produce a single walk reused across passes because passes mutate the tree). Quadratic `deps` resolution.
 6. **P2 — Duplication remaining:** canonicalization/containment (`ensure_inside_root` vs `slim::split` real_root check vs `plugins/manifest` containment vs `fetchrun/common` canonicalize), sibling extraction duplication (`extract_source_archive` vs `extract_source_archive_stripped` now share `decompressed_reader` — remaining duplication is minimal), duplicate build-secret handling, planner/upgrade overlap (two resolvers: `plan.rs` vs `upgrade/mod.rs`).
 
@@ -192,6 +194,41 @@ All remaining items carry compatibility risk or require architectural decision p
 - [x] Predictable error handling (`Class::of` + `diag::hint`, `InstallReason` type-safe)
 - [x] Minimal duplication in walks, temp names, placeholders (see Steps 7-8)
 - [x] No unnecessary abstractions (no new traits/DI; helpers are plain fns)
-- [x] Strong test coverage: 412 tests in `--bin nawa` + integration suites, all green
+- [x] Strong test coverage: 412 tests in `--bin nawa` at the time of this update (428 now; see §7) plus integration suites, all green
 - [x] No unexplained breaking changes, no regressions in package management (CI matrix green)
 - [x] Clean formatting/clippy (CI `cargo clippy --release --all-targets --locked -- -D warnings` green)
+
+---
+
+## 7. Update — 2026-11-12: remaining audit follow-ups closed
+
+### Security: P0-3 extra-bind host policy (`463d4fb`)
+
+`SandboxSpec::parse` now enforces a host-path policy on every `extra_binds` source: absolute, no `..`, and refused for `/`, `/etc`, `/proc`, `/sys`, `/boot`, exact `/dev`/`/run`, and any `etc/nawa`, `var/lib/nawa` or `var/cache/nawa` tree (including custom `--root` prefixes). All producers were audited: build assets, fetch views, resolver copies, source-cache entries and Cargo temp directories remain allowed; recipes cannot contribute bind entries at all because `[sandbox]` only exposes `network` and `sysfs`. `tests/sandbox.rs::extra_bind_sources_cannot_expose_protected_host_paths` drives the real `nawa sandbox-init` entry point and proves the refusal happens before any namespace syscall.
+
+The broader trust-model finding is unchanged: at `sandbox` isolation the build root is still the live root, with namespaces and the mount policy as the barrier. That needs an architectural decision (live-root hardening vs mandatory closure), not a low-risk patch.
+
+### Cache identity: P1-4 closed (`53390ed`)
+
+Assets, fetch-schema versions and Go/Cargo versions were already inputs. The opt-in `--use-cache` sidecar is now `v2:<sha256>` over the legacy build id plus:
+
+- the effective isolation level (`env`/`sandbox`/`closure`), and
+- the host `cc`/`c++`/`ld`/`make` versions for `env`/`sandbox` builds (probed through the exact build `PATH`, absent commands skipped).
+
+`closure` remains keyed by the dependency closure archives, which pin the toolchain. `.PKGINFO build_id` keeps its legacy value byte-for-byte; pre-v2 sidecars miss once and are rewritten. The old P1-4 claim that `sandbox.extra_binds` must be hashed does not apply: recipes cannot supply binds, and every producer is a validated staging path.
+
+### P1-5 verified mitigated
+
+`wipe_tree` already uses `symlink_metadata` and treats non-directories (including symlinks) as files, so it never follows a symlink-to-directory escape. No code change was needed; the earlier audit line is retained for history.
+
+### Current validation
+
+```
+cargo check --locked --all-targets                         → clean
+cargo clippy --all-targets --locked -- -D warnings         → clean
+python3 scripts/check-layering.py                          → 52 modules, no cycles
+cargo test --locked --no-fail-fast                         → 428 unit passed, 1 ignored;
+                                                              109 integration tests passed
+```
+
+Remaining work: P1-2 (undo/WAL consolidation), P1-8 (performance), P2 duplication (path containment, planner/upgrade resolver overlap), and repo-wide `cargo fmt --check` drift (not enforced by CI).

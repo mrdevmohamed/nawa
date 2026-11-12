@@ -2,6 +2,9 @@
 
 **Companion to:** `2026-11-09-nawa-audit.md`
 **Date:** 2026-11-09
+
+> **Status update (2026-11-12):** Steps 0-7 were implemented in PRs #36-#42. Step 8 is partial (recipe cache, parallel source staging and unique-temp consolidation landed). The post-roadmap security/cache follow-ups are recorded in `2026-11-09-final-report.md` §7.
+
 **Principles:**
 - Backward compatible: `nawa sync/update/upgrade/install/remove/fetch/build/revdep/service` CLI semantics unchanged.
 - Small, reviewable diffs (rule 10). One logical concern per PR.

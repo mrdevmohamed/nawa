@@ -5,6 +5,8 @@
 **Auditor role:** Senior Rust engineer, architecture & maintainability
 **Scope:** Entire `src/`, `tests/`, `Cargo.toml`, CI workflows, docs
 
+> **Status update (2026-11-12):** this document is the original 2026-11-09 audit snapshot. P0-1, P0-2, P1-1, P1-4 and P2-4 are closed; P0-3 is closed for the extra-bind host policy, while the broader live-root trust model remains open; P1-5 was verified as already mitigated. Commits, integration coverage and current validation are recorded in `2026-11-09-final-report.md` §7.
+
 ---
 
 ## 1. Current Architecture
