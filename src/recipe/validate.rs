@@ -29,6 +29,28 @@ impl Recipe {
         }
         // ---- new schema vs legacy (§4.1/§4.2, §19) — checked first, so
         // a mixed recipe reports the real problem instead of a legacy one
+        self.validate_schema_marker()?;
+        if self.is_new_schema() {
+            self.validate_new_schema_sources()?;
+        }
+        self.validate_assets()?;
+        self.validate_fetch_tables()?;
+        self.validate_mirrors()?;
+        // names/versions become directory and archive file names
+        crate::db::check_name(&self.package.name)?;
+        if !crate::db::valid_version(&self.package.version) {
+            bail!(
+                "recipe {} has an invalid package.version `{}`",
+                self.package.name,
+                self.package.version.escape_debug()
+            );
+        }
+        Ok(())
+    }
+
+    /// `[package] workdir` needs `[[package.sources]]`, and the fail-closed
+    /// schema marker in `package.source` must match the tables actually used.
+    fn validate_schema_marker(&self) -> Result<()> {
         let new_schema = self.is_new_schema();
         let marker = self.package.source == SCHEMA_MARKER;
         if !self.package.workdir.is_empty() && self.package.sources.is_empty() {
@@ -54,92 +76,101 @@ impl Recipe {
                 self.package.name
             );
         }
-        if new_schema {
-            if !self.package.sha256.is_empty()
-                || !self.package.mirrors.is_empty()
-                || !self.package.source_dir.is_empty()
-            {
-                bail!(
-                    "recipe {} must not mix the new [[package.sources]] form with legacy \
-                     `source`, `sha256`, `mirrors` or `source_dir` (fetch-phase.md §4.2)",
-                    self.package.name
-                );
-            }
-            let mut seen: Vec<&str> = Vec::new();
-            for src in &self.package.sources {
-                if !valid_source_name(&src.name) {
-                    bail!(
-                        "recipe {} has an invalid source name `{}` — expected \
-                         [a-z0-9][a-z0-9._-]*{{,64}} (fetch-phase.md §4.2)",
-                        self.package.name,
-                        src.name
-                    );
-                }
-                if seen.contains(&src.name.as_str()) {
-                    bail!(
-                        "recipe {} has duplicate [[package.sources]] name `{}`",
-                        self.package.name,
-                        src.name
-                    );
-                }
-                seen.push(&src.name);
-                if src.url.trim().is_empty() {
-                    bail!("recipe {} source `{}` has no url", self.package.name, src.name);
-                }
-                if !is_lower_hex64(&src.sha256) {
-                    bail!(
-                        "recipe {} source `{}` has an invalid sha256 `{}` — expected exactly \
-                         64 lowercase hex characters (fetch-phase.md §4.2)",
-                        self.package.name,
-                        src.name,
-                        src.sha256
-                    );
-                }
-                if src.mirrors.iter().any(|m| m.trim().is_empty()) {
-                    bail!(
-                        "recipe {} source `{}` has an empty entry in mirrors",
-                        self.package.name,
-                        src.name
-                    );
-                }
-                check_rel_path(
-                    "[[package.sources]] into",
-                    &src.into,
-                )
-                .with_context(|| {
-                    format!("recipe {} source `{}`", self.package.name, src.name)
-                })?;
-            }
-            check_rel_path("[package] workdir", &self.package.workdir)?;
-            // a build whose every input is a stamped plain file has no
-            // reproducible mtime to derive the epoch from (§6)
-            if !self.package.sources.is_empty()
-                && self
-                    .package
-                    .sources
-                    .iter()
-                    .all(|s| s.unpack == Some(false))
-                && self.package.source_date_epoch.is_none()
-            {
-                bail!(
-                    "recipe {} has only `unpack = false` sources and no source_date_epoch — \
-                     a plain file's staging time would reach the archive; pin \
-                     package.source_date_epoch (fetch-phase.md §6)",
-                    self.package.name
-                );
-            }
-            // and with no external sources at all there is nothing the epoch
-            // could be derived from: assets never feed it (§6 makes them
-            // invisible to the derivation on purpose)
-            if self.package.sources.is_empty() && self.package.source_date_epoch.is_none() {
-                bail!(
-                    "recipe {} has no external sources to derive SOURCE_DATE_EPOCH from — \
-                     assets and fetch views are excluded on purpose; pin \
-                     package.source_date_epoch (fetch-phase.md §6)",
-                    self.package.name
-                );
-            }
+        Ok(())
+    }
+
+    /// New-schema recipes: no legacy fields mixed in, valid and unique
+    /// `[[package.sources]]`, and a reproducible `SOURCE_DATE_EPOCH` input.
+    fn validate_new_schema_sources(&self) -> Result<()> {
+        if !self.package.sha256.is_empty()
+            || !self.package.mirrors.is_empty()
+            || !self.package.source_dir.is_empty()
+        {
+            bail!(
+                "recipe {} must not mix the new [[package.sources]] form with legacy \
+                 `source`, `sha256`, `mirrors` or `source_dir` (fetch-phase.md §4.2)",
+                self.package.name
+            );
         }
+        let mut seen: Vec<&str> = Vec::new();
+        for src in &self.package.sources {
+            if !valid_source_name(&src.name) {
+                bail!(
+                    "recipe {} has an invalid source name `{}` — expected \
+                     [a-z0-9][a-z0-9._-]*{{,64}} (fetch-phase.md §4.2)",
+                    self.package.name,
+                    src.name
+                );
+            }
+            if seen.contains(&src.name.as_str()) {
+                bail!(
+                    "recipe {} has duplicate [[package.sources]] name `{}`",
+                    self.package.name,
+                    src.name
+                );
+            }
+            seen.push(&src.name);
+            if src.url.trim().is_empty() {
+                bail!("recipe {} source `{}` has no url", self.package.name, src.name);
+            }
+            if !is_lower_hex64(&src.sha256) {
+                bail!(
+                    "recipe {} source `{}` has an invalid sha256 `{}` — expected exactly \
+                     64 lowercase hex characters (fetch-phase.md §4.2)",
+                    self.package.name,
+                    src.name,
+                    src.sha256
+                );
+            }
+            if src.mirrors.iter().any(|m| m.trim().is_empty()) {
+                bail!(
+                    "recipe {} source `{}` has an empty entry in mirrors",
+                    self.package.name,
+                    src.name
+                );
+            }
+            check_rel_path(
+                "[[package.sources]] into",
+                &src.into,
+            )
+            .with_context(|| {
+                format!("recipe {} source `{}`", self.package.name, src.name)
+            })?;
+        }
+        check_rel_path("[package] workdir", &self.package.workdir)?;
+        // a build whose every input is a stamped plain file has no
+        // reproducible mtime to derive the epoch from (§6)
+        if !self.package.sources.is_empty()
+            && self
+                .package
+                .sources
+                .iter()
+                .all(|s| s.unpack == Some(false))
+            && self.package.source_date_epoch.is_none()
+        {
+            bail!(
+                "recipe {} has only `unpack = false` sources and no source_date_epoch — \
+                 a plain file's staging time would reach the archive; pin \
+                 package.source_date_epoch (fetch-phase.md §6)",
+                self.package.name
+            );
+        }
+        // and with no external sources at all there is nothing the epoch
+        // could be derived from: assets never feed it (§6 makes them
+        // invisible to the derivation on purpose)
+        if self.package.sources.is_empty() && self.package.source_date_epoch.is_none() {
+            bail!(
+                "recipe {} has no external sources to derive SOURCE_DATE_EPOCH from — \
+                 assets and fetch views are excluded on purpose; pin \
+                 package.source_date_epoch (fetch-phase.md §6)",
+                self.package.name
+            );
+        }
+        Ok(())
+    }
+
+    /// Declared `[assets] include` paths must stay inside the recipe directory.
+    fn validate_assets(&self) -> Result<()> {
         // assets: declared paths must stay inside the recipe directory
         // (never absolute, no `..`, no trailing `/`) — checked at parse time
         // for the same reason as `into`/`workdir` (§5.2, §14)
@@ -154,6 +185,11 @@ impl Recipe {
                 })?;
             }
         }
+        Ok(())
+    }
+
+    /// `[fetch.go]` / `[fetch.cargo]` (§9).
+    fn validate_fetch_tables(&self) -> Result<()> {
         // fetch.go / fetch.cargo (§9): `dir` is parsed like
         // `into`/`workdir`, and the toolchain recipes themselves must not
         // declare their own table (an implicit self-dependency).
@@ -173,6 +209,11 @@ impl Recipe {
                 );
             }
         }
+        Ok(())
+    }
+
+    /// `package.mirrors` need a downloadable `package.source`.
+    fn validate_mirrors(&self) -> Result<()> {
         if !self.package.mirrors.is_empty() {
             let src = self.package.source.as_str();
             if src.is_empty() || src.starts_with("local:") {
@@ -184,15 +225,6 @@ impl Recipe {
             if self.package.mirrors.iter().any(|m| m.trim().is_empty()) {
                 bail!("recipe {} has an empty entry in package.mirrors", self.package.name);
             }
-        }
-        // names/versions become directory and archive file names
-        crate::db::check_name(&self.package.name)?;
-        if !crate::db::valid_version(&self.package.version) {
-            bail!(
-                "recipe {} has an invalid package.version `{}`",
-                self.package.name,
-                self.package.version.escape_debug()
-            );
         }
         Ok(())
     }
