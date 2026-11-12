@@ -78,7 +78,14 @@ pub(crate) fn install_archive(
     key: Option<&Path>,
     reason: crate::db::InstallReason,
 ) -> Result<Entry> {
-    install_archive_pinned(archive_path, root, InstallOpts { force, allow_unsigned, key, reason, pinned_sha: None })
+    install_archive_pinned(archive_path, root, InstallOpts {
+        force,
+        allow_unsigned,
+        key,
+        reason,
+        pinned_sha: None,
+        file_journal: None,
+    })
 }
 
 /// Options for [`install_archive_pinned`]: the install booleans and
@@ -90,6 +97,9 @@ pub(crate) struct InstallOpts<'a> {
     pub key: Option<&'a Path>,
     pub reason: crate::db::InstallReason,
     pub pinned_sha: Option<&'a str>,
+    /// Logical transaction/step that owns the physical file journal, when
+    /// the caller records history.
+    pub file_journal: Option<journal::FileJournalId>,
 }
 
 /// [`install_archive`] for an archive that a repository index already
@@ -101,7 +111,7 @@ pub(crate) fn install_archive_pinned(
     root: &Path,
     opts: InstallOpts<'_>,
 ) -> Result<Entry> {
-    let InstallOpts { force, allow_unsigned, key, reason, pinned_sha } = opts;
+    let InstallOpts { force, allow_unsigned, key, reason, pinned_sha, file_journal } = opts;
     let snapshot_dir = root.join(".nawa");
     let snapshot = crate::fetch::snapshot_file(archive_path, pinned_sha, &snapshot_dir)?;
     let sig = sign::sig_path_for(archive_path);
@@ -127,6 +137,7 @@ pub(crate) fn install_archive_pinned(
         reason,
         true,
         auth,
+        file_journal,
     )
 }
 
@@ -147,6 +158,7 @@ pub(crate) fn install_archive_from_index_proof(
     expected_sha256: &str,
     reason: crate::db::InstallReason,
     proof: Option<IndexProof<'_>>,
+    file_journal: Option<journal::FileJournalId>,
 ) -> Result<Entry> {
     let snapshot_dir = root.join(".nawa");
     let snapshot = crate::fetch::snapshot_file(archive_path, Some(expected_sha256), &snapshot_dir)?;
@@ -164,7 +176,7 @@ pub(crate) fn install_archive_from_index_proof(
             repo_id: None,
         },
     };
-    install_archive_payload(snapshot.path(), archive_path, root, force, reason, false, auth)
+    install_archive_payload(snapshot.path(), archive_path, root, force, reason, false, auth, file_journal)
 }
 
 /// Borrowed proof bundle for a trusted-index install.
@@ -221,10 +233,10 @@ mod step;
 
 // ---- re-exports used outside the install module ---------------------------
 pub(crate) use hooks::{exists_in_root, hook_needs_retry, resolve_in_root, retry_pending_hook};
-pub(crate) use journal::recover_and_report;
+pub(crate) use journal::FileJournalId;
 pub(crate) use payload::install_archive_payload;
 pub(crate) use rollback::{
-    remove_with, rollback, verify_retained_detached_proof, verify_retained_index_proof,
+    remove_with_linked, rollback, verify_retained_detached_proof, verify_retained_index_proof,
 };
 pub(crate) use step::{record_install_outcome, record_remove_outcome};
 
@@ -233,7 +245,7 @@ pub(crate) use hooks::{save_hook_status, save_hooks, HookStatus};
 #[cfg(test)]
 pub(crate) use journal::{dec, enc, recover, Tx};
 #[cfg(test)]
-pub(crate) use rollback::remove;
+pub(crate) use rollback::{remove, remove_with};
 
 #[cfg(test)]
 mod tests {
@@ -756,12 +768,12 @@ mod tests {
         let digest = crate::fetch::sha256_of_file(&archive).unwrap();
 
         let wrong = "0".repeat(64);
-        let err = install_archive_pinned(&archive, &root, InstallOpts { force: false, allow_unsigned: true, key: None, reason: crate::db::InstallReason::Explicit, pinned_sha: Some(&wrong) })
+        let err = install_archive_pinned(&archive, &root, InstallOpts { force: false, allow_unsigned: true, key: None, reason: crate::db::InstallReason::Explicit, pinned_sha: Some(&wrong), file_journal: None })
             .unwrap_err();
         assert!(format!("{err:#}").contains("sha256 mismatch"), "{err:#}");
         assert!(!root.join("usr/share/pinned-demo").exists());
 
-        install_archive_pinned(&archive, &root, InstallOpts { force: false, allow_unsigned: true, key: None, reason: crate::db::InstallReason::Explicit, pinned_sha: Some(&digest.to_uppercase()) })
+        install_archive_pinned(&archive, &root, InstallOpts { force: false, allow_unsigned: true, key: None, reason: crate::db::InstallReason::Explicit, pinned_sha: Some(&digest.to_uppercase()), file_journal: None })
             .unwrap();
         assert!(root.join("usr/share/pinned-demo").exists());
         let _ = std::fs::remove_dir_all(&base);
@@ -1178,6 +1190,7 @@ mod tests {
                 signer_public: Some(&signer_pub),
                 repo_id: Some("local-test"),
             }),
+            None,
         ).unwrap();
 
         let digest = re.sha256.clone();

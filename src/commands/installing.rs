@@ -374,6 +374,7 @@ fn install_one(
     let step_no = recorder.step_intent_state(
         &package, action, before.as_ref(), Some(&target), &target.artifact_sha256,
     )?;
+    let file_journal = install::FileJournalId::for_step(recorder.tx(), step_no);
     let installed = match request.index_sha256 {
         Some(expected) if request.signed_index => {
             let proof = open_repo.map(|open| install::IndexProof {
@@ -383,14 +384,14 @@ fn install_one(
                 repo_id: open.base_url.as_deref(),
             });
             install::install_archive_from_index_proof(
-                archive, &ctx.root, flags.force, expected, effective_reason, proof,
+                archive, &ctx.root, flags.force, expected, effective_reason, proof, file_journal,
             )
         }
         pinned => {
             let expected = pinned.unwrap_or(target.artifact_sha256.as_str());
             install::install_archive_pinned(
                 archive, &ctx.root,
-                install::InstallOpts { force: flags.force, allow_unsigned: flags.allow_unsigned, key: None, reason: effective_reason, pinned_sha: Some(expected) },
+                install::InstallOpts { force: flags.force, allow_unsigned: flags.allow_unsigned, key: None, reason: effective_reason, pinned_sha: Some(expected), file_journal },
             )
         },
     };
@@ -872,7 +873,8 @@ pub(crate) fn cmd_autoremove(ctx: &Ctx, dry_run: bool, yes: bool, build_deps: bo
             None,
             "",
         )?;
-        let result = install::remove_with(n, &ctx.root, false);
+        let file_journal = install::FileJournalId::for_step(recorder.tx(), step_no);
+        let result = install::remove_with_linked(n, &ctx.root, false, file_journal);
         install::record_remove_outcome(
             &mut recorder,
             &ctx.root,
@@ -946,9 +948,10 @@ pub(crate) fn install_archive_file(
     let step_no = recorder.step_intent_state(
         &pkg_name, action, before.as_ref(), Some(&target), &digest,
     )?;
+    let file_journal = install::FileJournalId::for_step(recorder.tx(), step_no);
     let result = install::install_archive_pinned(
         file, &ctx.root,
-        install::InstallOpts { force, allow_unsigned, key: key.as_deref(), reason: crate::db::InstallReason::Explicit, pinned_sha: Some(&digest) },
+        install::InstallOpts { force, allow_unsigned, key: key.as_deref(), reason: crate::db::InstallReason::Explicit, pinned_sha: Some(&digest), file_journal },
     );
     install::record_install_outcome(
         &mut recorder,
@@ -1018,7 +1021,8 @@ pub(crate) fn cmd_remove(ctx: &Ctx, name: &str, force: bool, yes: bool) -> Resul
         None,
         before.as_ref().map(|b| b.artifact_sha256.as_str()).unwrap_or(""),
     )?;
-    let result = install::remove_with(name, &ctx.root, force);
+    let file_journal = install::FileJournalId::for_step(recorder.tx(), step_no);
+    let result = install::remove_with_linked(name, &ctx.root, force, file_journal);
     install::record_remove_outcome(
         &mut recorder,
         &ctx.root,

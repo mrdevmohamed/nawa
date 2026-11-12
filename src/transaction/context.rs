@@ -118,7 +118,6 @@ pub(crate) struct OperationHandle {
 
 impl OperationHandle {
     /// The allocated transaction id, when history recording is enabled.
-    #[allow(dead_code)]
     pub fn tx(&self) -> Option<u64> {
         self.tx
     }
@@ -226,6 +225,13 @@ pub(crate) struct RecorderHandle<'a> {
 }
 
 impl RecorderHandle<'_> {
+    /// The owning transaction id, when history recording is enabled. The
+    /// caller pairs it with the step number returned by [`Self::step_intent`]
+    /// to link the physical file journal to this logical step.
+    pub fn tx(&self) -> Option<u64> {
+        self.op.tx
+    }
+
     /// Write the write-ahead intent for one package step (before the
     /// mutation runs).
     pub fn step_intent(

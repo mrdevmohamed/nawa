@@ -184,6 +184,7 @@ fn apply_plan(
             name, crate::transaction::history::StepAction::Upgrade,
             before.as_ref(), Some(&target), &re.sha256,
         )?;
+        let file_journal = install::FileJournalId::for_step(recorder.tx(), step_no);
         let outcome = fetch_entry(root, open, re, opts.allow_unsigned).and_then(|src| {
             if open.archive_auth == ArchiveAuth::SignedIndexSha256 {
                 install::install_archive_from_index_proof(
@@ -198,12 +199,13 @@ fn apply_plan(
                         signer_public: open.signer_public.as_deref(),
                         repo_id: None,
                     }),
+                    file_journal,
                 )
             } else {
                 install::install_archive_pinned(
                     &src,
                     root,
-                    install::InstallOpts { force: opts.force, allow_unsigned: opts.allow_unsigned, key: None, reason: crate::db::InstallReason::Keep, pinned_sha: Some(&re.sha256) },
+                    install::InstallOpts { force: opts.force, allow_unsigned: opts.allow_unsigned, key: None, reason: crate::db::InstallReason::Keep, pinned_sha: Some(&re.sha256), file_journal },
                 )
             }
         });

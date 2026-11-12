@@ -174,6 +174,11 @@ No breaking changes to CLI commands (`nawa sync/update/upgrade/install/remove/fe
 ### Remaining technical debt (after Steps 3-8)
 
 > **Status 2026-11-12:** P0-3 is closed for the extra-bind host surface, P1-4 is closed, and P1-5 was verified as already mitigated. The broader P0-3 question (sandbox binds the live root outside the closure) remains open. P1-2, P1-8 and the P2 duplication list are unchanged. See §7 for commits and current validation.
+>
+> **Status 2026-11-12 (later):** P1-2 has a design
+> (`docs/design/undo-wal-consolidation.md`) and Phase 1 is implemented:
+> FileJournal identity plus one combined physical→logical recovery pass.
+> Phases 2–3 (previous-slot resolver and per-step-lock recovery) remain.
 
 1. **P0-3 — Sandbox trusts live root outside closure** (`Sandbox` only mounts namespaces over live root; `extra_binds` shape validated but not policy-checked). Needs architectural decision, not low-risk. **Update:** the extra-bind host policy is implemented (`463d4fb`); the live-root trust model remains.
 2. **P1-2 — Legacy undo journal vs new transaction WAL duplication** (two sources of truth for "what was installed before"; keep both until WAL undo covers rollback use-case per audit §1). Needs migration strategy.
@@ -221,14 +226,36 @@ Assets, fetch-schema versions and Go/Cargo versions were already inputs. The opt
 
 `wipe_tree` already uses `symlink_metadata` and treats non-directories (including symlinks) as files, so it never follows a symlink-to-directory escape. No code change was needed; the earlier audit line is retained for history.
 
+### Undo/WAL consolidation: Phase 1 (`docs/design/undo-wal-consolidation.md`)
+
+The P1-2 design is in `docs/design/undo-wal-consolidation.md`. Phase 1 links
+the physical FileJournal to the logical transaction/step that owns it with an
+additive `T` line (old parsers ignore unknown records), and adds one combined
+recovery entry point in `src/recovery.rs`: physical restore first, then TxWAL
+reconciliation, under the exclusive lock. `nawa rollback` / `nawa history undo`
+semantics and the legacy `undo/<name>/{desc,files}` mirror are unchanged.
+
+The new unit test forces a crash after the db entry was replaced and proves the
+physical pass restores both files and db before reconciliation classifies the
+step as failed; a second pass is a no-op. The logical pass intentionally does
+not run inside `install_archive_payload`/`remove_with` (those run after
+`begin_operation` wrote the live TxWAL). Phase 3 will move the combined call
+before `begin_operation` for commands that use per-step locks, then remove the
+inner physical calls.
+
+Phase 2 (previous-slot resolver) is next. Phase 4 (removing the `desc`/`files`
+mirror) remains an explicit compatibility decision.
+
 ### Current validation
 
 ```
 cargo check --locked --all-targets                         → clean
 cargo clippy --all-targets --locked -- -D warnings         → clean
-python3 scripts/check-layering.py                          → 52 modules, no cycles
-cargo test --locked --no-fail-fast                         → 428 unit passed, 1 ignored;
+python3 scripts/check-layering.py                          → 53 modules, no cycles
+cargo test --locked --no-fail-fast                         → 432 unit passed, 1 ignored;
                                                               109 integration tests passed
 ```
 
-Remaining work: P1-2 (undo/WAL consolidation), P1-8 (performance), P2 duplication (path containment, planner/upgrade resolver overlap), and repo-wide `cargo fmt --check` drift (not enforced by CI).
+Remaining work: P1-2 Phases 2–3 (resolver + per-step-lock recovery), P1-8
+(performance), P2 duplication (path containment, planner/upgrade resolver
+overlap), and repo-wide `cargo fmt --check` drift (not enforced by CI).

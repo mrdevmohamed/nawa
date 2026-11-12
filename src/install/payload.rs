@@ -9,10 +9,11 @@ use crate::archive;
 use crate::db::{Db, Entry};
 use crate::install::InstallAuth;
 use crate::install::hooks::{hook_status_path, run_tracked_hook, save_hooks};
-use crate::install::journal::{recover_and_report, Tx};
+use crate::install::journal::{recover_and_report, FileJournalId, Tx};
 use crate::interrupt;
 use crate::sign;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn install_archive_payload(
     archive_path: &Path,
     cache_name_source: &Path,
@@ -21,6 +22,7 @@ pub(crate) fn install_archive_payload(
     reason: crate::db::InstallReason,
     cache_detached_signature: bool,
     auth: InstallAuth,
+    file_journal: Option<FileJournalId>,
 ) -> Result<Entry> {
     let db = Db::new(root);
     // Ctrl+C / SIGTERM / SIGHUP are deferred from here to the end of the
@@ -111,7 +113,10 @@ pub(crate) fn install_archive_payload(
 
     // ---- move staged tree into the root -------------------------------------
     let mut diverted: Vec<(String, String)> = Vec::new(); // (orig, diverted)
-    let mut tx = Tx::new(root, root.join(".nawa").join(format!("bak-{uniq}")));
+    let mut tx = match file_journal {
+        Some(id) => Tx::new_linked(root, root.join(".nawa").join(format!("bak-{uniq}")), id),
+        None => Tx::new(root, root.join(".nawa").join(format!("bak-{uniq}"))),
+    };
     // last clean exit before any file is touched
     interrupt::check()?;
     if let Err(e) = move_tree(&tmp, root, root, &old_hashes, &mut diverted, &mut tx) {

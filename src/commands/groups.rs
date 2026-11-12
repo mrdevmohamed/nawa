@@ -164,15 +164,16 @@ pub(crate) fn cmd_group_remove(ctx: &Ctx, id: &str, yes: bool) -> Result<()> {
     let mut failure: Option<anyhow::Error> = None;
     for package in &candidates {
         let before = db.entry(package)?;
-        let step_no = {
+        let (step_no, file_journal) = {
             let mut recorder = op.recorder();
-            recorder.step_intent(
+            let step_no = recorder.step_intent(
                 package, transaction::history::StepAction::Remove,
                 before.as_ref(), None,
                 before.as_ref().map(|entry| entry.artifact_sha256.as_str()).unwrap_or(""),
-            )?
+            )?;
+            (step_no, install::FileJournalId::for_step(recorder.tx(), step_no))
         };
-        let result = install::remove_with(package, &ctx.root, false);
+        let result = install::remove_with_linked(package, &ctx.root, false, file_journal);
         {
             let mut recorder = op.recorder();
             install::record_remove_outcome(

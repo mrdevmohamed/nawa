@@ -35,6 +35,7 @@ mod plan;
 mod plugins;
 mod profile;
 mod recipe;
+mod recovery;
 mod repo;
 mod repositories;
 mod revdep;
@@ -189,7 +190,7 @@ fn run(ctx: &Ctx, cmd: Cmd, track_package_changes: bool) -> (Result<()>, bool) {
     // nawa left behind; holding the exclusive lock guarantees no live
     // transaction is mistaken for a dead one
     if mode == Some(lock::Mode::Exclusive) {
-        install::recover_and_report(&ctx.root);
+        recovery::recover_and_report(&ctx.root);
         // one-shot, idempotent migration of legacy nanosecond install dates
         // (roadmap §4.3): only clearly-nanosecond values are rewritten, each
         // with a .bak copy of the old desc

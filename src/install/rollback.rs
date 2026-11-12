@@ -8,7 +8,7 @@ use crate::db::{Db, Entry};
 use crate::install::hooks::{load_hooks, run_hook};
 use crate::install::journal::{recover_and_report, Tx};
 use crate::install::payload::save_undo;
-use crate::install::{inspect_archive_state, install_archive, install_archive_from_index_proof, install_archive_pinned, InstallOpts};
+use crate::install::{inspect_archive_state, install_archive, install_archive_from_index_proof, install_archive_pinned, FileJournalId, InstallOpts};
 use crate::interrupt;
 use crate::sign;
 
@@ -53,6 +53,7 @@ pub(crate) fn rollback(name: &str, root: &Path) -> Result<()> {
         &[name.to_string()],
         &[],
     )?;
+    let tx = operation.tx();
     let (result, proof) = {
         let mut recorder = operation.recorder();
         let step_no = recorder.step_intent_state(
@@ -62,8 +63,9 @@ pub(crate) fn rollback(name: &str, root: &Path) -> Result<()> {
             Some(&target),
             &digest,
         )?;
+        let file_journal = FileJournalId::for_step(tx, step_no);
 
-        let (result, proof) = install_restore_source(source, root);
+        let (result, proof) = install_restore_source(source, root, file_journal);
 
         crate::install::record_install_outcome(
             &mut recorder,
@@ -134,21 +136,35 @@ fn pick_restore_source(root: &Path, name: &str, prev: &Entry) -> Result<RestoreS
 
 /// Reinstall the chosen source through the installer path that matches its
 /// authentication; returns the result and the proof text to report.
-fn install_restore_source(source: RestoreSource, root: &Path) -> (Result<Entry>, String) {
+fn install_restore_source(
+    source: RestoreSource,
+    root: &Path,
+    file_journal: Option<FileJournalId>,
+) -> (Result<Entry>, String) {
     match source {
         RestoreSource::SignedIndex { object, digest } => (
-            install_archive_from_index_proof(&object, root, false, &digest, crate::db::InstallReason::Keep, None),
+            install_archive_from_index_proof(
+                &object,
+                root,
+                false,
+                &digest,
+                crate::db::InstallReason::Keep,
+                None,
+                file_journal,
+            ),
             "signed-index proof re-verified".to_string(),
         ),
         RestoreSource::Detached { object, digest } => (
-            install_archive_pinned(&object, root, InstallOpts { force: false, allow_unsigned: true, key: None, reason: crate::db::InstallReason::Keep, pinned_sha: Some(&digest) }),
+            install_archive_pinned(&object, root, InstallOpts { force: false, allow_unsigned: true, key: None, reason: crate::db::InstallReason::Keep, pinned_sha: Some(&digest), file_journal }),
             "detached signature re-verified".to_string(),
         ),
         RestoreSource::Pinned { object, digest, proof } => (
-            install_archive_pinned(&object, root, InstallOpts { force: false, allow_unsigned: true, key: None, reason: crate::db::InstallReason::Keep, pinned_sha: Some(&digest) }),
+            install_archive_pinned(&object, root, InstallOpts { force: false, allow_unsigned: true, key: None, reason: crate::db::InstallReason::Keep, pinned_sha: Some(&digest), file_journal }),
             proof,
         ),
         RestoreSource::Legacy { archive } => (
+            // Legacy records carry no digest, so the modern linked installer
+            // cannot verify them anyway; keep the established unsigned path.
             install_archive(&archive, root, false, true, None, crate::db::InstallReason::Explicit),
             "legacy cached archive (no recorded authentication proof)".to_string(),
         ),
@@ -233,6 +249,17 @@ pub(crate) fn remove(name: &str, root: &Path) -> Result<()> {
 /// A failure to move any file aborts the removal instead of silently
 /// leaving a half-removed package behind.
 pub(crate) fn remove_with(name: &str, root: &Path, force: bool) -> Result<()> {
+    remove_with_linked(name, root, force, None)
+}
+
+/// [`remove_with`] with the logical transaction/step that owns the physical
+/// removal journal.
+pub(crate) fn remove_with_linked(
+    name: &str,
+    root: &Path,
+    force: bool,
+    file_journal: Option<FileJournalId>,
+) -> Result<()> {
     let db = Db::new(root);
     let _interrupts = interrupt::Guard::new();
     recover_and_report(root);
@@ -271,7 +298,10 @@ pub(crate) fn remove_with(name: &str, root: &Path, force: bool) -> Result<()> {
     let shared = db.paths_claimed_by_others(name)?;
     let mut files: Vec<String> = db.files(name)?.into_iter().filter(|f| !shared.contains(f)).collect();
     files.sort_by_key(|f| std::cmp::Reverse(f.len()));
-    let mut tx = Tx::new(root, root.join(".nawa").join(format!("rm-{uniq}")));
+    let mut tx = match file_journal {
+        Some(id) => Tx::new_linked(root, root.join(".nawa").join(format!("rm-{uniq}")), id),
+        None => Tx::new(root, root.join(".nawa").join(format!("rm-{uniq}"))),
+    };
     let mut dirs: Vec<PathBuf> = Vec::new();
     let mut move_err: Option<anyhow::Error> = None;
     for f in &files {
