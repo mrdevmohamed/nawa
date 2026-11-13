@@ -6,6 +6,8 @@
 **Scope:** Entire `src/`, `tests/`, `Cargo.toml`, CI workflows, docs
 
 > **Status update (2026-11-12):** this document is the original 2026-11-09 audit snapshot. P0-1, P0-2, P1-1, P1-4 and P2-4 are closed; P0-3 is closed for the extra-bind host policy, while the broader live-root trust model remains open; P1-5 was verified as already mitigated. Commits, integration coverage and current validation are recorded in `2026-11-09-final-report.md` §7.
+>
+> **Status update (2026-11-13):** P1-2 is closed by the Phase 4A mirror decision. P1-8's repository-parsing, double-ELF-read and quadratic-resolver concerns were re-checked against current call sites and no longer apply; only the staged-tree walk split remains. See `2026-11-09-final-report.md` §7.
 
 ---
 
@@ -163,9 +165,9 @@ The remaining ~35 top-level modules are flat files in `src/`.
 - `struct Recipe` + `struct Package` + `struct Depends` + `struct Build` + `struct Fetch` + validation + `expand()` + `load_all()` + `is_lower_hex64` + `check_schema_placeholders()`.
 - `expand` does string replacement with `replace()` for each placeholder — O(n * placeholders) and does not handle `%%` escaping. A `{}`-style format string or a dedicated expander would be safer.
 
-**P2-8. Performance: repository parsing repeated**
-- `upgrade.rs::fetch_entry` / `open_repo` loads the whole index for each package? `plan.rs` walks deps repeatedly. `revdep::scan` reads every ELF twice (once for `DT_NEEDED`, once for soname index). No caching of parsed recipe graph beyond a single `load_all` per command (fixed in PR #31-32). `build` used to call `recipe::load_all` twice when `use_cache` + `Closure`; it now parses the graph once and reuses it for cache identity and assembly (2026-11-13).
-- `lint.rs` walks the staged tree, then `slim::run` walks again, then `archive::create` walks a third time (PR #33 fixed double-walk in `slim`, but `lint`+`archive` still separate).
+**P2-8. Performance: staged-tree walks (re-checked 2026-11-13)**
+- The historical per-package index parsing and double ELF read no longer apply: `open_repo` parses each index once, `revdep::scan` reads each candidate once, and `plan::visit`/`deps::visit` memoise dependency traversal. No practical quadratic resolver remains; the planner's cycle stack is linear in dependency depth. `build` used to call `recipe::load_all` twice when `use_cache` + `Closure`; it now parses the graph once and reuses it for cache identity and assembly.
+- `lint.rs` walks the staged tree, then `slim::run` walks again, then `archive::create` walks a third time (PR #33 fixed double-walk in `slim`, but `lint`+`archive` still separate). Each pass mutates the tree, so merging them needs an architectural change, not a mechanical rewrite.
 
 #### P3 — Low (style, clippy, deps, polish)
 
