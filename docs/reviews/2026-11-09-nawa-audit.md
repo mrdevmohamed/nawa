@@ -158,7 +158,8 @@ The remaining ~35 top-level modules are flat files in `src/`.
 
 **P2-6. Test coverage gaps**
 - Strong coverage for: version comparison, recipe validation, archive create/extract, sign/verify, db, lint, fetch extraction edge cases, transaction WAL, sandbox spec parsing.
-- Weak: `fetchrun.rs` Go/Cargo planning (only a few unit tests), `commands/*` orchestration (covered indirectly via integration tests), `repositories::cmd_clean` (only one test), `service.rs` (requires runit, hard to test), `revdep::suggest` (name guessing), `build::rebuild_check` (integration only).
+- Weak: `fetchrun.rs` Go/Cargo planning (only a few unit tests), `commands/*` orchestration (covered indirectly via integration tests), `service.rs` (requires runit, hard to test), `build::rebuild_check` (integration only).
+- Improved (2026-11-13): `repositories::cmd_clean` helpers now have unit tests for `.part` retention, `<sha16>-` legacy detection, dry-run purity, and foreign-file/live-lock retention, plus an end-to-end `clean metadata` test. They caught two sweep bugs: `clean_dir` never unlinked regular files (it always used `remove_dir_all`), and `sweep_tree --dry-run` changed read-only cache permissions.
 - No fuzz target for `parse_pkginfo`, `unpack_tar_stream`, `decode_hex32` etc. Attack surface is tar extraction + recipe parsing; hand-rolled tar header validation (`is_tar_header`, `octal_field`) would benefit from fuzzing.
 
 **P2-7. `recipe.rs` 1374 lines — model + load + validate + expand in one file**

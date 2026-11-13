@@ -275,17 +275,27 @@ compatibility PR. The full suite also surfaced pre-existing duplicate test
 temp-dir tags; one tag per colliding pair was renamed so parallel unit tests
 are deterministic.
 
+### Clean-cache coverage and fixes
+
+`repositories::cmd_clean` helpers now have direct unit tests for `.part`
+retention, the legacy `<sha16>-` cache predicate, dry-run purity, and
+foreign-file/live-lock retention, plus an end-to-end `clean metadata` test.
+They exposed and fixed two sweep bugs: `clean_dir` silently left regular files
+because it always called `remove_dir_all`, and `sweep_tree --dry-run` restored
+write bits on read-only cache entries. Wet runs still restore the bits needed
+to unlink read-only trees; dry runs now leave permissions untouched.
+
 ### Current validation
 
 ```
 cargo check --locked --all-targets                         → clean
 cargo clippy --all-targets --locked -- -D warnings         → clean
 python3 scripts/check-layering.py                          → 53 modules, no cycles
-cargo test --locked --no-fail-fast                         → 454 unit passed, 1 ignored;
-                                                              110 integration tests passed
+cargo test --locked --no-fail-fast                         → 458 unit passed, 1 ignored;
+                                                              111 integration tests passed
 ```
 
 Remaining work: the staged-tree walk split in P1-8, P0-3's live-root sandbox
-trust model (architectural), P2-6 test-coverage gaps, and repo-wide
-`cargo fmt --check` drift (not enforced by CI). P1-2 is closed by the Phase 4A
-decision.
+trust model (architectural), the remaining P2-6 coverage gaps (`fetchrun`
+planning, `service`, fuzz targets), and repo-wide `cargo fmt --check` drift (not
+enforced by CI). P1-2 is closed by the Phase 4A decision.
