@@ -164,7 +164,7 @@ The remaining ~35 top-level modules are flat files in `src/`.
 - `expand` does string replacement with `replace()` for each placeholder — O(n * placeholders) and does not handle `%%` escaping. A `{}`-style format string or a dedicated expander would be safer.
 
 **P2-8. Performance: repository parsing repeated**
-- `upgrade.rs::fetch_entry` / `open_repo` loads the whole index for each package? `plan.rs` walks deps repeatedly. `revdep::scan` reads every ELF twice (once for `DT_NEEDED`, once for soname index). No caching of parsed recipe graph beyond a single `load_all` per command (fixed in PR #31-32, but `build` still calls `recipe::load_all` twice when `use_cache` + `Closure`).
+- `upgrade.rs::fetch_entry` / `open_repo` loads the whole index for each package? `plan.rs` walks deps repeatedly. `revdep::scan` reads every ELF twice (once for `DT_NEEDED`, once for soname index). No caching of parsed recipe graph beyond a single `load_all` per command (fixed in PR #31-32). `build` used to call `recipe::load_all` twice when `use_cache` + `Closure`; it now parses the graph once and reuses it for cache identity and assembly (2026-11-13).
 - `lint.rs` walks the staged tree, then `slim::run` walks again, then `archive::create` walks a third time (PR #33 fixed double-walk in `slim`, but `lint`+`archive` still separate).
 
 #### P3 — Low (style, clippy, deps, polish)
@@ -228,7 +228,7 @@ The remaining ~35 top-level modules are flat files in `src/`.
 
 - No premature optimisation needed. SHA-256 hashing uses 64KiB buffers; `BufWriter` with 256KiB for tar rewrite; zstd level 3 for archives (level 19 for repo index — correct trade-off).
 - Parallelism: `jobs` respected for build; `fetch` is sequential per source (correct — no parallel download yet, but `sources.rs` stages sources sequentially; could parallelise `stage_sources` per source).
-- Largest waste: repeated `recipe::load_all` (parses every `recipe.toml`) in `build` (twice), `plan`, `upgrade`, `revdep`. Could cache within a single command via `OnceCell` or pass loaded graph. Mitigated by recent PR #32 single-walk change.
+- Largest waste: repeated `recipe::load_all` (parses every `recipe.toml`) in `build` (twice), `plan`, `upgrade`, `revdep`. Could cache within a single command via `OnceCell` or pass loaded graph. Mitigated by recent PR #32 single-walk change; the closure build path now loads once and passes the graph through (2026-11-13).
 - `clone()` count is high but dominated by `PathBuf` construction where ownership transfer is required; not a concern.
 
 ---

@@ -87,6 +87,12 @@ pub(crate) fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
     // download or closure work.
     rec.check_schema_placeholders()?;
 
+    // The closure build root is needed for the cache identity and again when
+    // the build root is assembled. Keep the graph parsed for the cache lookup
+    // so a cache miss does not read every `recipe.toml` twice; without the
+    // cache the assembly step loads it as before.
+    let mut closure_known: Option<std::collections::BTreeMap<String, Recipe>> = None;
+
     // In live/env modes the toolchain comes from the host root, not a pinned
     // closure archive. Capture the exact fetch PATH versions before cache lookup.
     let toolchain_identity = crate::fetchrun::build_toolchain_identity(rec, opts.isolation)?;
@@ -103,11 +109,13 @@ pub(crate) fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
     if opts.use_cache && opts.isolation >= Isolation::Env {
         let closure_paths: Vec<PathBuf> = if opts.isolation == Isolation::Closure {
             let known = crate::recipe::load_all(&opts.recipes_root)?;
-            crate::closure::buildroot(rec, &known, opts.check != CheckMode::Off)
+            let paths = crate::closure::buildroot(rec, &known, opts.check != CheckMode::Off)
                 .context("compute build root")?
                 .iter()
                 .filter_map(|n| known.get(n).map(|r| crate::closure::archive_for(r, &opts.outdir)))
-                .collect()
+                .collect();
+            closure_known = Some(known);
+            paths
         } else {
             Vec::new()
         };
@@ -170,7 +178,8 @@ pub(crate) fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
     );
 
     // ---- assemble the build root (closure level, §5) ----------------------
-    let assembled = buildroot::assemble_build_root(rec, opts, &work, &outdir)?;
+    let assembled =
+        buildroot::assemble_build_root(rec, opts, &work, &outdir, closure_known.as_ref())?;
 
     // ---- ecosystem fetch (fetch-phase.md §7, §11, §12) --------------------
     let fetch_env = buildroot::run_fetch_phase(

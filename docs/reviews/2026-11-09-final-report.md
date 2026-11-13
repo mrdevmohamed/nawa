@@ -188,7 +188,7 @@ No breaking changes to CLI commands (`nawa sync/update/upgrade/install/remove/fe
 2. **P1-2 — Legacy undo journal vs new transaction WAL duplication** (two sources of truth for "what was installed before"; keep both until WAL undo covers rollback use-case per audit §1). **Closed** by Phases 1–3 (`2ffebe7`, `4112d1f`, `6b80ede`) and the Phase 4A decision: history is canonical whenever it can answer, while the legacy mirror remains a compatibility aid for old-binary rollback. No on-disk format changed; see §7.
 3. **P1-4 — Build isolation cache identity** misses `sandbox.extra_binds`, `assets` digest, toolchain version for non-closure isolation (`build_id_for` coverage). **Closed** by `53390ed` (assets and isolation + host toolchain; see §7).
 4. **P1-5 — `wipe_work` recursion + symlink escape** under overlayfs `sb/layer-work` (mode 000) — hardening with `O_NOFOLLOW`/`symlink_metadata` guard (code already uses `symlink_metadata` and treats symlinks as files; audit noted comment but code may still be vulnerable to symlink-to-dir escapes in overlayfs). **Verified mitigated** (see §7).
-5. **P1-8 — Performance:** repository parsing repeated (`fetch::load_index` called per repo file in `repositories.rs` + `sync.rs`); `revdep::scan` reads every ELF twice; `lint→slim→archive` still walk separately (fswalk helper centralises pattern but does not produce a single walk reused across passes because passes mutate the tree). Quadratic `deps` resolution.
+5. **P1-8 — Performance:** repository parsing repeated (`fetch::load_index` called per repo file in `repositories.rs` + `sync.rs`); `revdep::scan` reads every ELF twice; `lint→slim→archive` still walk separately (fswalk helper centralises pattern but does not produce a single walk reused across passes because passes mutate the tree). Quadratic `deps` resolution. **Partial:** the closure build path now loads the recipe graph once and reuses it for cache identity and assembly instead of parsing every `recipe.toml` twice.
 6. **P2 — Duplication remaining:** canonicalization/containment (`ensure_inside_root` vs `slim::split` real_root check vs `plugins/manifest` containment vs `fetchrun/common` canonicalize), sibling extraction duplication (`extract_source_archive` vs `extract_source_archive_stripped` now share `decompressed_reader` — remaining duplication is minimal), duplicate build-secret handling, planner/upgrade overlap (two resolvers: `plan.rs` vs `upgrade/mod.rs`).
 
 All remaining items carry compatibility risk or require architectural decision per plan rule 7 and should be addressed in separate, design-led PRs.
@@ -285,6 +285,7 @@ cargo test --locked --no-fail-fast                         → 454 unit passed, 
                                                               110 integration tests passed
 ```
 
-Remaining work: P1-8 (performance), P2 duplication (path containment,
-planner/upgrade resolver overlap), and repo-wide `cargo fmt --check` drift
-(not enforced by CI). P1-2 is closed by the Phase 4A decision.
+Remaining work: P1-8 (performance; closure builds now parse the recipe graph
+once), P2 duplication (path containment, planner/upgrade resolver overlap), and
+repo-wide `cargo fmt --check` drift (not enforced by CI). P1-2 is closed by the
+Phase 4A decision.
