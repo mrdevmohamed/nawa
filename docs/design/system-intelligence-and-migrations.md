@@ -137,6 +137,33 @@ adding the capability solver and migration engine. The source audit must verify
 the exact dependency graph rather than infer it from directory names.
 
 
+### 2.4 Current dependency and repository metadata limits
+
+The current implementation is not a general package/provider solver:
+
+- `plan.rs` builds a dependency-first graph from the local recipe tree. It
+  follows declared build and runtime dependencies and treats already installed
+  dependencies as satisfied.
+- Binary repository entries in the current signed v2/v3 index contain package
+  identity, archive location, digest, and size metadata. They do not currently
+  expose a signed `provides` capability list or a complete runtime-dependency
+  list for solving before archive download.
+- Runtime dependencies are recorded in package archive `.PKGINFO` and in the
+  installed package database. A binary-only package without a local recipe can
+  currently be installed, but that path does not gain the same dependency
+  planning as a recipe-backed install.
+- The current repository upgrade path compares installed package versions and
+  orders candidates using available recipe data, with an alphabetical fallback
+  when that data is unavailable. It does not select alternative providers.
+
+These limitations are part of the baseline, not behavior that this proposal
+can assume already exists. The initial implementation must define one
+authenticated candidate model that can represent both recipe-built and
+binary-only packages. Until the signed metadata needed for a safe solve exists,
+Nawa must report that the plan is incomplete and refuse a critical init
+migration rather than assume missing dependencies or capabilities do not
+exist.
+
 ## 3. Goals and non-goals
 
 ### 3.1 Goals
@@ -302,6 +329,7 @@ during the refactor.
           signature_verifier.rs
           process_runner.rs
           transaction_journal.rs
+          init_system_probe.rs
         features/
           package/
             install.rs
@@ -326,6 +354,14 @@ during the refactor.
             list.rs
             undo.rs
             rollback.rs
+          groups/
+            list.rs
+            install.rs
+            remove.rs
+          plugins/
+            list.rs
+            manage.rs
+            run.rs
           system/
             detect.rs
             profile.rs
@@ -349,6 +385,8 @@ during the refactor.
         transaction/
           model.rs
           state.rs
+        groups/
+          model.rs
         system/
           identity.rs
           profile.rs
@@ -364,6 +402,7 @@ during the refactor.
         process/
         sandbox/
         transaction/
+        plugins/
 
       presentation/
         output.rs
@@ -388,15 +427,23 @@ The intended flow separates planning from effects:
    request. It does not load the package database or invoke the installer.
 2. **Install use case:** coordinates the operation and requests the required
    inputs through application ports.
-3. **Input adapters:** obtain a consistent installed-package snapshot and
-   authenticated repository/recipe candidates.
-4. **Functional Core:** the domain planner resolves dependencies, selects
-   eligible versions, detects conflicts, determines install order, and
-   returns an explainable plan. It performs no I/O.
+3. **Input adapters:** obtain an installed-package snapshot and authenticated
+   candidate metadata from recipes and/or the signed repository index. Both
+   source-built and binary-only candidates must use the same normalized domain
+   model; missing dependency or capability metadata must remain explicitly
+   unknown, not be treated as an empty list.
+4. **Functional Core:** the domain planner resolves declared dependencies,
+   applies the target init-provider constraint, detects conflicts, determines
+   install order, and returns an explainable plan. It performs no I/O. The
+   initial implementation is not a general SAT solver and must not claim to be
+   one.
 5. **Presentation:** renders the complete plan and obtains the required
    confirmation. Dry-run ends here without mutation.
 6. **Execution coordination:** checks cancellation and preconditions, acquires
-   the required lock at the correct boundary, and records transaction intent.
+   the required lock at the mutation boundary, re-reads the relevant installed
+   state, and revalidates the approved plan. If inputs changed, it must stop
+   and require a fresh plan/approval rather than execute a stale plan; it then
+   records transaction intent.
 7. **Effect adapters:** fetch and verify the selected artifact, apply the
    package payload, update installed state, and persist each transaction
    outcome. Existing archive authentication, file-conflict, journaling, and
@@ -460,6 +507,10 @@ The first mapping from current `master` to the target architecture is:
 | `build/`, `buildenv.rs`, `fetchrun/`, `sandbox/` | Build use case and cohesive build subsystem, with process, fetch, and sandbox effects behind adapter boundaries where needed. |
 | `transaction/`, `recovery.rs`, `lock.rs`, `undo.rs` | Separate transaction domain/state, application lifecycle coordination, and durable journal/lock adapters. |
 | `config.rs`, `profile.rs`, `sys.rs` | Split configuration loading and host observations from validated domain configuration/profile models. |
+| `groups/` and `commands/groups.rs` | Group membership domain plus group application use cases; keep catalog loading in its repository adapter. |
+| `plugins/` and `commands/plugins.rs` | Plugin management use cases plus isolated discovery/runner adapters; plugins remain outside the trusted package/migration core. |
+| `artifact.rs`, `sign.rs`, `checksum.rs` | Artifact identity and verification values where pure; concrete cryptographic and file access in signing/artifact adapters. |
+| `sources.rs`, `assets.rs`, `fetchrun/`, `slim.rs`, `closure.rs` | Keep with the build feature/subsystems they serve; isolate network and filesystem effects behind adapter boundaries where needed. |
 | `output.rs`, `diag.rs`, `color.rs`, `confirm.rs`, `humanize.rs` | Presentation and user-interaction responsibilities. |
 | `service.rs`, `commands/service.rs` | Delete as part of the accepted removal of service management from Nawa. |
 
