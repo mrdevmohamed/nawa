@@ -25,6 +25,7 @@ These documents describe architecture, implementation constraints, proposals, an
 - [Signed repository index design](design/signed-repository-index-v2.md)
 - [Plugin API v1](design/plugin-api-v1.md)
 - [Package management roadmap](design/package-management-roadmap.md)
+- [System intelligence and migration engine proposal](design/system-intelligence-and-migrations.md)
 - [Dependency-aware rebuild proposal](future-dependency-aware-rebuild.md)
 - [PR #15 review](reviews/PR-15-REVIEW.md)
 - [PR #16 review](reviews/PR-16-REVIEW.md)
