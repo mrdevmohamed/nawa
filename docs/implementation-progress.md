@@ -13,7 +13,7 @@
 | 0 — Source audit | **DONE** (this session) |
 | 1 — Structural refactor + service removal | **DONE** (1a, 1b, 1c, 1d, 1e — 1e is the deferred apply-transaction extraction) |
 | 2 — Init identity & capability foundation | **DONE** (detection + capability/identity domain model) |
-| 3 — Metadata & capability resolution | not started (next: B3 index-v4 schema proposal first) |
+| 3 — Metadata & capability resolution | in progress: B3 schema proposal written (unwired); next: the solver/planning use case |
 | 4 — System profiles & planning | not started |
 | 5 — Migration engine | not started |
 | 6 — Faseela runit→systemd migration | **BLOCKED** (see blockers) |
@@ -401,19 +401,46 @@ the handlers own only parsing, rendering and prompts.
 
 ## Current task
 
-**Phase 3 — profile and planning** (design §6–§8). First step, unblocking
-B3: write the **repository index v4 / recipe+archive metadata chain schema
-proposal** (`domain/system/capability.rs`'s §6 schema note is the seed):
+**Phase 3 — profile and planning** (design §6–§8). B3 is done as a
+*proposal* (below); next step: the **solver/planning use case** that consumes
+`domain/system/capability.rs` + `domain/package/metadata.rs` + `detect.rs`
+(`plan_install`'s dependency resolution moves behind it):
 
-1. Re-read design §6.3 and §16.1–2; inspect the current v3 index format
-   (`repo/`), `.PKGINFO` fields (`archive::`), and recipe `SourceSpec`/
-   `FetchSpec` (`recipe/model.rs`).
-2. Draft the v4 schema (authenticity chain: recipe → `.PKGINFO` → signed
-   index entry; missing capability metadata stays explicitly unknown) as a
-   written proposal + parser tests, in the style of the Phase-2 §6 note.
-3. Only then plan the solver use case that consumes
-   `domain/system/capability.rs` + `detect.rs` (`plan_install`'s
-   dependency resolution moves behind it).
+1. Design the use-case boundary: what `plan_install` currently resolves from
+   repo entries + db records, and which of it becomes normalized candidate
+   input (§8.1) to a presentation-free use case.
+2. Keep package/index/db formats unchanged — the B3 schema is agreed only as
+   a proposal; the solver consumes `PkgMetadata` normalized from *existing*
+   v1–v3 entries (unknown-vs-empty) and recipe-declared rundeps.
+3. Then Phase 4 (system profile, §7/§16.3) as the next externally blocked
+   step (B4).
+
+### Done within Phase 3 so far
+
+**B3 — package metadata chain proposal** (design §6.3, §16.1–2):
+
+* `docs/design/package-metadata-chain.md` (new): exact recipe
+  (`[capabilities] provides`), archive (`.PKGINFO provides =`, comma-joined
+  single value), and index-v4 spellings (`[[package]]` + required
+  `rundeps`/`provides`, `deny_unknown_fields`); the chain rules (one value,
+  authentication, exact comparison on fetch, legacy = no comparison); the
+  unknown-vs-empty table; what binary-only solving requires; the upgrade
+  story (opt-in `--index-version 4`, old readers fail closed via the
+  existing unknown-schema message, no downgrade, side-by-side v3+v4 during
+  migration).
+* `src/domain/package/{mod,metadata}.rs` (new, unwired —
+  `#![allow(dead_code)]` + justification, Phase-2 proposal style): pure
+  normalized model — `RunDeps{Declared,Unknown}`, `PkgMetadata`
+  (`unknown()`, `from_pkginfo_map`), `check_chain` (index-vs-archive exact
+  compare, §6.3(3)), `IndexEntryV4` (serde + `parse_toml`/`validate`/
+  `metadata`) + 15 tests (flat-format rules incl. the no-comma rule,
+  v4 required-field fail-closed errors, legacy→unknown mapping, chain
+  mismatch cases). Domain stays pure: std/serde/toml +
+  `domain/system/capability.rs` only.
+* Notable finding pinned by a test: the current install-time reader
+  (`Pkginfo::from_map`) is lenient (absent rundeps → `[]`, empty slots
+  filtered); the normalized reader is strict and preserves
+  unknown-vs-empty. Wiring replaces it on the new path only.
 
 Nothing in this step changes package, index or db formats yet.
 
@@ -480,6 +507,13 @@ Nothing in this step changes package, index or db formats yet.
   * `src/commands/mod.rs` (installer facade narrowed to the six commands)
   * `src/application/{mod,features/package/mod}.rs` (port + use-case
     registrations, layering doc updated)
+* Phase 3 (B3, in progress):
+  * `docs/design/package-metadata-chain.md` (new — the B3 schema proposal,
+    answers design §16.1–2)
+  * `src/domain/package/{mod,metadata}.rs` (new — pure normalized metadata
+    model: `RunDeps`, `PkgMetadata`, `check_chain`, `IndexEntryV4` + 15
+    tests; unwired with justification)
+  * `src/domain/mod.rs` (one-line `pub(crate) mod package;`)
 
 ## Tests actually executed
 
@@ -493,8 +527,9 @@ Nothing in this step changes package, index or db formats yet.
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 1d tree) | 581 pass / 2 ignored / 3 env-failed (= 564 + 18 new − 1 net lifecycle test; same 3 env failures) |
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 2 tree) | 614 pass / 2 ignored / 3 env-failed (= 581 + 33 new: 16 detect + 9 identity + 8 capability; same 3 env failures) |
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 1e tree) | 622 pass / 2 ignored / 3 env-failed (= 614 + 8 new apply-transaction tests; same 3 env failures) |
-| `cargo clippy --all-targets --offline -- -D warnings` | pass (Phase 1a + 1b + 1c + 1d + 1e + 2) |
-| `python3 scripts/check-layering.py` | pass (54 after 1a; 53 after 1b; 54 after 1c; 55 after 2 — the new `domain` layer) |
+| `cargo test --all-targets --offline --no-fail-fast` (Phase 3 B3 tree) | 637 pass / 2 ignored / 3 env-failed (= 622 + 15 new metadata tests; same 3 env failures) |
+| `cargo clippy --all-targets --offline -- -D warnings` | pass (Phase 1a + 1b + 1c + 1d + 1e + 2 + 3/B3) |
+| `python3 scripts/check-layering.py` | pass (54 after 1a; 53 after 1b; 54 after 1c; 55 after 2 — the new `domain` layer; 55 after 3/B3 — the count is top-level modules, the new `domain/package` submodule is scanned) |
 | `bash scripts/smoke-v06.sh` (release build, Phases 1b + 1c + 1d + 2) | ALL V0.6 SMOKE TESTS PASSED |
 | `bash scripts/smoke-v05.sh` (release build, Phases 1d + 2) | ALL SMOKE TESTS PASSED |
 | HEAD-vs-1c behavior diff (`--help`, `--version`, completions × 3, isolated worktree build) | byte-identical |
@@ -524,7 +559,7 @@ Nothing in this step changes package, index or db formats yet.
 |---|---|---|---|
 | B1 | **saq init selection**: disk-boot `init` fallback chain (`$INIT_ARG /usr/bin/runit /sbin/init /usr/sbin/init`) contains no systemd path, and Faseela's grub.cfg passes no `init=`. During the migration runit must stay installed, so `/usr/bin/runit` would win the chain and boot runit again. Needs: migration boot config sets `init=` explicitly **and/or** saq change (e.g. read a selection file) — exact interface TBD with Faseela/SAQ. | Faseela/SAQ | Phase 6 apply-safety (Phase 2 detection tests were unblocked: read-only, fake `/proc`) |
 | B2 | **`/usr/bin/init` payload conflict**: old runit-services and the systemd package both ship `/usr/bin/init`. Staged coexistence (install systemd while runit is still installed) hits a file conflict or silently replaces the selector. Needs Faseela-side payload/policy decision (move init selector ownership, document force-install + journal-restore behavior). | Faseela | Phase 6 staged install |
-| B3 | **Repository index v4 schema**: metadata chain (recipe → `.PKGINFO` → authenticated v4) needs a written schema proposal + tests before the solver consumes it (design §6.3, §16.1–2). | Nawa (this repo) | Phase 3 |
+| B3 | **Repository index v4 schema**: ~~needs a written schema proposal + tests~~ **proposal written** (`docs/design/package-metadata-chain.md` + unwired reference model `domain/package/metadata.rs`, 15 tests). Awaiting maintainer agreement before wiring (recipe/build/repo-create/validate/fetch changes listed in §10 of the proposal). | Nawa (this repo) | Phase 3 (proposal done; wiring when agreed) |
 | B4 | **System profile location/merge contract** with Faseela (defaults path, override path, precedence) — design §16.3. | Faseela agreement | Phase 4 |
 | B5 | **Bootloader/initramfs scope + recovery route** for the first migration (grub only? which initramfs tool versions) — design §16.4–5. | Faseela | Phase 6 |
 | B6 | **VM boot-test harness**: boot-critical verification requires disposable VMs with snapshots (BIOS + UEFI). No harness exists in this repo yet. | Nawa/infra | Phase 6 acceptance |
@@ -532,12 +567,13 @@ Nothing in this step changes package, index or db formats yet.
 
 ## Exact next task
 
-Start **Phase 3** with the B3 schema proposal (checklist in "Current task"
-above): re-read design §6.3 + §16.1–2, inspect the current v3 index and
-`.PKGINFO`/recipe formats, write the v4 metadata-chain schema proposal with
-parser tests; then the solver/planning use case consuming
-`domain/system/capability.rs` + `detect.rs`. Verify with `cargo check
+**Phase 3, solver/planning use case**: move `plan_install`'s dependency
+resolution behind a presentation-free application use case that consumes
+normalized candidates — `PkgMetadata` (unknown-vs-empty) from existing v1–v3
+repo entries, recipe-declared rundeps, and `domain/system/capability.rs` +
+`detect.rs` for the init-system role (design §8.1–8.2). No format changes
+(the B3 schema stays a proposal until agreed). Then verify with `cargo check
 --all-targets --offline && cargo test --all-targets --offline
---no-fail-fast && cargo clippy --all-targets --offline -- -D warnings`
-plus `python3 scripts/check-layering.py`; keep package/index/db formats
-unchanged until the proposal is agreed; commit as one coherent unit.
+--no-fail-fast && cargo clippy --all-targets --offline -- -D warnings` plus
+`python3 scripts/check-layering.py`; new files rustfmt-clean; commit as one
+coherent unit.

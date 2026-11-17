@@ -2,4 +2,5 @@
 //! I/O side effects. The domain layer sits below application; it imports
 //! nothing from the layers above it.
 
+pub(crate) mod package;
 pub(crate) mod system;
