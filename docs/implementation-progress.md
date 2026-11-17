@@ -13,8 +13,8 @@
 | 0 — Source audit | **DONE** (this session) |
 | 1 — Structural refactor + service removal | **DONE** (1a, 1b, 1c, 1d, 1e — 1e is the deferred apply-transaction extraction) |
 | 2 — Init identity & capability foundation | **DONE** (detection + capability/identity domain model) |
-| 3 — Metadata & capability resolution | in progress: B3 proposal + the whole package planner (install + outdated/orphans/removal) in `domain/planning/`, behavior verified byte-identical; next: Phase 4 profiles |
-| 4 — System profiles & planning | not started |
+| 3 — Metadata & capability resolution | **DONE** (B3 proposal; the whole package planner — install, outdated, orphans, removal ordering — in `domain/planning/`, behavior verified byte-identical) |
+| 4 — System profiles & planning | in progress: the profile model + merge rules + loader landed (§7); next: wire the profile into plan generation (§8.1–8.2 explanations) |
 | 5 — Migration engine | not started |
 | 6 — Faseela runit→systemd migration | **BLOCKED** (see blockers) |
 | 7 — Final verification | not started |
@@ -519,6 +519,48 @@ now thin adapters over normalized inputs:
   probe (transcript + resulting db state) produce identical outputs
   against an isolated HEAD worktree build.
 
+### Done within Phase 4 so far (1): the profile model, merge rules and loader
+
+**The system profile** (design §7, §16.3): the desired-state model — what
+the distribution or administrator has declared the system should use — as
+opposed to the observed state the detector reports. Explicitly *not* the
+build profile of `src/profile.rs` (`--profiles`): separate concepts,
+separate models, separate paths, as the design demands.
+
+* `domain/system/profile.rs` (new, pure): `SystemProfile` (schema pinned
+  to 1, optional `distribution`/`profile`/`architecture` scalars,
+  ordered `providers` role → identity map) with `from_doc` over
+  normalized maps — strict like the B3 chain: unknown keys and unknown
+  schema versions are parse errors, never silently misread (fail closed,
+  §7); roles/identities normalize like `Capability` (§6.1).
+  `merge(defaults, overrides)` produces the **effective target profile**:
+  overrides take precedence field-wise, provider roles overlay per role
+  (an override replaces or adds a role; it cannot remove one), either
+  side may be absent, an override without defaults is a valid profile.
+  `init_capability()` exposes the selected init provider as the §6
+  capability the solver will compare against candidate declarations.
+* `application/features/system/profile.rs` (new): the loader with
+  injectable paths (B4 only pins the contract): recommended layout
+  `<root>/usr/share/nawa/system-profile.toml` (distribution defaults) +
+  `<root>/etc/nawa/system-profile.toml` (administrator override). Both
+  missing → `Ok(None)` (no desired state declared — an absent profile is
+  not read as a decision); an override may exist without defaults; an
+  invalid file on either side **fails closed naming the file** — never
+  silently ignored in favor of the other side. Read-only: a package
+  update never touches these files (§7: local policy is never silently
+  overwritten).
+* Verification: 20 new tests (11 domain: §7 example, schema pinning,
+  unknown keys, normalization, strict providers, empty `[providers]`
+  section, merge cases incl. determinism; 9 loader: absent/defaults/
+  override-only/merged, invalid override fails closed, invalid defaults,
+  table-where-scalar, empty file is invalid not absent, integer schema);
+  layering caught one doc-comment `crate::application` reference in the
+  domain module (the parser counts doc links) — reworded, layering green.
+  The loader is not wired into any command yet (next slice), so CLI
+  behavior is trivially unchanged — verified anyway: `--help`/
+  `--version`/completions × 3 and the paired 8-step scenario byte-identical
+  vs HEAD (isolated builds).
+
 ## Changed files (this phase, updated as work lands)
 
 * `docs/architecture-audit.md` (new, Phase 0)
@@ -606,6 +648,15 @@ now thin adapters over normalized inputs:
     delegation adapters; signatures unchanged; `recipe_full`/
     `newer_than_installed` + `vercmp`/`Ordering`/`BTreeSet` imports
     dropped; baseline tests byte-identical)
+* Phase 4 (profile model, in progress):
+  * `src/domain/system/profile.rs` (new — `SystemProfile`, `from_doc`
+    validation, `merge`, `init_capability` + 11 tests; strict/fail-closed
+    documented; `#![allow(dead_code)]` until the planner consumes it)
+  * `src/application/features/system/profile.rs` (new — the loader with
+    injectable paths, recommended §7 layout, fail-closed semantics + 9
+    tests)
+  * `src/domain/system/mod.rs`, `src/application/features/system/mod.rs`
+    (one-line registrations)
 
 ## Tests actually executed
 
@@ -622,8 +673,9 @@ now thin adapters over normalized inputs:
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 3 B3 tree) | 637 pass / 2 ignored / 3 env-failed (= 622 + 15 new metadata tests; same 3 env failures) |
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 3 solver tree) | 648 pass / 2 ignored / 3 env-failed (= 637 + 11 new domain-planner tests; same 3 env failures) |
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 3 removal tree) | 658 pass / 2 ignored / 3 env-failed (= 648 + 8 removal + 2 outdated domain tests; same 3 env failures) |
-| `cargo clippy --all-targets --offline -- -D warnings` | pass (Phase 1a + 1b + 1c + 1d + 1e + 2 + 3/B3 + 3/solver + 3/removal) |
-| `python3 scripts/check-layering.py` | pass (54 after 1a; 53 after 1b; 54 after 1c; 55 after 2 — the new `domain` layer; 55 after 3/B3, 3/solver and 3/removal — the count is top-level modules, the new `domain/package` + `domain/planning` submodules are scanned) |
+| `cargo test --all-targets --offline --no-fail-fast` (Phase 4 profile tree) | 678 pass / 2 ignored / 3 env-failed (= 658 + 11 domain + 9 loader profile tests; same 3 env failures) |
+| `cargo clippy --all-targets --offline -- -D warnings` | pass (Phase 1a + 1b + 1c + 1d + 1e + 2 + 3/B3 + 3/solver + 3/removal + 4/profile) |
+| `python3 scripts/check-layering.py` | pass (54 after 1a; 53 after 1b; 54 after 1c; 55 after 2 — the new `domain` layer; 55 after 3/B3, 3/solver, 3/removal and 4/profile — the count is top-level modules, the new `domain/package`, `domain/planning`, `domain/system/profile` + `features/system/profile` submodules are scanned) |
 | `bash scripts/smoke-v06.sh` (release build, Phases 1b + 1c + 1d + 2) | ALL V0.6 SMOKE TESTS PASSED |
 | `bash scripts/smoke-v05.sh` (release build, Phases 1d + 2) | ALL SMOKE TESTS PASSED |
 | HEAD-vs-1c behavior diff (`--help`, `--version`, completions × 3, isolated worktree build) | byte-identical |
@@ -637,7 +689,8 @@ now thin adapters over normalized inputs:
 | HEAD-vs-3(removal) behavior diff (`--help`, `--version`, completions × 3, isolated CARGO_TARGET_DIR builds) | byte-identical |
 | HEAD-vs-3(removal) paired 8-step install/update scenario (same script, isolated builds) | identical transcripts |
 | HEAD-vs-3(removal) query/remove probes over a seeded db (reasons explicit/dependency, recorded run deps): `outdated` / `autoremove -n` (prints the dependents-first removal order) / `update -n` / real `remove --yes` (transcript + resulting db state), isolated builds | identical transcripts + db state |
-| `cargo fmt --all -- --check` | fails repo-wide at HEAD (pre-existing ~100 files; CI does not run fmt) — re-scoped to "no new violations in touched/new code", satisfied (1a–1e, 2, 3/B3, 3/solver, 3/removal: new files clean; plan.rs dirty hunks 19 → 13 — the deleted planner bodies carried six away across the two slices, the added adapter code is clean) |
+| HEAD-vs-4(profile) behavior diff (`--help`, `--version`, completions × 3, paired 8-step scenario, isolated CARGO_TARGET_DIR builds) | byte-identical (the loader is unwired; no production path changed) |
+| `cargo fmt --all -- --check` | fails repo-wide at HEAD (pre-existing ~100 files; CI does not run fmt) — re-scoped to "no new violations in touched/new code", satisfied (1a–1e, 2, 3/B3, 3/solver, 3/removal, 4/profile: new files clean; plan.rs dirty hunks 19 → 13 — the deleted planner bodies carried six away across the two slices, the added adapter code is clean) |
 
 ## Known problems
 
@@ -660,26 +713,27 @@ now thin adapters over normalized inputs:
 | B1 | **saq init selection**: disk-boot `init` fallback chain (`$INIT_ARG /usr/bin/runit /sbin/init /usr/sbin/init`) contains no systemd path, and Faseela's grub.cfg passes no `init=`. During the migration runit must stay installed, so `/usr/bin/runit` would win the chain and boot runit again. Needs: migration boot config sets `init=` explicitly **and/or** saq change (e.g. read a selection file) — exact interface TBD with Faseela/SAQ. | Faseela/SAQ | Phase 6 apply-safety (Phase 2 detection tests were unblocked: read-only, fake `/proc`) |
 | B2 | **`/usr/bin/init` payload conflict**: old runit-services and the systemd package both ship `/usr/bin/init`. Staged coexistence (install systemd while runit is still installed) hits a file conflict or silently replaces the selector. Needs Faseela-side payload/policy decision (move init selector ownership, document force-install + journal-restore behavior). | Faseela | Phase 6 staged install |
 | B3 | **Repository index v4 schema**: ~~needs a written schema proposal + tests~~ **proposal written** (`docs/design/package-metadata-chain.md` + unwired reference model `domain/package/metadata.rs`, 15 tests). Awaiting maintainer agreement before wiring (recipe/build/repo-create/validate/fetch changes listed in §10 of the proposal). | Nawa (this repo) | Phase 3 (proposal done; wiring when agreed) |
-| B4 | **System profile location/merge contract** with Faseela (defaults path, override path, precedence) — design §16.3. | Faseela agreement | Phase 4 |
+| B4 | **System profile location/merge contract** with Faseela (defaults path, override path, precedence) — design §16.3. ~~Model + merge rules~~ **landed** (`domain/system/profile.rs` + injectable loader; recommended §7 layout documented) — B4 now only pins the exact filenames/locations the loader is called with. | Faseela agreement | Phase 4 (planner wiring, dry-run explanations) |
 | B5 | **Bootloader/initramfs scope + recovery route** for the first migration (grub only? which initramfs tool versions) — design §16.4–5. | Faseela | Phase 6 |
 | B6 | **VM boot-test harness**: boot-critical verification requires disposable VMs with snapshots (BIOS + UEFI). No harness exists in this repo yet. | Nawa/infra | Phase 6 acceptance |
 | B7 | **Hook/trigger trust policy** (design §16.9): explicit documented policy + CI guard for `.HOOKS`/transaction-trigger service activation. | Faseela (+ Nawa docs) | Phase 1 docs, Phase 5 |
 
 ## Exact next task
 
-**Phase 4 — system profiles & planning (design §7, §16.3)**: build the
-internal profile model + merge rules behind a port — distribution defaults
-shipped by the distribution, local administrator overrides stored
-separately (never silently overwritten by a package update), the effective
-target profile produced by merging, and observed runtime state reported
-independently by the detector (already `domain/system/identity.rs` +
-`features/system/detect.rs`). Blocker B4 only pins **where the profile
-files live** (Faseela agreement); the model and merge rules can land now
-with the paths injected. Then wire the profile into plan generation so a
-dry-run plan explains the init-provider decision (§8.2) — that is
-Stage 3's exit condition: "dry-run plans explain every init-provider and
-package decision without managing services". Verify with `cargo check
---all-targets --offline && cargo test --all-targets --offline
---no-fail-fast && cargo clippy --all-targets --offline -- -D warnings`
-plus `python3 scripts/check-layering.py`; new files rustfmt-clean; paired
+**Phase 4, next slice: wire the profile into plan generation (§8.1–8.2)** —
+the effective target profile becomes an explicit plan input: load it via
+`features/system/profile::load_effective` where the planning use cases
+assemble their inputs, upgrade `detect.rs`'s `DesiredInit` from
+`NotRead` to carry the loaded profile (§5.5: never collapse the four
+state kinds), and make the dry-run plan report the init-provider
+decision the profile selects — per §8.4's explanation shape ("required
+by: target profile", "capability: init-system=systemd"), including the
+explicit *unresolved* result when no profile declares an init provider
+(§8.2: unknown is never guessed). Only the *reporting* lands now; no
+command may act on a provider change (§7: installing a package must not
+switch the init provider — that is the explicitly authorized migration,
+Phase 5/6). Verify with `cargo check --all-targets --offline && cargo
+test --all-targets --offline --no-fail-fast && cargo clippy
+--all-targets --offline -- -D warnings` plus
+`python3 scripts/check-layering.py`; new files rustfmt-clean; paired
 transcripts identical; commit as one coherent unit.

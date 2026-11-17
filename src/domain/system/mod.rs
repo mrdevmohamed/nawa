@@ -3,3 +3,4 @@
 
 pub(crate) mod capability;
 pub(crate) mod identity;
+pub(crate) mod profile;

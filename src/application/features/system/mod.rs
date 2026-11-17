@@ -2,3 +2,4 @@
 //! detection now; profiles, planning and migration in later phases.
 
 pub(crate) mod detect;
+pub(crate) mod profile;
