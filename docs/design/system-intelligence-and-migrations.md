@@ -865,14 +865,42 @@ Nawa may handle service-related files only as ordinary package payload:
   according to the package manifest.
 - Apply normal package ownership, permissions, conflict checks, verification,
   and transaction recovery to those files.
-- Never infer that a service is enabled, started, healthy, or even usable
-  merely because a related file exists.
+- Never infer that a service is enabled, started, healthy, or usable merely
+  because a related file exists.
 
 Nawa must not expose a service API, service CLI, provider interface, service
-state database, or service-specific capability. It must not invoke service
-manager commands as part of package installation, upgrade, removal, or init
-migration. This includes implicit post-install activation through recipe
-hooks.
+state database, or service-specific capability. Nawa's built-in install,
+upgrade, removal, and migration workflows must not themselves invoke service
+manager commands or automatically enable/start services.
+
+There is an important existing compatibility boundary: current package
+archives may contain a `.HOOKS` entry with `post_install`, `pre_remove`, and
+`post_remove` shell scripts. The current installer executes these scripts
+through a shell on the live root or inside a chroot. Distribution
+post-transaction trigger scripts are also executed by the current application.
+Consequently, the blanket claim that "Nawa can never invoke service-manager
+commands during a package operation" would be false while these script
+mechanisms remain available: a hook can itself call `systemctl`, `sv`, or
+another command.
+
+The initial scope therefore makes this distinction explicit:
+
+- Nawa provides no service-management API and has no built-in service
+  activation behavior.
+- Faseela package and transaction-trigger scripts must not use hooks to enable,
+  start, stop, or otherwise manage services. The distribution needs a
+  documented recipe/repository review policy and CI checks for this rule.
+- Static hook linting is a policy guard, not a security sandbox; it cannot
+  prove that arbitrary shell code never performs service management.
+- If the project requires a hard technical guarantee that package hooks cannot
+  manage services, restricting or removing privileged package hooks and
+  transaction triggers is a separate compatibility/security project. It must
+  be designed and tested explicitly rather than claimed by this migration
+  proposal.
+
+Service unit files, presets, and runit run scripts remain ordinary payload
+files. Installing one of those files is not the same as enabling or starting
+the service.
 
 The distribution's service manager, distribution provisioning tools, and the
 administrator are responsible for deciding which services are enabled and for
@@ -903,8 +931,8 @@ cleanup checklist:
   needed, design it independently from service state.
 
 The removal is complete only when the crate builds and tests pass without a
-service command, service-management module, service-manager invocation, or
-runit-specific installer marker behavior.
+service command, service-management module, built-in service-manager
+invocation, or runit-specific installer marker behavior.
 
 ## 10. Migration engine
 
@@ -943,10 +971,11 @@ root to run.
 
 ### 10.2 Trusted handlers
 
-Privileged migration handlers should be built into Nawa or delivered through a
-separately reviewed and authenticated extension mechanism with a strict
-capability boundary. The first implementation should prefer built-in
-allowlisted handler IDs.
+For the first implementation, privileged migration handlers must be built
+into Nawa and selected only by an allowlisted, typed handler ID. Do not load
+migration executables, scripts, plugins, or dynamic libraries from a
+repository. A future authenticated extension mechanism would require a
+separate security design and must not be assumed by this proposal.
 
 A handler should expose small, typed operations with explicit inputs and
 postconditions. It must not receive unrestricted authority to execute
@@ -960,43 +989,79 @@ must never grant new privilege.
 The migration should persist a versioned state record under Nawa's state
 directory, for example:
 
-    /var/lib/nawa/migrations/<migration-id>.toml
+    <target-root>/var/lib/nawa/migrations/<migration-id>.toml
 
-Suggested states:
+Suggested durable states:
 
 | State | Meaning |
 |---|---|
-| planned | Plan created; no mutation has begun. |
-| preparing | Preconditions checked and preparation is running. |
-| awaiting-reboot | Packages and boot preparation are committed; reboot is required. |
-| verifying | The machine has rebooted and postconditions are being checked. |
-| completed | Target state has been verified and finalization is complete. |
-| failed | A step failed and the failure is recorded. |
-| interrupted | Process ended before a step outcome was committed. |
-| needs-recovery | Automatic safe continuation is not possible. |
-| rollback-required | The target state failed verification and recovery action is required. |
+| planned | Plan created and approved; no mutation has begun. |
+| preparing | The migration owns a persistent mutation gate while package and boot preparation runs. |
+| awaiting-reboot | Preparation is committed; the new init has not yet been verified after reboot. |
+| verifying | The live host has rebooted and init/boot postconditions are being checked. |
+| completed | Target state is verified and finalization is complete. |
+| failed | A step failed and the old bootable state is known to remain intact. |
+| rollback-required | Verification failed, but a documented rollback action is available. |
+| needs-recovery | State is ambiguous or automatic safe continuation/rollback is impossible. |
 
-Every state transition must be durably recorded. Writes should use the project's
-atomic publication and fsync conventions. Recovery must inspect recorded
-intents and actual system state; it must not blindly repeat non-idempotent
-steps.
+An interrupted process is not a stable state by itself. On restart, an intent
+without a corresponding result is reconciled into one of the durable states
+after inspecting actual system state.
+
+Every external migration step must have a write-ahead intent persisted before
+the side effect and a result persisted after it. Writes must use atomic
+publication, file and directory fsync, and restrictive ownership/permissions.
+The migration record is rooted at the selected target root; it must never
+accidentally write to the host when Nawa is planning an offline root.
+
+A **persistent migration mutation gate** is required because the ordinary
+`flock` lock disappears when the process exits or the machine reboots. While
+a migration is in `preparing`, `awaiting-reboot`, `verifying`,
+`rollback-required`, or `needs-recovery`, all package-mutating commands must
+stop before changing the package set. Read-only inspection and explicit
+migration recovery commands remain allowed. The migration coordinator may
+perform its own planned package transactions through a narrowly scoped
+internal migration permit; ordinary CLI invocations must not bypass the gate.
+The gate is checked under the same exclusive package database lock before any
+package mutation. It is cleared only after verified completion or a completed,
+verified rollback.
 
 ### 10.4 Migration stages
 
-1. **Detect:** compare observed state, installed state, and target profile.
-2. **Preflight:** verify privileges, packages, disk space, architecture, boot
-   layout, required tools, repository trust, and recovery prerequisites.
-3. **Plan:** solve package and provider changes; display all actions.
-4. **Prepare:** install required packages and service definitions using the
-   existing verified installer; prepare boot integration through the trusted
-   handler; preserve the previous boot path where supported.
-5. **Commit pending state:** durably record that the new provider is prepared
-   and a reboot is required.
-6. **Reboot boundary:** Nawa exits with a clear pending-migration status. The
-   system must not pretend the new init is active before reboot.
-7. **Verify:** on the next boot, inspect PID 1 and required system services.
-8. **Finalize:** only after verification and rollback-policy checks, retire
-   old provider components and mark the migration complete.
+1. **Detect:** compare observed PID 1, installed init candidates, and the
+   effective target profile as separate facts.
+2. **Preflight:** require the verified live Faseela host, root privileges,
+   supported architecture/release, authenticated packages and metadata, disk
+   space, known boot layout, compatible initramfs/boot tooling, and an external
+   recovery route.
+3. **Plan:** calculate package changes and boot/init selection changes; show
+   all actions, conflicts, retained packages, and rollback limits.
+4. **Stage artifacts:** download/build and verify all required package
+   artifacts before entering the mutation phase. Do not hold the package lock
+   across downloads or builds.
+5. **Prepare:** acquire the exclusive package lock, revalidate the approved
+   plan against current installed state, persist the migration gate and
+   write-ahead record, then install the required packages through the existing
+   verified installer. Prepare boot/initramfs integration only through the
+   built-in trusted handler. Do not activate services.
+6. **Commit pending state:** persist `awaiting-reboot` only after every
+   preparation postcondition is checked and the previous boot/recovery path is
+   retained. Nawa exits with a clear pending-migration status; it does not
+   reboot automatically.
+7. **Resume and verify:** after reboot, an explicit
+   `nawa system migrate resume` (or equivalent documented command) checks the
+   live PID 1 identity and boot/init postconditions only. It must not inspect
+   or manage individual services.
+8. **Finalize:** only after successful verification and rollback-policy checks,
+   retire old init packages/artifacts as permitted, record completion, and
+   clear the persistent mutation gate.
+
+Faseela's initramfs generator and boot configuration are part of this
+integration boundary. The migration must verify that the generated initramfs
+selects the requested systemd init explicitly. It must not rely on a fallback
+ordering that prefers an installed `/usr/bin/runit` merely because that file
+exists. The Faseela `saq` init-selection contract and BIOS/UEFI boot paths
+must be audited and tested before the migration handler is considered safe.
 
 A migration may be refused if its handler cannot prove a safe preparation and
 verification path for the target machine.
@@ -1005,7 +1070,9 @@ verification path for the target machine.
 
 The migration definition must state what can be restored, how, and at which
 stage. At minimum, it should preserve the old boot entry or another documented
-recovery route when the platform supports it.
+recovery route when the platform supports it. It must also define which exact
+kernel, initramfs, modules, and boot configuration artifacts are retained;
+keeping only a symlink to an old image is not a rollback strategy.
 
 Do not promise automatic rollback of arbitrary root filesystem changes.
 Package-level rollback, saved configuration copies, boot-entry restoration,
@@ -1025,14 +1092,18 @@ The migration engine must reuse the existing installer and transaction
 history/journal instead of creating a second package installation path.
 
 A migration record should link to the package transaction or transactions
-that prepared it. It should record:
+that prepared it, but it must not reuse the package WAL as if it covered boot
+side effects. Package transactions continue to journal package/filesystem and
+database steps; the migration journal separately records boot/initramfs
+handler intents and outcomes. It should record:
 
 - Migration ID and definition version.
 - Source and target profile/provider.
 - Requested and selected packages.
 - Handler ID and handler version.
 - Preconditions and their results.
-- Ordered step intents and outcomes.
+- Ordered write-ahead step intents and outcomes, including the durable point
+  before and after every boot/initramfs side effect.
 - Files or boot artifacts changed by each handler.
 - Reboot boundary and verification results.
 - Recovery instructions and final status.
@@ -1048,6 +1119,13 @@ Shared cache refresh triggers are not suitable for critical migration steps:
 they are designed for retryable refresh work after package transactions, not
 for boot-critical changes. Migration steps need explicit preconditions,
 idempotency rules, durable intent, and postcondition checks.
+
+The persistent migration gate must be checked by every package-mutating entry
+point after process restart and after reboot, while holding the exclusive
+package database lock. The migration's own coordinator uses an internal,
+scoped permit to run only the package transactions recorded in its approved
+plan. This is separate from the process-local `flock` lock and cannot be
+implemented by relying on the lock alone.
 
 ## 12. CLI and user experience
 
