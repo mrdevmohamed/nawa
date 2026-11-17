@@ -30,6 +30,7 @@ nav = [
     "design/signed-repository-index-v2.md",
     "design/plugin-api-v1.md",
     "design/package-management-roadmap.md",
+    "design/system-intelligence-and-migrations.md",
     "future-dependency-aware-rebuild.md",
   ] },
   { "Review records" = [
