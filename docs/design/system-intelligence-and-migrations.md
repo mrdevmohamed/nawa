@@ -201,7 +201,10 @@ This proposal does not require:
 - Replacing the existing repository signature and artifact-verification
   mechanisms.
 - Adding an AI model or network service to the package manager.
-- Running arbitrary scripts downloaded from repositories as root.
+- Using repository-supplied package hooks as migration handlers or as a
+  substitute for built-in, reviewed migration logic. Existing package
+  `.HOOKS` remain a separate legacy execution mechanism whose trust policy is
+  explicitly reviewed in Section 9.
 - Automatically changing a live system merely because a package name appears
   in an upgrade list.
 - Treating every provider change as a simple package conflict.
@@ -252,19 +255,26 @@ features and use cases.
 The dependency direction is inward:
 
     CLI ----------------------> Application Features
-                                      |
-                                      v
-                                  Domain
+      |                               |
+      |                               v
+      |                             Domain
+      |                               ^
+      |                               |
+      +----> Presentation              |
+                 |                    |
+                 +---- implements ----+---- Application Ports
                                       ^
                                       |
-    Adapters ----------------> Application Ports
+                                  Adapters
 
-    Bootstrap wires CLI + Application + Ports + Adapters together.
+    Bootstrap wires CLI + Application + Ports + Adapters + Presentation together.
 
-Application defines the ports it needs. Adapters implement those ports and may
-depend on the port contracts and domain types. Domain remains independent of
-Application, CLI, and Adapters. CLI must not call adapter implementations
-directly. No layer may create a circular dependency.
+Application defines the ports it needs. Infrastructure adapters implement
+those ports and may depend on the port contracts and domain types. The
+Presentation adapter implements the user-interaction port (plan display,
+confirmation, and authorization prompts). Domain remains independent of
+Application, CLI, Presentation, and Adapters. CLI must not call adapter
+implementations directly. No layer may create a circular dependency.
 
 Ports should be introduced where an external effect must be substituted,
 isolated, or tested. Do not create a trait for every function or wrap simple
@@ -412,6 +422,9 @@ during the refactor.
         sandbox/
         transaction/
         plugins/
+        recipe_source/
+        configuration/
+        host_inspection/
 
       presentation/
         output.rs
@@ -422,11 +435,16 @@ during the refactor.
 The tree may retain cohesive existing subsystems during early stages. For
 example, the build pipeline, sandbox implementation, archive format, and
 repository-index implementation do not need to be flattened or rewritten merely
-to match this diagram. Move or split a module only when its current ownership
+to match this diagram. The Presentation adapter may implement the interaction
+port without making Application depend on terminal libraries or output
+formatting modules. Move or split a module only when its current ownership
 crosses a boundary or makes a use case difficult to test.
 
 The exact names and placement of modules should be settled by the Stage 0
 source audit. The target tree is a guide, not a license for a mass file move.
+The first implementation should also extract the presentation interaction
+port: Application requests plan display/confirmation/authorization through
+that port; it must not depend directly on terminal output or prompting code.
 
 ### 4.4 Example: the `nawa install firefox` flow
 
@@ -1039,7 +1057,7 @@ Suggested durable states:
 
 | State | Meaning |
 |---|---|
-| planned | Plan created and approved; no mutation has begun. |
+| planned | Live-host plan passed preflight and explicit approval; its persistent record is created immediately before the mutation gate. Offline plans are transient and do not create this state. |
 | preparing | The migration owns a persistent mutation gate while package and boot preparation runs. |
 | awaiting-reboot | Preparation is committed; the new init has not yet been verified after reboot. |
 | verifying | The live host has rebooted and init/boot postconditions are being checked. |
@@ -1076,9 +1094,16 @@ A **persistent migration mutation gate** is required because the ordinary
 `flock` lock disappears when the process exits or the machine reboots. The
 gate check must run before any process-local lock-bypass shortcut. In the
 current source, `lock::acquire` returns early when `NAWA_LOCK_HELD` is set so
-a nested package hook can avoid deadlocking on its parent's lock. That marker
-may suppress reacquiring the same `flock`; it must never authorize a package
-mutation or skip the persistent migration-gate check. While
+a nested package hook can avoid deadlocking on its parent's lock. This
+environment variable is forgeable and is not proof that a parent process
+actually holds the lock. It must never authorize a package mutation or skip
+the persistent migration-gate check. While the marker is present, a nested
+package-mutating CLI command must fail closed rather than proceed without a
+lock. Read-only nested commands may bypass reacquiring the lock only where
+Stage 0 proves their read snapshot is consistent; otherwise they must fail
+fast with a clear diagnostic. The refactor should replace the generic
+environment-based mutation bypass with explicit in-process lock ownership
+where application use cases share a lock guard. While
 a migration is in `preparing`, `awaiting-reboot`, `verifying`,
 `rollback-required`, or `needs-recovery`, all package-mutating commands must
 stop before changing the package set. Read-only inspection and explicit
@@ -1090,9 +1115,13 @@ it must not be represented by an environment variable, CLI flag, plugin
 capability, or inherited subprocess environment. The gate check happens before
 honoring `NAWA_LOCK_HELD` or any equivalent lock-bypass marker. A nested
 `nawa` process launched by a package hook receives no migration permit and
-must be blocked if it attempts a package mutation while the gate is pending.
+must be blocked if it attempts a package mutation even if the marker is set.
 The migration coordinator should invoke the package-use-case implementation
 inside the same Nawa process rather than spawn a nested `nawa` CLI process.
+The process-local permit is distinct from the lock guard: the coordinator must
+hold the appropriate exclusive lock and pass both the lock ownership and the
+permit through the internal application call chain without reacquiring the
+same non-reentrant lock.
 The gate is checked under the same exclusive package database lock before any
 package mutation. It is cleared only after verified completion or a completed,
 verified rollback.
@@ -1351,10 +1380,12 @@ Testing must cover both the solver and real system transition boundaries.
   checks fail on forbidden dependency directions.
 - The pure planner produces identical results for identical normalized
   source-built and binary-only inputs.
-- Persistent gate checks run before the `NAWA_LOCK_HELD` shortcut; a nested
-  hook process cannot mutate packages while migration is pending.
-- No environment variable, CLI flag, or plugin can construct or impersonate
-  the private in-process migration permit.
+- Persistent gate checks run before the `NAWA_LOCK_HELD` shortcut. The
+  environment marker cannot authorize mutation; nested package-mutating
+  commands fail closed even when it is set.
+- No environment variable, CLI flag, inherited hook environment, or plugin
+  can construct or impersonate the private in-process migration permit. A
+  forged `NAWA_LOCK_HELD` marker cannot bypass package mutation locking.
 
 ### 14.2 Integration tests
 
@@ -1368,10 +1399,11 @@ Testing must cover both the solver and real system transition boundaries.
   policies reject service activation in package hooks; tests also document
   that shell hooks are privileged code and cannot be treated as a sandbox.
 - Mutating package commands are blocked while a migration mutation gate is
-  pending; read-only commands remain available. `NAWA_LOCK_HELD` may suppress
-  nested lock acquisition but cannot bypass the gate. Only the private
-  in-process permit held by the matching migration coordinator may continue
-  its approved package steps.
+  pending; read-only commands remain available where snapshot consistency is
+  proven. `NAWA_LOCK_HELD` is not proof of lock ownership and cannot authorize
+  mutation or bypass the gate. Nested package-mutating commands fail closed
+  even when that marker is set. Only the private in-process permit, together
+  with the coordinator's lock ownership, may continue approved package steps.
 - `nawa system migrate apply` refuses offline roots, chroots, containers,
   and unknown runtime init states; offline-root planning remains read-only
   and does not persist migration state under the target root.
