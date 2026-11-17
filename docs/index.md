@@ -34,3 +34,8 @@ Nawa does **not** ship a package recipe collection. A distribution or administra
 ## Documentation scope
 
 The user guide describes commands and behavior available in the current source tree. Design documents and review records are included separately and are labeled as design or implementation status; proposals are not presented as shipped features.
+
+## Design proposals
+
+- [Package management roadmap](design/package-management-roadmap.md)
+- [System intelligence and migration engine](design/system-intelligence-and-migrations.md)
