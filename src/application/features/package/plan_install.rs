@@ -13,6 +13,7 @@
 use anyhow::{bail, Context, Result};
 use std::collections::{BTreeMap, HashMap};
 
+use crate::application::features::system::profile::EffectiveProfile;
 use crate::config::InstallMode;
 use crate::ctx::Ctx;
 use crate::db::Entry;
@@ -174,17 +175,39 @@ pub(crate) struct PlanOutcome {
     pub(crate) extras: Vec<RepoEntry>,
 }
 
+/// The explanatory note for the solve's init decision (§8.4: "required by:
+/// target profile", with the declaring file for attribution, §5.1). Only a
+/// *declared* selection is explained — an unresolved decision prints
+/// nothing, because nothing was decided (§8.2: unknown is never guessed).
+/// `identity` comes from the resolution (§8.2's structured result), the
+/// source file from the loader's role attribution.
+pub(crate) fn init_note(profile: &EffectiveProfile, init: &plan::InitSelection) -> Option<Notice> {
+    let plan::InitSelection::Declared { identity } = init else {
+        return None;
+    };
+    let source = profile.role_sources.get("init-system")?;
+    Some(Notice::Note(format!(
+        "target profile selects init-system={identity} (from {}) — installing does not \
+         switch the init provider",
+        source.display()
+    )))
+}
+
 /// Plan the recipe-backed part of an install and split the remaining
 /// targets: repository-only packages that are current become up-to-date
 /// notices, the rest become `extras`; names that are neither a recipe nor a
 /// repository package go to the planner, which reports them with a
-/// "did you mean" hint. Notices accumulate here and the handler prints them
-/// even when planning fails, exactly as the inline code did.
+/// "did you mean" hint. `profile` is the effective target profile (§8.1
+/// plan input; its init decision is explained when it declares one, §8.4).
+/// Notices accumulate here and the handler prints them even when planning
+/// fails, exactly as the inline code did.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn plan(
     targets: &[String],
     known: &BTreeMap<String, Recipe>,
     installed: &HashMap<String, Entry>,
     sourcing: &Sourcing,
+    profile: &EffectiveProfile,
     why: Why,
     with_deps: bool,
     notices: &mut Vec<Notice>,
@@ -218,7 +241,17 @@ pub(crate) fn plan(
         }
     }
 
-    let plan = plan::install_plan(&recipe_targets, installed, known, why, with_deps)?;
+    let plan = plan::install_plan(
+        &recipe_targets,
+        installed,
+        known,
+        profile.profile.as_ref(),
+        why,
+        with_deps,
+    )?;
+    if let Some(note) = init_note(profile, &plan.init) {
+        notices.push(note);
+    }
     for name in &plan.up_to_date {
         notices.push(Notice::Info(format!(
             "{name} is already installed and up to date"
@@ -311,6 +344,76 @@ mod tests {
             .collect()
     }
 
+    fn no_profile() -> EffectiveProfile {
+        EffectiveProfile {
+            profile: None,
+            role_sources: BTreeMap::new(),
+        }
+    }
+
+    fn profile_declaring(init: &str) -> EffectiveProfile {
+        let scalars = BTreeMap::from([("schema".to_string(), "1".to_string())]);
+        let providers = BTreeMap::from([("init-system".to_string(), init.to_string())]);
+        let profile =
+            crate::domain::system::profile::SystemProfile::from_doc(&scalars, &Some(providers))
+                .unwrap();
+        EffectiveProfile {
+            role_sources: BTreeMap::from([(
+                "init-system".to_string(),
+                std::path::PathBuf::from("/etc/nawa/system-profile.toml"),
+            )]),
+            profile: Some(profile),
+        }
+    }
+
+    #[test]
+    fn the_profiles_init_decision_becomes_a_note_when_declared() {
+        // §8.4's explanation: required by target profile, with the
+        // declaring file — and an unresolved decision prints nothing
+        let sourcing = Sourcing::build_only();
+        let installed = inst(vec![]);
+        let known = BTreeMap::from([("curl".to_string(), rec("curl", "1.0", &[]))]);
+        let mut notices = Vec::new();
+        plan(
+            &["curl".to_string()],
+            &known,
+            &installed,
+            &sourcing,
+            &profile_declaring("systemd"),
+            Why::Explicit,
+            true,
+            &mut notices,
+        )
+        .unwrap();
+        let notes: Vec<&str> = notices
+            .iter()
+            .filter_map(|n| match n {
+                Notice::Note(text) => Some(text.as_str()),
+                Notice::Info(_) => None,
+            })
+            .collect();
+        assert_eq!(
+            notes,
+            ["target profile selects init-system=systemd \
+              (from /etc/nawa/system-profile.toml) — installing does not switch the init provider"],
+        );
+
+        // no profile: unresolved, no note
+        let mut notices = Vec::new();
+        plan(
+            &["curl".to_string()],
+            &known,
+            &installed,
+            &sourcing,
+            &no_profile(),
+            Why::Explicit,
+            true,
+            &mut notices,
+        )
+        .unwrap();
+        assert!(notices.is_empty(), "{notices:?}");
+    }
+
     #[test]
     fn current_repo_only_packages_become_up_to_date_notices() {
         let sourcing = Sourcing {
@@ -325,6 +428,7 @@ mod tests {
             &BTreeMap::new(),
             &installed,
             &sourcing,
+            &no_profile(),
             Why::Explicit,
             true,
             &mut notices,
@@ -352,6 +456,7 @@ mod tests {
             &BTreeMap::new(),
             &installed,
             &sourcing,
+            &no_profile(),
             Why::Explicit,
             true,
             &mut notices,
@@ -380,6 +485,7 @@ mod tests {
             &known,
             &installed,
             &sourcing,
+            &no_profile(),
             Why::Explicit,
             true,
             &mut notices,

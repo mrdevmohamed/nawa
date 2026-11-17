@@ -8,6 +8,7 @@ use crate::application::features::package::apply_transaction::{
     apply_transaction, archive_name_of, ApplyRequest, Applied,
 };
 use crate::application::features::package::plan_install;
+use crate::application::features::system::profile as sys_profile;
 use crate::application::ports::user_interaction::{PlanView, UserInteraction};
 use crate::color::Palette;
 use std::path::Path;
@@ -77,6 +78,11 @@ pub(crate) fn cmd_install_with_why(
     let known = ctx.load_all()?;
     let installed = installed_map(ctx)?;
 
+    // The effective target profile is an explicit plan input (§8.1). An
+    // invalid profile fails closed: refuse rather than plan against a
+    // broken desired state (§7).
+    let effective = sys_profile::load_effective(&ctx.root)?;
+
     // Complete interrupted (or legacy, untracked) hooks before consulting the
     // repository. A retry must work for binary-only packages even if the
     // repository is temporarily unavailable, and must not reinstall payloads.
@@ -126,6 +132,7 @@ pub(crate) fn cmd_install_with_why(
         &known,
         &installed,
         &sourcing,
+        &effective,
         target_why,
         !no_deps,
         &mut notices,
@@ -326,6 +333,9 @@ pub(crate) fn cmd_update(
 
     let known = ctx.load_all()?;
     let installed = installed_map(ctx)?;
+    // The effective target profile is an explicit plan input (§8.1); an
+    // invalid profile fails closed (§7).
+    let effective = sys_profile::load_effective(&ctx.root)?;
     for n in names {
         if !installed.contains_key(n) {
             bail!("`{n}` is not installed (use `nawa install {n}`)");
@@ -342,7 +352,14 @@ pub(crate) fn cmd_update(
         crate::nawa_info!("everything is up to date");
         return Ok(());
     }
-    let plan = plan::install_plan(&targets, &installed, &known, plan::Why::Update, true)?;
+    let plan = plan::install_plan(
+        &targets,
+        &installed,
+        &known,
+        effective.profile.as_ref(),
+        plan::Why::Update,
+        true,
+    )?;
     let repo_url = repo.or_else(|| ctx.repo.clone());
     let (sourcing, sourcing_notes) = plan_install::open_sourcing(
         ctx,
@@ -352,6 +369,9 @@ pub(crate) fn cmd_update(
         flags.force,
     )?;
     for note in &sourcing_notes {
+        note.emit();
+    }
+    if let Some(note) = plan_install::init_note(&effective, &plan.init) {
         note.emit();
     }
 

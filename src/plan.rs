@@ -19,10 +19,11 @@ use anyhow::Result;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::db::Entry;
-pub(crate) use crate::domain::planning::install::Why;
 use crate::domain::planning::install::{self, Candidate};
+pub(crate) use crate::domain::planning::install::{InitSelection, Why};
 use crate::domain::planning::removal::{self, InstalledPkg};
 use crate::domain::system::capability::Provides;
+use crate::domain::system::profile::SystemProfile;
 use crate::recipe::Recipe;
 
 /// The planning semantics of [`Why`] are the domain enum; the database
@@ -63,6 +64,8 @@ pub(crate) struct Plan {
     /// requested targets that need nothing (already at the recipe's version
     /// or newer) — reported, not rebuilt
     pub up_to_date: Vec<String>,
+    /// the init-provider decision the target profile makes (§8.2)
+    pub init: InitSelection,
 }
 
 fn full(version: &str, rel: u32) -> String {
@@ -82,10 +85,13 @@ fn deps_of(
 ///
 /// * `target_why` — `Explicit` for `nawa install`, `Update` for `nawa update`
 /// * `with_deps`  — follow dependencies (`--no-deps` turns this off)
+/// * `profile`    — the effective target profile (§8.1 plan input); its
+///   `init-system` declaration becomes `Plan::init` (§8.2)
 pub(crate) fn install_plan(
     targets: &[String],
     installed: &HashMap<String, Entry>,
     known: &BTreeMap<String, Recipe>,
+    profile: Option<&SystemProfile>,
     target_why: Why,
     with_deps: bool,
 ) -> Result<Plan> {
@@ -94,8 +100,14 @@ pub(crate) fn install_plan(
         .map(|(name, e)| (name.clone(), full(&e.version, e.rel)))
         .collect();
     let candidates = candidates_of(known);
-    let resolved =
-        install::install_plan(targets, &installed_full, &candidates, target_why, with_deps)?;
+    let resolved = install::install_plan(
+        targets,
+        &installed_full,
+        &candidates,
+        profile,
+        target_why,
+        with_deps,
+    )?;
     // The planner only resolves items for candidates it found, so every
     // resolved name is a recipe here.
     let items = resolved
@@ -113,6 +125,7 @@ pub(crate) fn install_plan(
     Ok(Plan {
         items,
         up_to_date: resolved.up_to_date,
+        init: resolved.init,
     })
 }
 
@@ -254,7 +267,7 @@ mod tests {
             rec("curl", "1", &["zlib"], &["openssl"]),
             rec("openssl", "1", &["zlib"], &[]),
         ]);
-        let p = install_plan(&["curl".into()], &HashMap::new(), &known, Why::Explicit, true).unwrap();
+        let p = install_plan(&["curl".into()], &HashMap::new(), &known, None, Why::Explicit, true).unwrap();
         assert_eq!(names(&p), ["zlib", "openssl", "curl"]);
         assert_eq!(p.items[0].why, Why::Dependency);
         assert_eq!(p.items[2].why, Why::Explicit);
@@ -264,7 +277,7 @@ mod tests {
     fn installed_deps_are_skipped_and_not_walked() {
         let known = tree(vec![rec("zlib", "1", &[], &[]), rec("curl", "1", &["zlib"], &[])]);
         let have = inst(vec![entry("zlib", "0.5", "explicit", &[])]);
-        let p = install_plan(&["curl".into()], &have, &known, Why::Explicit, true).unwrap();
+        let p = install_plan(&["curl".into()], &have, &known, None, Why::Explicit, true).unwrap();
         assert_eq!(names(&p), ["curl"], "an installed (even older) dep is satisfied");
     }
 
@@ -272,7 +285,7 @@ mod tests {
     fn up_to_date_target_is_reported_not_rebuilt() {
         let known = tree(vec![rec("zlib", "1", &[], &[])]);
         let have = inst(vec![entry("zlib", "1", "explicit", &[])]);
-        let p = install_plan(&["zlib".into()], &have, &known, Why::Explicit, true).unwrap();
+        let p = install_plan(&["zlib".into()], &have, &known, None, Why::Explicit, true).unwrap();
         assert!(p.items.is_empty());
         assert_eq!(p.up_to_date, ["zlib"]);
     }
@@ -281,32 +294,48 @@ mod tests {
     fn older_installed_target_becomes_a_replacement() {
         let known = tree(vec![rec("zlib", "1.3", &[], &[])]);
         let have = inst(vec![entry("zlib", "1.2", "explicit", &[])]);
-        let p = install_plan(&["zlib".into()], &have, &known, Why::Explicit, true).unwrap();
+        let p = install_plan(&["zlib".into()], &have, &known, None, Why::Explicit, true).unwrap();
         assert_eq!(p.items[0].replaces.as_deref(), Some("1.2-1"));
     }
 
     #[test]
     fn no_deps_plans_only_the_target() {
         let known = tree(vec![rec("zlib", "1", &[], &[]), rec("curl", "1", &["zlib"], &[])]);
-        let p = install_plan(&["curl".into()], &HashMap::new(), &known, Why::Explicit, false).unwrap();
+        let p = install_plan(&["curl".into()], &HashMap::new(), &known, None, Why::Explicit, false).unwrap();
         assert_eq!(names(&p), ["curl"]);
     }
 
     #[test]
     fn typo_gets_a_suggestion_and_cycles_are_errors() {
         let known = tree(vec![rec("zlib", "1", &[], &[])]);
-        let e = install_plan(&["zlb".into()], &HashMap::new(), &known, Why::Explicit, true).unwrap_err();
+        let e = install_plan(&["zlb".into()], &HashMap::new(), &known, None, Why::Explicit, true).unwrap_err();
         assert!(e.to_string().contains("zlib"), "{e}");
 
         let cyc = tree(vec![rec("a", "1", &["b"], &[]), rec("b", "1", &[], &["a"])]);
-        let e = install_plan(&["a".into()], &HashMap::new(), &cyc, Why::Explicit, true).unwrap_err();
+        let e = install_plan(
+            &["a".into()],
+            &HashMap::new(),
+            &cyc,
+            None,
+            Why::Explicit,
+            true,
+        )
+        .unwrap_err();
         assert!(e.to_string().contains("a -> b -> a"), "{e}");
     }
 
     #[test]
     fn missing_dependency_names_who_needs_it() {
         let known = tree(vec![rec("a", "1", &["ghost"], &[])]);
-        let e = install_plan(&["a".into()], &HashMap::new(), &known, Why::Explicit, true).unwrap_err();
+        let e = install_plan(
+            &["a".into()],
+            &HashMap::new(),
+            &known,
+            None,
+            Why::Explicit,
+            true,
+        )
+        .unwrap_err();
         let s = e.to_string();
         assert!(s.contains("ghost") && s.contains("needed by a"), "{s}");
     }
@@ -356,7 +385,7 @@ mod tests {
     #[test]
     fn group_install_reason_is_distinct_from_explicit() {
         let known = tree(vec![rec("dev-tool", "1", &[], &[])]);
-        let plan = install_plan(&["dev-tool".into()], &HashMap::new(), &known, Why::Group, true).unwrap();
+        let plan = install_plan(&["dev-tool".into()], &HashMap::new(), &known, None, Why::Group, true).unwrap();
         assert_eq!(plan.items[0].why.db_reason(), crate::db::InstallReason::Group);
         assert_eq!(plan.items[0].why.label(), "group");
     }

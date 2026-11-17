@@ -14,7 +14,7 @@
 | 1 — Structural refactor + service removal | **DONE** (1a, 1b, 1c, 1d, 1e — 1e is the deferred apply-transaction extraction) |
 | 2 — Init identity & capability foundation | **DONE** (detection + capability/identity domain model) |
 | 3 — Metadata & capability resolution | **DONE** (B3 proposal; the whole package planner — install, outdated, orphans, removal ordering — in `domain/planning/`, behavior verified byte-identical) |
-| 4 — System profiles & planning | in progress: the profile model + merge rules + loader landed (§7); next: wire the profile into plan generation (§8.1–8.2 explanations) |
+| 4 — System profiles & planning | in progress: profile model + merge rules + loader landed (§7); the profile is wired into plan generation (§8.1–8.4 explanations) — install/update report the init decision and fail closed on invalid profiles; next: Phase 5 migration engine |
 | 5 — Migration engine | not started |
 | 6 — Faseela runit→systemd migration | **BLOCKED** (see blockers) |
 | 7 — Final verification | not started |
@@ -561,6 +561,59 @@ separate models, separate paths, as the design demands.
   `--version`/completions × 3 and the paired 8-step scenario byte-identical
   vs HEAD (isolated builds).
 
+### Done within Phase 4 so far (2): the profile as an explicit plan input (§8.1–8.4)
+
+The effective target profile now reaches the planner and the dry-run
+report. Only *reporting* landed: no transaction acts on the init decision
+(§7 — a provider switch is the explicitly authorized migration, the
+Phase 5/6 engine).
+
+* `domain/planning/install.rs`: new `InitSelection` enum (`Declared {
+  identity }` = the normalized identity the effective target profile
+  selects for `init-system`, `Unresolved` = the explicit no-decision,
+  default) carried on `Resolution::init` (§8.2: the exact selected
+  provider or an explicit unresolved result — never a guess).
+  `install_plan` gains the effective profile as its §8.1 plan input;
+  package decisions are untouched by it (determinism pinned by test).
+* `src/plan.rs`: `Plan::init` passthrough + `InitSelection` re-export;
+  adapter only, signatures of the untouched planners unchanged.
+* `application/features/system/profile.rs`: the loader returns
+  `EffectiveProfile { profile, role_sources }` — per-role file
+  attribution (§5.1: an observation includes its source; an override
+  role points at the override file, a defaults-only role at the defaults
+  file). Its `#![allow(dead_code)]` is **removed**: everything is
+  production-reachable now.
+* `application/features/package/plan_install.rs`: `plan()` takes the
+  effective profile; the §8.4 explanation `init_note()` builds the note
+  **only when a profile declares `init-system`** — pinned wording
+  `target profile selects init-system=systemd (from
+  <file>) — installing does not switch the init provider`; an unresolved
+  decision prints nothing (no bytes change without a profile).
+* `src/commands/installing.rs`: `cmd_install_with_why` and `cmd_update`
+  load the effective profile (`sys_profile::load_effective(&ctx.root)?`)
+  and pass it through; an invalid profile **fails closed** (§7): the
+  command refuses (exit 1, error names the file + cause) instead of
+  planning against a broken desired state. Scope boundary: plain archive
+  installs (`nawa install foo.nawa.tar.zst`) bypass the planner entirely
+  (no recipe, no plan) and return before the profile load — they are not
+  recipe-backed planning paths.
+* `application/features/system/detect.rs`: `DesiredInit` upgraded from
+  `NotRead` to §5.5's real desired state — `Declared { identity, source }`
+  / `NotDeclared` / `Invalid { reason }` — read via `desired_init(root)`
+  in both `observe` branches. `detect()` still never fails: an invalid
+  profile is *reported* (`Invalid`, file named), never guessed around.
+
+Verification (this slice): 8 new tests (3 domain `InitSelection`, 1
+loader role-source attribution, 1 plan-install note test, 3 `desired_init`
+tests: declared-with-source / invalid-reports / role-less →
+`NotDeclared`); gates green; byte-identity held (`--help`/`--version`/
+completions × 3 + 8-step scenario identical vs HEAD — no fixture carries
+a profile, so no bytes change), plus 6 positive probes on the new binary:
+override profile → note (override path); defaults-only profile → note
+(defaults path); `update -n` pending update → note; profile without the
+init role → no note; invalid profile → `install` **and** `update` fail
+closed with exit 1 naming the file.
+
 ## Changed files (this phase, updated as work lands)
 
 * `docs/architecture-audit.md` (new, Phase 0)
@@ -657,6 +710,25 @@ separate models, separate paths, as the design demands.
     tests)
   * `src/domain/system/mod.rs`, `src/application/features/system/mod.rs`
     (one-line registrations)
+* Phase 4 (planner wiring, in progress):
+  * `src/domain/planning/install.rs` (`InitSelection` + `Resolution::init`
+    + `install_plan` profile param; `ResolvedItem` gains `PartialEq`/`Eq`
+    for test assertions; 3 new tests)
+  * `src/plan.rs` (`Plan::init` + `InitSelection` re-export; signature
+    gains the profile param)
+  * `src/application/features/system/profile.rs` (`EffectiveProfile` +
+    `role_sources` provenance, `Debug`; 1 new test; `allow(dead_code)`
+    removed)
+  * `src/application/features/package/plan_install.rs` (`plan()` profile
+    param, `init_note()` §8.4 explanation; 1 new test + 2 helpers)
+  * `src/commands/installing.rs` (`cmd_install_with_why`/`cmd_update` load
+    the effective profile, pass it through, emit the note; fail closed on
+    invalid profiles)
+  * `src/application/features/system/detect.rs` (`DesiredInit` →
+    `Declared{identity, source}`/`NotDeclared`/`Invalid{reason}` +
+    `desired_init(root)`; 3 new tests)
+  * `src/domain/system/profile.rs` (module `dead_code` justification
+    comment updated — no code change)
 
 ## Tests actually executed
 
@@ -674,8 +746,9 @@ separate models, separate paths, as the design demands.
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 3 solver tree) | 648 pass / 2 ignored / 3 env-failed (= 637 + 11 new domain-planner tests; same 3 env failures) |
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 3 removal tree) | 658 pass / 2 ignored / 3 env-failed (= 648 + 8 removal + 2 outdated domain tests; same 3 env failures) |
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 4 profile tree) | 678 pass / 2 ignored / 3 env-failed (= 658 + 11 domain + 9 loader profile tests; same 3 env failures) |
-| `cargo clippy --all-targets --offline -- -D warnings` | pass (Phase 1a + 1b + 1c + 1d + 1e + 2 + 3/B3 + 3/solver + 3/removal + 4/profile) |
-| `python3 scripts/check-layering.py` | pass (54 after 1a; 53 after 1b; 54 after 1c; 55 after 2 — the new `domain` layer; 55 after 3/B3, 3/solver, 3/removal and 4/profile — the count is top-level modules, the new `domain/package`, `domain/planning`, `domain/system/profile` + `features/system/profile` submodules are scanned) |
+| `cargo test --all-targets --offline --no-fail-fast` (Phase 4 wiring tree) | 686 pass / 2 ignored / 3 env-failed (= 678 + 3 InitSelection + 1 loader provenance + 1 plan note + 3 desired-init tests; same 3 env failures) |
+| `cargo clippy --all-targets --offline -- -D warnings` | pass (Phase 1a + 1b + 1c + 1d + 1e + 2 + 3/B3 + 3/solver + 3/removal + 4/profile + 4/wiring) |
+| `python3 scripts/check-layering.py` | pass (54 after 1a; 53 after 1b; 54 after 1c; 55 after 2 — the new `domain` layer; 55 after 3/B3, 3/solver, 3/removal and 4/profile — the count is top-level modules, the new `domain/package`, `domain/planning`, `domain/system/profile` + `features/system/profile` submodules are scanned; 55 after 4/wiring) |
 | `bash scripts/smoke-v06.sh` (release build, Phases 1b + 1c + 1d + 2) | ALL V0.6 SMOKE TESTS PASSED |
 | `bash scripts/smoke-v05.sh` (release build, Phases 1d + 2) | ALL SMOKE TESTS PASSED |
 | HEAD-vs-1c behavior diff (`--help`, `--version`, completions × 3, isolated worktree build) | byte-identical |
@@ -690,7 +763,9 @@ separate models, separate paths, as the design demands.
 | HEAD-vs-3(removal) paired 8-step install/update scenario (same script, isolated builds) | identical transcripts |
 | HEAD-vs-3(removal) query/remove probes over a seeded db (reasons explicit/dependency, recorded run deps): `outdated` / `autoremove -n` (prints the dependents-first removal order) / `update -n` / real `remove --yes` (transcript + resulting db state), isolated builds | identical transcripts + db state |
 | HEAD-vs-4(profile) behavior diff (`--help`, `--version`, completions × 3, paired 8-step scenario, isolated CARGO_TARGET_DIR builds) | byte-identical (the loader is unwired; no production path changed) |
-| `cargo fmt --all -- --check` | fails repo-wide at HEAD (pre-existing ~100 files; CI does not run fmt) — re-scoped to "no new violations in touched/new code", satisfied (1a–1e, 2, 3/B3, 3/solver, 3/removal, 4/profile: new files clean; plan.rs dirty hunks 19 → 13 — the deleted planner bodies carried six away across the two slices, the added adapter code is clean) |
+| HEAD-vs-4(wiring) behavior diff (`--help`, `--version`, completions × 3, paired 8-step scenario, isolated CARGO_TARGET_DIR builds) | byte-identical (no fixture carries a profile; the note prints only when one declares `init-system`) |
+| HEAD-vs-4(wiring) positive probes on the new binary (seeded profiles in a fake root): override declaring `init-system` → `install -n`/`update -n` print the §8.4 note with the override path; defaults-only profile → note names the defaults path; profile without the init role → no note; invalid profile → `install` and `update` refuse with exit 1 naming the file + cause | pass |
+| `cargo fmt --all -- --check` | fails repo-wide at HEAD (pre-existing ~100 files; CI does not run fmt) — re-scoped to "no new violations in touched/new code", satisfied (1a–1e, 2, 3/B3, 3/solver, 3/removal, 4/profile, 4/wiring: new files clean; plan.rs dirty hunks 19 → 13 → **12** — the deleted planner bodies carried six away across the two slices, one over-long test call was canonicalized while adding the profile arg; installing.rs stays at its pre-existing 18 hunks, none on lines touched here) |
 
 ## Known problems
 
@@ -720,20 +795,24 @@ separate models, separate paths, as the design demands.
 
 ## Exact next task
 
-**Phase 4, next slice: wire the profile into plan generation (§8.1–8.2)** —
-the effective target profile becomes an explicit plan input: load it via
-`features/system/profile::load_effective` where the planning use cases
-assemble their inputs, upgrade `detect.rs`'s `DesiredInit` from
-`NotRead` to carry the loaded profile (§5.5: never collapse the four
-state kinds), and make the dry-run plan report the init-provider
-decision the profile selects — per §8.4's explanation shape ("required
-by: target profile", "capability: init-system=systemd"), including the
-explicit *unresolved* result when no profile declares an init provider
-(§8.2: unknown is never guessed). Only the *reporting* lands now; no
-command may act on a provider change (§7: installing a package must not
-switch the init provider — that is the explicitly authorized migration,
-Phase 5/6). Verify with `cargo check --all-targets --offline && cargo
-test --all-targets --offline --no-fail-fast && cargo clippy
---all-targets --offline -- -D warnings` plus
-`python3 scripts/check-layering.py`; new files rustfmt-clean; paired
-transcripts identical; commit as one coherent unit.
+**Phase 5, first slice: the migration domain model (§10.1–§10.3)** —
+`domain/migration/` (pure): the typed, versioned `MigrationDefinition`
+(id, from/to capability identity, built-in handler ID binding — §10.2:
+never a repository-supplied executable; versioned + validated like the B3
+chain), the durable state machine over
+`planned → preparing → awaiting-reboot → verifying → completed` with
+`failed`/`rollback-required`/`needs-recovery` side exits and the §10.3
+transition rules (failure in `preparing` ⇒ `failed` only after
+compensation, ambiguous ⇒ `needs-recovery` with the gate kept), and the
+migration record (versioned TOML under
+`<root>/var/lib/nawa/migrations/<migration-id>.toml`: state, write-ahead
+step intents + outcomes with atomic publication, restrictive permissions;
+offline-root planning is read-only and must not create a record). The
+persistent mutation-gate *check* (§10.3: all package-mutating entry points
+stop while a gate is active; checked before honoring `NAWA_LOCK_HELD`;
+only the typed in-process coordinator permit bypasses) may land as the
+second slice with the gate wiring — the pure state machine first, wiring
+after. Blockers B5/B6 gate the boot-critical handler internals, not this
+model. Gates as always (check/test/clippy/layering; new files
+rustfmt-clean; byte-identity for existing CLI paths — the migration
+surface is additive), then commit and update this tracker.

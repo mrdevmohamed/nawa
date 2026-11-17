@@ -2,8 +2,8 @@
 //!
 //! Three kinds of state stay separate (§5): the *observed runtime* (PID 1,
 //! execution context), the *installed state* of the target root, and the
-//! *desired state* (a system profile — Phase 4). [`ObservedSystem`] carries
-//! them as four separate fields and never collapses them into one
+//! *desired state* (the effective target profile, §7). [`ObservedSystem`]
+//! carries them as four separate fields and never collapses them into one
 //! `init-system` value (§5.5).
 //!
 //! Detection is read-only (§5.4): no file is written, no package is
@@ -25,9 +25,10 @@
 //! Every source is an injectable path, so each rule is unit-testable
 //! without booting anything and without touching the host.
 
-// Foundation use case for the system-intelligence migration: consumed by
-// the profile (Phase 4) and migration (Phase 5/6) work. Until then its
-// items are deliberately unused, so `dead_code` is allowed at module scope.
+// Foundation use case for the system-intelligence migration. `Invalid`'s
+// `reason` and parts of the installed-state model are for the §8.4
+// explanation and the Phase 5/6 dry-run report (rendered by later
+// consumers), so `dead_code` stays allowed at module scope until then.
 #![allow(dead_code)]
 
 use std::fs;
@@ -104,12 +105,21 @@ pub(crate) struct InitCandidate {
     pub(crate) evidence: String,
 }
 
-/// The desired init (§5.3 desired state). System profiles arrive in Phase 4
-/// (blocker B4); until they exist this is deliberately `NotRead` — an
-/// absent profile is not read as a decision.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The desired init (§5.3 desired state): what the effective target profile
+/// (§7) declares for the `init-system` role, with the declaring file for
+/// attribution (§5.1). A missing profile is *not declared* — never read as
+/// a decision; an invalid profile fails closed and is reported (§7), never
+/// guessed around.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DesiredInit {
-    NotRead,
+    /// a system profile selects the provider: the normalized identity and
+    /// the file that declared it
+    Declared { identity: String, source: String },
+    /// no profile declares an init provider (no profile files, or no
+    /// `init-system` role): the desired state is undeclared
+    NotDeclared,
+    /// a profile file exists but is invalid: fail closed, reported (§7)
+    Invalid { reason: String },
 }
 
 /// The full observation for one detection (§5.5 contract: the execution
@@ -123,6 +133,32 @@ pub(crate) struct ObservedSystem {
     pub(crate) runtime: RuntimeInit,
     pub(crate) installed: InstalledInit,
     pub(crate) desired: DesiredInit,
+}
+
+/// The desired init declared by the target root's system profile (§5.3):
+/// read-only; an invalid profile is reported (`Invalid`), never guessed
+/// around (§7 fail-closed).
+fn desired_init(root: &Path) -> DesiredInit {
+    match super::profile::load_effective(root) {
+        Ok(effective) => match effective
+            .profile
+            .as_ref()
+            .and_then(|p| p.provider("init-system"))
+        {
+            Some(identity) => DesiredInit::Declared {
+                identity: identity.to_string(),
+                source: effective
+                    .role_sources
+                    .get("init-system")
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+            },
+            None => DesiredInit::NotDeclared,
+        },
+        Err(e) => DesiredInit::Invalid {
+            reason: format!("{e:#}"),
+        },
+    }
 }
 
 /// Observe the managed `root` and this process's own environment. `proc` is
@@ -143,7 +179,7 @@ pub(crate) fn observe(root: &Path, proc: &Path) -> ObservedSystem {
                     .to_string(),
             },
             installed: installed_init(root),
-            desired: DesiredInit::NotRead,
+            desired: desired_init(root),
         };
     }
     observe_canonical(root, proc)
@@ -177,7 +213,7 @@ pub(crate) fn observe_canonical(managed_root: &Path, proc: &Path) -> ObservedSys
         context,
         runtime,
         installed: installed_init(managed_root),
-        desired: DesiredInit::NotRead,
+        desired: desired_init(managed_root),
     }
 }
 
@@ -450,7 +486,7 @@ mod tests {
 
         let observed = observe_canonical(&root, &proc);
         assert_eq!(observed.root, root);
-        assert_eq!(observed.desired, DesiredInit::NotRead);
+        assert_eq!(observed.desired, DesiredInit::NotDeclared);
         match expect_context(&observed) {
             Context::LiveHost { evidence } => assert!(
                 evidence.iter().any(|e| e.source.contains("/proc/1/root")),
@@ -807,5 +843,70 @@ mod tests {
         let installed = installed_init(&root);
         assert_eq!(installed.candidates.len(), 1);
         assert_eq!(installed.candidates[0].kind, InitKind::Systemd);
+    }
+
+    #[test]
+    fn the_target_profile_declares_the_desired_init_with_its_source() {
+        // §5.5 desired state: the effective target profile's init-system
+        // role, attributed to the file that declared it (§5.1)
+        let base = crate::testutil::tmpdir("detect-profile-declared");
+        let root = dir(&base, "rootdir");
+        file(
+            &base,
+            "rootdir/etc/nawa/system-profile.toml",
+            "schema = 1\n\n[providers]\ninit-system = \"systemd\"\n",
+        );
+        // the offline branch never reads `proc`, so a plain path suffices
+        let observed = observe(&root, Path::new("/proc"));
+        match &observed.desired {
+            DesiredInit::Declared { identity, source } => {
+                assert_eq!(identity, "systemd");
+                assert_eq!(
+                    source,
+                    &root
+                        .join("etc/nawa/system-profile.toml")
+                        .display()
+                        .to_string()
+                );
+            }
+            other => panic!("expected Declared, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_invalid_target_profile_is_reported_not_guessed_around() {
+        // §7 fail-closed: a broken profile is `Invalid` with the file
+        // named, never silently read as "no decision"
+        let base = crate::testutil::tmpdir("detect-profile-invalid");
+        let root = dir(&base, "rootdir");
+        file(
+            &base,
+            "rootdir/etc/nawa/system-profile.toml",
+            "schema = 1\n\nfuture-key = true\n",
+        );
+        let desired = desired_init(&root);
+        match &desired {
+            DesiredInit::Invalid { reason } => {
+                assert!(
+                    reason.contains("etc/nawa/system-profile.toml"),
+                    "the error must name the file, got: {reason}"
+                );
+                assert!(reason.contains("future-key"), "got: {reason}");
+            }
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_target_profile_without_an_init_role_leaves_the_desired_init_undeclared() {
+        // a profile that says nothing about init-system is not a decision
+        let base = crate::testutil::tmpdir("detect-profile-silent");
+        let root = dir(&base, "rootdir");
+        file(
+            &base,
+            "rootdir/usr/share/nawa/system-profile.toml",
+            "schema = 1\n\n[providers]\nsession-manager = \"elogind\"\n",
+        );
+        assert_eq!(desired_init(&root), DesiredInit::NotDeclared);
     }
 }

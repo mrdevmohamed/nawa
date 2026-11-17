@@ -24,21 +24,26 @@
 //! system profile, not the build profile of `src/profile.rs`
 //! (`--profiles`): separate models, separate paths (§7).
 
-// Consumed by the planner once the profile becomes a plan input (§8.1,
-// next Phase 4 slice). Until then its items are deliberately unused, so
-// `dead_code` is allowed at module scope.
-#![allow(dead_code)]
-
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::domain::system::profile::{ProvidersDoc, SystemProfile};
 
+/// The effective target profile together with the file that supplied each
+/// declared provider role (§5.1: an observation must include its source —
+/// when the merge takes the override's `init-system`, the source is the
+/// override file, otherwise the defaults file).
+#[derive(Debug)]
+pub(crate) struct EffectiveProfile {
+    pub(crate) profile: Option<SystemProfile>,
+    pub(crate) role_sources: BTreeMap<String, std::path::PathBuf>,
+}
+
 /// The effective target profile for `root`: merge the recommended
 /// distribution defaults and administrator override (§7's recommended
 /// layout; the exact filename is the open B4 contract).
-pub(crate) fn load_effective(root: &Path) -> Result<Option<SystemProfile>> {
+pub(crate) fn load_effective(root: &Path) -> Result<EffectiveProfile> {
     load_effective_at(
         &root.join("usr/share/nawa/system-profile.toml"),
         &root.join("etc/nawa/system-profile.toml"),
@@ -47,13 +52,28 @@ pub(crate) fn load_effective(root: &Path) -> Result<Option<SystemProfile>> {
 
 /// The effective target profile from two explicit files (injectable so the
 /// B4 location contract can change and the rules stay unit-testable).
-pub(crate) fn load_effective_at(
-    defaults: &Path,
-    overrides: &Path,
-) -> Result<Option<SystemProfile>> {
-    let defaults = read_one(defaults)?;
-    let overrides = read_one(overrides)?;
-    Ok(SystemProfile::merge(defaults.as_ref(), overrides.as_ref()))
+pub(crate) fn load_effective_at(defaults: &Path, overrides: &Path) -> Result<EffectiveProfile> {
+    let defaults_profile = read_one(defaults)?;
+    let overrides_profile = read_one(overrides)?;
+    let profile = SystemProfile::merge(defaults_profile.as_ref(), overrides_profile.as_ref());
+    let mut role_sources = BTreeMap::new();
+    if let Some(p) = &profile {
+        for role in p.providers.keys() {
+            let source = if overrides_profile
+                .as_ref()
+                .is_some_and(|o| o.providers.contains_key(role))
+            {
+                overrides
+            } else {
+                defaults
+            };
+            role_sources.insert(role.clone(), source.to_path_buf());
+        }
+    }
+    Ok(EffectiveProfile {
+        profile,
+        role_sources,
+    })
 }
 
 /// Read one profile file: `Ok(None)` when it does not exist (absence is
@@ -168,7 +188,7 @@ init-system = \"systemd\"
     fn both_files_missing_means_no_declared_desired_state() {
         let f = Fixture::new("absent");
         let eff = load_effective_at(&f.defaults, &f.overrides).unwrap();
-        assert_eq!(eff, None);
+        assert_eq!(eff.profile, None);
     }
 
     #[test]
@@ -177,6 +197,7 @@ init-system = \"systemd\"
         write(&f.defaults, DESKTOP);
         let eff = load_effective_at(&f.defaults, &f.overrides)
             .unwrap()
+            .profile
             .unwrap();
         assert_eq!(eff.distribution.as_deref(), Some("faseela"));
         assert_eq!(eff.provider("init-system"), Some("systemd"));
@@ -191,6 +212,7 @@ init-system = \"systemd\"
         );
         let eff = load_effective_at(&f.defaults, &f.overrides)
             .unwrap()
+            .profile
             .unwrap();
         assert_eq!(eff.provider("init-system"), Some("systemd"));
     }
@@ -205,6 +227,7 @@ init-system = \"systemd\"
         );
         let eff = load_effective_at(&f.defaults, &f.overrides)
             .unwrap()
+            .profile
             .unwrap();
         assert_eq!(eff.profile.as_deref(), Some("server"));
         assert_eq!(eff.provider("init-system"), Some("runit"));
@@ -254,7 +277,33 @@ init-system = \"systemd\"
         write(&f.defaults, "schema = 1\n");
         let eff = load_effective_at(&f.defaults, &f.overrides)
             .unwrap()
+            .profile
             .unwrap();
         assert_eq!(eff.schema, 1);
+    }
+
+    #[test]
+    fn declared_roles_carry_their_declaring_file_as_the_source() {
+        // §5.1 attribution: the override declares init-system, so the
+        // override file is that role's source; a role only the defaults
+        // declare points at the defaults file
+        let f = Fixture::new("sources");
+        write(
+            &f.defaults,
+            "schema = 1\n\n[providers]\nsession-manager = \"elogind\"\n",
+        );
+        write(
+            &f.overrides,
+            "schema = 1\n\n[providers]\ninit-system = \"systemd\"\n",
+        );
+        let eff = load_effective_at(&f.defaults, &f.overrides).unwrap();
+        assert_eq!(
+            eff.role_sources.get("init-system").map(|p| p.as_path()),
+            Some(f.overrides.as_path())
+        );
+        assert_eq!(
+            eff.role_sources.get("session-manager").map(|p| p.as_path()),
+            Some(f.defaults.as_path())
+        );
     }
 }

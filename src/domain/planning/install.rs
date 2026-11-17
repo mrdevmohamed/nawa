@@ -32,6 +32,7 @@ use anyhow::{bail, Result};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::domain::system::capability::Provides;
+use crate::domain::system::profile::SystemProfile;
 use crate::suggest;
 use crate::version::vercmp;
 
@@ -84,6 +85,35 @@ impl Candidate {
     }
 }
 
+/// The init-provider decision carried by a resolution (§8.2: "the exact
+/// selected init provider for the target profile, or an explicit unresolved
+/// result"). `Declared` is the *desired* selection the effective target
+/// profile makes (§7) — whether any candidate can fulfill it is a separate
+/// question that cannot be answered while candidate metadata is unknown
+/// (the unwired B3 chain), and no install/update transaction acts on it:
+/// installing does not switch the provider (§7 — that is an explicitly
+/// authorized migration, the Phase 5/6 engine).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) enum InitSelection {
+    /// the effective target profile declares the `init-system` role with
+    /// this normalized identity (§8.4: "required by: target profile")
+    Declared { identity: String },
+    /// no profile declares an init provider: the decision is unresolved —
+    /// reported, never guessed (§8.2)
+    #[default]
+    Unresolved,
+}
+
+/// The init decision of one solve: what the target profile declares.
+fn init_selection(profile: Option<&SystemProfile>) -> InitSelection {
+    match profile.and_then(|p| p.provider("init-system")) {
+        Some(identity) => InitSelection::Declared {
+            identity: identity.to_string(),
+        },
+        None => InitSelection::Unresolved,
+    }
+}
+
 /// The normalized planner output (§8.2): the package decisions. Provider
 /// selection and migration-candidate fields arrive with the Phase 4/5 work.
 #[derive(Debug, Default)]
@@ -92,9 +122,11 @@ pub(crate) struct Resolution {
     pub(crate) items: Vec<ResolvedItem>,
     /// requested targets that need no work — reported, not rebuilt
     pub(crate) up_to_date: Vec<String>,
+    /// the init-provider decision the target profile makes (§8.2)
+    pub(crate) init: InitSelection,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedItem {
     pub(crate) name: String,
     pub(crate) why: Why,
@@ -107,6 +139,9 @@ pub(crate) struct ResolvedItem {
 /// * `installed` — the installed `version-rel` per package name; an
 ///   installed package that is not a requested target is satisfied and its
 ///   own dependencies are not walked
+/// * `profile` — the effective target profile (§8.1 input); its
+///   `init-system` declaration becomes the resolution's
+///   [`InitSelection`] (§8.2)
 /// * `target_why` — `Explicit` for `nawa install`, `Update` for `nawa update`
 /// * `with_deps` — follow dependency edges (`--no-deps` turns this off)
 ///
@@ -116,11 +151,15 @@ pub(crate) fn install_plan(
     targets: &[String],
     installed: &HashMap<String, String>,
     known: &BTreeMap<String, Candidate>,
+    profile: Option<&SystemProfile>,
     target_why: Why,
     with_deps: bool,
 ) -> Result<Resolution> {
     let wanted: HashSet<&str> = targets.iter().map(|s| s.as_str()).collect();
-    let mut resolution = Resolution::default();
+    let mut resolution = Resolution {
+        init: init_selection(profile),
+        ..Resolution::default()
+    };
     let mut done: HashSet<String> = HashSet::new();
     let mut visiting: Vec<String> = Vec::new();
 
@@ -291,6 +330,7 @@ mod tests {
             &["curl".to_string()],
             &HashMap::new(),
             &known,
+            None,
             Why::Explicit,
             true,
         )
@@ -309,7 +349,15 @@ mod tests {
             cand("curl", "1", 1, &["zlib"]),
         ]);
         let have = inst(&[("zlib", "0.5-1")]);
-        let r = install_plan(&["curl".to_string()], &have, &known, Why::Explicit, true).unwrap();
+        let r = install_plan(
+            &["curl".to_string()],
+            &have,
+            &known,
+            None,
+            Why::Explicit,
+            true,
+        )
+        .unwrap();
         assert_eq!(
             names(&r),
             ["curl"],
@@ -323,7 +371,15 @@ mod tests {
         // exists, the planner must not invent one
         let known = tree(vec![cand("curl", "1", 1, &["zlib"])]);
         let have = inst(&[("zlib", "0.5-1")]);
-        let r = install_plan(&["curl".to_string()], &have, &known, Why::Explicit, true).unwrap();
+        let r = install_plan(
+            &["curl".to_string()],
+            &have,
+            &known,
+            None,
+            Why::Explicit,
+            true,
+        )
+        .unwrap();
         assert_eq!(names(&r), ["curl"]);
     }
 
@@ -331,7 +387,15 @@ mod tests {
     fn up_to_date_target_is_reported_not_rebuilt() {
         let known = tree(vec![cand("zlib", "1", 1, &[])]);
         let have = inst(&[("zlib", "1-1")]);
-        let r = install_plan(&["zlib".to_string()], &have, &known, Why::Explicit, true).unwrap();
+        let r = install_plan(
+            &["zlib".to_string()],
+            &have,
+            &known,
+            None,
+            Why::Explicit,
+            true,
+        )
+        .unwrap();
         assert!(r.items.is_empty());
         assert_eq!(r.up_to_date, ["zlib"]);
     }
@@ -340,7 +404,15 @@ mod tests {
     fn an_older_installed_target_is_replaced_with_its_installed_version() {
         let known = tree(vec![cand("zlib", "1.3", 1, &[])]);
         let have = inst(&[("zlib", "1.2-1")]);
-        let r = install_plan(&["zlib".to_string()], &have, &known, Why::Explicit, true).unwrap();
+        let r = install_plan(
+            &["zlib".to_string()],
+            &have,
+            &known,
+            None,
+            Why::Explicit,
+            true,
+        )
+        .unwrap();
         assert_eq!(r.items[0].replaces.as_deref(), Some("1.2-1"));
     }
 
@@ -354,6 +426,7 @@ mod tests {
             &["curl".to_string()],
             &HashMap::new(),
             &known,
+            None,
             Why::Explicit,
             false,
         )
@@ -368,6 +441,7 @@ mod tests {
             &["zlb".to_string()],
             &HashMap::new(),
             &known,
+            None,
             Why::Explicit,
             true,
         )
@@ -380,6 +454,7 @@ mod tests {
             &["a".to_string()],
             &HashMap::new(),
             &cyc,
+            None,
             Why::Explicit,
             true,
         )
@@ -397,6 +472,7 @@ mod tests {
             &["a".to_string()],
             &HashMap::new(),
             &known,
+            None,
             Why::Explicit,
             true,
         )
@@ -412,8 +488,8 @@ mod tests {
             cand("curl", "1", 1, &["zlib"]),
         ]);
         let targets = ["curl".to_string()];
-        let a = install_plan(&targets, &HashMap::new(), &known, Why::Explicit, true).unwrap();
-        let b = install_plan(&targets, &HashMap::new(), &known, Why::Explicit, true).unwrap();
+        let a = install_plan(&targets, &HashMap::new(), &known, None, Why::Explicit, true).unwrap();
+        let b = install_plan(&targets, &HashMap::new(), &known, None, Why::Explicit, true).unwrap();
         assert_eq!(format!("{a:?}"), format!("{b:?}"));
     }
 
@@ -449,5 +525,82 @@ mod tests {
             ("ghost".to_string(), "0-1".to_string()),
         ];
         assert_eq!(outdated(&have, &known), Vec::<String>::new());
+    }
+
+    fn profile_doc(pairs: &[(&str, &str)], init: Option<&str>) -> SystemProfile {
+        let scalars: BTreeMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let providers = init.map(|i| BTreeMap::from([("init-system".to_string(), i.to_string())]));
+        SystemProfile::from_doc(&scalars, &providers).unwrap()
+    }
+
+    #[test]
+    fn the_profiles_init_declaration_is_the_resolution_s_decision() {
+        // §8.4's example: systemd required by the target profile
+        let p = profile_doc(&[("schema", "1")], Some("systemd"));
+        let r = install_plan(
+            &["zlib".to_string()],
+            &HashMap::new(),
+            &tree(vec![cand("zlib", "1", 1, &[])]),
+            Some(&p),
+            Why::Explicit,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            r.init,
+            InitSelection::Declared {
+                identity: "systemd".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn no_declared_init_provider_is_an_explicit_unresolved_result() {
+        // §8.2: an unresolved result, never a guess — with no profile at
+        // all and with a profile that has no init-system role
+        let silent = profile_doc(&[("schema", "1")], None);
+        for profile in [None, Some(&silent)] {
+            let r = install_plan(
+                &["zlib".to_string()],
+                &HashMap::new(),
+                &tree(vec![cand("zlib", "1", 1, &[])]),
+                profile,
+                Why::Explicit,
+                true,
+            )
+            .unwrap();
+            assert_eq!(r.init, InitSelection::Unresolved);
+        }
+    }
+
+    #[test]
+    fn the_init_decision_is_deterministic_and_package_decisions_unaffected() {
+        let known = tree(vec![cand("zlib", "1", 1, &[])]);
+        let targets = ["zlib".to_string()];
+        let p = profile_doc(&[("schema", "1")], Some("runit"));
+        let with = install_plan(
+            &targets,
+            &HashMap::new(),
+            &known,
+            Some(&p),
+            Why::Explicit,
+            true,
+        )
+        .unwrap();
+        let without =
+            install_plan(&targets, &HashMap::new(), &known, None, Why::Explicit, true).unwrap();
+        assert_eq!(with.items, without.items);
+        assert_ne!(with.init, without.init);
+        // out-of-scope identities are still the profile's declared desire;
+        // scope checking belongs to the migration, not the solve
+        assert_eq!(
+            with.init,
+            InitSelection::Declared {
+                identity: "runit".to_string()
+            }
+        );
     }
 }
