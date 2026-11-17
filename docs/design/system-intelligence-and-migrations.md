@@ -238,13 +238,14 @@ because a reboot is pending.
 The detector should:
 
 - Prefer structured, target-root-aware sources.
-- Use /proc and live service-manager queries only when they refer to the
-  environment Nawa is managing.
+- Use /proc only when it refers to the environment Nawa is managing; do not
+  query a service manager.
 - Identify chroot, container, offline-root, and live-host contexts where
   possible.
 - Report unavailable or contradictory observations explicitly.
 - Never infer successful migration from the presence of a binary or unit file.
-- Avoid writing files, enabling services, or changing packages.
+- Avoid writing files or changing packages; service activation is outside
+  detector and migration responsibilities.
 
 ## 6. Capabilities and provider selection
 
@@ -267,9 +268,6 @@ The following is a possible model, not the current recipe or repository schema:
     [capabilities]
     provides = [
       "init-system=runit"
-    ]
-    requires = [
-      "session-manager"
     ]
 
 A systemd package could provide:
