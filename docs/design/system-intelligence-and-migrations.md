@@ -79,12 +79,20 @@ them through its normal file-management path. Their activation and runtime
 management belong to the selected init/service manager, distribution
 provisioning, or the administrator—not to Nawa.
 
-The implementation audit must also remove service-specific installer coupling,
-including any call such as `crate::service::keep_disabled` and any dependency
-on runit disabled markers. Do not replace this with systemd enablement tracking
-or another service-manager integration. A genuinely generic user-configuration
-preservation mechanism may be designed separately, but it must not manage
-service state.
+The implementation audit must identify and transfer ownership of the state
+currently represented by `crate::service::keep_disabled` and
+`/etc/runit/disabled`. The existing runit implementation documents that
+packages ship default runsvdir symlinks and that these markers prevent a package
+upgrade from silently recreating a link an administrator disabled. Removing
+this logic without changing the Faseela package/provisioning model can
+re-enable services during an upgrade.
+
+Nawa must no longer own that service state. Before removing the marker handling,
+Faseela must move enablement links out of ordinary package payloads and define
+how its distribution-owned service configuration preserves administrator
+choices. The migration must account for existing disabled markers. Do not
+replace the Nawa code with a second hidden service manager or assume that
+deleting the function has no behavioral effect.
 
 Distribution recipes and package payloads must not rely on Nawa implicitly
 enabling or starting services after installation. Faseela's own system setup
@@ -541,8 +549,11 @@ folder with the same name.
   CLI or presentation code.
 - No adapter may silently bypass signature verification, package conflict
   checks, transaction recording, or migration authorization.
-- No service-management APIs, providers, service state, or service-manager
-  invocations are permitted in Nawa. Service definitions and presets remain
+- No first-party Nawa service-management APIs, providers, service-state
+  database, or service-control adapter is permitted. First-party package and
+  migration workflows must not invoke service-manager commands. Existing
+  package hooks are a separate privileged script mechanism and are governed by
+  the explicit policy in Section 9. Service definitions and presets remain
   ordinary package payload files.
 - Do not change recipe syntax, archive format, repository index format,
   installed database format, CLI behavior, or recovery semantics as an
@@ -925,14 +936,17 @@ cleanup checklist:
   completions.
 - Remove installer calls to `crate::service::keep_disabled` (including the
   payload/install path), the runit disabled-marker path, and all related
-  imports and tests.
+  imports and tests only after Faseela has taken over the disabled-state
+  compatibility behavior and stopped packaging default enablement symlinks.
 - Do not replace this with systemd enablement tracking or another hidden
   service-management path. If generic configuration-file preservation is
   needed, design it independently from service state.
 
 The removal is complete only when the crate builds and tests pass without a
-service command, service-management module, built-in service-manager
-invocation, or runit-specific installer marker behavior.
+service command, service-management module, first-party service-control
+adapter, or runit-specific installer marker behavior. The marker behavior may
+be removed only after Faseela's package payload/provisioning policy preserves
+the prior disabled-service choice across package upgrades.
 
 ## 10. Migration engine
 
@@ -1221,8 +1235,14 @@ JSON output must not omit warnings, unresolved state, or required user actions.
 - Ensure capability and migration metadata is covered by authenticated data.
 - Treat local profile overrides as administrator-controlled input and validate
   them strictly.
-- Never execute shell text supplied by a repository as root.
-- Use allowlisted migration-handler IDs and typed arguments.
+- Do not execute repository-supplied shell text as a migration handler.
+  Existing archive `.HOOKS` are a separate legacy mechanism: they are stored
+  in package archives and the current installer runs them through a shell as
+  root on the live root or inside a chroot. Their trust policy must account for
+  the current unsigned-package policy as well as signed repositories.
+- Use allowlisted, built-in migration-handler IDs and typed arguments. A
+  migration handler must never be implemented as an archive hook or a
+  post-transaction trigger.
 - Validate every path relative to the target root; reject path traversal and
   unexpected symlinks.
 - Require root privileges and explicit authority for boot, initramfs, and
@@ -1378,8 +1398,10 @@ The proposal is ready to become an implementation plan when:
 - Capability and profile schemas have been reviewed and versioned.
 - The solver can explain init-system selection and every planned package
   action.
-- All service-management code and interfaces are removed from Nawa, including
-  runit-specific installer marker handling; service-related package files
+- All first-party service-management code and interfaces are removed from
+  Nawa. Runit-specific installer marker handling is removed only after Faseela
+  has moved default enablement links and administrator disabled-state
+  preservation into distribution-owned configuration; service-related files
   remain ordinary payload files.
 - Migration handlers are trusted, allowlisted, and narrowly scoped.
 - The migration journal records write-ahead intents/outcomes for boot side
@@ -1391,8 +1413,9 @@ The proposal is ready to become an implementation plan when:
   a tested `saq` init-selection contract for supported BIOS/UEFI modes.
 - The privileged package-hook and post-transaction-trigger trust policy is
   explicit and compatible with the no-service-management boundary.
-- Tests prove that Nawa refuses unsafe or ambiguous transitions and never
-  attempts to control services.
+- Tests prove that built-in Nawa features do not manage or control services,
+  and that the Faseela hook policy is explicit about the limits of static
+  checks on privileged shell scripts.
 - Documentation clearly distinguishes implemented behavior from proposals.
 
 Until those criteria are met, this document is a discussion proposal only.
