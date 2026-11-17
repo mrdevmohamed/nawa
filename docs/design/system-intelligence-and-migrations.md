@@ -1,0 +1,788 @@
+# System intelligence and migration engine
+
+> **STATUS: PROPOSED — DESIGN FOR DISCUSSION — NOT IMPLEMENTED**
+>
+> This document is an architectural proposal. It does not describe shipped Nawa
+> behavior and does not authorize a package-format, repository-index, database,
+> CLI, or service-management change by itself. Examples are illustrative.
+>
+> **Design baseline:** Nawa 1.0.0 source and documentation inspected on
+> 2026-11-17. Re-check the implementation before turning any section into a
+> task. The current service integration is runit-specific.
+
+## 1. Purpose
+
+Nawa should evolve from a package manager that primarily resolves package
+names and package dependencies into a system-aware package manager that can
+reason about the desired and actual state of a Linux installation.
+
+The user should describe the outcome they want. Nawa should:
+
+1. Inspect the target system and identify what is known, unknown, or
+   inconsistent.
+2. Resolve package dependencies and system capabilities.
+3. Calculate the smallest safe set of package and system changes.
+4. Explain why every change is necessary.
+5. Present the complete plan before making mutations.
+6. Execute the plan through the existing package installer and transaction
+   infrastructure.
+7. Verify the resulting state, including work that must wait for reboot.
+8. Recover safely when a step fails or the machine restarts unexpectedly.
+
+This is deterministic package-management logic, not an AI feature. The solver
+must make decisions from explicit metadata, administrator policy, and measured
+system state. It must not guess at critical system behavior.
+
+The runit-to-systemd transition is the motivating example, not the only use
+case. The same architecture should eventually support changes to service
+managers, session managers, network providers, audio providers, display
+managers, kernels, and boot integration.
+
+## 2. Existing foundations and constraints
+
+The current project already has important building blocks:
+
+- Rust CLI and declarative TOML package recipes.
+- Build and runtime dependency declarations.
+- Binary repositories with authenticated metadata and package digests.
+- Ed25519 repository trust and SHA-256 artifact verification.
+- Package installation/removal staging and file-conflict checks.
+- Package-level rollback and transaction history/recovery infrastructure.
+- Package transaction hooks for shared cache/index refresh work.
+- A service command whose current backend targets runit.
+
+The proposal should extend these foundations rather than replace them.
+
+### 2.1 Current runit integration is a compatibility boundary
+
+The current service documentation describes runit service definitions under:
+
+- /etc/sv/
+- /etc/runit/runsvdir/default/
+
+It is therefore inaccurate to describe Nawa as already supporting systemd
+service management. The service command needs a provider abstraction before
+Nawa can manage more than one service manager.
+
+Do not remove the current runit implementation while introducing the new
+abstraction. It remains the first provider and a required compatibility test.
+
+### 2.2 Existing transactions are not whole-system atomicity
+
+Nawa's package installer and history journal provide valuable recovery
+behavior, but a multi-package operation must not be described as globally
+atomic unless the implementation can prove that property.
+
+Changing PID 1, boot configuration, initramfs, service enablement, and packages
+crosses several independent system boundaries. A migration may need to pause
+for a reboot and continue in a later process. It must have its own durable
+state machine and use the existing transaction journal where appropriate.
+
+Do not claim that package rollback alone can restore an arbitrary system-wide
+migration.
+
+## 3. Goals and non-goals
+
+### 3.1 Goals
+
+- Model system roles as capabilities rather than hard-coded package names.
+- Distinguish the installed package set, the configured target profile, and
+  the currently running system.
+- Make dependency solving explainable and deterministic.
+- Support multiple implementations of the same system capability.
+- Abstract service management behind providers.
+- Describe migrations as reviewed, versioned transitions.
+- Run only trusted, known migration handlers for privileged system changes.
+- Make plans inspectable and dry-runnable.
+- Reuse existing package installation, artifact verification, history, and
+  recovery code.
+- Preserve old recipes, archives, indexes, databases, and command behavior
+  unless a separately reviewed compatibility change is approved.
+- Fail closed when critical system facts or migration prerequisites cannot be
+  established.
+
+### 3.2 Non-goals
+
+This proposal does not require:
+
+- Rewriting Nawa or replacing its package database.
+- Replacing the source build engine or TOML recipes.
+- Replacing the existing repository signature and artifact-verification
+  mechanisms.
+- Adding an AI model or network service to the package manager.
+- Running arbitrary scripts downloaded from repositories as root.
+- Automatically changing a live system merely because a package name appears
+  in an upgrade list.
+- Treating every provider change as a simple package conflict.
+- Claiming that all filesystem, bootloader, service, and user-data changes can
+  be rolled back automatically.
+- Supporting every Linux init system in the first implementation.
+
+## 4. Proposed architecture
+
+Keep the current CLI and package-management core. Add a system-planning layer
+that coordinates existing facilities and a small set of new domain components.
+
+    nawa CLI
+      |
+      +-- package commands
+      |
+      +-- system commands
+              |
+              v
+        System Intelligence
+          - System Detector
+          - System Profile
+          - Capability Catalog
+          - Dependency / Capability Solver
+          - Conflict and Impact Analysis
+          - Plan Builder
+          - Migration Planner
+              |
+              v
+        Execution Coordination
+          - Existing package installer
+          - Existing transaction history / journal
+          - Service Provider interface
+          - Trusted Migration Handlers
+          - Post-reboot Verification
+              |
+              v
+        Target Root and System State
+
+Responsibilities should remain separate:
+
+| Component | Responsibility |
+|---|---|
+| System Detector | Read-only observations about a target root and the running environment. |
+| System Profile | Describe the intended providers and system roles for a distribution or installation. |
+| Capability Catalog | Normalize capabilities provided and required by packages. |
+| Solver | Select a valid package/provider solution from installed and repository candidates. |
+| Conflict Analyzer | Detect file conflicts, exclusive roles, removals, and affected dependents. |
+| Plan Builder | Produce an ordered, explainable plan without mutating the system. |
+| Migration Planner | Match current and target system states to a supported transition. |
+| Transaction Coordinator | Execute package changes and durable migration steps with recovery records. |
+| Service Provider | Implement operations for a specific service manager. |
+| Migration Handler | Perform a narrowly scoped, built-in, reviewed system transition. |
+| Verifier | Check postconditions, including after reboot. |
+
+These are domain responsibilities, not a requirement to create one Rust crate
+or one file per row. Preserve Nawa's existing module-layering rules. Lower-level
+modules must not depend on CLI or command modules.
+
+## 5. System state: observed, installed, and desired
+
+A central rule is to keep three kinds of state separate.
+
+### 5.1 Observed runtime state
+
+What is actually running now: PID 1, service manager, active session manager,
+mounted filesystems, and other facts that can be measured.
+
+Examples:
+
+- PID 1 is systemd.
+- A runit supervisor is managing services.
+- A command is running inside a container or chroot.
+- A service manager cannot be contacted.
+
+An observation must include its source and confidence. Unknown is a valid
+result; it must not silently become a guessed value.
+
+### 5.2 Installed state
+
+What is present in the target root: package database entries, files,
+service-unit files, initramfs images, and boot configuration.
+
+When Nawa is invoked with --root, observations of the host's /proc/1 must not
+be mistaken for observations of the target root. In a chroot or offline root,
+the runtime state may be unknown while the installed state remains readable.
+
+### 5.3 Desired state
+
+What the distribution or administrator has declared the system should use.
+This is expressed by a versioned system profile and local administrator policy.
+
+A desired profile does not prove the migration has completed. For example,
+the target profile may select systemd while the running PID 1 is still runit
+because a reboot is pending.
+
+### 5.4 Detection rules
+
+The detector should:
+
+- Prefer structured, target-root-aware sources.
+- Use /proc and live service-manager queries only when they refer to the
+  environment Nawa is managing.
+- Identify chroot, container, offline-root, and live-host contexts where
+  possible.
+- Report unavailable or contradictory observations explicitly.
+- Never infer successful migration from the presence of a binary or unit file.
+- Avoid writing files, enabling services, or changing packages.
+
+## 6. Capabilities and provider selection
+
+Package names are implementation details. System requirements should be
+expressed as capabilities.
+
+Example capability names:
+
+- init-system
+- service-manager
+- session-manager
+- network-manager
+- audio-server
+- display-manager
+- bootloader
+- kernel
+
+A package may provide one or more capabilities. A system profile selects the
+provider wanted for each exclusive role. Applications can require a capability
+without requiring a particular implementation package.
+
+### 6.1 Illustrative metadata
+
+The following is a possible model, not the current recipe or repository schema:
+
+    [capabilities]
+    provides = [
+      "init-system=runit",
+      "service-manager=runit"
+    ]
+
+    [capabilities]
+    requires = [
+      "session-manager"
+    ]
+
+A systemd package could provide:
+
+    [capabilities]
+    provides = [
+      "init-system=systemd",
+      "service-manager=systemd"
+    ]
+
+The final schema must define normalized capability identifiers, optional
+provider versions, architecture constraints, and how a requirement can express
+a compatible range or a specific provider.
+
+### 6.2 Capability semantics
+
+Before implementation, define these rules precisely:
+
+- A capability requirement is not necessarily a package dependency.
+- More than one package may provide a capability, but an exclusive system
+  role has one selected provider in the desired profile.
+- Two providers may be installed side by side during a staged transition if
+  their files and package contents allow it.
+- Selecting a new provider does not immediately mean the old provider package
+  can be removed.
+- Package-level Conflicts should mean an actual package/file/runtime
+  incompatibility, not merely that two packages provide alternative choices.
+- The solver must distinguish a provider candidate from the active provider.
+- Administrator pins and distribution policy must influence provider choice.
+- Ambiguous or equally valid critical providers should be reported, not chosen
+  arbitrarily.
+
+Do not model runit and systemd as ordinary package conflicts if that prevents
+the migration planner from preparing the new provider before reboot. Exclusive
+selection belongs to the target system profile; package conflicts are a
+separate concept.
+
+### 6.3 Backward compatibility
+
+Legacy packages without capability metadata must remain readable. The solver
+must not invent capabilities for them.
+
+For critical roles such as init-system, a migration must require explicit,
+authenticated provider metadata and a supported migration definition. Missing
+metadata means the transition cannot be planned safely.
+
+The exact location of capability declarations remains an open schema decision.
+Any repository-supplied metadata that affects solving must be covered by the
+existing authenticated repository data or a separately reviewed, authenticated
+format. Unsigned side data must not influence privileged changes.
+
+## 7. System profiles
+
+A system profile describes a distribution's intended composition. It should
+not be confused with a snapshot of the packages currently installed.
+
+Illustrative profile:
+
+    schema = 1
+    distribution = "faseela"
+    profile = "desktop"
+    architecture = "x86_64"
+
+    [providers]
+    init-system = "systemd"
+    service-manager = "systemd"
+    session-manager = "systemd-logind"
+    network-manager = "NetworkManager"
+    audio-server = "pipewire"
+    desktop = "cosmic"
+
+This is a discussion example only. It does not imply that all listed
+capabilities or providers are currently supported by Nawa or Faseela.
+
+The design should distinguish:
+
+- Distribution defaults, shipped and versioned by the distribution.
+- Local administrator overrides, stored separately and never overwritten
+  silently by a package update.
+- Effective target profile, produced by merging defaults and valid overrides.
+- Observed runtime state, reported independently by the detector.
+
+A profile change should be an explicit input to plan generation. Installing a
+desktop package must not silently rewrite the system's init provider.
+
+The profile file location, ownership, merge rules, and update policy need to be
+decided with Faseela before implementation.
+
+## 8. Dependency and capability solver
+
+The solver should extend the current dependency-resolution facilities rather
+than become a second independent package resolver.
+
+### 8.1 Inputs
+
+A solve request should include:
+
+- Requested package operations and user intent.
+- Installed package records and install reasons.
+- Trusted repository candidates and their metadata.
+- Package dependencies, provides, conflicts, and replacements.
+- Effective target system profile.
+- Architecture and version constraints.
+- Administrator pins, exclusions, and provider preferences.
+- Protected packages and unsupported/unknown system state.
+- Whether the operation is a normal package transaction or a staged
+  migration.
+
+### 8.2 Output
+
+The solver should produce a structured solution containing:
+
+- Packages to install, upgrade, keep, or remove.
+- Provider selections for requested system capabilities.
+- Dependency and capability explanation chains.
+- Conflicts and the reason each candidate was rejected.
+- Packages/services/files affected by each operation.
+- Required migration handlers and their prerequisites.
+- Reboot requirement and post-reboot checks.
+- Any unresolved fact or unsafe condition that prevents execution.
+
+The plan must be deterministic for identical inputs and policy.
+
+### 8.3 Selection policy
+
+Prefer the smallest valid change set. Preserve explicit user-installed roots
+where possible. Respect configured provider preferences and repository
+priorities. Never remove a protected system package merely to make a solve
+succeed.
+
+When no valid solution exists, return an actionable explanation. Do not
+silently discard a requirement, downgrade repository authentication, or select
+an untrusted package.
+
+### 8.4 Explanation
+
+Every planned action should have a reason that can be traced to a request,
+dependency, capability requirement, profile change, or migration step.
+
+For example:
+
+    systemd
+      required by: target profile
+      capability: init-system=systemd
+      replaces active provider selection: init-system=runit
+
+    runit
+      retained until: systemd boot verification succeeds
+      removal reason: old provider cleanup after migration
+
+The explanation must distinguish package removal from deactivating a provider.
+
+## 9. Service provider abstraction
+
+The current runit-specific service implementation should be refactored behind
+a narrow provider interface.
+
+Possible operations include:
+
+- Detect whether a provider is available in the target context.
+- List known service definitions.
+- Report enabled/disabled state.
+- Report live active/inactive state when queryable.
+- Enable, disable, start, stop, and restart a service.
+- Explain unsupported operations or unavailable runtime state.
+
+The interface must separate static filesystem state from live runtime state.
+For example, a service unit existing on disk does not prove that systemd is
+running or that the service is active.
+
+Initial implementations:
+
+1. Runit provider, preserving current paths and behavior.
+2. Systemd provider, added only after the interface and tests are stable.
+
+Additional providers can follow later if there is a real distribution need.
+
+Provider selection should come from the detected/target system state, not from
+a hard-coded assumption that systemd is always present. In an offline root,
+Nawa may inspect definitions but must not claim that it started or enabled a
+live service.
+
+Service providers must not own package database mutations. Package changes
+remain in the package manager core.
+
+## 10. Migration engine
+
+A migration is a named, versioned transition from a known system state to a
+known target state. It is not an arbitrary package hook.
+
+Example transition:
+
+- From: active and configured provider is runit.
+- To: target provider is systemd.
+- Preconditions: supported Faseela release, known boot layout, verified
+  packages, supported architecture, and a recoverable boot path.
+- Package plan: install required systemd packages and systemd service units.
+- System steps: prepare boot/initramfs integration using trusted handlers.
+- Reboot: required.
+- Verification: check that systemd is PID 1, the expected system manager is
+  reachable, and required services are healthy.
+- Finalization: remove or retire old runit components only after verification
+  and after the rollback policy allows it.
+
+### 10.1 Migration definition
+
+An illustrative declaration:
+
+    id = "faseela-runit-to-systemd-v1"
+    from = "init-system=runit"
+    to = "init-system=systemd"
+    handler = "faseela.init.runit_to_systemd"
+    requires_reboot = true
+
+This is conceptual metadata. The actual contract must be typed, versioned,
+validated, and bound to a trusted built-in handler identifier. A repository
+must not be able to provide an arbitrary executable path or shell command for
+root to run.
+
+### 10.2 Trusted handlers
+
+Privileged migration handlers should be built into Nawa or delivered through a
+separately reviewed and authenticated extension mechanism with a strict
+capability boundary. The first implementation should prefer built-in
+allowlisted handler IDs.
+
+A handler should expose small, typed operations with explicit inputs and
+postconditions. It must not receive unrestricted authority to execute
+repository-supplied scripts.
+
+Migration metadata may describe which handler is needed, but metadata alone
+must never grant new privilege.
+
+### 10.3 Durable state machine
+
+The migration should persist a versioned state record under Nawa's state
+directory, for example:
+
+    /var/lib/nawa/migrations/<migration-id>.toml
+
+Suggested states:
+
+| State | Meaning |
+|---|---|
+| planned | Plan created; no mutation has begun. |
+| preparing | Preconditions checked and preparation is running. |
+| awaiting-reboot | Packages and boot preparation are committed; reboot is required. |
+| verifying | The machine has rebooted and postconditions are being checked. |
+| completed | Target state has been verified and finalization is complete. |
+| failed | A step failed and the failure is recorded. |
+| interrupted | Process ended before a step outcome was committed. |
+| needs-recovery | Automatic safe continuation is not possible. |
+| rollback-required | The target state failed verification and recovery action is required. |
+
+Every state transition must be durably recorded. Writes should use the project's
+atomic publication and fsync conventions. Recovery must inspect recorded
+intents and actual system state; it must not blindly repeat non-idempotent
+steps.
+
+### 10.4 Migration stages
+
+1. **Detect:** compare observed state, installed state, and target profile.
+2. **Preflight:** verify privileges, packages, disk space, architecture, boot
+   layout, required tools, repository trust, and recovery prerequisites.
+3. **Plan:** solve package and provider changes; display all actions.
+4. **Prepare:** install required packages and service definitions using the
+   existing verified installer; prepare boot integration through the trusted
+   handler; preserve the previous boot path where supported.
+5. **Commit pending state:** durably record that the new provider is prepared
+   and a reboot is required.
+6. **Reboot boundary:** Nawa exits with a clear pending-migration status. The
+   system must not pretend the new init is active before reboot.
+7. **Verify:** on the next boot, inspect PID 1 and required system services.
+8. **Finalize:** only after verification and rollback-policy checks, retire
+   old provider components and mark the migration complete.
+
+A migration may be refused if its handler cannot prove a safe preparation and
+verification path for the target machine.
+
+### 10.5 Rollback policy
+
+The migration definition must state what can be restored, how, and at which
+stage. At minimum, it should preserve the old boot entry or another documented
+recovery route when the platform supports it.
+
+Do not promise automatic rollback of arbitrary root filesystem changes.
+Package-level rollback, saved configuration copies, boot-entry restoration,
+filesystem snapshots, and manual recovery are different mechanisms and must be
+reported honestly.
+
+Do not remove the old init provider before the new provider has booted and
+passed verification. Even then, retain any old boot/initramfs artifacts needed
+by the configured rollback window.
+
+If a machine fails to boot, Nawa cannot assume it will be running to repair
+itself. The distribution must document an external rescue path.
+
+## 11. Transaction integration
+
+The migration engine must reuse the existing installer and transaction
+history/journal instead of creating a second package installation path.
+
+A migration record should link to the package transaction or transactions
+that prepared it. It should record:
+
+- Migration ID and definition version.
+- Source and target profile/provider.
+- Requested and selected packages.
+- Handler ID and handler version.
+- Preconditions and their results.
+- Ordered step intents and outcomes.
+- Files or boot artifacts changed by each handler.
+- Reboot boundary and verification results.
+- Recovery instructions and final status.
+
+Package-level operations continue to use the current artifact verification,
+file conflict checks, staging, and database update path.
+
+A multi-stage migration is a long-running logical operation, not necessarily
+one filesystem-atomic transaction. The CLI and history must show this
+distinction.
+
+Shared cache refresh triggers are not suitable for critical migration steps:
+they are designed for retryable refresh work after package transactions, not
+for boot-critical changes. Migration steps need explicit preconditions,
+idempotency rules, durable intent, and postcondition checks.
+
+## 12. CLI and user experience
+
+The commands below are proposals, not current commands.
+
+### 12.1 Inspection and planning
+
+    nawa system status
+    nawa system profile show
+    nawa plan
+    nawa plan --dry-run
+    nawa explain systemd
+    nawa why runit
+
+The output should state whether information describes the running host, an
+offline target root, or a configured target profile.
+
+### 12.2 Migration management
+
+    nawa migrate list
+    nawa migrate show faseela-runit-to-systemd-v1
+    nawa migrate plan faseela-runit-to-systemd-v1
+    nawa migrate apply faseela-runit-to-systemd-v1
+    nawa migrate status
+
+The final command names should be reviewed against Nawa's current CLI
+conventions before implementation. Avoid adding aliases that duplicate
+existing package commands without a clear need.
+
+### 12.3 Upgrade behavior
+
+A normal upgrade should remain a package upgrade unless trusted target
+metadata and the active distribution policy declare a system transition.
+
+When a transition is discovered, Nawa should show it as a separate,
+high-impact part of the proposed plan. It must not silently remove the current
+init package or alter boot configuration.
+
+Example preview:
+
+    System transition detected
+
+    Running provider:
+      init-system = runit
+
+    Target provider:
+      init-system = systemd
+
+    Package changes:
+      + systemd
+      + required systemd integration packages
+      ~ affected service packages
+
+    Deferred actions:
+      keep runit until the new system has booted and passed verification
+      prepare initramfs and boot configuration
+      reboot required
+      finalize old-provider cleanup after verification
+
+    Safety:
+      current init remains active until reboot
+      previous boot path is retained where supported
+      migration has a durable recovery record
+
+    Apply this system migration? [y/N]
+
+The actual package names and actions must come from the trusted repository
+solution and Faseela migration definition, not from hard-coded display text.
+
+### 12.4 Non-interactive operation
+
+High-impact system transitions must not run merely because a caller supplied
+a generic auto-confirm flag.
+
+Unattended migration requires a separate explicit policy/authorization that
+names the permitted migration and its recovery requirements. Without that
+policy, Nawa should stop before mutation and explain how to review the plan.
+
+Provide machine-readable plan output only after a stable schema is approved.
+JSON output must not omit warnings, unresolved state, or required user actions.
+
+## 13. Security requirements
+
+- Continue to verify repository signatures and package digests before use.
+- Ensure capability and migration metadata is covered by authenticated data.
+- Treat local profile overrides as administrator-controlled input and validate
+  them strictly.
+- Never execute shell text supplied by a repository as root.
+- Use allowlisted migration-handler IDs and typed arguments.
+- Validate every path relative to the target root; reject path traversal and
+  unexpected symlinks.
+- Require explicit authority for boot, initramfs, service, and provider changes.
+- Keep plugins outside the trusted package-manager core; a plugin must not
+  bypass package verification, transactions, or migration authorization.
+- Log the reason for every package/provider choice and every privileged step.
+- Fail closed when boot layout, recovery path, or provider identity is unknown.
+- Do not downgrade repository trust or accept unsigned metadata as a fallback.
+
+## 14. Testing strategy
+
+Testing must cover both the solver and real system transition boundaries.
+
+### 14.1 Unit tests
+
+- Capability parsing, normalization, version matching, and invalid metadata.
+- Multiple providers and exclusive target-profile selection.
+- Deterministic solving and minimal-change preference.
+- Conflict explanations and reverse dependency impact.
+- Legacy package records without capability metadata.
+- Unknown and contradictory detector observations.
+- Provider interface behavior and unsupported operations.
+- Migration definition validation and handler allowlisting.
+- Migration state-machine transition legality.
+- Durable state-record recovery and idempotent step handling.
+
+### 14.2 Integration tests
+
+- Existing runit service list/enable/disable/status behavior is preserved.
+- Systemd provider operates against a disposable test root or controlled VM.
+- A runit-to-systemd plan is generated without mutating the machine.
+- The plan does not remove runit during preparation.
+- Failed package installation leaves the current init bootable.
+- Failed initramfs or boot preparation stops before the reboot boundary.
+- Reboot pending state is recovered after process termination.
+- Successful reboot verifies systemd before old-provider cleanup.
+- Failed verification enters rollback-required or needs-recovery.
+- Chroot, container, and offline-root detection never reports host PID 1 as
+  the target's init.
+- Unsigned or malformed capability/migration metadata is rejected.
+- Existing repositories, recipes, package records, and history remain readable.
+
+### 14.3 End-to-end migration tests
+
+The first real migration must run in disposable virtual machines with
+snapshots or an equivalent externally controlled recovery mechanism.
+
+Test at least:
+
+1. Successful runit-to-systemd transition.
+2. Interruption before package preparation.
+3. Interruption after packages are installed but before reboot.
+4. Successful reboot with verification.
+5. Boot failure and recovery through the documented rescue path.
+6. Verification failure after boot.
+7. Finalization and cleanup only after the rollback policy permits them.
+
+A green unit suite is not evidence that a machine can reboot successfully.
+Record the exact VM image, commit, boot configuration, and test result.
+
+## 15. Incremental implementation roadmap
+
+Implementation should be split into reviewable changes. Do not combine this
+proposal with unrelated recipe, repository, package, or distribution changes.
+
+| Stage | Scope | Exit condition |
+|---|---|---|
+| 0. Baseline audit | Map current solver, package metadata, database, transaction, service, root handling, and CLI extension points. | A source-backed implementation map and explicit compatibility tests exist. |
+| 1. Capabilities | Add an optional, versioned capability model and explainable provider queries. | Legacy metadata still reads; signed repository data authenticates new fields; tests are green. |
+| 2. System detection | Add read-only observed/installed/desired state reporting. | Live host, chroot, container, and offline roots are distinguished or reported unknown. |
+| 3. Service providers | Extract runit operations behind a provider interface; add systemd implementation separately. | Existing runit behavior is unchanged and provider selection is context-aware. |
+| 4. Profile and solver integration | Add validated system profiles and capability-aware planning. | Dry-run plans are deterministic and explain every provider decision. |
+| 5. Migration framework | Add versioned migration records, state machine, trusted handlers, and recovery. | Failure/restart tests prove safe continuation or explicit recovery-required status. |
+| 6. Faseela transition | Add the distribution-specific runit-to-systemd definition and handlers. | Disposable VM migration passes boot, verification, and recovery tests. |
+
+The first implementation step is Stage 0, not a rewrite of the dependency solver.
+The audit should identify which current code can be reused and which behavior
+is truly missing.
+
+## 16. Open design decisions for discussion
+
+These questions should be resolved before changing package or repository
+schemas:
+
+1. Should capabilities be declared in recipe metadata, archive metadata, the
+   signed repository index, or a combination with one canonical source?
+2. How should capability requirements express version ranges and provider
+   preferences?
+3. Where should Faseela's distribution profile live, and how should local
+   administrator overrides be merged?
+4. Which service-provider operations should be common, and which must be
+   provider-specific?
+5. What bootloader and initramfs configurations must the first Faseela
+   migration support?
+6. What recovery mechanism is guaranteed on supported Faseela installations?
+7. How long should the previous init provider and boot artifacts be retained?
+8. Should migration authorization be a dedicated prompt, a policy file, or
+   both?
+9. How should offline upgrades and chroot package installation represent a
+   migration that cannot be verified until the target machine boots?
+10. Which CLI command names best fit the current Nawa command structure?
+
+## 17. Acceptance criteria
+
+The proposal is ready to become an implementation plan when:
+
+- The current source extension points and compatibility constraints have been
+  audited.
+- Capability and profile schemas have been reviewed and versioned.
+- The solver can explain provider selection and every planned package action.
+- Runit service behavior is preserved behind the provider interface.
+- Migration handlers are trusted, allowlisted, and narrowly scoped.
+- The transaction/recovery design covers interruption before and after reboot.
+- The Faseela migration has a documented boot and rescue strategy.
+- Tests prove that Nawa refuses unsafe or ambiguous transitions.
+- Documentation clearly distinguishes implemented behavior from proposals.
+
+Until those criteria are met, this document is a discussion proposal only.
