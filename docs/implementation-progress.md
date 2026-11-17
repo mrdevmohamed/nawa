@@ -11,7 +11,7 @@
 | Phase | State |
 |---|---|
 | 0 — Source audit | **DONE** (this session) |
-| 1 — Structural refactor + service removal | **in progress** (1a, 1b done; 1c next) |
+| 1 — Structural refactor + service removal | **in progress** (1a, 1b, 1c done; 1d next) |
 | 2 — Init-system detection & system capabilities | not started |
 | 3 — Metadata & capability resolution | not started |
 | 4 — System profiles & planning | not started |
@@ -143,25 +143,68 @@
   mention `service`; `nawa service …` now reports "unknown command"
   (routed through plugin dispatch).
 
+### Phase 1c — CLI split, `main.rs` slimming, bootstrap (2026-11-17)
+
+* `src/cli.rs` (833 lines) split into `src/cli/{mod,args,completions}.rs`
+  (args: `Cli`/`Cmd`/subcommand enums + the reserved-commands test;
+  completions: the three `COMPLETION_*` constants, `completions_script`
+  + the bash-syntax test). Pure move; one slice mistake
+  (`completions_script` initially dropped) caught by `cargo check` and
+  fixed.
+* `main.rs` slimmed 430 → 110 lines: the whole top-level orchestration
+  — lock acquisition + recovery + install-date migration, before/after
+  installed-state snapshots, payload-change comparison, `should_run_…
+  hooks`, and the `Cmd` → handler dispatch — moved verbatim into the
+  new `src/commands/dispatch.rs` (with its test). Deviation from the
+  planned checklist: the plan said `main.rs` keeps "lock acquisition";
+  in the end the entire `run()` orchestration moved to
+  `commands/dispatch.rs` because lock acquisition is command
+  orchestration, not process bootstrap. `main.rs` now reads:
+  parse → overrides → config → ctx → hook-suppression decision →
+  `commands::run` → post-transaction triggers → plugin events → exit.
+* New `src/bootstrap.rs`: `print_error` + `exit_on_error` (error
+  rendering, Ctrl+C → 130, other errors → 1; success returns normally
+  so stdout still flushes by natural return). Process-exit policy lives
+  in one place.
+* Crate-root bindings preserved: `use cli::*;` stays in `main.rs`
+  because `commands/fetching.rs` addresses `crate::default_jobs` (a
+  private crate-root glob is visible to all descendant modules). A
+  `git grep` confirmed `crate::default_jobs` is the only such external
+  reliance; `use commands::*;` was dropped (nothing outside
+  `main.rs`/`dispatch.rs` used it).
+* Verified: `cargo check --all-targets --offline` clean;
+  `cargo clippy --all-targets --offline -- -D warnings` clean;
+  `cargo test --all-targets --offline --no-fail-fast` → 564 passed /
+  2 ignored / 3 env-failed (identical to the Phase-1b tree; all moved
+  tests still counted, verified individually in the log);
+  `python3 scripts/check-layering.py` green (54 modules);
+  `cargo fmt --all -- --check` — no new violations in touched files
+  (dispatch.rs carries the moved pre-existing style only).
+  **Byte-identical behavior check**: built HEAD in an isolated
+  `git worktree` and diffed `--help`, `--version` and all three
+  completion scripts against the Phase-1c build — identical.
+  `scripts/smoke-v06.sh` executed against the release build: **ALL
+  V0.6 SMOKE TESTS PASSED**.
+
 ## Current task
 
-**Phase 1c — CLI split, `main.rs` slimming, bootstrap** (mechanical;
-behavior preserved):
+**Phase 1d — use-case extraction + layering direction rules** (last
+Phase-1 sub-phase; establishes the functional-core boundary):
 
-1. Split `src/cli.rs` into a `src/cli/` module: `cli/mod.rs` (types +
-   `completions_script`), `cli/args.rs` (the clap `Cli`/`Cmd`/subcommand
-   enums), `cli/completions.rs` (the three `COMPLETION_*` constants).
-   Pure move, no behavior change.
-2. Slim `main.rs`: the ~600-line dispatch `match` moves into the
-   commands layer (`src/commands/mod.rs::dispatch` or a new
-   `src/commands/dispatch.rs`); `main.rs` keeps only bootstrap (env,
-   color, context setup, lock acquisition, dispatch call, error
-   rendering).
-3. Add `src/bootstrap.rs`: the process-entry prelude (env normalization,
-   `NAWA_COLOR`/`NO_COLOR`, sysconfdir resolution) as its own module so
-   the imperative shell starts at one identifiable place.
-4. Verify: all commands still parse and run identically (CLI
-   integration tests cover this), gates green, then commit.
+1. Extract the first package use cases from the `commands/*` handlers
+   into `application/features/package/*` (start with the ones the
+   design names: plan-install, apply-transaction, query). Handlers keep
+   argument parsing + output formatting; use cases take typed requests
+   and return domain results.
+2. Extend `scripts/check-layering.py` with *direction* rules: domain
+   (`db`, `version`, `plan`, `recipe::model`, …) must not import
+   `cli`, `application`, `commands`, `output`, `color`, `diag`
+   (presentation); `application` must not import `commands` or `cli`
+   types (except the pragmatic `lifecycle` → `cli::Cmd` edge, or finish
+   moving `lock_mode` onto a typed request enum — decide during the
+   work).
+3. Keep every behavior and CLI message identical; integration tests
+   are the regression net.
 
 ## Changed files (this phase, updated as work lands)
 
@@ -181,19 +224,26 @@ behavior preserved):
   * `scripts/smoke-v06.sh` (§7 removed), `CHANGELOG.md` (removal entry +
     pre-existing corruption repaired), `README.md`, `docs/index.md`,
     `docs/commands.md`, `docs/transactions-services-plugins.md`
+* Phase 1c:
+  * `src/cli.rs` → `src/cli/{mod,args,completions}.rs`
+  * `src/main.rs` (slimmed 430 → 110 lines)
+  * `src/commands/dispatch.rs` (new — orchestration + dispatch moved)
+  * `src/bootstrap.rs` (new — error rendering + exit codes)
 
 ## Tests actually executed
 
 | Command | Result |
 |---|---|
-| `cargo check --all-targets --offline` | pass (Phase 0 + 1a + 1b) |
+| `cargo check --all-targets --offline` | pass (Phase 0 + 1a + 1b + 1c) |
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 0, re-measured at HEAD) | 566 pass / 2 ignored / 3 env-failed (baseline, pre-existing) |
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 1a tree) | 569 pass / 2 ignored / 3 env-failed (same 3; +3 new/moved tests) |
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 1b tree) | 564 pass / 2 ignored / 3 env-failed (same 3; −5 = deleted service unit tests) |
-| `cargo clippy --all-targets --offline -- -D warnings` | pass (Phase 1a + 1b) |
-| `python3 scripts/check-layering.py` | pass (54 modules after 1a; 53 after 1b) |
-| `bash scripts/smoke-v06.sh` (release build, Phase 1b) | ALL V0.6 SMOKE TESTS PASSED |
-| `cargo fmt --all -- --check` | fails repo-wide at HEAD (pre-existing ~100 files; CI does not run fmt) — re-scoped to "no new violations in touched/new code", satisfied (1a + 1b) |
+| `cargo test --all-targets --offline --no-fail-fast` (Phase 1c tree) | 564 pass / 2 ignored / 3 env-failed (identical to 1b; moved tests verified present) |
+| `cargo clippy --all-targets --offline -- -D warnings` | pass (Phase 1a + 1b + 1c) |
+| `python3 scripts/check-layering.py` | pass (54 after 1a; 53 after 1b; 54 after 1c) |
+| `bash scripts/smoke-v06.sh` (release build, Phases 1b + 1c) | ALL V0.6 SMOKE TESTS PASSED |
+| HEAD-vs-1c behavior diff (`--help`, `--version`, completions × 3, isolated worktree build) | byte-identical |
+| `cargo fmt --all -- --check` | fails repo-wide at HEAD (pre-existing ~100 files; CI does not run fmt) — re-scoped to "no new violations in touched/new code", satisfied (1a + 1b + 1c) |
 
 ## Known problems
 
@@ -223,12 +273,12 @@ behavior preserved):
 
 ## Exact next task
 
-Execute the Phase 1c checklist in "Current task" above; verify with
+Execute the Phase 1d checklist in "Current task" above; verify with
 `cargo check --all-targets --offline && cargo test --all-targets
 --offline --no-fail-fast && cargo clippy --all-targets --offline -- -D
 warnings` plus `python3 scripts/check-layering.py` (expect 564 pass /
-3 env-failed) and confirm `nawa --help`, `nawa completions …` and the
-CLI integration tests behave identically; commit as one coherent unit
-("cli module split + main.rs slimming + bootstrap"); then proceed to
-Phase 1d (use-case extraction into `application/features/*`, layering
-direction rules in `scripts/check-layering.py`).
+3 env-failed, layering green *with the new direction rules enforced*)
+and the byte-identical CLI check for any touched command; commit as one
+coherent unit ("first use cases + layering direction rules"); then
+Phase 1 is done — move to Phase 2 (init-system detection & system
+capabilities, design §5) or the next unblocked phase.

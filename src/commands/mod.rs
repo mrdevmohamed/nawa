@@ -1,4 +1,6 @@
-//! Command handlers grouped by domain; `main.rs` only dispatches.
+//! Command handlers grouped by domain; `dispatch` owns the top-level command
+//! orchestration (lock, recovery, snapshots, the `Cmd` → handler match);
+//! `main.rs` only bootstraps.
 mod building;
 mod configuring;
 mod fetching;
@@ -23,3 +25,6 @@ pub(crate) use querying::*;
 pub(crate) use recipes::*;
 pub(crate) use sandbox::*;
 pub(crate) use signing::*;
+
+mod dispatch;
+pub(crate) use dispatch::*;
