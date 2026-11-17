@@ -244,7 +244,7 @@ features and use cases.
 | CLI | Parse arguments, validate command-line shape, and route a request to an application use case. | Resolve dependencies, modify package files, or own transaction policy. |
 | Application features | Orchestrate one user operation: gather inputs, call domain logic, request confirmation, coordinate execution, and report the outcome. | Reimplement domain rules or contain low-level transport/filesystem details. |
 | Domain | Own package, dependency, recipe, plan, transaction, system-profile, and migration models and deterministic rules. | Read environment variables, access the network, spawn processes, or mutate the filesystem. |
-| Application ports | Define the external capabilities a use case needs through narrow interfaces. | Contain adapter implementations or become a generic interface for every helper function. |
+| Application ports | Define the external capabilities a use case needs through narrow interfaces, including plan confirmation and authorization. | Contain adapter implementations or become a generic interface for every helper function. |
 | Adapters | Implement ports using concrete storage, network, archive, filesystem, signing, process, and sandbox facilities. | Decide user intent or package/provider policy. |
 | Presentation | Render plans, diagnostics, confirmations, and human/machine-readable output. | Own package-management decisions. |
 | Bootstrap | Construct concrete adapters, connect them to use cases, and start the selected command. | Become another place for business logic. |
@@ -338,6 +338,7 @@ during the refactor.
           process_runner.rs
           transaction_journal.rs
           init_system_probe.rs
+          user_interaction.rs
         features/
           package/
             install.rs
@@ -445,8 +446,10 @@ The intended flow separates planning from effects:
    install order, and returns an explainable plan. It performs no I/O. The
    initial implementation is not a general SAT solver and must not claim to be
    one.
-5. **Presentation:** renders the complete plan and obtains the required
-   confirmation. Dry-run ends here without mutation.
+5. **Presentation adapter:** renders the complete plan and implements the
+   application's user-interaction/authorization port. The application receives
+   an explicit approval result; it does not write directly to a terminal.
+   Dry-run ends here without mutation.
 6. **Execution coordination:** checks cancellation and preconditions, acquires
    the required lock at the mutation boundary, re-reads the relevant installed
    state, and revalidates the approved plan. If inputs changed, it must stop
@@ -509,18 +512,31 @@ The first mapping from current `master` to the target architecture is:
 | `install/mod.rs` | Keep a narrow installer facade while separating payload application, authentication, journals, rollback, and persistence responsibilities. |
 | `install/payload.rs` | Filesystem/package-payload adapter responsibilities. |
 | `install/journal.rs`, `previous.rs`, `rollback.rs`, `step.rs` | Transaction and filesystem adapter implementations, with transaction state models separated from storage. |
-| `db.rs` | Database adapter and persistence mapping; keep domain package/state types independent of file formats. |
-| `repo/`, `repositories.rs`, `fetch/` | Repository and fetch adapters; keep authenticated index/package data models explicit and validated. |
-| `recipe/model.rs`, `validate.rs`, `expand.rs` | Domain recipe model and validation/expansion rules; file discovery and loading remain an I/O boundary. |
+| `db.rs` | Database adapter and persistence mapping. Convert persisted `db::Entry` values into domain `InstalledPackage` values at the port boundary; never make the on-disk record the domain model. |
+| `repo/`, `repositories.rs`, `fetch/` | Repository and fetch adapters. Convert signed `RepoEntry` transport/index records into normalized domain package candidates while preserving authentication provenance; do not expose transport structs to the solver. |
+| `recipe/model.rs`, `validate.rs`, `expand.rs` | Split the pure recipe definition/validation rules into Domain from file loading and build expansion. Keep source path and raw recipe bytes in a loader-owned `RecipeDocument`/source envelope, not in the Domain `Recipe`; move `ExpandCtx` and filesystem-bound expansion into the build feature. |
 | `build/`, `buildenv.rs`, `fetchrun/`, `sandbox/` | Build use case and cohesive build subsystem, with process, fetch, and sandbox effects behind adapter boundaries where needed. |
 | `transaction/`, `recovery.rs`, `lock.rs`, `undo.rs` | Separate transaction domain/state, application lifecycle coordination, and durable journal/lock adapters. |
 | `config.rs`, `profile.rs`, `sys.rs` | Split configuration loading and host observations from validated domain configuration/profile models. |
 | `groups/` and `commands/groups.rs` | Group membership domain plus group application use cases; keep catalog loading in its repository adapter. |
 | `plugins/` and `commands/plugins.rs` | Plugin management use cases plus isolated discovery/runner adapters; plugins remain outside the trusted package/migration core. |
-| `artifact.rs`, `sign.rs`, `checksum.rs` | Artifact identity and verification values where pure; concrete cryptographic and file access in signing/artifact adapters. |
+| `artifact.rs`, `sign.rs`, `checksum.rs` | Artifact digest/provenance values may be Domain types; content-addressed storage, signature verification, and file hashing implementations belong in adapters. |
 | `sources.rs`, `assets.rs`, `fetchrun/`, `slim.rs`, `closure.rs` | Keep with the build feature/subsystems they serve; isolate network and filesystem effects behind adapter boundaries where needed. |
 | `output.rs`, `diag.rs`, `color.rs`, `confirm.rs`, `humanize.rs` | Presentation and user-interaction responsibilities. |
 | `service.rs`, `commands/service.rs` | Delete as part of the accepted removal of service management from Nawa. |
+
+Other small root modules also need explicit owners during Stage 0:
+
+| Current modules | Target ownership |
+|---|---|
+| `archive.rs`, `fswalk.rs`, `glob.rs`, `pathutil.rs`, `atomic.rs`, `unique.rs` | Archive/filesystem/path adapters or narrowly scoped infrastructure primitives; keep pure path/name rules in Domain where they express package invariants. |
+| `version.rs`, `suggest.rs`, `humanize.rs` | Version comparison and suggestion rules in Domain where pure; human-readable formatting in Presentation. |
+| `lint/` | Build/recipe validation feature, separated into pure recipe checks and filesystem/ELF inspection adapters. |
+| `revdep.rs`, `undo.rs`, `recovery.rs` | Reverse-dependency analysis and undo decisions in Domain; filesystem restoration and crash reconciliation in adapters, coordinated by Application. |
+| `sync.rs`, `repositories.rs` | Repository/sync application use cases plus repository adapters; do not mix remote transport with policy. |
+| `config.rs`, `profile.rs`, `sys.rs` | Configuration/profile loading and host observation adapters; validated profile values and init identity remain Domain types. |
+| `interrupt.rs`, `lock.rs` | Process cancellation and OS lock adapters, coordinated by Application lifecycle. |
+| `error.rs`, `testutil.rs` | Shared error taxonomy only where stable across layers; test fixtures remain test support, not production Domain modules. |
 
 This table is an initial ownership hypothesis. Stage 0 must inspect imports,
 call sites, and tests before assigning the final destination of each module.
@@ -537,13 +553,18 @@ folder with the same name.
   behavior belongs in a named application service or domain function only
   when it is genuinely shared.
 - Keep dependency resolution and plan construction pure and deterministic.
+  Domain planners receive domain package/recipe types, never `db::Entry`,
+  `repo::RepoEntry`, file paths, or repository transport records.
 - Keep installer internals behind a narrow application-facing API. Command
   handlers must not reach into payload, journal, rollback, or database internals.
-- Define ports around meaningful external boundaries. Avoid unnecessary traits,
-  generic repositories, service locators, global mutable state, and a large
-  context object passed everywhere.
+- Define ports around meaningful external boundaries, including user
+  confirmation/authorization. Avoid unnecessary traits, generic repositories,
+  service locators, global mutable state, and a large context object passed
+  everywhere.
 - Domain modules may depend on other domain modules, but not on CLI,
-  Application, or Adapters.
+  Application, or Adapters. Move shared pure identity/version/name validation
+  rules out of `db.rs` before recipe/archive adapters depend on them; the
+  database adapter must not become the owner of domain invariants.
 - Application may depend on Domain and its own port contracts.
 - Adapters may depend on port contracts and domain data types, but never on
   CLI or presentation code.
@@ -570,9 +591,9 @@ code review, and focused architecture checks; do not rely on folder names alone.
 - **Domain unit tests:** run without filesystem, network, subprocess, root
   privileges, or a temporary installed system. Cover dependency resolution,
   version selection, conflicts, planning, and state transitions.
-- **Application tests:** use small fake/in-memory port implementations to
-  verify use-case orchestration, confirmation gates, failure handling, and
-  transaction boundaries.
+- **Application tests:** use small fake/in-memory port implementations,
+  including a user-interaction port, to verify use-case orchestration,
+  confirmation gates, failure handling, and transaction boundaries.
 - **Adapter tests:** exercise real filesystem/database/archive behavior with
   temporary roots, plus controlled local HTTP fixtures for repository and
   fetch behavior.
@@ -693,9 +714,10 @@ A systemd package could provide:
       "init-system=systemd"
     ]
 
-The final schema must define normalized capability identifiers, optional
-provider versions, architecture constraints, and how a requirement can express
-a compatible range or a specific provider.
+The eventual schema must define normalized capability identifiers and
+architecture constraints. General capability version-range negotiation is
+deferred; the first implementation supports only the exact init identities
+`init-system=runit` and `init-system=systemd`.
 
 ### 6.2 Capability semantics
 
@@ -746,7 +768,11 @@ Recommended metadata contract:
    the archive is fetched.
 4. Legacy v1/v2/v3 repositories and archives without these fields remain
    readable, but missing critical init-provider metadata means migration is
-     unsupported. Never infer `init-system` from package names.
+   unsupported. Never infer `init-system` from package names.
+5. In v4, metadata fields required for solving must be present for every
+   package, with an explicit empty list when the package has no dependencies
+   or capabilities. A missing field in a legacy record means `unknown`, not
+   `[]`. The normalized candidate model must preserve this distinction.
 
 The precise TOML spelling and schema version remain to be specified before
 implementation. Recipe, archive, and signed-index values must not become
@@ -779,7 +805,11 @@ The design should distinguish:
 - Observed runtime state, reported independently by the detector.
 
 A profile change should be an explicit input to plan generation. Installing a
-desktop package must not silently rewrite the system's init provider.
+desktop package must not silently rewrite the system's init provider. Likewise,
+`nawa install systemd` by itself installs a package and its declared
+dependencies; it must not silently switch the boot/init provider, prepare a
+new initramfs, or trigger a migration. Only an explicit target-profile change
+and separately authorized migration may do that.
 
 The system profile is not the existing build profile selected through
 `--profiles`. Those are different concepts and must use separate models and
@@ -1037,15 +1067,32 @@ the side effect and a result persisted after it. Writes must use atomic
 publication, file and directory fsync, and restrictive ownership/permissions.
 The migration record is rooted at the selected target root; it must never
 accidentally write to the host when Nawa is planning an offline root.
+Planning against an offline root is read-only: it produces an in-memory or
+user-exported plan and does not create a persistent `planned` migration record
+inside the target. The durable `planned` record is created only after the
+live-host apply preflight and explicit authorization succeed.
 
 A **persistent migration mutation gate** is required because the ordinary
-`flock` lock disappears when the process exits or the machine reboots. While
+`flock` lock disappears when the process exits or the machine reboots. The
+gate check must run before any process-local lock-bypass shortcut. In the
+current source, `lock::acquire` returns early when `NAWA_LOCK_HELD` is set so
+a nested package hook can avoid deadlocking on its parent's lock. That marker
+may suppress reacquiring the same `flock`; it must never authorize a package
+mutation or skip the persistent migration-gate check. While
 a migration is in `preparing`, `awaiting-reboot`, `verifying`,
 `rollback-required`, or `needs-recovery`, all package-mutating commands must
 stop before changing the package set. Read-only inspection and explicit
 migration recovery commands remain allowed. The migration coordinator may
-perform its own planned package transactions through a narrowly scoped
-internal migration permit; ordinary CLI invocations must not bypass the gate.
+perform its own planned package transactions through a narrowly scoped,
+unforgeable in-process permit created only by the migration use case. The
+permit must be a private typed value passed directly to the package use case;
+it must not be represented by an environment variable, CLI flag, plugin
+capability, or inherited subprocess environment. The gate check happens before
+honoring `NAWA_LOCK_HELD` or any equivalent lock-bypass marker. A nested
+`nawa` process launched by a package hook receives no migration permit and
+must be blocked if it attempts a package mutation while the gate is pending.
+The migration coordinator should invoke the package-use-case implementation
+inside the same Nawa process rather than spawn a nested `nawa` CLI process.
 The gate is checked under the same exclusive package database lock before any
 package mutation. It is cleared only after verified completion or a completed,
 verified rollback.
@@ -1144,12 +1191,22 @@ they are designed for retryable refresh work after package transactions, not
 for boot-critical changes. Migration steps need explicit preconditions,
 idempotency rules, durable intent, and postcondition checks.
 
-The persistent migration gate must be checked by every package-mutating entry
-point after process restart and after reboot, while holding the exclusive
-package database lock. The migration's own coordinator uses an internal,
-scoped permit to run only the package transactions recorded in its approved
-plan. This is separate from the process-local `flock` lock and cannot be
-implemented by relying on the lock alone.
+The persistent migration gate must be checked by every Nawa-owned
+package-mutating entry point after process restart and after reboot, before
+honoring `NAWA_LOCK_HELD` or another process-local lock-bypass marker. The
+check is performed against the selected root while the exclusive package
+database lock is held, or under the already-held parent lock for a nested
+read-only gate check. The only bypass is the private, typed in-process permit
+held by the active migration coordinator; it cannot be forged with an
+environment variable, CLI argument, or plugin. The migration coordinator
+executes its approved package operations through application use cases in the
+same process, not a nested CLI invocation.
+
+This gate serializes Nawa-managed package mutations only. It cannot prevent an
+administrator or an unrelated privileged program from modifying the target
+root outside Nawa; that limitation must be documented and the migration
+preflight should warn about concurrent external package managers or manual
+changes.
 
 ## 12. CLI and user experience
 
@@ -1294,20 +1351,30 @@ Testing must cover both the solver and real system transition boundaries.
   checks fail on forbidden dependency directions.
 - The pure planner produces identical results for identical normalized
   source-built and binary-only inputs.
+- Persistent gate checks run before the `NAWA_LOCK_HELD` shortcut; a nested
+  hook process cannot mutate packages while migration is pending.
+- No environment variable, CLI flag, or plugin can construct or impersonate
+  the private in-process migration permit.
 
 ### 14.2 Integration tests
 
 - The `nawa service` command and all service-management APIs are absent.
 - Package unit, preset, and run-script files install as ordinary payload files.
+- Faseela's out-of-Nawa provisioning preserves existing user-disabled runit
+  services across package upgrades and imports existing disabled markers
+  before the Nawa marker logic is removed.
 - Built-in package installation and migration paths do not implement or call
   service-management operations. Faseela recipe and transaction-trigger
   policies reject service activation in package hooks; tests also document
   that shell hooks are privileged code and cannot be treated as a sandbox.
 - Mutating package commands are blocked while a migration mutation gate is
-  pending; read-only commands remain available, and only the matching
-  migration coordinator permit may continue its approved steps.
-- `migrate apply` refuses offline roots, chroots, containers, and unknown
-  runtime init states; offline-root planning remains read-only.
+  pending; read-only commands remain available. `NAWA_LOCK_HELD` may suppress
+  nested lock acquisition but cannot bypass the gate. Only the private
+  in-process permit held by the matching migration coordinator may continue
+  its approved package steps.
+- `nawa system migrate apply` refuses offline roots, chroots, containers,
+  and unknown runtime init states; offline-root planning remains read-only
+  and does not persist migration state under the target root.
 - A runit-to-systemd plan is generated without mutating the machine.
 - The plan does not remove runit during preparation.
 - Failed package installation leaves the current init bootable.
@@ -1330,7 +1397,9 @@ The first real migration must run in disposable virtual machines with
 snapshots or an equivalent externally controlled recovery mechanism. Test both
 BIOS and UEFI paths supported by Faseela, and use the real `saq` init-selection
 implementation so the test proves which init the generated initramfs will
-actually launch.
+actually launch. Separately verify that Faseela's service-policy/provisioning
+migration preserves administrator enable/disable choices without adding
+service-management behavior to Nawa.
 
 Test at least:
 
@@ -1359,7 +1428,7 @@ repository, package, or distribution changes.
 | 2. Init identity and capability foundation | Add read-only init-system detection and the authenticated metadata needed to identify init providers and resolve binary-only runtime dependencies. | Legacy metadata remains readable; live, chroot, container, and offline-root states are distinguished or reported unknown; no critical solve treats missing metadata as an empty dependency/provider list. |
 | 3. Profile and planning | Add the validated target init profile and deterministic package planning. | Dry-run plans explain every init-provider and package decision without managing services. |
 | 4. Migration framework | Add versioned migration records, a write-ahead handler journal, persistent mutation gate, built-in trusted handlers, and recovery. | Failure/restart tests prove safe continuation or an explicit recovery-required status; unrelated package mutation is blocked across process exit and reboot while migration is pending. |
-| 5. Faseela transition | Add the distribution-specific runit-to-systemd definition and handlers; service activation remains outside Nawa. | Disposable VM migration passes boot, init verification, recovery, and Faseela-owned disabled-service preservation tests on supported BIOS/UEFI paths. |
+| 5. Faseela transition | Add the distribution-specific runit-to-systemd definition and handlers; service activation and service-state conversion remain outside Nawa. | Disposable VM migration passes boot, init verification, recovery, and Faseela-owned preservation of administrator service choices on supported BIOS/UEFI paths. |
 
 The first implementation step is Stage 0, not a rewrite of the dependency
 solver and not a mass file move. Stage 0 records the actual dependency graph,
@@ -1393,6 +1462,9 @@ schemas:
    post-transaction triggers, given that current Nawa executes these scripts?
 10. Which exact `saq` interface selects systemd in the generated initramfs,
     and how is that behavior tested for each supported boot mode?
+11. Which Faseela-owned component translates legacy runit enabled/disabled
+    choices into the systemd preset/provisioning policy, without Nawa querying
+    or managing individual services?
 
 ## 17. Acceptance criteria
 
