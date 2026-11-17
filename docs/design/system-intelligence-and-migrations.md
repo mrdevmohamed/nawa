@@ -1135,9 +1135,8 @@ The commands below are proposals, not current commands.
 
     nawa system status
     nawa system profile show
-    nawa plan
-    nawa plan --dry-run
-    nawa explain systemd
+    nawa system plan
+    nawa system explain init-system
     nawa why runit
 
 The output should state whether information describes the running host, an
@@ -1145,24 +1144,29 @@ offline target root, or a configured target profile.
 
 ### 12.2 Migration management
 
-    nawa migrate list
-    nawa migrate show faseela-runit-to-systemd-v1
-    nawa migrate plan faseela-runit-to-systemd-v1
-    nawa migrate apply faseela-runit-to-systemd-v1
-    nawa migrate status
+    nawa system migrate list
+    nawa system migrate show faseela-runit-to-systemd-v1
+    nawa system migrate plan faseela-runit-to-systemd-v1
+    nawa system migrate apply faseela-runit-to-systemd-v1
+    nawa system migrate resume
+    nawa system migrate status
 
-The final command names should be reviewed against Nawa's current CLI
-conventions before implementation. Avoid adding aliases that duplicate
-existing package commands without a clear need.
+Use the single `nawa system migrate` namespace for migration lifecycle
+commands. Planning may target an offline root; `apply` and `resume` are live
+host operations only and must reject `--root` targets other than the verified
+live Faseela root. The final flag spelling should be reviewed during
+implementation, but do not introduce a second top-level `migrate` namespace.
 
 ### 12.3 Upgrade behavior
 
 A normal upgrade should remain a package upgrade unless trusted target
 metadata and the active distribution policy declare a system transition.
 
-When a transition is discovered, Nawa should show it as a separate,
-high-impact part of the proposed plan. It must not silently remove the current
-init package or alter boot configuration.
+When a transition is discovered, Nawa may show it as a separate,
+high-impact migration candidate in the upgrade preview. A normal package
+upgrade must not silently switch the target init provider, remove the current
+init package, or alter boot configuration. Applying the migration requires its
+own explicit migration authorization and durable migration record.
 
 Example preview:
 
@@ -1192,8 +1196,10 @@ Example preview:
 
     Apply this system migration? [y/N]
 
-The actual package names and actions must come from the trusted repository
-solution and Faseela migration definition, not from hard-coded display text.
+The actual package names and actions must come from authenticated repository
+metadata and the reviewed Faseela migration definition, not from hard-coded
+display text. The preview must distinguish package-upgrade actions from
+boot/init migration actions.
 
 ### 12.4 Non-interactive operation
 
@@ -1201,8 +1207,10 @@ High-impact system transitions must not run merely because a caller supplied
 a generic auto-confirm flag.
 
 Unattended migration requires a separate explicit policy/authorization that
-names the permitted migration and its recovery requirements. Without that
-policy, Nawa should stop before mutation and explain how to review the plan.
+names the exact migration ID, source/target init, allowed package set, handler
+version, and recovery requirements. A generic `--yes` flag is insufficient.
+Without that policy, Nawa must stop before mutation and explain how to review
+the plan.
 
 Provide machine-readable plan output only after a stable schema is approved.
 JSON output must not omit warnings, unresolved state, or required user actions.
@@ -1217,9 +1225,19 @@ JSON output must not omit warnings, unresolved state, or required user actions.
 - Use allowlisted migration-handler IDs and typed arguments.
 - Validate every path relative to the target root; reject path traversal and
   unexpected symlinks.
-- Require explicit authority for boot, initramfs, and init-provider changes.
-- Keep plugins outside the trusted package-manager core; a plugin must not
-  bypass package verification, transactions, or migration authorization.
+- Require root privileges and explicit authority for boot, initramfs, and
+  init-provider changes; refuse apply in chroots, containers, and offline roots.
+- Persist and enforce the migration mutation gate under the package database
+  lock for every package-mutating command.
+- Keep migration state and journal paths rooted under the selected target root,
+  with restrictive ownership, permissions, no-follow path handling, and
+  atomic/fsynced publication.
+- Keep third-party plugins outside the trusted package-manager and migration
+  core. A plugin must not register a privileged migration handler or bypass
+  package verification, transactions, or migration authorization.
+- Treat existing archive `.HOOKS` and local post-transaction trigger scripts
+  as privileged code-execution mechanisms; document their trust boundary and
+  do not reuse them as migration handlers.
 - Log the reason for every package/provider choice and every privileged step.
 - Fail closed when boot layout, recovery path, or provider identity is unknown.
 - Do not downgrade repository trust or accept unsigned metadata as a fallback.
@@ -1240,30 +1258,49 @@ Testing must cover both the solver and real system transition boundaries.
   offline roots.
 - Migration definition validation and handler allowlisting.
 - Migration state-machine transition legality.
-- Durable state-record recovery and idempotent step handling.
+- Durable state-record recovery, legal transition checks, and idempotent step
+  handling at every write-ahead boundary.
+- No domain module imports CLI, Application, or adapter modules; architecture
+  checks fail on forbidden dependency directions.
+- The pure planner produces identical results for identical normalized
+  source-built and binary-only inputs.
 
 ### 14.2 Integration tests
 
 - The `nawa service` command and all service-management APIs are absent.
 - Package unit, preset, and run-script files install as ordinary payload files.
-- Package installation and migration never invoke `sv` or `systemctl` to
-  change service state.
+- Built-in package installation and migration paths do not implement or call
+  service-management operations. Faseela recipe and transaction-trigger
+  policies reject service activation in package hooks; tests also document
+  that shell hooks are privileged code and cannot be treated as a sandbox.
+- Mutating package commands are blocked while a migration mutation gate is
+  pending; read-only commands remain available, and only the matching
+  migration coordinator permit may continue its approved steps.
+- `migrate apply` refuses offline roots, chroots, containers, and unknown
+  runtime init states; offline-root planning remains read-only.
 - A runit-to-systemd plan is generated without mutating the machine.
 - The plan does not remove runit during preparation.
 - Failed package installation leaves the current init bootable.
 - Failed initramfs or boot preparation stops before the reboot boundary.
-- Reboot pending state is recovered after process termination.
-- Successful reboot verifies systemd before old-provider cleanup.
+- Reboot pending state and every interrupted handler step are recovered after
+  process termination or power loss.
+- A stale plan is rejected and must be regenerated/reapproved after relevant
+  installed state changes.
+- Successful reboot verifies systemd as PID 1 and the expected boot/initramfs
+  postconditions before old-provider cleanup; no service state is queried.
 - Failed verification enters rollback-required or needs-recovery.
 - Chroot, container, and offline-root detection never reports host PID 1 as
-  the target's init.
+  the target's init, and migration apply is rejected for those contexts.
 - Unsigned or malformed capability/migration metadata is rejected.
 - Existing repositories, recipes, package records, and history remain readable.
 
 ### 14.3 End-to-end migration tests
 
 The first real migration must run in disposable virtual machines with
-snapshots or an equivalent externally controlled recovery mechanism.
+snapshots or an equivalent externally controlled recovery mechanism. Test both
+BIOS and UEFI paths supported by Faseela, and use the real `saq` init-selection
+implementation so the test proves which init the generated initramfs will
+actually launch.
 
 Test at least:
 
@@ -1305,12 +1342,14 @@ should new capability and migration behavior be added.
 These questions should be resolved before changing package or repository
 schemas:
 
-1. Should capabilities be declared in recipe metadata, archive metadata, the
-   signed repository index, or a combination with one canonical source?
-2. How should capability requirements express version ranges and provider
-   preferences?
-3. Where should Faseela's distribution profile live, and how should local
-   administrator overrides be merged?
+1. Confirm the recommended metadata chain: recipe declaration, canonical
+   archive `.PKGINFO`, and authenticated duplication in a future signed index
+   schema. Define the exact recipe and archive field syntax.
+2. What exact package metadata is required for binary-only dependency solving,
+   and how will the signed index be upgraded without breaking v1/v2/v3 readers?
+3. Confirm the distribution profile location and precedence between Faseela
+   defaults and administrator overrides, keeping it separate from the existing
+   build profiles selected by `--profiles`.
 4. What bootloader and initramfs configurations must the first Faseela
    migration support?
 5. What recovery mechanism is guaranteed on supported Faseela installations?
@@ -1319,14 +1358,18 @@ schemas:
    both?
 8. How should offline upgrades and chroot package installation represent a
    migration that cannot be verified until the target machine boots?
-9. Which CLI command names best fit the current Nawa command structure?
+9. What is the enforceable Faseela policy for privileged package `.HOOKS` and
+   post-transaction triggers, given that current Nawa executes these scripts?
+10. Which exact `saq` interface selects systemd in the generated initramfs,
+    and how is that behavior tested for each supported boot mode?
 
 ## 17. Acceptance criteria
 
 The proposal is ready to become an implementation plan when:
 
-- The current source extension points, module ownership, dependency graph, and
-  compatibility constraints have been audited.
+- The current source extension points, module ownership, dependency graph,
+  binary-only package limitations, hook execution paths, and compatibility
+  constraints have been audited.
 - The Feature-Oriented Hexagonal Architecture with Functional Core /
   Imperative Shell is documented and its dependency direction is enforced.
 - Core planning rules are testable without filesystem, network, or process I/O.
@@ -1339,8 +1382,15 @@ The proposal is ready to become an implementation plan when:
   runit-specific installer marker handling; service-related package files
   remain ordinary payload files.
 - Migration handlers are trusted, allowlisted, and narrowly scoped.
-- The transaction/recovery design covers interruption before and after reboot.
-- The Faseela migration has a documented boot and rescue strategy.
+- The migration journal records write-ahead intents/outcomes for boot side
+  effects, and the persistent mutation gate blocks unrelated package changes
+  until verified completion or rollback.
+- Migration apply is limited to a verified live Faseela host; offline roots
+  are planning-only.
+- The Faseela migration has a documented boot and rescue strategy, including
+  a tested `saq` init-selection contract for supported BIOS/UEFI modes.
+- The privileged package-hook and post-transaction-trigger trust policy is
+  explicit and compatible with the no-service-management boundary.
 - Tests prove that Nawa refuses unsafe or ambiguous transitions and never
   attempts to control services.
 - Documentation clearly distinguishes implemented behavior from proposals.
