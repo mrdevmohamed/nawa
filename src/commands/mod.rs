@@ -19,7 +19,7 @@ pub(crate) use configuring::*;
 pub(crate) use fetching::*;
 pub(crate) use groups::*;
 pub(crate) use history::*;
-pub(crate) use installing::*;
+pub(crate) use installing::{cmd_autoremove, cmd_install, cmd_outdated, cmd_remove, cmd_update};
 pub(crate) use plugins::*;
 pub(crate) use querying::*;
 pub(crate) use recipes::*;

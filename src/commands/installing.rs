@@ -1,10 +1,14 @@
 //! install / remove / update / autoremove / outdated handlers and the plan runner.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use crate::suggest;
 use crate::ctx::Ctx;
 use crate::config::InstallMode;
-use crate::application::features::package::plan_install::{self, Sourcing, Source};
+use crate::application::features::package::apply_transaction::{
+    apply_transaction, archive_name_of, ApplyRequest, Applied,
+};
+use crate::application::features::package::plan_install;
+use crate::application::ports::user_interaction::{PlanView, UserInteraction};
 use crate::color::Palette;
 use std::path::Path;
 use std::path::PathBuf;
@@ -22,10 +26,8 @@ use crate::pathutil::is_archive_arg;
 use crate::lock;
 use crate::plan;
 use crate::recovery;
-use crate::repo;
 use crate::revdep;
 use crate::transaction;
-use crate::upgrade;
 use crate::version;
 use crate::commands::warn_revdep;
 
@@ -181,201 +183,66 @@ pub(crate) fn cmd_install_with_why(
             op.record_group(id);
         }
         drop(_lock);
-        let result = run_plan(ctx, &plan, flags, &sourcing, &extras, &mut op, target_why);
-        let err = result.err();
+        let build = |ctx: &Ctx, it: &plan::Item, n: usize, total: usize| {
+            build_one(ctx, it, flags, n, total)
+        };
+        let request = ApplyRequest {
+            build: &build,
+            force: flags.force,
+            allow_unsigned: flags.allow_unsigned,
+            dry_run: flags.dry_run,
+            extras_why: target_why,
+        };
+        let ui = interaction(flags.yes);
+        let result = apply_transaction(ctx, &plan, &extras, &sourcing, &mut op, &request, &ui);
+        let outcome = match result {
+            Ok(applied) => applied,
+            Err(err) => {
+                let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
+                op.finish(Some(&err))?;
+                return Err(err);
+            }
+        };
         {
             let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
-            op.finish(err.as_ref())?;
+            op.finish(None)?;
         }
-        match err {
-            Some(e) => Err(e),
-            None => Ok(()),
+        match outcome {
+            Applied::Done { changed, seconds } => {
+                crate::nawa_success!(
+                    "done — {} package(s) installed in {}",
+                    changed.len(),
+                    format_duration(seconds)
+                );
+                warn_revdep(ctx, &changed);
+            }
+            Applied::NothingToDo => {}
         }
+        Ok(())
     }
 }
 
-/// The installed packages by name, read under a brief shared lock.
-pub(crate) fn installed_map(ctx: &Ctx) -> Result<std::collections::HashMap<String, db::Entry>> {
-    let _lock = lock::acquire(&ctx.root, lock::Mode::Shared)?;
-    Ok(db::Db::new(&ctx.root)
-        .installed()?
-        .into_iter()
-        .map(|e| (e.name.clone(), e))
-        .collect())
-}
-
-/// Details for one staged archive installation.
-struct InstallRequest<'a> {
-    reason: crate::db::InstallReason,
-    what: &'a str,
-    number: usize,
-    total: usize,
-    /// SHA-256 the repository index promised for this archive (repository
-    /// sources only). Always pinned, so the installed bytes are the bytes
-    /// that were validated against the index entry.
-    index_sha256: Option<&'a str>,
-    /// The index was authenticated by a trusted key and replaces the
-    /// per-archive detached signature (schema v2).
-    signed_index: bool,
-    /// Where this archive comes from, for the history record.
-    source: &'a str,
-}
-
-/// Install one ready archive. The library functions never lock; hold the db
-/// lock for this one install only, never through a build or a download.
-fn install_one(
-    ctx: &Ctx,
-    archive: &Path,
-    flags: &PlanFlags,
-    request: InstallRequest<'_>,
-    open_repo: Option<&upgrade::OpenRepo>,
-    op: &mut transaction::OperationHandle,
-) -> Result<()> {
-    crate::nawa_info!(
-        "[{}/{}] installing {}",
-        request.number, request.total, request.what
-    );
-    let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
-    // Resolve the real package identity from .PKGINFO; archive filenames
-    // are not authoritative package metadata.
-    let package = archive_name_of(archive)
-        .ok_or_else(|| anyhow::anyhow!("cannot read package name from {}", archive.display()))?;
-    let db = db::Db::new(&ctx.root);
-    let before = db.entry(&package)?;
-    // A package that was explicitly requested must stay explicit even when
-    // a group later upgrades it. "keep" preserves the existing DB reason.
-    let effective_reason = if request.reason == crate::db::InstallReason::Group
-        && before.as_ref().is_some_and(|entry| entry.reason == crate::db::InstallReason::Explicit.as_str())
-    {
-        crate::db::InstallReason::Keep
-    } else {
-        request.reason
-    };
-    let target = install::inspect_archive_state(archive, effective_reason, before.as_ref())?;
-    if let Some(expected) = request.index_sha256 {
-        if expected != target.artifact_sha256 {
-            bail!(
-                "archive {} changed after repository verification: index expected {}, inspected {}",
-                archive.display(), expected, target.artifact_sha256
-            );
-        }
+/// The presentation adapter for [`apply_transaction`]: own boxed closures
+/// wired to the real prompts, status macros and the plan-table renderer, so
+/// the port object is self-contained. `yes` pre-answers every confirmation.
+fn interaction(yes: bool) -> UserInteraction {
+    UserInteraction {
+        stderr_line: Box::new(|line| eprintln!("{line}")),
+        info: Box::new(|line| crate::nawa_info!("{}", line)),
+        warn: Box::new(|line| crate::nawa_warn!("{}", line)),
+        show_plan: Box::new(render_plan),
+        choose: Box::new(confirm::choose),
+        confirm: Box::new(move |prompt| confirm::confirm(prompt, yes)),
     }
-    let action = match &before {
-        None => transaction::history::StepAction::Install,
-        Some(old) if old.version != target.version.clone().unwrap_or_default()
-            || Some(old.rel) != target.rel => transaction::history::StepAction::Upgrade,
-        Some(_) => transaction::history::StepAction::Reinstall,
-    };
-    let mut recorder = op.recorder();
-    let step_no = recorder.step_intent_state(
-        &package, action, before.as_ref(), Some(&target), &target.artifact_sha256,
-    )?;
-    let file_journal = install::FileJournalId::for_step(recorder.tx(), step_no);
-    let installed = match request.index_sha256 {
-        Some(expected) if request.signed_index => {
-            let proof = open_repo.map(|open| install::IndexProof {
-                index_bytes: Some(&open.index_bytes),
-                index_signature: open.index_signature.as_deref(),
-                signer_public: open.signer_public.as_deref(),
-                repo_id: open.base_url.as_deref(),
-            });
-            install::install_archive_from_index_proof(
-                archive, &ctx.root, flags.force, expected, effective_reason, proof, file_journal,
-            )
-        }
-        pinned => {
-            let expected = pinned.unwrap_or(target.artifact_sha256.as_str());
-            install::install_archive_pinned(
-                archive, &ctx.root,
-                install::InstallOpts { force: flags.force, allow_unsigned: flags.allow_unsigned, key: None, reason: effective_reason, pinned_sha: Some(expected), file_journal },
-            )
-        },
-    };
-    install::record_install_outcome(
-        &mut recorder,
-        &ctx.root,
-        step_no,
-        &package,
-        action,
-        before.as_ref(),
-        &target,
-        request.source,
-        &installed,
-    )?;
-    installed.with_context(|| {
-        format!(
-            "[{}/{}] install of {} failed",
-            request.number, request.total, request.what
-        )
-    })?;
-    Ok(())
 }
 
-/// The package name inside an archive (from .PKGINFO), when readable.
-fn archive_name_of(archive: &Path) -> Option<String> {
-    let raw = crate::archive::read_pkginfo(archive).ok()?;
-    let info = crate::archive::parse_pkginfo(&raw).ok()?;
-    info.get("pkgname").cloned()
-}
-
-/// How many items of the plan come from the repository (`extras` always do).
-fn count_repo(sources: &[Source], extras: &[repo::RepoEntry]) -> usize {
-    sources.iter().filter(|s| matches!(s, Source::Repo(_))).count() + extras.len()
-}
-
-/// Print the plan as a dnf-style table with sizes and the totals line.
-fn print_plan(
-    ctx: &Ctx,
-    plan: &plan::Plan,
-    extras: &[repo::RepoEntry],
-    sources: &[Source],
-    total: usize,
-) {
+/// Render the plan table from the port's display data (the dnf-style table
+/// with sizes and the totals line). Moved verbatim from the former
+/// `print_plan`; the use case now supplies the rows, the header info line
+/// and the exact wording.
+fn render_plan(view: &PlanView) {
     let pal = Palette::auto(Stream::Stdout);
-    let from_repo = count_repo(sources, extras);
-    crate::nawa_info!(
-        "{total} package(s) to install into {} ({from_repo} from the repository, {} to build)",
-        ctx.root.display(),
-        total - from_repo
-    );
-    // one row per package: dnf-style table with sizes
-    struct Row {
-        name: String,
-        ver: String,
-        tag: &'static str,
-        dl: u64,
-        inst: u64,
-        note: String,
-    }
-    let mut rows: Vec<Row> = Vec::with_capacity(total);
-    for (i, it) in plan.items.iter().enumerate() {
-        let (tag, dl, inst) = match &sources[i] {
-            Source::Repo(re) => ("repo", re.size, re.installed_size),
-            Source::Build => ("build", 0, 0),
-        };
-        let mut note = it.why.label().to_string();
-        if let Some(old) = &it.replaces {
-            note.push_str(&format!(" (replaces {old})"));
-        }
-        rows.push(Row {
-            name: it.rec.package.name.clone(),
-            ver: format!("{}-{}", it.rec.package.version, it.rec.package.rel),
-            tag,
-            dl,
-            inst,
-            note,
-        });
-    }
-    for re in extras {
-        rows.push(Row {
-            name: re.name.clone(),
-            ver: format!("{}-{}", re.version, re.rel),
-            tag: "repo",
-            dl: re.size,
-            inst: re.installed_size,
-            note: "explicit (no recipe: dependencies not resolved)".to_string(),
-        });
-    }
+    let rows = &view.rows;
     let size_cell = |n: u64| if n == 0 { "-".to_string() } else { format_size(n) };
     let wn = rows.iter().map(|r| r.name.len()).max().unwrap_or(0).max("Package".len());
     let wv = rows.iter().map(|r| r.ver.len()).max().unwrap_or(0).max("Version".len());
@@ -415,202 +282,14 @@ fn print_plan(
     println!("{line}");
 }
 
-/// Get the archive for one plan item: fetch it from the repository or build
-/// it. Returns the archive path, the repository index sha256 (repository
-/// copies only) and whether a signed index authenticated it. In `auto` mode a
-/// failed repository fetch falls back to a build (the recipe pins its
-/// sources); in strict `repo` mode it is an error.
-fn acquire_archive(
-    ctx: &Ctx,
-    it: &plan::Item,
-    flags: &PlanFlags,
-    sourcing: &Sourcing,
-    source: &Source,
-    n: usize,
-    total: usize,
-) -> Result<(PathBuf, Option<String>, bool)> {
-    let id = it.rec.id();
-    let acquired = match source {
-        Source::Build => (build_one(ctx, it, flags, n, total)?, None, false),
-        Source::Repo(re) => {
-            crate::nawa_info!("[{n}/{total}] fetching {id} from the repository");
-            let open = sourcing
-                .open
-                .as_ref()
-                .context("internal: repository source without an open repository")?;
-            match upgrade::fetch_entry(&ctx.root, open, re, flags.allow_unsigned) {
-                Ok(a) => (
-                    a,
-                    Some(re.sha256.clone()),
-                    open.archive_auth == upgrade::ArchiveAuth::SignedIndexSha256,
-                ),
-                // strict repo mode never builds behind the user's back
-                Err(e) if sourcing.mode == InstallMode::Repo => {
-                    return Err(e)
-                        .with_context(|| format!("[{n}/{total}] repository fetch of {id} failed"));
-                }
-                // auto: the recipe pins its sources, so a build is a safe fallback
-                Err(e) => {
-                    crate::nawa_warn!(
-                        "cannot use the repository copy of {id} ({e:#}) — building from source"
-                    );
-                    (build_one(ctx, it, flags, n, total)?, None, false)
-                }
-            }
-        }
-    };
-    Ok(acquired)
-}
-
-/// Show the plan, ask, then install every item in order — dependencies
-/// first, one `[n/total]` line per step. Each item comes from the repository
-/// or is built from its recipe (see [`Sourcing`]); `extras` are repository
-/// packages without a recipe, installed last.
-pub(crate) fn run_plan(
-    ctx: &Ctx,
-    plan: &plan::Plan,
-    flags: &PlanFlags,
-    sourcing: &Sourcing,
-    extras: &[repo::RepoEntry],
-    op: &mut transaction::OperationHandle,
-    extras_why: plan::Why,
-) -> Result<()> {
-    let total = plan.items.len() + extras.len();
-    if total == 0 {
-        crate::nawa_info!("nothing to do");
-        return Ok(());
-    }
-
-    // decide every source up front: a strict `repo` run must fail BEFORE the
-    // first package is touched, not halfway through
-    let mut sources: Vec<Source> = Vec::with_capacity(plan.items.len());
-    for it in &plan.items {
-        let (source, note) = sourcing.pick(&it.rec)?;
-        if let Some(note) = note {
-            eprintln!("{note}");
-        }
-        sources.push(source);
-    }
-
-    print_plan(ctx, plan, extras, &sources, total);
-    if flags.dry_run {
-        crate::nawa_info!("dry run — nothing was built or installed");
-        return Ok(());
-    }
-
-    // `install_mode = ask`: on a terminal, let the user choose the source
-    // for everything the repository could supply
-    if sourcing.ask && count_repo(&sources, extras) > 0 {
-        let c = confirm::choose(
-            "nawa: install the repository-available packages from the repository (r) or build them from source (b)?",
-            'r',
-            &['r', 'b'],
-        )?;
-        if c == 'b' {
-            if let Some(re) = extras.first() {
-                bail!(
-                    "`{}` has no recipe, so it cannot be built — it exists only in the repository",
-                    re.name
-                );
-            }
-            for s in sources.iter_mut() {
-                *s = Source::Build;
-            }
-            crate::nawa_info!("building all {total} package(s) from source");
-        }
-    }
-    confirm::confirm(&format!("nawa: install {total} package(s)?"), flags.yes)?;
-
-    let started = std::time::Instant::now();
-    for (i, it) in plan.items.iter().enumerate() {
-        // Ctrl+C during the previous install was deferred until that package
-        // was complete; now that the system is consistent, stop here
-        crate::interrupt::check()?;
-        let n = i + 1;
-        let id = it.rec.id();
-        let mut step = || -> Result<()> {
-            let (archive, index_sha256, signed_index) =
-                acquire_archive(ctx, it, flags, sourcing, &sources[i], n, total)?;
-            let source = match &sources[i] {
-                Source::Repo(_) => "repository",
-                Source::Build => "local-build",
-            };
-            install_one(
-                ctx,
-                &archive,
-                flags,
-                InstallRequest {
-                    reason: it.why.db_reason(),
-                    what: &id,
-                    number: n,
-                    total,
-                    index_sha256: index_sha256.as_deref(),
-                    signed_index,
-                    source,
-                },
-                sourcing.open.as_ref(),
-                op,
-            )
-        };
-        if let Err(e) = step() {
-            if i > 0 {
-                eprintln!(
-                    "nawa: {i} of {total} package(s) were installed before this failure — \
-                     re-run the same command to continue (installed packages are skipped)"
-                );
-            }
-            return Err(e);
-        }
-    }
-    for (j, re) in extras.iter().enumerate() {
-        crate::interrupt::check()?;
-        let n = plan.items.len() + j + 1;
-        let what = format!("{}-{}-{}", re.name, re.version, re.rel);
-        let mut step = || -> Result<()> {
-            crate::nawa_info!("[{n}/{total}] fetching {what} from the repository");
-            let open = sourcing
-                .open
-                .as_ref()
-                .context("internal: repository package without an open repository")?;
-            let archive = upgrade::fetch_entry(&ctx.root, open, re, flags.allow_unsigned)
-                .with_context(|| format!("[{n}/{total}] repository fetch of {what} failed"))?;
-            let signed_index = open.archive_auth == upgrade::ArchiveAuth::SignedIndexSha256;
-            install_one(
-                ctx,
-                &archive,
-                flags,
-                InstallRequest {
-                    reason: extras_why.db_reason(),
-                    what: &what,
-                    number: n,
-                    total,
-                    index_sha256: Some(re.sha256.as_str()),
-                    signed_index,
-                    source: "repository",
-                },
-                sourcing.open.as_ref(),
-                op,
-            )
-        };
-        if let Err(e) = step() {
-            if n > 1 {
-                eprintln!(
-                    "nawa: {} of {total} package(s) were installed before this failure — \
-                     re-run the same command to continue (installed packages are skipped)",
-                    n - 1
-                );
-            }
-            return Err(e);
-        }
-    }
-    crate::nawa_success!(
-        "done — {total} package(s) installed in {}",
-        format_duration(started.elapsed().as_secs())
-    );
-    let mut changed: Vec<String> = plan.items.iter().map(|it| it.rec.package.name.clone()).collect();
-    changed.extend(extras.iter().map(|re| re.name.clone()));
-    warn_revdep(ctx, &changed);
-    Ok(())
+/// The installed packages by name, read under a brief shared lock.
+pub(crate) fn installed_map(ctx: &Ctx) -> Result<std::collections::HashMap<String, db::Entry>> {
+    let _lock = lock::acquire(&ctx.root, lock::Mode::Shared)?;
+    Ok(db::Db::new(&ctx.root)
+        .installed()?
+        .into_iter()
+        .map(|e| (e.name.clone(), e))
+        .collect())
 }
 
 pub(crate) fn cmd_outdated(ctx: &Ctx) -> Result<()> {
@@ -713,19 +392,46 @@ pub(crate) fn cmd_update(
             &repo_ids,
         )?
     };
-    let result = run_plan(ctx, &plan, flags, &sourcing, &[], &mut op, plan::Why::Update);
-    let err = result.err();
+    let build = |ctx: &Ctx, it: &plan::Item, n: usize, total: usize| {
+        build_one(ctx, it, flags, n, total)
+    };
+    let request = ApplyRequest {
+        build: &build,
+        force: flags.force,
+        allow_unsigned: flags.allow_unsigned,
+        dry_run: flags.dry_run,
+        extras_why: plan::Why::Update,
+    };
+    let ui = interaction(flags.yes);
+    let result = apply_transaction(ctx, &plan, &[], &sourcing, &mut op, &request, &ui);
+    let outcome = match result {
+        Ok(applied) => applied,
+        Err(err) => {
+            let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
+            op.finish(Some(&err))?;
+            // also after a partial run: whatever was installed is worth
+            // checking
+            let changed: Vec<String> =
+                plan.items.iter().map(|it| it.rec.package.name.clone()).collect();
+            warn_revdep(ctx, &changed);
+            return Err(err);
+        }
+    };
     {
         let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
-        op.finish(err.as_ref())?;
+        op.finish(None)?;
+    }
+    if let Applied::Done { seconds, .. } = outcome {
+        crate::nawa_success!(
+            "done — {} package(s) installed in {}",
+            plan.items.len(),
+            format_duration(seconds)
+        );
     }
     // also after a partial run: whatever was installed is worth checking
     let changed: Vec<String> = plan.items.iter().map(|it| it.rec.package.name.clone()).collect();
     warn_revdep(ctx, &changed);
-    match err {
-        Some(e) => Err(e),
-        None => Ok(()),
-    }
+    Ok(())
 }
 
 pub(crate) fn cmd_autoremove(ctx: &Ctx, dry_run: bool, yes: bool, build_deps: bool) -> Result<()> {

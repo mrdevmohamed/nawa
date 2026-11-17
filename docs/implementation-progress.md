@@ -11,9 +11,9 @@
 | Phase | State |
 |---|---|
 | 0 — Source audit | **DONE** (this session) |
-| 1 — Structural refactor + service removal | **DONE** (1a, 1b, 1c, 1d) |
+| 1 — Structural refactor + service removal | **DONE** (1a, 1b, 1c, 1d, 1e — 1e is the deferred apply-transaction extraction) |
 | 2 — Init identity & capability foundation | **DONE** (detection + capability/identity domain model) |
-| 3 — Metadata & capability resolution | not started (next: apply-transaction extraction first) |
+| 3 — Metadata & capability resolution | not started (next: B3 index-v4 schema proposal first) |
 | 4 — System profiles & planning | not started |
 | 5 — Migration engine | not started |
 | 6 — Faseela runit→systemd migration | **BLOCKED** (see blockers) |
@@ -328,31 +328,94 @@
   detection adds no CLI surface). `scripts/smoke-v06.sh` and
   `scripts/smoke-v05.sh` (release build): **ALL PASSED**.
 
+### Phase 1e — apply-transaction extraction behind the user-interaction port (2026-11-17)
+
+The deliberately-deferred Phase 1d tail (design §4.3/§4.4): the execution
+half of `nawa install` / `nawa update` is now an application use case, and
+the handlers own only parsing, rendering and prompts.
+
+* New **application ports** layer (`src/application/ports/`):
+  * `user_interaction.rs`: the `UserInteraction` port — owned boxed
+    closures (`stderr_line`, `info`, `warn`, `show_plan`, `choose`,
+    `confirm`) plus the `PlanView`/`PlanRow` display contract. The use case
+    decides *what* is shown and asked, including the exact wording; the
+    presentation adapter decides *how* it is rendered (colours, column
+    widths, prompt mechanics).
+* `src/application/features/package/apply_transaction.rs` (new use case):
+  * `apply_transaction(ctx, plan, extras, sourcing, op, request, ui)`:
+    source picking (strict-repo failure before anything is touched), the
+    header info line, the plan table, dry run, the `ask`-mode
+    repository-vs-build choice, confirmation, and the per-package
+    fetch/build + install loop with the failure continuation notices.
+    Returns `Applied` (`NothingToDo` | `Done { changed, seconds }`) — the
+    raw elapsed seconds go back so the handler keeps `format_duration`.
+  * `ApplyRequest` carries plain values + the injected `BuildStep`
+    (`commands::build_one` stays presentation); no CLI flag struct crosses
+    the boundary (1d precedent).
+  * Moved from `commands/installing.rs`: `install_one` (per-item
+    `InstallRequest` now carries the per-run force/allow_unsigned knobs),
+    `acquire` (fetch with the auto-mode build fallback), `count_repo`,
+    `plan_view` (row computation), `archive_name_of` (still used by the
+    handler's `install_archive_file`).
+* `src/commands/installing.rs`: `interaction(yes)` wires the port to the
+  real `confirm::` calls, status macros and `render_plan` (the moved
+  table/totals renderer); the success line and `warn_revdep` are
+  handler-side again. cmd_install/cmd_update match on `Applied`.
+* Facade narrowed (design stage 1 tail): `pub(crate) use installing::*` →
+  the six dispatched commands (`cmd_autoremove`, `cmd_install`,
+  `cmd_outdated`, `cmd_remove`, `cmd_update`; `cmd_install_with_why` stays
+  on the module path for `groups.rs`).
+* Tests: 8 new unit tests on the use case (recorder port): empty plan,
+  dry run, declined confirm, ask-mode extras bail, ask-mode build switch
+  (build closure invoked, no fetch), strict pick failure before the plan
+  is shown, pick-note-before-plan ordering, first-item failure without a
+  continuation note. Real-install success paths stay covered by the
+  integration tests and smoke suites.
+* **One intentional normalization** (everything else byte-identical):
+  `nawa update` used to run the reverse-dependency warning **twice** on
+  success — once inside `run_plan` (over items+extras, before the
+  transaction finished) and once in `cmd_update` (over items, after it).
+  The extraction keeps the post-finish call only (always, over the plan
+  items; failure-path order unchanged: finish → warn → return the error).
+  Failure/dry-run/nothing-to-do paths print exactly as before.
+* Verified: `cargo check --all-targets --offline` clean;
+  `cargo clippy --all-targets --offline -- -D warnings` clean;
+  `cargo test --all-targets --offline --no-fail-fast` → **622 passed /
+  2 ignored / 3 env-failed** (= 614 + 8 new; the same 3 pre-existing env
+  failures); `python3 scripts/check-layering.py` green (55 modules).
+  (One full-suite run mid-session reported 8 failures: the container's
+  `/tmp` tmpfs had filled with leaked per-run test fixture dirs — cleaned,
+  re-run green.)
+* **Byte-identical behavior**: `--help`, `--version` and all three
+  completion scripts identical to a HEAD release build (isolated worktree,
+  removed afterwards); a paired 8-step install/update scenario (pick note
+  → plan table → confirm → fetch → install → success; dry run; the
+  non-interactive refusal; the planner error; the strict-repo update
+  refusal; the real update; the up-to-date dry run) produced **identical
+  transcripts**; `scripts/smoke-v06.sh` and `scripts/smoke-v05.sh`:
+  **ALL PASSED**.
+* Formatting: all new files rustfmt-clean; `commands/installing.rs`'s
+  rustfmt dirty hunks went 26 → 18 (the moved code's violations became
+  clean inside the new files; `render_plan` carries the old `print_plan`
+  body verbatim — the same pre-existing violation relocated, none new).
+
 ## Current task
 
-**Apply-transaction extraction behind the user-interaction port** (design
-§4.3; the deliberately-deferred Phase 1d extraction, before Phase 3's
-solver consumes the transaction loop):
+**Phase 3 — profile and planning** (design §6–§8). First step, unblocking
+B3: write the **repository index v4 / recipe+archive metadata chain schema
+proposal** (`domain/system/capability.rs`'s §6 schema note is the seed):
 
-1. Define the interaction port (`application/ports/user_interaction.rs`
-   shape — a struct of injected callbacks is enough for one crate; no new
-   layer ceremony): plan display, confirmation prompts, and the per-step
-   progress/error reporting `run_plan` currently does inline via
-   `nawa_*!` macros and `confirm::` calls.
-2. Extract `apply-transaction` from `commands/installing.rs`
-   (`run_plan`, `install_one`, the confirm prompts) into
-   `application/features/package/apply_transaction.rs`: the use case
-   decides and returns per-step outcomes; rendering stays in the handler.
-   `install_one`'s acquisition calls `commands::build_one` and
-   `upgrade::fetch_entry` — route what the use case needs through typed
-   inputs, keep the build/archive execution in the handler where it
-   belongs until the build use case (design §4.3 `build/`) is extracted.
-3. Keep every printed byte, confirm prompt and exit code identical
-   (byte-identical behavior check vs a HEAD build, incl. the smoke
-   suites); handlers keep argument parsing and rendering.
-4. Then narrow the installer facade (design stage 1 tail): the
-   `pub(crate) use installing::*` surface shrinks to what the dispatcher
-   actually calls.
+1. Re-read design §6.3 and §16.1–2; inspect the current v3 index format
+   (`repo/`), `.PKGINFO` fields (`archive::`), and recipe `SourceSpec`/
+   `FetchSpec` (`recipe/model.rs`).
+2. Draft the v4 schema (authenticity chain: recipe → `.PKGINFO` → signed
+   index entry; missing capability metadata stays explicitly unknown) as a
+   written proposal + parser tests, in the style of the Phase-2 §6 note.
+3. Only then plan the solver use case that consumes
+   `domain/system/capability.rs` + `detect.rs` (`plan_install`'s
+   dependency resolution moves behind it).
+
+Nothing in this step changes package, index or db formats yet.
 
 ## Changed files (this phase, updated as work lands)
 
@@ -405,6 +468,18 @@ solver consumes the transaction loop):
     injectable-source `observe()` + 16 tests)
   * `src/main.rs`, `src/application/features/mod.rs` (one-line
     `mod` registrations)
+* Phase 1e:
+  * `src/application/ports/{mod,user_interaction}.rs` (new —
+    `UserInteraction` closure port + `PlanView`/`PlanRow`)
+  * `src/application/features/package/apply_transaction.rs` (new —
+    `apply_transaction`/`Applied`/`ApplyRequest`/`BuildStep`, moved
+    `install_one`/`acquire`/`count_repo`/`plan_view`/`archive_name_of`
+    + 8 tests)
+  * `src/commands/installing.rs` (handlers call the use case; `interaction`
+    adapter + `render_plan`; success line + `warn_revdep` handler-side)
+  * `src/commands/mod.rs` (installer facade narrowed to the six commands)
+  * `src/application/{mod,features/package/mod}.rs` (port + use-case
+    registrations, layering doc updated)
 
 ## Tests actually executed
 
@@ -417,14 +492,17 @@ solver consumes the transaction loop):
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 1c tree) | 564 pass / 2 ignored / 3 env-failed (identical to 1b; moved tests verified present) |
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 1d tree) | 581 pass / 2 ignored / 3 env-failed (= 564 + 18 new − 1 net lifecycle test; same 3 env failures) |
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 2 tree) | 614 pass / 2 ignored / 3 env-failed (= 581 + 33 new: 16 detect + 9 identity + 8 capability; same 3 env failures) |
-| `cargo clippy --all-targets --offline -- -D warnings` | pass (Phase 1a + 1b + 1c + 1d + 2) |
+| `cargo test --all-targets --offline --no-fail-fast` (Phase 1e tree) | 622 pass / 2 ignored / 3 env-failed (= 614 + 8 new apply-transaction tests; same 3 env failures) |
+| `cargo clippy --all-targets --offline -- -D warnings` | pass (Phase 1a + 1b + 1c + 1d + 1e + 2) |
 | `python3 scripts/check-layering.py` | pass (54 after 1a; 53 after 1b; 54 after 1c; 55 after 2 — the new `domain` layer) |
 | `bash scripts/smoke-v06.sh` (release build, Phases 1b + 1c + 1d + 2) | ALL V0.6 SMOKE TESTS PASSED |
 | `bash scripts/smoke-v05.sh` (release build, Phases 1d + 2) | ALL SMOKE TESTS PASSED |
 | HEAD-vs-1c behavior diff (`--help`, `--version`, completions × 3, isolated worktree build) | byte-identical |
 | HEAD-vs-1d behavior diff (`--help`, `--version`, completions × 3 + 12 read/planning commands, isolated worktree build) | byte-identical |
 | HEAD-vs-2 behavior diff (`--help`, `--version`, completions × 3, isolated worktree build) | byte-identical (detection adds no CLI surface) |
-| `cargo fmt --all -- --check` | fails repo-wide at HEAD (pre-existing ~100 files; CI does not run fmt) — re-scoped to "no new violations in touched/new code", satisfied (1a–1d; 1d new files clean, dirty-hunk counts decreased in both touched handlers; 2: all new files clean, two one-line registrations only) |
+| HEAD-vs-1e behavior diff (`--help`, `--version`, completions × 3, isolated worktree build) | byte-identical |
+| HEAD-vs-1e paired 8-step install/update scenario (pick note → plan → confirm → fetch → install → success; dry run; non-interactive refusal; planner error; strict-repo update refusal; real update; up-to-date dry run; local signed repo, worktree build) | identical transcripts |
+| `cargo fmt --all -- --check` | fails repo-wide at HEAD (pre-existing ~100 files; CI does not run fmt) — re-scoped to "no new violations in touched/new code", satisfied (1a–1e; 1e new files clean, installing.rs dirty hunks 26 → 18, render_plan carries the relocated pre-existing print_plan violation verbatim) |
 
 ## Known problems
 
@@ -454,13 +532,12 @@ solver consumes the transaction loop):
 
 ## Exact next task
 
-Execute the apply-transaction checklist in "Current task" above (the
-user-interaction port + `application/features/package/apply_transaction.rs`,
-the deferred Phase-1d extraction; then narrow the installer facade); verify
-with `cargo check --all-targets --offline && cargo test --all-targets
---offline --no-fail-fast && cargo clippy --all-targets --offline -- -D
-warnings` plus `python3 scripts/check-layering.py`; keep printed bytes,
-prompts and exit codes identical (HEAD-vs-new diff incl. the smoke suites);
-commit as one coherent unit. After that: Phase 3 (profile and planning —
-B3's index/recipe schema proposal first, then the solver consuming
-`domain/system/capability.rs` and `detect.rs`).
+Start **Phase 3** with the B3 schema proposal (checklist in "Current task"
+above): re-read design §6.3 + §16.1–2, inspect the current v3 index and
+`.PKGINFO`/recipe formats, write the v4 metadata-chain schema proposal with
+parser tests; then the solver/planning use case consuming
+`domain/system/capability.rs` + `detect.rs`. Verify with `cargo check
+--all-targets --offline && cargo test --all-targets --offline
+--no-fail-fast && cargo clippy --all-targets --offline -- -D warnings`
+plus `python3 scripts/check-layering.py`; keep package/index/db formats
+unchanged until the proposal is agreed; commit as one coherent unit.
