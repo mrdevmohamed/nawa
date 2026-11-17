@@ -12,6 +12,14 @@
 //!   `NAWA_LOCK_TIMEOUT=<seconds>` to give up instead of waiting forever.
 //! * Hooks run by a package are children of the nawa that holds the lock and
 //!   get `NAWA_LOCK_HELD=1`, so a hook that itself calls nawa cannot deadlock.
+//!   The marker is an *optimisation for read-only nested calls only*: it is
+//!   inherited process state and forgeable, so it must never authorize a
+//!   mutation. An exclusive acquisition fails closed when the marker is
+//!   present — a nested package-mutating command has no lock of its own (the
+//!   parent's flock belongs to the parent process) and must not change the
+//!   package set from inside a hook or trigger script. The persistent
+//!   migration mutation gate (roadmap Phase 5) will be checked *before* the
+//!   marker is honored; the marker can never bypass it.
 //!
 //! Callers lock once, at the top-level command (see `main.rs`); the library
 //! functions (`install_archive`, `upgrade`, ...) never lock, because
@@ -26,7 +34,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// Set in the environment of hooks so nested nawa calls skip locking.
+/// Set in the environment of hooks so nested nawa *read-only* calls skip
+/// locking. It is process state inherited by children and forgeable at
+/// will: it must never authorize a package mutation, and the migration
+/// mutation gate (roadmap Phase 5) must be checked before it is honored.
 pub(crate) const HELD_ENV: &str = "NAWA_LOCK_HELD";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,12 +60,28 @@ pub(crate) fn lock_path(root: &Path) -> PathBuf {
 /// Lock the database of `root`, waiting if another nawa holds it.
 ///
 /// Returns `Ok(None)` when no lock is needed or possible:
-/// * inside a hook of a nawa that already holds the lock (`NAWA_LOCK_HELD`);
+/// * a *read-only* (shared) acquisition inside a hook of a nawa that already
+///   holds the lock (`NAWA_LOCK_HELD`) — the parent's lock covers the read
+///   window; the child's own shared lock would deadlock against the parent's
+///   exclusive lock;
 /// * a *shared* lock on a root that has no nawa state yet, or that is
 ///   read-only for us (readers are best-effort, writers are strict).
+///
+/// An *exclusive* acquisition inside such a hook fails closed: the marker
+/// proves nothing about lock ownership (it is inherited process state, and
+/// the parent's flock does not extend to the child), so a nested
+/// package-mutating command must not run without its own lock.
 pub(crate) fn acquire(root: &Path, mode: Mode) -> Result<Option<DbLock>> {
     if std::env::var_os(HELD_ENV).is_some() {
-        return Ok(None);
+        match mode {
+            Mode::Shared => return Ok(None),
+            Mode::Exclusive => bail!(
+                "this nawa runs inside a package hook or transaction trigger \
+                 ({HELD_ENV} is set): the parent command owns the package \
+                 database lock and this process holds none, so package-mutating \
+                 commands must not run here"
+            ),
+        }
     }
     let timeout = std::env::var("NAWA_LOCK_TIMEOUT")
         .ok()

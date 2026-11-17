@@ -127,7 +127,9 @@ fn nested_nawa_inside_a_hook_does_not_deadlock() {
     }
     let root = scratch("held");
     let mut holder = hold(&root, 8);
-    // a nawa started with NAWA_LOCK_HELD (as hooks are) skips locking entirely
+    // a nawa started with NAWA_LOCK_HELD (as hooks are) skips locking for
+    // read-only commands: its own shared lock would deadlock against the
+    // parent's exclusive one
     let out = nawa()
         .env("NAWA_LOCK_HELD", "1")
         .env("NAWA_LOCK_TIMEOUT", "1")
@@ -135,6 +137,72 @@ fn nested_nawa_inside_a_hook_does_not_deadlock() {
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let _ = holder.kill();
+    let _ = holder.wait();
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// `NAWA_LOCK_HELD` is inherited process state and forgeable at will: it
+/// must never let a nested (hook- or trigger-spawned) invocation change the
+/// package set. Mutating commands fail closed, even when someone sets the
+/// marker by hand — the parent's flock does not extend to this process.
+#[test]
+fn forged_held_marker_cannot_authorize_a_mutating_command() {
+    let root = scratch("forged");
+    for args in [
+        vec!["remove", "curl"],      // whole-command exclusive lock in main
+        vec!["autoremove", "--yes"], // exclusive
+        vec!["install", "/tmp/nonexistent.nawa.tar.zst"], // all-archive install: exclusive
+    ] {
+        let out = nawa()
+            .env("NAWA_LOCK_HELD", "1")
+            .env("NAWA_LOCK_TIMEOUT", "1")
+            .args(["--root", root.to_str().unwrap()])
+            .args(&args)
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !out.status.success(),
+            "{args:?} must fail closed; got: {err}"
+        );
+        assert!(
+            err.contains("package hook or transaction trigger"),
+            "{args:?} must name the hook context: {err}"
+        );
+        assert!(
+            err.contains("holds none"),
+            "{args:?} must explain that no lock is held: {err}"
+        );
+    }
+    // nothing was installed, nothing was recorded: the database stays empty
+    assert!(
+        !root.join("var/lib/nawa/local").exists(),
+        "no package state may be created"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// The same mutating command *without* the marker runs normally: the
+/// fail-closed behavior is the marker's doing, not the command's.
+#[test]
+fn mutating_command_without_the_marker_uses_its_own_lock() {
+    if !have_flock() {
+        eprintln!("skipped: flock(1) not available");
+        return;
+    }
+    let root = scratch("unfrozen");
+    let mut holder = hold(&root, 8);
+    // under contention it must WAIT for the lock (proving it tries to lock
+    // at all) instead of sneaking past it
+    let out = nawa()
+        .env("NAWA_LOCK_TIMEOUT", "1")
+        .args(["--root", root.to_str().unwrap(), "remove", "curl"])
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(err.contains("waiting for the package database lock"), "{err}");
     let _ = holder.kill();
     let _ = holder.wait();
     let _ = fs::remove_dir_all(&root);

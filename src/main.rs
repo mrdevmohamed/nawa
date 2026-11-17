@@ -1,6 +1,7 @@
 //! nawa — source-based package manager
 //! A source-based package manager for a from-scratch Linux distribution.
 
+mod application;
 mod archive;
 mod artifact;
 mod assets;
@@ -64,6 +65,7 @@ use config::Overrides;
 
 // Items moved out of this file: command-line definition, command handlers and
 // formatters. Each module imports what it uses explicitly.
+use application::lifecycle::lock_mode;
 use cli::*;
 use commands::*;
 use ctx::{resolve_mode, resolve_repo, Ctx};
