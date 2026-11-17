@@ -21,6 +21,7 @@ mod confirm;
 mod db;
 mod deps;
 mod diag;
+mod domain;
 mod error;
 mod fetch;
 mod fetchrun;

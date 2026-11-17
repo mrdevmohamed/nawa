@@ -12,8 +12,8 @@
 |---|---|
 | 0 — Source audit | **DONE** (this session) |
 | 1 — Structural refactor + service removal | **DONE** (1a, 1b, 1c, 1d) |
-| 2 — Init identity & capability foundation | **in progress** (next) |
-| 3 — Metadata & capability resolution | not started |
+| 2 — Init identity & capability foundation | **DONE** (detection + capability/identity domain model) |
+| 3 — Metadata & capability resolution | not started (next: apply-transaction extraction first) |
 | 4 — System profiles & planning | not started |
 | 5 — Migration engine | not started |
 | 6 — Faseela runit→systemd migration | **BLOCKED** (see blockers) |
@@ -262,27 +262,97 @@
   PASSED** — install/upgrade/rollback run through the extracted
   `plan_install`.
 
+### Phase 2 — init identity and capability foundation (2026-11-17)
+
+* **Read-only detection use case** — `application/features/system/detect.rs`
+  observes the environment into typed data (design §5), with every source an
+  injectable path so each rule is unit-testable without booting and without
+  touching the host. [`ObservedSystem`] carries the §5.5 contract as four
+  separate fields — execution `Context`, observed `RuntimeInit`, target-root
+  `InstalledInit`, `DesiredInit` — never collapsed into one `init-system`
+  value:
+  * `Context`: `LiveHost` (PID 1's root is this process's root, no container
+    markers), `Container` (file markers `/.dockerenv`, `/run/.containerenv`
+    or a `/proc/1/cgroup` marker), `Chroot` (this process's root is not
+    PID 1's root), `OfflineRoot` (explicit non-canonical `--root`), and
+    `Unknown` with a reason (e.g. unreadable `/proc`). Attribution rules:
+    host `/proc` describes the managed root only when it is canonical; in a
+    chroot the runtime init is `Unknown` because `/proc/1` belongs to the
+    outer environment; in a container PID 1 *is* the managed environment's
+    init and is reported with evidence — the context field is what a
+    migration gate must check.
+  * `RuntimeInit`: classified from `/proc/1/exe` + `/proc/1/comm` with
+    `Evidence{source, value}` per §5.1 and `Confidence::{Proven,
+    Indicated}`; contradictions are reported (`Unknown` + reason), never
+    resolved; a bare `init` name identifies nothing (unknown ≠ guess).
+  * `InstalledInit`: staged init candidates from the target root
+    (`usr/lib/systemd/systemd`, `lib/systemd/systemd`, `etc/runit/2`,
+    `usr/bin/runit`, `sbin/runit-init`, plus the generic `init` entry
+    points classified by symlink-target *text*, never resolved through the
+    filesystem — detection never leaves the target root; a broken symlink
+    still counts as installed intent). Presence is evidence of intent,
+    never proof of the running PID 1 (§5.5); two staged providers are both
+    reported (§6.2 / blocker B2's coexistence scenario).
+  * `DesiredInit::NotRead`: system profiles are Phase 4 (blocker B4); an
+    absent profile is not read as a decision.
+  * Read-only per §5.4: no writes, no `systemctl`/`sv`, no service-manager
+    queries; nothing is wired into any command yet (no CLI surface).
+* **Capability / identity domain model** — new top-level `domain` layer
+  (design §4.3 `domain/system`; pure types, no I/O, imports nothing above
+  it; the layering gate covers it):
+  * `domain/system/identity.rs`: closed `InitKind` (Systemd/Runit/Other),
+    `classify_pid1` (Confirmed/Indicated/Ambiguous/Contradictory) and the
+    `init-system` selection rule `InitKind::from_capability` — limited to
+    the exact `runit`/`systemd` identities (§6); declared-but-unknown
+    identities and other domains select nothing.
+  * `domain/system/capability.rs`: normalized `Capability` (`domain=identity`
+    parse: lowercase, exactly one `=`, no whitespace), and `Provides` with
+    the §6.3(5) distinction — a missing field is `Unknown`, **not** an
+    empty declaration, so no future solve can treat missing metadata as
+    "provides nothing"; `InitProvider::{Single, Ambiguous, Absent}` reports
+    ambiguity instead of choosing (§6.2). Phase 2 deliverable is the
+    *proposal* (illustrative recipe spelling documented in the module; §6.1):
+    the recipe/`.PKGINFO`/signed-index chain stays unwired until the exact
+    field syntax is specified (§16.1; B3 governs index v4). No package or
+    index format changed.
+* Verified: `cargo check --all-targets --offline` clean;
+  `cargo clippy --all-targets --offline -- -D warnings` clean;
+  `cargo test --all-targets --offline --no-fail-fast` → **614 passed /
+  2 ignored / 3 env-failed** (= 581 + 33 new tests: 16 detect + 9 identity +
+  8 capability; the same 3 pre-existing env failures);
+  `python3 scripts/check-layering.py` green (**55 modules** — the new
+  `domain` top-level module). All new files rustfmt-clean; no existing file
+  reformatted (only two one-line `mod` registrations).
+* **Byte-identical CLI**: `--help`, `--version` and all three completion
+  scripts identical to a HEAD release build (isolated `git worktree`;
+  detection adds no CLI surface). `scripts/smoke-v06.sh` and
+  `scripts/smoke-v05.sh` (release build): **ALL PASSED**.
+
 ## Current task
 
-**Phase 2 — init identity and capability foundation** (design §5–§6;
-roadmap stage 2). Read-only observation first; no behavior change to
-any package command:
+**Apply-transaction extraction behind the user-interaction port** (design
+§4.3; the deliberately-deferred Phase 1d extraction, before Phase 3's
+solver consumes the transaction loop):
 
-1. `application/features/system/detect.rs` (+ `domain/system/identity.rs`
-   types when needed): observe the runtime — PID 1 identity, boot
-   context — into typed `ObservedSystem` data, following §5.4 detection
-   rules and the §5.5 execution-context contract (live system, chroot,
-   container, offline `--root`; distinguish or report unknown).
-2. Decide the provider/capability data model (§6): what Nawa records
-   about providers and how binary-only packages declare them; keep it
-   readable alongside legacy metadata (§6.3) — schema proposal only,
-   no index writes yet (B3 governs the signed-index part).
-3. Every detection is unit-testable without booting anything: fake
-   `/proc`, `/run`, root layouts; no network, no host assumptions
-   (the test container boots runit-less; detection must not assume
-   PID 1 identity exists at all).
-4. Phase 2 test note: B1 (saq init selection) blocks *applying* a
-   migration, not read-only detection tests.
+1. Define the interaction port (`application/ports/user_interaction.rs`
+   shape — a struct of injected callbacks is enough for one crate; no new
+   layer ceremony): plan display, confirmation prompts, and the per-step
+   progress/error reporting `run_plan` currently does inline via
+   `nawa_*!` macros and `confirm::` calls.
+2. Extract `apply-transaction` from `commands/installing.rs`
+   (`run_plan`, `install_one`, the confirm prompts) into
+   `application/features/package/apply_transaction.rs`: the use case
+   decides and returns per-step outcomes; rendering stays in the handler.
+   `install_one`'s acquisition calls `commands::build_one` and
+   `upgrade::fetch_entry` — route what the use case needs through typed
+   inputs, keep the build/archive execution in the handler where it
+   belongs until the build use case (design §4.3 `build/`) is extracted.
+3. Keep every printed byte, confirm prompt and exit code identical
+   (byte-identical behavior check vs a HEAD build, incl. the smoke
+   suites); handlers keep argument parsing and rendering.
+4. Then narrow the installer facade (design stage 1 tail): the
+   `pub(crate) use installing::*` surface shrinks to what the dispatcher
+   actually calls.
 
 ## Changed files (this phase, updated as work lands)
 
@@ -323,6 +393,18 @@ any package command:
   * `src/commands/querying.rs` (`cmd_search`/`cmd_why` call the use case)
   * `scripts/check-layering.py` (direction rules + legacy allowlist +
     stale-entry detection + `application/features/**` strictness)
+* Phase 2:
+  * `src/domain/{mod,system/mod}.rs` (new top-level `domain` layer)
+  * `src/domain/system/identity.rs` (new — `InitKind`, `Pid1`,
+    `classify_pid1`/`identify`, `InitKind::from_capability` + 9 tests)
+  * `src/domain/system/capability.rs` (new — normalized `Capability`,
+    `Provides` with the Unknown-vs-empty distinction, `InitProvider`
+    + 8 tests; §6 schema proposal documented in the module header)
+  * `src/application/features/system/{mod,detect}.rs` (new —
+    `ObservedSystem`/`Context`/`RuntimeInit`/`InstalledInit`/`DesiredInit`,
+    injectable-source `observe()` + 16 tests)
+  * `src/main.rs`, `src/application/features/mod.rs` (one-line
+    `mod` registrations)
 
 ## Tests actually executed
 
@@ -334,12 +416,15 @@ any package command:
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 1b tree) | 564 pass / 2 ignored / 3 env-failed (same 3; −5 = deleted service unit tests) |
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 1c tree) | 564 pass / 2 ignored / 3 env-failed (identical to 1b; moved tests verified present) |
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 1d tree) | 581 pass / 2 ignored / 3 env-failed (= 564 + 18 new − 1 net lifecycle test; same 3 env failures) |
-| `cargo clippy --all-targets --offline -- -D warnings` | pass (Phase 1a + 1b + 1c) |
-| `python3 scripts/check-layering.py` | pass (54 after 1a; 53 after 1b; 54 after 1c) |
-| `bash scripts/smoke-v06.sh` (release build, Phases 1b + 1c + 1d) | ALL V0.6 SMOKE TESTS PASSED |
+| `cargo test --all-targets --offline --no-fail-fast` (Phase 2 tree) | 614 pass / 2 ignored / 3 env-failed (= 581 + 33 new: 16 detect + 9 identity + 8 capability; same 3 env failures) |
+| `cargo clippy --all-targets --offline -- -D warnings` | pass (Phase 1a + 1b + 1c + 1d + 2) |
+| `python3 scripts/check-layering.py` | pass (54 after 1a; 53 after 1b; 54 after 1c; 55 after 2 — the new `domain` layer) |
+| `bash scripts/smoke-v06.sh` (release build, Phases 1b + 1c + 1d + 2) | ALL V0.6 SMOKE TESTS PASSED |
+| `bash scripts/smoke-v05.sh` (release build, Phases 1d + 2) | ALL SMOKE TESTS PASSED |
 | HEAD-vs-1c behavior diff (`--help`, `--version`, completions × 3, isolated worktree build) | byte-identical |
 | HEAD-vs-1d behavior diff (`--help`, `--version`, completions × 3 + 12 read/planning commands, isolated worktree build) | byte-identical |
-| `cargo fmt --all -- --check` | fails repo-wide at HEAD (pre-existing ~100 files; CI does not run fmt) — re-scoped to "no new violations in touched/new code", satisfied (1a–1d; 1d new files clean, dirty-hunk counts decreased in both touched handlers) |
+| HEAD-vs-2 behavior diff (`--help`, `--version`, completions × 3, isolated worktree build) | byte-identical (detection adds no CLI surface) |
+| `cargo fmt --all -- --check` | fails repo-wide at HEAD (pre-existing ~100 files; CI does not run fmt) — re-scoped to "no new violations in touched/new code", satisfied (1a–1d; 1d new files clean, dirty-hunk counts decreased in both touched handlers; 2: all new files clean, two one-line registrations only) |
 
 ## Known problems
 
@@ -359,7 +444,7 @@ any package command:
 
 | ID | Blocker | Owner | Affects |
 |---|---|---|---|
-| B1 | **saq init selection**: disk-boot `init` fallback chain (`$INIT_ARG /usr/bin/runit /sbin/init /usr/sbin/init`) contains no systemd path, and Faseela's grub.cfg passes no `init=`. During the migration runit must stay installed, so `/usr/bin/runit` would win the chain and boot runit again. Needs: migration boot config sets `init=` explicitly **and/or** saq change (e.g. read a selection file) — exact interface TBD with Faseela/SAQ. | Faseela/SAQ | Phase 6 apply-safety, Phase 2 detection tests |
+| B1 | **saq init selection**: disk-boot `init` fallback chain (`$INIT_ARG /usr/bin/runit /sbin/init /usr/sbin/init`) contains no systemd path, and Faseela's grub.cfg passes no `init=`. During the migration runit must stay installed, so `/usr/bin/runit` would win the chain and boot runit again. Needs: migration boot config sets `init=` explicitly **and/or** saq change (e.g. read a selection file) — exact interface TBD with Faseela/SAQ. | Faseela/SAQ | Phase 6 apply-safety (Phase 2 detection tests were unblocked: read-only, fake `/proc`) |
 | B2 | **`/usr/bin/init` payload conflict**: old runit-services and the systemd package both ship `/usr/bin/init`. Staged coexistence (install systemd while runit is still installed) hits a file conflict or silently replaces the selector. Needs Faseela-side payload/policy decision (move init selector ownership, document force-install + journal-restore behavior). | Faseela | Phase 6 staged install |
 | B3 | **Repository index v4 schema**: metadata chain (recipe → `.PKGINFO` → authenticated v4) needs a written schema proposal + tests before the solver consumes it (design §6.3, §16.1–2). | Nawa (this repo) | Phase 3 |
 | B4 | **System profile location/merge contract** with Faseela (defaults path, override path, precedence) — design §16.3. | Faseela agreement | Phase 4 |
@@ -369,12 +454,13 @@ any package command:
 
 ## Exact next task
 
-Execute the Phase 2 checklist in "Current task" above (init-system
-detection use case, read-only); verify with `cargo check --all-targets
---offline && cargo test --all-targets --offline --no-fail-fast && cargo
-clippy --all-targets --offline -- -D warnings` plus `python3
-scripts/check-layering.py`; keep CLI output byte-identical for any
-touched command (detection adds no CLI surface yet); commit as one
-coherent unit. The next use-case extraction after that is
-apply-transaction behind the user-interaction port (design §4.3),
-then narrowing the installer facade.
+Execute the apply-transaction checklist in "Current task" above (the
+user-interaction port + `application/features/package/apply_transaction.rs`,
+the deferred Phase-1d extraction; then narrow the installer facade); verify
+with `cargo check --all-targets --offline && cargo test --all-targets
+--offline --no-fail-fast && cargo clippy --all-targets --offline -- -D
+warnings` plus `python3 scripts/check-layering.py`; keep printed bytes,
+prompts and exit codes identical (HEAD-vs-new diff incl. the smoke suites);
+commit as one coherent unit. After that: Phase 3 (profile and planning —
+B3's index/recipe schema proposal first, then the solver consuming
+`domain/system/capability.rs` and `detect.rs`).
