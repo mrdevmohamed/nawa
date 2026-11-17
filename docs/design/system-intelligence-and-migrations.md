@@ -627,6 +627,29 @@ The detector should:
 - Avoid writing files or changing packages; service activation is outside
   detector and migration responsibilities.
 
+### 5.5 Detection contract by execution context
+
+The detector must return separate fields for execution context, observed
+runtime init, installed/configured init candidate, and desired init profile.
+It must never collapse these into one `init-system` value.
+
+| Context | Allowed evidence | Result and policy |
+|---|---|---|
+| Verified live host | Read-only PID 1 evidence such as `/proc/1/exe` and `/proc/1/comm`, plus checks that the process is not operating inside an unsupported container/chroot context. | May report the observed running init with its evidence and confidence. |
+| Target root passed through `--root` | Target-root package records, target-root init symlinks, and target-root boot configuration. | Reports installed/configured candidates only. Host `/proc` must never be presented as the target's runtime state. |
+| Chroot, container, or ambiguous environment | Only evidence that can be attributed unambiguously to that environment. | Runtime init is `unknown` unless the detector can prove the identity and context. |
+| Offline root | Static target-root evidence only. | Planning and inspection are allowed; live migration apply is forbidden. |
+
+A migration plan may be generated for an offline root, but `migrate apply`
+must require the actual Faseela live host, a canonical target root of `/`,
+effective root privileges, and a positively identified runtime init. It must
+refuse chroots, containers, remote roots, and unknown contexts. A binary or
+symlink named `init` inside a target root is evidence of installed intent,
+not proof of the running PID 1.
+
+The initial detector should use read-only kernel/process/filesystem evidence.
+It must not call `systemctl`, `sv`, or another service-management command.
+
 ## 6. Capabilities and provider selection
 
 Package names are implementation details. System requirements should be
@@ -637,9 +660,11 @@ For the initial migration design, the only system capability in scope is
 provider domains to Nawa's capability resolver as part of this work. Additional
 capability domains require a separate, justified design decision.
 
-A package may provide one or more capabilities. A system profile selects the
-provider wanted for each exclusive role. Applications can require a capability
-without requiring a particular implementation package.
+For this initial migration, provider selection is limited to the exact
+`init-system=runit` and `init-system=systemd` identities. Do not implement
+general version-range negotiation, capability expressions, or arbitrary
+provider plugins in the first pass. A system profile selects the desired
+provider for this one exclusive role.
 
 ### 6.1 Illustrative metadata
 
@@ -668,8 +693,11 @@ Before implementation, define these rules precisely:
 - A capability requirement is not necessarily a package dependency.
 - More than one package may provide a capability, but an exclusive system
   role has one selected provider in the desired profile.
-- Two providers may be installed side by side during a staged transition if
-  their files and package contents allow it.
+- Two init providers may be installed side by side during a staged transition
+  only when their package payloads do not conflict and installing the new
+  provider does not replace the active boot/init selector. The migration
+  handler must prove this from the actual package manifests and target layout;
+  the solver must not assume coexistence is possible.
 - Selecting a new provider does not immediately mean the old provider package
   can be removed.
 - Package-level Conflicts should mean an actual package/file/runtime
@@ -693,10 +721,25 @@ For critical roles such as init-system, a migration must require explicit,
 authenticated provider metadata and a supported migration definition. Missing
 metadata means the transition cannot be planned safely.
 
-The exact location of capability declarations remains an open schema decision.
-Any repository-supplied metadata that affects solving must be covered by the
-existing authenticated repository data or a separately reviewed, authenticated
-format. Unsigned side data must not influence privileged changes.
+Recommended metadata contract:
+
+1. Recipe metadata declares the package's capabilities and runtime dependency
+   information as source input.
+2. The built archive records the normalized package metadata in `.PKGINFO`;
+   this is the package-level source of truth authenticated by the archive
+   digest/signature.
+3. A future signed repository-index schema (v4 or later) may duplicate the
+   normalized `provides` and runtime-dependency fields so Nawa can solve
+   without downloading every archive. The index signature authenticates these
+   fields, and Nawa must compare them with the verified archive metadata when
+   the archive is fetched.
+4. Legacy v1/v2/v3 repositories and archives without these fields remain
+   readable, but missing critical init-provider metadata means migration is
+     unsupported. Never infer `init-system` from package names.
+
+The precise TOML spelling and schema version remain to be specified before
+implementation. Recipe, archive, and signed-index values must not become
+independent conflicting authorities.
 
 ## 7. System profiles
 
@@ -727,13 +770,23 @@ The design should distinguish:
 A profile change should be an explicit input to plan generation. Installing a
 desktop package must not silently rewrite the system's init provider.
 
-The profile file location, ownership, merge rules, and update policy need to be
-decided with Faseela before implementation.
+The system profile is not the existing build profile selected through
+`--profiles`. Those are different concepts and must use separate models and
+configuration paths. A recommended layout is a distribution-owned default
+under `/usr/share/nawa/` and a local administrator override under
+`/etc/nawa/`; the exact filenames and merge contract must be agreed with
+Faseela. Administrator overrides take precedence over distribution defaults,
+invalid overrides fail closed for migration, and package updates must never
+silently overwrite local policy.
 
 ## 8. Dependency and capability solver
 
-The solver should extend the current dependency-resolution facilities rather
-than become a second independent package resolver.
+The planner should extend the current dependency-resolution facilities rather
+than become a second independent package resolver. In the first implementation
+it should handle the dependency forms Nawa actually supports plus the exact
+init-provider constraint. It is not a general SAT solver. Before planning,
+Application assembles normalized candidates from trusted recipe and repository
+inputs; the Domain planner receives those values and performs no I/O.
 
 ### 8.1 Inputs
 
@@ -742,7 +795,9 @@ A solve request should include:
 - Requested package operations and user intent.
 - Installed package records and install reasons.
 - Trusted repository candidates and their metadata.
-- Package dependencies, provides, conflicts, and replacements.
+- Package build/runtime dependencies, init-provider metadata, conflicts, and
+  replacements. For binary-only packages, these inputs must come from
+  authenticated metadata; absent fields are unknown, not empty.
 - Effective target system profile.
 - Architecture and version constraints.
 - Administrator pins, exclusions, and provider preferences.
@@ -755,16 +810,20 @@ A solve request should include:
 The solver should produce a structured solution containing:
 
 - Packages to install, upgrade, keep, or remove.
-- Provider selections for requested system capabilities.
+- The exact selected init provider for the target profile, or an explicit
+  unresolved result when authenticated metadata is unavailable.
 - Dependency and capability explanation chains.
 - Conflicts and the reason each candidate was rejected.
 - Package files and dependents affected by each operation, without interpreting
   service definitions or changing service state.
-- Required migration handlers and their prerequisites.
+- A migration candidate and its prerequisites when the requested operation
+  changes the target init provider; selecting a candidate does not execute it.
 - Reboot requirement and post-reboot init-system checks.
 - Any unresolved fact or unsafe condition that prevents execution.
 
-The plan must be deterministic for identical inputs and policy.
+The plan must be deterministic for identical normalized inputs and policy.
+The same rules must apply to recipe-built and binary-only package candidates.
+Do not choose an arbitrary provider when the signed candidate data is incomplete.
 
 ### 8.3 Selection policy
 
