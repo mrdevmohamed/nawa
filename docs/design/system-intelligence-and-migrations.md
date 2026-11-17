@@ -69,7 +69,9 @@ The target architecture must not add or retain:
 - APIs to list, enable, disable, start, stop, restart, or query services.
 - Service-manager or session-manager capabilities in the initial capability
   model.
-- Calls to `sv`, `systemctl`, or equivalent commands to control services.
+- First-party Nawa code must not call `sv`, `systemctl`, or equivalent
+  commands to control services. Repository package hooks remain a separate
+  legacy script mechanism and are governed by Section 9.
 - Package-install behavior that automatically enables or starts services.
 
 Package contents may still include service-related files. Systemd unit files,
@@ -777,13 +779,16 @@ Recommended metadata contract:
 1. Recipe metadata declares the package's capabilities and runtime dependency
    information as source input.
 2. The built archive records the normalized package metadata in `.PKGINFO`;
-   this is the package-level source of truth authenticated by the archive
-   digest/signature.
+   this is the package-level source of truth. Its digest must be authenticated
+   by a verified detached signature or a signed repository index. SHA-256
+   alone proves byte integrity, not publisher identity.
 3. A future signed repository-index schema (v4 or later) may duplicate the
    normalized `provides` and runtime-dependency fields so Nawa can solve
    without downloading every archive. The index signature authenticates these
-   fields, and Nawa must compare them with the verified archive metadata when
-   the archive is fetched.
+   fields and the referenced archive digest. Nawa must compare the index fields
+   with the verified archive metadata when the archive is fetched. A local
+   unsigned archive or an unsigned sidecar must not provide trusted init
+   capability metadata for migration.
 4. Legacy v1/v2/v3 repositories and archives without these fields remain
    readable, but missing critical init-provider metadata means migration is
    unsupported. Never infer `init-system` from package names.
@@ -1091,40 +1096,46 @@ inside the target. The durable `planned` record is created only after the
 live-host apply preflight and explicit authorization succeed.
 
 A **persistent migration mutation gate** is required because the ordinary
-`flock` lock disappears when the process exits or the machine reboots. The
-gate check must run before any process-local lock-bypass shortcut. In the
+`flock` lock disappears when the process exits or the machine reboots.
+
+The gate check must run before any process-local lock-bypass shortcut. In the
 current source, `lock::acquire` returns early when `NAWA_LOCK_HELD` is set so
 a nested package hook can avoid deadlocking on its parent's lock. This
 environment variable is forgeable and is not proof that a parent process
 actually holds the lock. It must never authorize a package mutation or skip
-the persistent migration-gate check. While the marker is present, a nested
-package-mutating CLI command must fail closed rather than proceed without a
-lock. Read-only nested commands may bypass reacquiring the lock only where
-Stage 0 proves their read snapshot is consistent; otherwise they must fail
-fast with a clear diagnostic. The refactor should replace the generic
+the persistent migration-gate check. A nested package-mutating CLI command
+must fail closed when the marker is present rather than proceed without a
+lock. A nested read-only command may bypass reacquiring the lock only where
+Stage 0 proves its read snapshot is consistent; otherwise it must fail fast
+with a clear diagnostic. The refactor must replace the generic
 environment-based mutation bypass with explicit in-process lock ownership
-where application use cases share a lock guard. While
-a migration is in `preparing`, `awaiting-reboot`, `verifying`,
-`rollback-required`, or `needs-recovery`, all package-mutating commands must
-stop before changing the package set. Read-only inspection and explicit
-migration recovery commands remain allowed. The migration coordinator may
-perform its own planned package transactions through a narrowly scoped,
-unforgeable in-process permit created only by the migration use case. The
-permit must be a private typed value passed directly to the package use case;
-it must not be represented by an environment variable, CLI flag, plugin
-capability, or inherited subprocess environment. The gate check happens before
-honoring `NAWA_LOCK_HELD` or any equivalent lock-bypass marker. A nested
-`nawa` process launched by a package hook receives no migration permit and
-must be blocked if it attempts a package mutation even if the marker is set.
-The migration coordinator should invoke the package-use-case implementation
-inside the same Nawa process rather than spawn a nested `nawa` CLI process.
-The process-local permit is distinct from the lock guard: the coordinator must
-hold the appropriate exclusive lock and pass both the lock ownership and the
-permit through the internal application call chain without reacquiring the
-same non-reentrant lock.
-The gate is checked under the same exclusive package database lock before any
-package mutation. It is cleared only after verified completion or a completed,
-verified rollback.
+where application use cases share a lock guard.
+
+While a migration is in `preparing`, `awaiting-reboot`, `verifying`,
+`rollback-required`, or `needs-recovery`, all Nawa-owned package-mutating
+commands must stop before changing the package set. Read-only inspection and
+explicit migration recovery commands remain allowed. The gate is checked
+against the selected root before honoring `NAWA_LOCK_HELD`, and under the
+exclusive package database lock (or the already-held parent lock for a nested
+read-only check).
+
+The migration coordinator may perform only the package transactions in its
+approved plan through a private, typed, unforgeable in-process permit created
+by the migration use case. The permit must not be represented by an environment
+variable, CLI flag, plugin capability, or inherited subprocess environment.
+It is distinct from lock ownership: the coordinator must hold the appropriate
+exclusive lock and pass both the lock guard and permit through the internal
+application call chain without reacquiring the same non-reentrant lock. A
+nested `nawa` process launched by a package hook receives no permit and must
+not be able to mutate packages while the gate is pending. The migration
+coordinator must invoke package use cases inside the same Nawa process rather
+than spawn a nested CLI process.
+
+This gate serializes Nawa-owned package mutations only. It cannot prevent an
+administrator or another privileged program from modifying the target root
+outside Nawa; the migration preflight must warn about concurrent external
+package managers or manual changes. The gate is cleared only after verified
+completion or a completed, verified rollback.
 
 ### 10.4 Migration stages
 
@@ -1455,7 +1466,7 @@ repository, package, or distribution changes.
 
 | Stage | Scope | Exit condition |
 |---|---|---|
-| 0. Architecture and behavior audit | Map the source/module dependency graph, command-to-installer flows, database and transaction boundaries, root handling, service-management references, package `.HOOKS` and transaction triggers, runit default enablement links/disabled-marker semantics, binary-only package limitations, `saq` init-selection, and current tests. Record the existing CLI and package behavior as the compatibility baseline. | A source-backed module ownership map, dependency rules, service-removal checklist, package-hook policy gap, service-state compatibility plan, and behavior-focused test baseline are reviewed. |
+| 0. Architecture and behavior audit | Map the source/module dependency graph, command-to-installer flows, database and transaction boundaries, root handling, service-management references, package `.HOOKS` and transaction triggers, `NAWA_LOCK_HELD` behavior and nested-hook call paths, runit default enablement links/disabled-marker semantics, binary-only package limitations, `saq` init-selection, and current tests. Record the existing CLI and package behavior as the compatibility baseline. | A source-backed module ownership map, dependency rules, service-removal checklist, package-hook policy gap, service-state compatibility plan, lock-ownership contract, and behavior-focused test baseline are reviewed. |
 | 1. Structural refactor and service removal | Establish CLI, feature-oriented Application, Domain, Ports, Adapters, Presentation, and Bootstrap boundaries. Move code incrementally; reduce orchestration in `main.rs`; separate package lifecycle use cases; narrow the installer facade; remove the service command/backend; transfer runit enablement-link and disabled-state ownership to Faseela before deleting `keep_disabled`. | Package operations preserve their documented behavior; the service command and first-party service-control code are gone; disabled services stay disabled across upgrades under Faseela-owned policy; package-hook trust/service policy is explicit; tests and checks pass. |
 | 2. Init identity and capability foundation | Add read-only init-system detection and the authenticated metadata needed to identify init providers and resolve binary-only runtime dependencies. | Legacy metadata remains readable; live, chroot, container, and offline-root states are distinguished or reported unknown; no critical solve treats missing metadata as an empty dependency/provider list. |
 | 3. Profile and planning | Add the validated target init profile and deterministic package planning. | Dry-run plans explain every init-provider and package decision without managing services. |
