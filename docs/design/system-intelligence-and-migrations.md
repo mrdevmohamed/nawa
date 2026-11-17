@@ -446,11 +446,26 @@ whether systemd is PID 1 after reboot). It must not enable, disable, start,
 stop, restart, list, or query individual services. A migration definition must
 not contain service-management steps.
 
-When removing the existing runit-specific implementation, audit all references
-to `service.rs`, `ServiceCmd`, `Cmd::Service`, `cmd_service`, service
-completion entries, and lock-mode special cases. Also remove installer
-references to `keep_disabled` and the runit disabled-marker directory. Do
-not keep a hidden service-management path after removing the public command.
+When removing the existing runit-specific implementation, use this source
+cleanup checklist:
+
+- Delete `src/service.rs` and `src/commands/service.rs`.
+- Remove the service module declarations and command registration from
+  `src/main.rs` and `src/commands/mod.rs`.
+- Remove `ServiceCmd`, `Cmd::Service`, dispatch, completion definitions, and
+  the service lock-mode exception from `src/cli.rs` and related CLI code.
+- Remove service-specific tests, help text, documentation, and shell
+  completions.
+- Remove installer calls to `crate::service::keep_disabled` (including the
+  payload/install path), the runit disabled-marker path, and all related
+  imports and tests.
+- Do not replace this with systemd enablement tracking or another hidden
+  service-management path. If generic configuration-file preservation is
+  needed, design it independently from service state.
+
+The removal is complete only when the crate builds and tests pass without a
+service command, service-management module, service-manager invocation, or
+runit-specific installer marker behavior.
 
 ## 10. Migration engine
 
