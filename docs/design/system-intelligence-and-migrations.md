@@ -1014,9 +1014,19 @@ Suggested durable states:
 | awaiting-reboot | Preparation is committed; the new init has not yet been verified after reboot. |
 | verifying | The live host has rebooted and init/boot postconditions are being checked. |
 | completed | Target state is verified and finalization is complete. |
-| failed | A step failed and the old bootable state is known to remain intact. |
+| failed | A step failed, compensation restored the known old bootable/package state, and no migration gate remains. |
 | rollback-required | Verification failed, but a documented rollback action is available. |
 | needs-recovery | State is ambiguous or automatic safe continuation/rollback is impossible. |
+
+The legal forward path is
+`planned -> preparing -> awaiting-reboot -> verifying -> completed`.
+A failure in `preparing` may become `failed` only after all committed
+package/boot changes have been safely compensated; otherwise it becomes
+`needs-recovery`. A failed post-reboot verification becomes
+`rollback-required` only when a documented rollback action is available.
+After rollback, Nawa must verify the old init/boot state before recording
+`failed` and clearing the gate. Any ambiguous outcome becomes
+`needs-recovery` and keeps the gate active.
 
 An interrupted process is not a stable state by itself. On restart, an intent
 without a corresponding result is reconciled into one of the durable states
