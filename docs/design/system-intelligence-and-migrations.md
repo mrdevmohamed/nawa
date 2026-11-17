@@ -1354,18 +1354,19 @@ repository, package, or distribution changes.
 
 | Stage | Scope | Exit condition |
 |---|---|---|
-| 0. Architecture and behavior audit | Map the source/module dependency graph, command-to-installer flows, database and transaction boundaries, root handling, service-management references, and current tests. Record the existing CLI and package behavior as the compatibility baseline. | A source-backed module ownership map, dependency rules, service-removal checklist, and behavior-focused test baseline are reviewed. |
-| 1. Structural refactor and service removal | Establish CLI, feature-oriented Application, Domain, Ports, Adapters, Presentation, and Bootstrap boundaries. Move code incrementally; reduce orchestration in `main.rs`; separate package lifecycle use cases; narrow the installer facade; remove the complete service subsystem and `keep_disabled` coupling. | No behavior change in package operations; no service command, provider, service invocation, or runit-specific installer state remains; tests and checks pass. |
-| 2. Init identity and capability foundation | Add read-only init-system detection and only the minimal authenticated metadata needed to identify init providers. | Legacy metadata remains readable; live, chroot, container, and offline-root states are distinguished or reported unknown. |
+| 0. Architecture and behavior audit | Map the source/module dependency graph, command-to-installer flows, database and transaction boundaries, root handling, service-management references, package `.HOOKS` and transaction triggers, runit default enablement links/disabled-marker semantics, binary-only package limitations, `saq` init-selection, and current tests. Record the existing CLI and package behavior as the compatibility baseline. | A source-backed module ownership map, dependency rules, service-removal checklist, package-hook policy gap, service-state compatibility plan, and behavior-focused test baseline are reviewed. |
+| 1. Structural refactor and service removal | Establish CLI, feature-oriented Application, Domain, Ports, Adapters, Presentation, and Bootstrap boundaries. Move code incrementally; reduce orchestration in `main.rs`; separate package lifecycle use cases; narrow the installer facade; remove the service command/backend; transfer runit enablement-link and disabled-state ownership to Faseela before deleting `keep_disabled`. | Package operations preserve their documented behavior; the service command and first-party service-control code are gone; disabled services stay disabled across upgrades under Faseela-owned policy; package-hook trust/service policy is explicit; tests and checks pass. |
+| 2. Init identity and capability foundation | Add read-only init-system detection and the authenticated metadata needed to identify init providers and resolve binary-only runtime dependencies. | Legacy metadata remains readable; live, chroot, container, and offline-root states are distinguished or reported unknown; no critical solve treats missing metadata as an empty dependency/provider list. |
 | 3. Profile and planning | Add the validated target init profile and deterministic package planning. | Dry-run plans explain every init-provider and package decision without managing services. |
-| 4. Migration framework | Add versioned migration records, state machine, trusted handlers, and recovery. | Failure/restart tests prove safe continuation or an explicit recovery-required status. |
-| 5. Faseela transition | Add the distribution-specific runit-to-systemd definition and handlers; service activation remains outside Nawa. | Disposable VM migration passes boot, init verification, and recovery tests. |
+| 4. Migration framework | Add versioned migration records, a write-ahead handler journal, persistent mutation gate, built-in trusted handlers, and recovery. | Failure/restart tests prove safe continuation or an explicit recovery-required status; unrelated package mutation is blocked across process exit and reboot while migration is pending. |
+| 5. Faseela transition | Add the distribution-specific runit-to-systemd definition and handlers; service activation remains outside Nawa. | Disposable VM migration passes boot, init verification, recovery, and Faseela-owned disabled-service preservation tests on supported BIOS/UEFI paths. |
 
 The first implementation step is Stage 0, not a rewrite of the dependency
-solver and not a mass file move. Stage 0 records the actual dependency graph and
-compatibility baseline. Stage 1 then creates clean boundaries with small,
-reviewable, behavior-preserving changes. Only after that foundation is stable
-should new capability and migration behavior be added.
+solver and not a mass file move. Stage 0 records the actual dependency graph,
+privileged-hook behavior, service-state compatibility, and boot/initramfs
+contract. Stage 1 creates clean boundaries and removes the service API only
+after Faseela's replacement ownership is in place. Only after that foundation
+is stable should capability and migration behavior be added.
 
 ## 16. Open design decisions for discussion
 
