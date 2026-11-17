@@ -17,9 +17,15 @@
 //!   mutation. An exclusive acquisition fails closed when the marker is
 //!   present — a nested package-mutating command has no lock of its own (the
 //!   parent's flock belongs to the parent process) and must not change the
-//!   package set from inside a hook or trigger script. The persistent
-//!   migration mutation gate (roadmap Phase 5) will be checked *before* the
-//!   marker is honored; the marker can never bypass it.
+//!   package set from inside a hook or trigger script.
+//! * The persistent migration mutation gate (design §10.3) is checked on
+//!   every exclusive acquisition, *before* the marker is honored: while a
+//!   migration record under the selected root is in a gate-keeping state,
+//!   package-mutating commands stop before changing the package set. The
+//!   check runs under the exclusive lock (or under the parent's already-held
+//!   lock for the nested-exclusive case), so the marker can never bypass it;
+//!   read-only commands remain allowed and are not gate-checked (the parent
+//!   command was already checked at its own exclusive acquisition).
 //!
 //! Callers lock once, at the top-level command (see `main.rs`); the library
 //! functions (`install_archive`, `upgrade`, ...) never lock, because
@@ -34,10 +40,13 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::migration_record as migrate;
+
 /// Set in the environment of hooks so nested nawa *read-only* calls skip
 /// locking. It is process state inherited by children and forgeable at
 /// will: it must never authorize a package mutation, and the migration
-/// mutation gate (roadmap Phase 5) must be checked before it is honored.
+/// mutation gate (design §10.3) is checked before it can influence any
+/// exclusive acquisition.
 pub(crate) const HELD_ENV: &str = "NAWA_LOCK_HELD";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +64,52 @@ pub(crate) struct DbLock {
 
 pub(crate) fn lock_path(root: &Path) -> PathBuf {
     root.join("var/lib/nawa/lock")
+}
+
+/// The persistent migration mutation gate (design §10.3): while a migration
+/// record under `root` is in a gate-keeping state, every Nawa-owned
+/// package-mutating command must stop *before changing the package set*.
+///
+/// Called on the exclusive paths only, and always under a lock that covers
+/// the state: under this process's own exclusive flock, or — for a nested
+/// hook-spawned process — before the `NAWA_LOCK_HELD` marker is honored,
+/// where the parent's already-held lock covers the window (§10.3: the gate
+/// is checked before the marker, so the marker can never bypass it; the
+/// marker only ever made read-only nesting possible, and the parent command
+/// was gate-checked at its own exclusive acquisition).
+///
+/// Read-only paths never run this check, on purpose: read-only inspection
+/// remains allowed while a migration is pending (§10.3), and readers are
+/// best-effort here — even a corrupt migration record must not take read
+/// commands down. Mutations are strict: if the gate state cannot be read,
+/// they fail closed rather than risk running under a pending migration.
+///
+/// A parent command holding the lock cannot race a gate into existence
+/// under it: beginning preparation (`BeginPreparation`, §10.4) requires
+/// the coordinator to hold the exclusive package database lock itself, so
+/// no gate can appear while any command holds the lock.
+fn check_migration_gate(root: &Path) -> Result<()> {
+    let gates = match migrate::active_gates(root) {
+        Ok(gates) => gates,
+        Err(error) => bail!(
+            "cannot check the persistent migration mutation gate: {error:#} — \
+             refusing to change the package set fail-closed (§10.3)"
+        ),
+    };
+    if gates.is_empty() {
+        return Ok(());
+    }
+    let list = gates
+        .iter()
+        .map(|gate| format!("{} is {}", gate.id, gate.state.as_str()))
+        .collect::<Vec<_>>()
+        .join("; ");
+    bail!(
+        "a system migration holds the package mutation gate: {list} — \
+         package-mutating commands are blocked until the migration completes \
+         or is recovered (§10.3; migration records: {})",
+        migrate::migrations_dir(root).display()
+    )
 }
 
 /// Lock the database of `root`, waiting if another nawa holds it.
@@ -75,12 +130,19 @@ pub(crate) fn acquire(root: &Path, mode: Mode) -> Result<Option<DbLock>> {
     if std::env::var_os(HELD_ENV).is_some() {
         match mode {
             Mode::Shared => return Ok(None),
-            Mode::Exclusive => bail!(
-                "this nawa runs inside a package hook or transaction trigger \
-                 ({HELD_ENV} is set): the parent command owns the package \
-                 database lock and this process holds none, so package-mutating \
-                 commands must not run here"
-            ),
+            Mode::Exclusive => {
+                // §10.3: the gate is checked before the marker is honored —
+                // the marker can never authorize a mutation or bypass the
+                // gate. Both outcomes below refuse; when a migration is
+                // pending, its error is the more precise one.
+                check_migration_gate(root)?;
+                bail!(
+                    "this nawa runs inside a package hook or transaction trigger \
+                     ({HELD_ENV} is set): the parent command owns the package \
+                     database lock and this process holds none, so package-mutating \
+                     commands must not run here"
+                );
+            }
         }
     }
     let timeout = std::env::var("NAWA_LOCK_TIMEOUT")
@@ -92,7 +154,14 @@ pub(crate) fn acquire(root: &Path, mode: Mode) -> Result<Option<DbLock>> {
     let mut announced = false;
     loop {
         match try_acquire(root, mode)? {
-            Attempt::Locked(l) => return Ok(Some(l)),
+            Attempt::Locked(l) => {
+                if mode == Mode::Exclusive {
+                    // under our own exclusive flock (§10.3: the gate is
+                    // checked under the exclusive package database lock)
+                    check_migration_gate(root)?;
+                }
+                return Ok(Some(l));
+            }
             Attempt::NotNeeded => return Ok(None),
             Attempt::Busy => {
                 if !announced {
@@ -251,6 +320,106 @@ mod tests {
         let _l = locked(try_acquire(&root, Mode::Exclusive).unwrap());
         let s = std::fs::read_to_string(lock_path(&root)).unwrap();
         assert_eq!(s.trim(), std::process::id().to_string());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- the migration mutation gate (design §10.3) -------------------------
+
+    /// Seed a migration record the way the store writes it (§10.3 record
+    /// format); written by hand here so the gate is exercised against raw
+    /// durable state, not through the store's own API.
+    fn seed_gate(root: &Path, id: &str, state: &str) -> PathBuf {
+        let dir = root.join("var/lib/nawa/migrations");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{id}.toml"));
+        std::fs::write(
+            &path,
+            format!(
+                "schema = 1\nid = \"{id}\"\ndefinition_version = 1\n\
+                 from = {{ domain = \"init-system\", identity = \"runit\" }}\n\
+                 to = {{ domain = \"init-system\", identity = \"systemd\" }}\n\
+                 handler = \"faseela.init.runit_to_systemd\"\nstate = \"{state}\"\n"
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn an_active_migration_blocks_the_exclusive_gate_until_the_record_goes_away() {
+        let root = tmp("gate-block");
+        let path = seed_gate(&root, "faseela-runit-to-systemd-v1", "preparing");
+
+        let e = check_migration_gate(&root).unwrap_err();
+        let msg = format!("{e:#}");
+        assert!(
+            msg.contains("faseela-runit-to-systemd-v1 is preparing"),
+            "{msg}"
+        );
+        assert!(msg.contains("package mutation gate"), "{msg}");
+        assert!(msg.contains("var/lib/nawa/migrations"), "{msg}");
+
+        // the same refusal on the real exclusive-acquisition path
+        let e = acquire(&root, Mode::Exclusive).unwrap_err();
+        assert!(
+            format!("{e:#}").contains("faseela-runit-to-systemd-v1 is preparing"),
+            "{e:#}"
+        );
+
+        // once the record is gone the mutation proceeds again
+        std::fs::remove_file(&path).unwrap();
+        let _l = acquire(&root, Mode::Exclusive).unwrap().unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn planned_and_terminal_records_keep_the_gate_open() {
+        // §10.3: `planned` was approved but the gate is taken only by
+        // BeginPreparation; verified completion and a completed, verified
+        // rollback clear the gate
+        for state in ["planned", "completed", "failed"] {
+            let root = tmp("gate-open");
+            seed_gate(&root, "faseela-runit-to-systemd-v1", state);
+            check_migration_gate(&root).unwrap();
+            let _l = acquire(&root, Mode::Exclusive).unwrap().unwrap();
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    #[test]
+    fn the_gate_never_blocks_readers() {
+        // §10.3: read-only inspection stays available while a migration is
+        // pending, and readers are best-effort — even a corrupt record must
+        // not take read commands down
+        let root = tmp("gate-read");
+        let path = seed_gate(&root, "faseela-runit-to-systemd-v1", "preparing");
+        let _l = acquire(&root, Mode::Shared).unwrap().unwrap();
+        std::fs::write(&path, "not [ valid toml").unwrap();
+        let _l2 = acquire(&root, Mode::Shared).unwrap().unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_corrupt_record_fails_the_exclusive_gate_closed() {
+        // mutations are strict: unreadable gate state refuses the mutation
+        // instead of risking a package change under a pending migration
+        let root = tmp("gate-corrupt");
+        let path = seed_gate(&root, "faseela-runit-to-systemd-v1", "preparing");
+        std::fs::write(&path, "not [ valid toml").unwrap();
+        let e = acquire(&root, Mode::Exclusive).unwrap_err();
+        let msg = format!("{e:#}");
+        assert!(
+            msg.contains("cannot check the persistent migration mutation gate"),
+            "{msg}"
+        );
+        // the same for an unreadable record entry (a directory in its place)
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let e = acquire(&root, Mode::Exclusive).unwrap_err();
+        assert!(
+            format!("{e:#}").contains("cannot check the persistent migration mutation gate"),
+            "{e:#}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

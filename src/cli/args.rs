@@ -741,7 +741,7 @@ pub(crate) enum Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::lifecycle::lock_mode;
+    use crate::application::lifecycle::lock_need;
     use clap::CommandFactory;
 
     fn parsed_request(args: &[&str]) -> crate::application::lifecycle::Request {
@@ -765,17 +765,17 @@ mod tests {
     #[test]
     fn archive_installs_take_one_exclusive_lock_name_installs_none() {
         assert_eq!(
-            lock_mode(&parsed_request(&[
+            lock_need(&parsed_request(&[
                 "install",
                 "build/out/curl-8.9-1.nawa.tar.zst"
             ])),
-            Some(crate::lock::Mode::Exclusive)
+            Some(crate::application::lifecycle::LockNeed::Exclusive)
         );
-        assert_eq!(lock_mode(&parsed_request(&["install", "curl"])), None);
+        assert_eq!(lock_need(&parsed_request(&["install", "curl"])), None);
         // mixing names and archives is rejected later, but the lock policy
         // still reads it as the by-name path
         assert_eq!(
-            lock_mode(&parsed_request(&["install", "curl", "a.nawa.tar.zst"])),
+            lock_need(&parsed_request(&["install", "curl", "a.nawa.tar.zst"])),
             None
         );
     }
@@ -783,24 +783,24 @@ mod tests {
     #[test]
     fn group_install_delegates_group_remove_is_exclusive() {
         assert_eq!(
-            lock_mode(&parsed_request(&["group", "install", "dev"])),
+            lock_need(&parsed_request(&["group", "install", "dev"])),
             None
         );
         assert_eq!(
-            lock_mode(&parsed_request(&["group", "remove", "dev"])),
-            Some(crate::lock::Mode::Exclusive)
+            lock_need(&parsed_request(&["group", "remove", "dev"])),
+            Some(crate::application::lifecycle::LockNeed::Exclusive)
         );
     }
 
     #[test]
     fn upgrade_dry_run_reads_the_database() {
         assert_eq!(
-            lock_mode(&parsed_request(&["upgrade", "--dry-run"])),
-            Some(crate::lock::Mode::Shared)
+            lock_need(&parsed_request(&["upgrade", "--dry-run"])),
+            Some(crate::application::lifecycle::LockNeed::Shared)
         );
         assert_eq!(
-            lock_mode(&parsed_request(&["upgrade"])),
-            Some(crate::lock::Mode::Exclusive)
+            lock_need(&parsed_request(&["upgrade"])),
+            Some(crate::application::lifecycle::LockNeed::Exclusive)
         );
     }
 
@@ -813,8 +813,8 @@ mod tests {
             ["deps", "curl"].as_slice(),
         ] {
             assert_eq!(
-                lock_mode(&parsed_request(args)),
-                Some(crate::lock::Mode::Shared),
+                lock_need(&parsed_request(args)),
+                Some(crate::application::lifecycle::LockNeed::Shared),
                 "{args:?} reads the installed database"
             );
         }
@@ -824,7 +824,7 @@ mod tests {
             ["completions", "bash"].as_slice(),
         ] {
             assert_eq!(
-                lock_mode(&parsed_request(args)),
+                lock_need(&parsed_request(args)),
                 None,
                 "{args:?} needs no database"
             );

@@ -9,12 +9,15 @@ use std::path::Path;
 use anyhow::Result;
 
 use super::*; // sibling `commands` handlers, grouped by domain
-use crate::application::lifecycle::lock_mode;
+use crate::application::lifecycle::{lock_need, LockNeed};
 use crate::cli::{completions_script, Cmd, ConfigCmd, GroupCmd, HistoryCmd, PluginCmd};
 use crate::ctx::{resolve_mode, resolve_repo, Ctx};
 
 pub(crate) fn run(ctx: &Ctx, cmd: Cmd, track_package_changes: bool) -> (Result<()>, bool) {
-    let mode = lock_mode(&cmd.lock_request());
+    let mode = lock_need(&cmd.lock_request()).map(|need| match need {
+        LockNeed::Exclusive => crate::lock::Mode::Exclusive,
+        LockNeed::Shared => crate::lock::Mode::Shared,
+    });
     let snapshot_needs_shared_lock = mode.is_none();
     // held until a whole-command transaction completes
     let _db_lock = match mode {

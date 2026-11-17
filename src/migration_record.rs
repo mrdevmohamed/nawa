@@ -1,4 +1,4 @@
-//! `system/migrate`: the durable migration record store (design §10.3).
+//! The durable migration record store (design §10.3).
 //!
 //! One versioned TOML record per migration under the selected target
 //! root's state directory —
@@ -7,6 +7,16 @@
 //! The state machine itself is pure domain
 //! (`domain/system/migration.rs`); this module owns only the text format,
 //! the directory layout and durable publication.
+//!
+//! Placement: a top-level module, not under `application/features/`,
+//! because two separate consumers need it — the lock mechanism checks the
+//! mutation gate before every exclusive acquisition (§10.3), and the
+//! migration coordinator use case will drive records through the state
+//! machine. The lock module must not depend on the application layer
+//! (application owns the transaction-apply path, which itself locks), so
+//! the shared store sits beside the mechanism like `transaction::journal`:
+//! a cohesive I/O subsystem the design's module organization (§4.3)
+//! deliberately keeps top-level instead of forcing it under one layer.
 //!
 //! Publication semantics (§10.3): records are written with the shared
 //! atomic temp+fsync+rename publication at mode 0600 (restrictive
@@ -19,9 +29,11 @@
 //! offline root is read-only — it must never create or modify a record
 //! under the target root (§10.3). Reading is always allowed.
 //!
-//! Not wired into any command yet (Phase 5 wiring is the next slice), so
-//! `dead_code` stays allowed at module scope until the coordinator and
-//! gate checks consume it.
+//! Gate wiring (this slice): the lock mechanism consumes
+//! [`active_gates`]/[`migrations_dir`] before every exclusive acquisition.
+//! Record creation and state transitions (`save`) have no production
+//! caller until the coordinator slice, so `dead_code` stays allowed at
+//! module scope with that one outstanding consumer named.
 
 #![allow(dead_code)]
 
@@ -36,7 +48,7 @@ use crate::domain::system::migration::{
 };
 
 /// `<root>/var/lib/nawa/migrations`
-fn migrations_dir(root: &Path) -> PathBuf {
+pub(crate) fn migrations_dir(root: &Path) -> PathBuf {
     root.join("var/lib/nawa/migrations")
 }
 

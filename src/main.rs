@@ -33,6 +33,7 @@ mod install;
 mod interrupt;
 mod lint;
 mod lock;
+mod migration_record;
 mod pathutil;
 mod plan;
 mod plugins;

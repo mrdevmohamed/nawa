@@ -15,7 +15,7 @@
 | 2 — Init identity & capability foundation | **DONE** (detection + capability/identity domain model) |
 | 3 — Metadata & capability resolution | **DONE** (B3 proposal; the whole package planner — install, outdated, orphans, removal ordering — in `domain/planning/`, behavior verified byte-identical) |
 | 4 — System profiles & planning | **DONE** (profile model + merge rules + loader §7; profile wired into plan generation §8.1–8.4 — install/update report the init decision, invalid profiles fail closed; byte-identity + probes verified. Stage-3 exit met: dry-run plans explain every init-provider and package decision without managing services. The candidate→provider capability comparison still awaits the B3 index schema — see blockers) |
-| 5 — Migration engine | in progress: the migration domain model (definition, durable state machine, record model) + the durable record store landed (§10.1–§10.3, unwired with justification); next: gate wiring + coordinator/stages |
+| 5 — Migration engine | in progress: the migration domain model (§10.1–§10.3) + the durable record store (now top-level `migration_record.rs`) + the persistent mutation-gate check wired into every exclusive acquisition (§10.3, block-only); next: read-only `system migrate` inspection CLI, then the coordinator/permit |
 | 6 — Faseela runit→systemd migration | **BLOCKED** (see blockers) |
 | 7 — Final verification | not started |
 
@@ -401,19 +401,11 @@ the handlers own only parsing, rendering and prompts.
 
 ## Current task
 
-**Phase 3 — profile and planning** (design §6–§8). B3 is done as a
-*proposal* (below); next step: the **solver/planning use case** that consumes
-`domain/system/capability.rs` + `domain/package/metadata.rs` + `detect.rs`
-(`plan_install`'s dependency resolution moves behind it):
-
-1. Design the use-case boundary: what `plan_install` currently resolves from
-   repo entries + db records, and which of it becomes normalized candidate
-   input (§8.1) to a presentation-free use case.
-2. Keep package/index/db formats unchanged — the B3 schema is agreed only as
-   a proposal; the solver consumes `PkgMetadata` normalized from *existing*
-   v1–v3 entries (unknown-vs-empty) and recipe-declared rundeps.
-3. Then Phase 4 (system profile, §7/§16.3) as the next externally blocked
-   step (B4).
+**Phase 5 — migration engine** (design §10–§12, Stage 4). Running log
+below ("Done within Phase 5 so far"); the gate is wired (slice 2), the
+read-only `system migrate` inspection CLI is next (see "Exact next
+task"). Phase 3's planning work is complete and folded into Phases 4–5;
+its notes below are kept for the record.
 
 ### Done within Phase 3 so far
 
@@ -682,7 +674,89 @@ behavior is unchanged (verified; see below). The persistent mutation-gate
   held: `--help`/`--version`/completions × 3 + 8-step scenario identical
   vs HEAD, and a seeded `preparing` migration record under a scenario
   root leaves `install -n`/`update -n` output unchanged (nothing reads
-  records yet — the module is inert by construction).
+  records yet — the module is inert by construction). (Bookkeeping note
+  found while wiring slice 2: that probe's heredoc record was actually
+  malformed TOML — keys written after a `[to]` section header nested
+  under it — harmless at the time because nothing parsed records; later
+  slices seed records in the store's real format, scalar fields first,
+  and a malformed record now *matters*: it fails the mutation gate
+  closed with the precise cause.)
+
+### Done within Phase 5 so far (2): the persistent mutation-gate check (§10.3)
+
+The gate is now enforced on every package-mutating path, block-only —
+no bypass exists because no coordinator permit exists yet (§10.3's
+typed permit arrives with the coordinator slice).
+
+Placement decisions first:
+
+* The record store moved from `application/features/system/migrate.rs`
+  to the top-level `migration_record.rs`. Reason: the lock mechanism
+  must check the gate before every exclusive acquisition, and the lock
+  module must not depend on the application layer — application owns
+  the transaction-apply path, which itself locks (`apply_transaction.rs`
+  imports `lock`), so a lock→application edge would close a cycle.
+  §4.3's module organization explicitly keeps cohesive I/O subsystems
+  top-level (`transaction::journal` is the precedent); the store's
+  header documents this.
+* The application layer got its own `LockNeed` vocabulary
+  (`application/lifecycle.rs`): `lock_mode` → `lock_need`, returning
+  `LockNeed::{Exclusive, Shared}`; `commands/dispatch.rs` maps that
+  onto the mechanism's `lock::Mode`. The dependency direction stays
+  application ← shell, and `lock::acquire` remains the single choke
+  point every exclusive acquisition goes through — which is where the
+  gate check lives.
+
+Gate semantics (`lock.rs::check_migration_gate`, wired into `acquire`):
+
+* Exclusive paths only, and always under a lock that covers the state:
+  under this process's own exclusive flock (checked after
+  `Attempt::Locked`), or — for the nested hook-spawned case — *before*
+  the `NAWA_LOCK_HELD` marker is honored (§10.3: the marker can never
+  authorize a mutation or bypass the gate; both outcomes refuse, and
+  when a migration is pending its error is the more precise one).
+* Shared/lock-free paths are never checked, on purpose: §10.3 keeps
+  read-only inspection available during a pending migration and readers
+  are best-effort — even a corrupt record must not take read commands
+  down. Mutations are strict: unreadable gate state fails closed
+  ("cannot check the persistent migration mutation gate … refusing to
+  change the package set fail-closed", exit 1).
+* The refusal names every active migration id and its state, the gate
+  rule, and the record directory: "a system migration holds the package
+  mutation gate: <id> is <state> — package-mutating commands are
+  blocked until the migration completes or is recovered (§10.3;
+  migration records: <dir>)".
+* Complete inventory of gated sites (everything that goes through
+  `lock::acquire(Mode::Exclusive)`): the dispatch whole-command lock
+  (remove, rollback, autoremove, history, all-archive install,
+  non-dry-run upgrade, group remove); the per-step locks — install-by-
+  name and update begin-operation/apply-step/finish (their `--dry-run`
+  forms run the same begin-operation block), `build --install` steps,
+  group install; the install hook-repair lock; post-transaction trigger
+  hooks. Not gated: every Shared acquire (dispatch snapshots,
+  `installed_map`) and lock-free dry-run short-circuits.
+* Observable consequences, all verified on the new binary: under a
+  pending migration, `remove`/`autoremove`/`upgrade`/archive install
+  refuse as the very first thing (exit 1); by-name `install -n` /
+  `update -n` refuse at the gated begin-operation lock *before*
+  printing the plan (the dry-run still writes an operation record, a
+  nawa-owned mutation, so the gate stops it); `upgrade -n` (Shared) and
+  all reads still work. The gate lifts when the record stops keeping it
+  — nothing sticky. `NAWA_LOCK_HELD=1` + pending migration → the gate
+  error wins over the hook-context error; marker + reads still work.
+  A parent command cannot race a gate into existence under it:
+  `BeginPreparation` (§10.4) requires the coordinator to hold the
+  exclusive package-database lock itself — documented in `lock.rs`,
+  enforced when the coordinator slice lands.
+* Tests: 4 lock.rs unit tests (gate blocks Exclusive and unblocks after
+  record removal; planned/terminal records keep it open; readers never
+  blocked, including a corrupt record; corrupt/unreadable records fail
+  the exclusive gate closed) and 4 tests/lock.rs integration tests
+  (mutating commands refuse naming id+state+gate+record dir and leave
+  the database untouched; reads stay available; the forged marker
+  cannot bypass and the gate error wins; the gate lifts when the record
+  goes away). The existing forged-marker tests still pass unchanged —
+  the gate-free marker error text is preserved exactly.
 
 ## Changed files (this phase, updated as work lands)
 
@@ -803,12 +877,29 @@ behavior is unchanged (verified; see below). The persistent mutation-gate
   * `src/domain/system/migration.rs` (new — `MigrationDefinition`,
     `HandlerId` allowlist, `check_id`, `MigrationState`/`Transition`/
     `transition()`, `StepRecord`/`StepOutcome`, `MigrationRecord` +
-    13 tests; pure, unwired with justification)
-  * `src/application/features/system/migrate.rs` (new — the durable
-    record store: `save` via `atomic::write_atomic` 0600, `load` fail
-    closed, `active_gates` scan + 7 tests; unwired with justification)
-  * `src/domain/system/mod.rs`, `src/application/features/system/mod.rs`
-    (one-line registrations + doc updates)
+    13 tests; pure)
+  * `src/migration_record.rs` (new — the durable record store moved
+    here from `application/features/system/migrate.rs` in the gate
+    slice; `save` via `atomic::write_atomic` 0600, `load` fail closed,
+    `active_gates` scan + 7 tests; header documents the placement)
+  * `src/domain/system/mod.rs` (one-line registration + doc update)
+* Phase 5 (gate wiring, in progress):
+  * `src/lock.rs` (`check_migration_gate` + wiring into `acquire` —
+    exclusive-after-lock check and the restructured marker branch that
+    checks the gate before honoring `NAWA_LOCK_HELD`; module docs and
+    `HELD_ENV` doc updated to present tense; 4 new unit tests)
+  * `src/application/lifecycle.rs` (own `LockNeed` vocabulary:
+    `lock_mode` → `lock_need`, doc header explains the application ←
+    shell direction; tests updated)
+  * `src/commands/dispatch.rs` (`LockNeed` → `lock::Mode` mapping)
+  * `src/cli/args.rs` (lock-policy test updated to `lock_need`/`LockNeed`)
+  * `src/application/features/system/migrate.rs` (deleted — the store
+    moved to top-level `migration_record.rs`; `features/system/mod.rs`
+    doc updated)
+  * `src/main.rs` (`mod migration_record;`)
+  * `src/domain/system/migration.rs` (doc pointer to the record store)
+  * `tests/lock.rs` (4 new gate tests + 3 pre-existing over-long
+    `assert!` calls canonicalized to rustfmt's exact preferred form)
 
 ## Tests actually executed
 
@@ -828,8 +919,9 @@ behavior is unchanged (verified; see below). The persistent mutation-gate
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 4 profile tree) | 678 pass / 2 ignored / 3 env-failed (= 658 + 11 domain + 9 loader profile tests; same 3 env failures) |
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 4 wiring tree) | 686 pass / 2 ignored / 3 env-failed (= 678 + 3 InitSelection + 1 loader provenance + 1 plan note + 3 desired-init tests; same 3 env failures) |
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 5 migration-model tree) | 706 pass / 2 ignored / 3 env-failed (= 686 + 13 domain migration + 7 record-store tests; same 3 env failures) |
-| `cargo clippy --all-targets --offline -- -D warnings` | pass (Phase 1a + 1b + 1c + 1d + 1e + 2 + 3/B3 + 3/solver + 3/removal + 4/profile + 4/wiring + 5/model) |
-| `python3 scripts/check-layering.py` | pass (54 after 1a; 53 after 1b; 54 after 1c; 55 after 2 — the new `domain` layer; 55 after 3/B3, 3/solver, 3/removal and 4/profile — the count is top-level modules, the new `domain/package`, `domain/planning`, `domain/system/profile` + `features/system/profile` submodules are scanned; 55 after 4/wiring and 5/model — `domain/system/migration` + `features/system/migrate` are submodules of existing top-level modules) |
+| `cargo test --all-targets --offline --no-fail-fast` (Phase 5 gate-wiring tree) | 714 pass / 2 ignored / 3 env-failed (= 706 + 4 lock unit + 4 lock integration tests; same 3 env failures) |
+| `cargo clippy --all-targets --offline -- -D warnings` | pass (Phase 1a + 1b + 1c + 1d + 1e + 2 + 3/B3 + 3/solver + 3/removal + 4/profile + 4/wiring + 5/model + 5/gate) |
+| `python3 scripts/check-layering.py` | pass (54 after 1a; 53 after 1b; 54 after 1c; 55 after 2 — the new `domain` layer; 55 after 3/B3, 3/solver, 3/removal and 4/profile — the count is top-level modules, the new `domain/package`, `domain/planning`, `domain/system/profile` + `features/system/profile` submodules are scanned; 55 after 4/wiring and 5/model — `domain/system/migration` + `features/system/migrate` are submodules of existing top-level modules; **56 after 5/gate** — the record store moved to the top-level `migration_record` module, no cycles: lock → migration_record → domain/atomic, application → lock via the transaction-apply path only) |
 | `bash scripts/smoke-v06.sh` (release build, Phases 1b + 1c + 1d + 2) | ALL V0.6 SMOKE TESTS PASSED |
 | `bash scripts/smoke-v05.sh` (release build, Phases 1d + 2) | ALL SMOKE TESTS PASSED |
 | HEAD-vs-1c behavior diff (`--help`, `--version`, completions × 3, isolated worktree build) | byte-identical |
@@ -848,12 +940,19 @@ behavior is unchanged (verified; see below). The persistent mutation-gate
 | HEAD-vs-4(wiring) positive probes on the new binary (seeded profiles in a fake root): override declaring `init-system` → `install -n`/`update -n` print the §8.4 note with the override path; defaults-only profile → note names the defaults path; profile without the init role → no note; invalid profile → `install` and `update` refuse with exit 1 naming the file + cause | pass |
 | HEAD-vs-5(model) behavior diff (`--help`, `--version`, completions × 3, paired 8-step scenario, isolated CARGO_TARGET_DIR builds) | byte-identical (the migration model + record store are unwired; no production path reads records) |
 | HEAD-vs-5(model) inertness probe (a `preparing` migration record seeded under a scenario root: `install -n` and `update -n` on both builds) | identical transcripts (the gate check is not wired yet) |
+| HEAD-vs-5(gate) behavior diff (`--help`, `--version`, completions × 3, paired 8-step scenario, isolated CARGO_TARGET_DIR builds) | byte-identical (the gate check only runs on exclusive acquisitions and no scenario fixture carries a migration record) |
+| HEAD-vs-5(gate) gate probes (a valid `preparing` record seeded under a scenario root, both builds): `remove --yes` / `autoremove --yes` / `install <archive>` refuse with exit 1 naming id+state+gate+record dir; `install curl -n` on a fresh root refuses at the gated begin-operation lock *before* printing the plan; `query` unaffected; the HEAD build shows none of this (`install -n` prints its plan, `remove --yes` fails with the ordinary "not installed" error) | pass |
 | `cargo fmt --all -- --check` | fails repo-wide at HEAD (pre-existing ~100 files; CI does not run fmt) — re-scoped to "no new violations in touched/new code", satisfied (1a–1e, 2, 3/B3, 3/solver, 3/removal, 4/profile, 4/wiring,
 5/model: new files clean; plan.rs dirty hunks 19 → 13 → **12** — the
 deleted planner bodies carried six away across the two slices, one
 over-long test call was canonicalized while adding the profile arg;
 installing.rs stays at its pre-existing 18 hunks, none on lines touched
-here) |
+here; 5/gate: the moved `migration_record.rs` and the doc-edited module
+files clean, lock.rs stays at its pre-existing 7 hunks (the one
+violation my gate tests introduced was fixed before commit) and
+tests/lock.rs hunks 5 → **2** — three pre-existing over-long `assert!`
+calls were canonicalized to rustfmt's exact preferred form while adding
+the gate tests, zero new violations) |
 
 ## Known problems
 
@@ -883,30 +982,39 @@ here) |
 
 ## Exact next task
 
-**Phase 5, second slice: the persistent mutation-gate check (§10.3)** —
-wire the gate into the package-mutating entry points, per §10.3's rules:
+**Phase 5, third slice: read-only migration record inspection
+(§12.2)** — give the record store its first real production consumers
+with the `nawa system migrate` namespace, read-only only:
 
-* Every Nawa-owned package-mutating command (install/update/remove/
-  autoremove/groups/plugins-runs-that-mutate) must stop *before changing
-  the package set* while `features/system/migrate::active_gates` finds a
-  gate-keeping record under the selected root. The check runs **before
-  honoring `NAWA_LOCK_HELD`** (the marker is forgeable and never
-  authorizes mutation or skips the gate) and while the exclusive package
-  database lock is held — or under the already-held parent lock for a
-  nested read-only check (§10.3's exact wording governs the shortcut).
-* Read-only commands stay available; nested read-only may bypass only
-  where Stage 0 proves the snapshot consistent, else fail fast with a
-  clear diagnostic.
-* Refusal message names the migration id and its state and points at the
-  documented recovery route (`needs-recovery` keeps the gate; only
-  verified completion or a completed, verified rollback clears it).
-* The private typed in-process coordinator permit (§10.3) lands with the
-  coordinator slice — this slice only ever *blocks*: no permit exists
-  yet, so no bypass must exist yet.
-* Tests: seeded gate record blocks install/update/remove/autoremove with
-  exit 1 (transcript asserts the id + state are named); read-only
-  commands still work; `NAWA_LOCK_HELD` does not bypass the gate (the
-  existing lock tests cover the marker semantics — extend with a
-  gate-present case); offline-root planning does not create records.
-  Gates as always + byte-identity vs HEAD on the gate-free scenario;
-  commit and update this tracker.
+* `nawa system migrate list` — every record under the selected root:
+  id, durable state, from→to capability keys, definition version; says
+  so explicitly when the list is empty (and whether that means "no
+  migration ever started").
+* `nawa system migrate show <id>` — the full record: handler,
+  requires-reboot binding, and the ordered write-ahead steps with
+  intents/outcomes (an intent without outcome is *interrupted* — say
+  so, §10.3). Unknown id → exit 1 naming the record directory; a
+  corrupt record is reported with its validation cause (readers stay
+  honest; this command is allowed to fail loudly where the gate's
+  silent skip must not).
+* `nawa system migrate status` — gate-active summary: whether package
+  mutations are currently blocked under the selected root, by which
+  migration(s). Exit 0 in both cases (informational); the machine-
+  checkable refusal already exists as the gate's exit-1 error on
+  mutating commands.
+* Rules: strictly read-only (never creates or modifies records; works
+  on offline roots and any `--root`); no second top-level `migrate`
+  namespace (§12.2); plain text output consistent with the existing
+  `history`-style listing; new subcommands only — no existing command's
+  bytes change.
+* Tests: unit tests over the presentation mapping (record → lines,
+  interrupted-step rendering); integration tests (list on an empty
+  root, list/show with seeded records incl. an interrupted step, show
+  unknown id exit 1, status with and without a gate). Gates as always +
+  byte-identity vs HEAD (existing commands untouched) + probes of the
+  three new subcommands on both a fresh root and a seeded one; commit
+  and update this tracker.
+
+The coordinator slice follows (typed in-process permit §10.3 +
+`apply_transaction` lock-ownership inversion), then record creation and
+state transitions.

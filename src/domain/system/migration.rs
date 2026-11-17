@@ -7,9 +7,9 @@
 //! (§10.2), the durable [`MigrationState`] state machine with its legal
 //! [`Transition`]s, and the [`MigrationRecord`] model that persists it. No
 //! I/O, no serde, no adapter types: the record's TOML text format and the
-//! directory layout belong to the application-layer record store
-//! (§10.3's durable record lives under the selected target root's state
-//! directory).
+//! directory layout belong to the record store (`migration_record`, a
+//! top-level module — see its header for the placement rationale; the
+//! durable record lives under the selected target root's state directory).
 //!
 //! §10.3's mutation-gate semantics are part of this model, because they are
 //! policy, not I/O: [`MigrationState::keeps_gate`] lists the states during
@@ -28,7 +28,6 @@ use crate::domain::system::capability::Capability;
 /// else: a newer record is never silently misread (§10.3: a *versioned*
 /// state record).
 pub(crate) const SCHEMA_VERSION: u32 = 1;
-
 /// The trusted built-in migration handlers (§10.2). Selected only by an
 /// allowlisted, typed handler ID: a repository must not be able to provide
 /// an arbitrary executable path or shell command for root to run, and
