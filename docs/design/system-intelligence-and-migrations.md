@@ -105,6 +105,38 @@ state machine and use the existing transaction journal where appropriate.
 Do not claim that package rollback alone can restore an arbitrary system-wide
 migration.
 
+### 2.3 Current source organization and architectural debt
+
+A review of the current `master` source tree (2026-11-17) found a mixed
+organization rather than a consistent module architecture:
+
+- The source tree contains approximately 115 Rust source files, with about 40
+  files directly under `src/`; some areas are grouped into directories while
+  other domain modules remain flat at the crate root.
+- There are useful existing boundaries such as `build/`, `commands/`,
+  `fetch/`, `install/`, `recipe/`, `repo/`, `sandbox/`, `transaction/`,
+  and `upgrade/`. These should be preserved where they represent cohesive
+  subsystems.
+- Large orchestration files still combine multiple responsibilities:
+  `commands/installing.rs` handles several package lifecycle use cases and
+  coordinates repository access, planning, installation, locking, recovery,
+  and transaction history; `install/mod.rs` is a large public-in-crate
+  installer facade and implementation file; `main.rs` contains command
+  dispatch and package lifecycle coordination in addition to process startup;
+  `cli.rs` combines argument definitions, completion behavior, and command
+  lock policy.
+- Some concerns are split across multiple locations while other unrelated
+  concerns are coordinated directly by command handlers. This makes ownership,
+  dependency direction, and the correct place for new system-migration logic
+  harder to determine.
+
+This is architectural debt accumulated through incremental feature growth. It
+does not mean every existing module is wrong or that all files should be moved.
+The goal is to establish explicit boundaries and dependency rules before
+adding the capability solver and migration engine. The source audit must verify
+the exact dependency graph rather than infer it from directory names.
+
+
 ## 3. Goals and non-goals
 
 ### 3.1 Goals
@@ -156,9 +188,8 @@ that coordinates existing facilities and a small set of new domain components.
               |
               v
         System Intelligence
-          - System Detector
-          - System Profile
           - Init-System Detector
+          - System Profile
           - Optional Capability Catalog
           - Dependency / Capability Solver
           - Conflict and Impact Analysis
@@ -193,6 +224,107 @@ Responsibilities should remain separate:
 These are domain responsibilities, not a requirement to create one Rust crate
 or one file per row. Preserve Nawa's existing module-layering rules. Lower-level
 modules must not depend on CLI or command modules.
+
+### 4.1 Required code boundaries
+
+Nawa should become a modular monolith with explicit dependency direction. Do
+not split it into multiple crates during this refactor unless a real independent
+release or reuse boundary is demonstrated.
+
+| Layer | Owns | Must not do |
+|---|---|---|
+| CLI / presentation | Clap argument types, shell completions, terminal rendering, prompts, JSON/text presentation. | Implement package policy, dependency solving, filesystem mutations, or transaction recovery. |
+| Application | User-facing use cases, command dispatch, orchestration, authorization/confirmation flow, and lifecycle coordination. | Reimplement package rules or contain low-level archive/filesystem/network code. |
+| Domain | Package and recipe concepts, dependency rules, plans, provider policy, init-system identity, and migration state transitions. | Read environment variables, contact the network, spawn processes, or mutate the filesystem directly. |
+| Infrastructure | Concrete package database, repository transport, archive/signature handling, filesystem operations, sandbox/process execution, locks, and durable journal storage. | Decide user intent or distribution policy. |
+
+The allowed dependency direction is:
+
+    CLI / Presentation
+            |
+            v
+       Application ------> Domain
+            |                 ^
+            v                 |
+       Infrastructure --------+
+
+Infrastructure implements narrow ports needed by Application or Domain; the
+composition root wires concrete implementations. Domain code must not import
+CLI, command handlers, or infrastructure adapters. Infrastructure must not
+depend on CLI. Avoid circular dependencies and avoid making every helper a
+trait: introduce an abstraction only at a boundary that needs substitution,
+testing, or isolation.
+
+### 4.2 Practical module organization
+
+The following is a target grouping, not a mandate to create every directory
+immediately:
+
+    src/
+      main.rs                 # process entry point and composition root
+      cli/                    # Clap types and completions
+      application/
+        context.rs
+        dispatch.rs
+        lifecycle.rs          # lock / recovery / post-transaction coordination
+        package/              # install, remove, update, upgrade, autoremove
+        query/                # search, info, deps, why, files, owner
+        build/                # build use case and build orchestration
+        repository/           # repo-facing use cases
+        history/              # history and rollback use cases
+        system/               # status, plan, migrate use cases (later)
+      domain/
+        package/              # package identity, dependency and plan rules
+        recipe/               # recipe model and validation rules
+        system/               # init detection model, profile, capability, migration
+        transaction/          # operation and migration state models
+      infrastructure/
+        database/
+        repository/
+        archive/
+        filesystem/
+        signing/
+        fetch/
+        process/
+        sandbox/
+        transaction_store/
+      presentation/           # output, diagnostics, confirmation
+
+Keep cohesive existing subsystems such as build, repository, recipe, and
+transaction as modules where appropriate; move them only when doing so clarifies
+ownership. A file's size alone is not a reason to split it. Split when it owns
+multiple independently testable use cases or mixes policy with I/O.
+
+### 4.3 Refactoring rules
+
+- Keep `main.rs` as the composition root: parse input, construct application
+  dependencies, run the selected use case, and map the final result to an exit
+  code. Move lifecycle policy and command orchestration into Application.
+- Keep `cli.rs` (or the future `cli/` module) concerned with parsing and
+  presentation-facing types. Move lock/recovery policy out of CLI definitions.
+- Make each command handler a thin adapter to one Application use case.
+  Separate install, remove, update, upgrade, and autoremove instead of growing
+  one catch-all package command module.
+- Keep installer implementation behind a small facade. Separate archive
+  validation/authentication, payload application, file journaling, rollback,
+  and package-database persistence by responsibility; do not make command
+  handlers reach into installer internals.
+- Keep package/dependency planning pure wherever possible. Filesystem,
+  repository, process, and privilege effects must be explicit at Application
+  or Infrastructure boundaries.
+- Make context dependencies explicit. Avoid a global mutable context or
+  passing a large context object to modules that need only one or two values.
+- Prefer domain-specific module names over a generic `utils` or `common`
+  dumping ground. Avoid broad `pub(crate)` exports when a narrower API is
+  sufficient.
+- Do not combine a structural move with a behavior change. Preserve CLI
+  behavior, recipe compatibility, package formats, repository indexes,
+  database records, and transaction recovery while refactoring.
+
+Architecture tests and code review should enforce the dependency direction.
+A new module must have a clear owner, a narrow API, and tests at the layer where
+its rules belong.
+
 
 ## 5. System state: observed, installed, and desired
 
@@ -768,15 +900,18 @@ proposal with unrelated recipe, repository, package, or distribution changes.
 
 | Stage | Scope | Exit condition |
 |---|---|---|
-| 0. Baseline audit | Map the current solver, package metadata, database, transaction, runit-specific service code, installer coupling, root handling, and CLI extension points. | A source-backed implementation map identifies every service-management path, including `keep_disabled`, and defines its removal tests. |
-| 1. Init identity and capability foundation | Add read-only init-system detection and only the minimal authenticated metadata needed to identify init providers. | Legacy metadata remains readable; live, chroot, container, and offline-root states are distinguished or reported unknown. |
-| 2. Profile and planning | Add the validated target init profile and deterministic package planning. | Dry-run plans explain every init-provider and package decision without managing services. |
-| 3. Migration framework | Add versioned migration records, state machine, trusted handlers, and recovery. | Failure/restart tests prove safe continuation or an explicit recovery-required status. |
-| 4. Faseela transition | Add the distribution-specific runit-to-systemd definition and handlers; service activation remains outside Nawa. | Disposable VM migration passes boot, init verification, and recovery tests. |
+| 0. Architecture and behavior audit | Map the source/module dependency graph, command-to-installer flows, database and transaction boundaries, root handling, service-management references, and current tests. Record the existing CLI and package behavior as the compatibility baseline. | A source-backed module ownership map, dependency rules, service-removal checklist, and behavior-focused test baseline are reviewed. |
+| 1. Structural refactor and service removal | Establish CLI / Application / Domain / Infrastructure boundaries. Move code incrementally; reduce orchestration in `main.rs`; separate package lifecycle use cases; narrow the installer facade; remove the complete service subsystem and `keep_disabled` coupling. | No behavior change in package operations; no service command, provider, service invocation, or runit-specific installer state remains; tests and checks pass. |
+| 2. Init identity and capability foundation | Add read-only init-system detection and only the minimal authenticated metadata needed to identify init providers. | Legacy metadata remains readable; live, chroot, container, and offline-root states are distinguished or reported unknown. |
+| 3. Profile and planning | Add the validated target init profile and deterministic package planning. | Dry-run plans explain every init-provider and package decision without managing services. |
+| 4. Migration framework | Add versioned migration records, state machine, trusted handlers, and recovery. | Failure/restart tests prove safe continuation or an explicit recovery-required status. |
+| 5. Faseela transition | Add the distribution-specific runit-to-systemd definition and handlers; service activation remains outside Nawa. | Disposable VM migration passes boot, init verification, and recovery tests. |
 
-The first implementation step is Stage 0, not a rewrite of the dependency solver.
-The audit should identify which current code can be reused and which behavior
-is truly missing.
+The first implementation step is Stage 0, not a rewrite of the dependency
+solver and not a mass file move. Stage 0 records the actual dependency graph and
+compatibility baseline. Stage 1 then creates clean boundaries with small,
+reviewable, behavior-preserving changes. Only after that foundation is stable
+should new capability and migration behavior be added.
 
 ## 16. Open design decisions for discussion
 
