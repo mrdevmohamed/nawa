@@ -4,6 +4,7 @@ use anyhow::{bail, Context, Result};
 use crate::suggest;
 use crate::ctx::Ctx;
 use crate::config::InstallMode;
+use crate::application::features::package::plan_install::{self, Sourcing, Source};
 use crate::color::Palette;
 use std::path::Path;
 use std::path::PathBuf;
@@ -12,7 +13,6 @@ use crate::color::Stream;
 use crate::commands::build_one;
 use crate::confirm;
 use crate::db;
-use crate::fetch;
 use crate::humanize::format_date;
 use crate::humanize::format_duration;
 use crate::humanize::format_size;
@@ -21,7 +21,6 @@ use crate::install;
 use crate::pathutil::is_archive_arg;
 use crate::lock;
 use crate::plan;
-use crate::recipe;
 use crate::recovery;
 use crate::repo;
 use crate::revdep;
@@ -29,8 +28,6 @@ use crate::transaction;
 use crate::upgrade;
 use crate::version;
 use crate::commands::warn_revdep;
-
-use crate::sys::arch_fits;
 
 pub(crate) fn cmd_install(
     ctx: &Ctx,
@@ -107,39 +104,36 @@ pub(crate) fn cmd_install_with_why(
     // where packages come from: flag > install_mode (env / nawa.toml / default)
     let mode = mode.unwrap_or(ctx.install_mode);
     let repo_url = repo.or_else(|| ctx.repo.clone());
-    let sourcing = open_sourcing(ctx, mode, repo_url.as_deref(), flags)?;
-
-    // a name without a recipe can still be installed when the repository has
-    // it (a binary-only package: no dependency resolution, no build)
-    let mut recipe_targets: Vec<String> = Vec::new();
-    let mut extras: Vec<repo::RepoEntry> = Vec::new();
-    for t in &remaining_targets {
-        if known.contains_key(t) {
-            recipe_targets.push(t.clone());
-            continue;
-        }
-        match sourcing.entry(t) {
-            Some(re) => match installed.get(t) {
-                Some(cur)
-                    if version::vercmp(
-                        &format!("{}-{}", cur.version, cur.rel),
-                        &format!("{}-{}", re.version, re.rel),
-                    ) != std::cmp::Ordering::Less =>
-                {
-                    crate::nawa_info!("{t} is already installed and up to date");
-                }
-                _ => extras.push(re.clone()),
-            },
-            // neither a recipe nor a repository package: the planner reports
-            // it with a "did you mean" hint
-            None => recipe_targets.push(t.clone()),
-        }
+    let (sourcing, sourcing_notes) = plan_install::open_sourcing(
+        ctx,
+        mode,
+        repo_url.as_deref(),
+        flags.allow_unsigned,
+        flags.force,
+    )?;
+    for note in &sourcing_notes {
+        note.emit();
     }
 
-    let plan = plan::install_plan(&recipe_targets, &installed, &known, target_why, !no_deps)?;
-    for name in &plan.up_to_date {
-        crate::nawa_info!("{name} is already installed and up to date");
+    // plan the recipe-backed part and split the repository-only targets.
+    // The notices print even when planning fails, exactly as the inline
+    // version printed them before the planner bailed.
+    let mut notices = Vec::new();
+    let planned = plan_install::plan(
+        &remaining_targets,
+        &known,
+        &installed,
+        &sourcing,
+        target_why,
+        !no_deps,
+        &mut notices,
+    );
+    for notice in &notices {
+        notice.emit();
     }
+    let outcome = planned?;
+    let plan = outcome.plan;
+    let extras = outcome.extras;
     if plan.items.is_empty() && extras.is_empty() {
         // A group install still changes durable membership even when every
         // selected package is already present, so keep it visible in history.
@@ -196,115 +190,6 @@ pub(crate) fn cmd_install_with_why(
         match err {
             Some(e) => Err(e),
             None => Ok(()),
-        }
-    }
-}
-
-/// Where each package of a plan comes from, decided per package.
-pub(crate) enum Source {
-    /// build it from its recipe
-    Build,
-    /// install this archive from the repository
-    Repo(repo::RepoEntry),
-}
-
-/// The repository (when one is usable) plus the policy for using it.
-pub(crate) struct Sourcing {
-    /// `Auto` (repository when it has the package at least as new as the
-    /// recipe, else build), `Repo` (strict: repository only) or `Build`
-    pub(crate) mode: InstallMode,
-    /// `install_mode = ask`: offer "repository or build?" on a terminal
-    pub(crate) ask: bool,
-    pub(crate) open: Option<upgrade::OpenRepo>,
-}
-
-impl Sourcing {
-    /// Always build — the default for `update` and explicit `--build`.
-    pub(crate) fn build_only() -> Self {
-        Sourcing { mode: InstallMode::Build, ask: false, open: None }
-    }
-
-    /// The repository's entry for `name`, if a repository is open and
-    /// usable on this machine's architecture.
-    pub(crate) fn entry(&self, name: &str) -> Option<&repo::RepoEntry> {
-        let open = self.open.as_ref()?;
-        let re = open.index.find(name)?;
-        if arch_fits(&re.arch) {
-            Some(re)
-        } else {
-            None
-        }
-    }
-
-    /// Decide the source of one recipe-backed package.
-    pub(crate) fn pick(&self, rec: &recipe::Recipe) -> Result<Source> {
-        if self.mode == InstallMode::Build {
-            return Ok(Source::Build);
-        }
-        let name = &rec.package.name;
-        let have = self.entry(name);
-        let strict = self.mode == InstallMode::Repo;
-        match have {
-            None if strict => bail!(
-                "`{name}` is not in the repository for this architecture \
-                 (use --build to build it, or the default `auto` mode to fall back to a build)"
-            ),
-            None => Ok(Source::Build),
-            Some(re) => {
-                let theirs = format!("{}-{}", re.version, re.rel);
-                let ours = format!("{}-{}", rec.package.version, rec.package.rel);
-                let older = version::vercmp(&theirs, &ours) == std::cmp::Ordering::Less;
-                if older && !strict {
-                    // the recipe tree is newer than the repository: honour the recipe
-                    Ok(Source::Build)
-                } else {
-                    if older {
-                        eprintln!(
-                            "nawa: note: repository has {name} {theirs}, the recipe is {ours} \
-                             — installing the repository version"
-                        );
-                    }
-                    Ok(Source::Repo(re.clone()))
-                }
-            }
-        }
-    }
-}
-
-/// Open the configured repository according to the install mode. A repository
-/// that cannot be used (offline, empty, no trusted key yet, switched off) is
-/// an error only in strict `repo` mode; otherwise it is one `note:` line and
-/// packages are built from source.
-pub(crate) fn open_sourcing(
-    ctx: &Ctx,
-    mode: InstallMode,
-    repo_url: Option<&str>,
-    flags: &PlanFlags,
-) -> Result<Sourcing> {
-    let ask = mode == InstallMode::Ask;
-    let eff = if ask { InstallMode::Auto } else { mode };
-    if eff == InstallMode::Build {
-        return Ok(Sourcing::build_only());
-    }
-    let strict = eff == InstallMode::Repo;
-    let url = match repo_url {
-        Some(u) => u,
-        None if strict => bail!(
-            "no repository configured: pass --repo <dir-or-url>, set `repo` in nawa.toml \
-             or /etc/nawa/nawa.toml, or export NAWA_REPO"
-        ),
-        None => {
-            crate::nawa_note!("no repository configured — building from source");
-            return Ok(Sourcing::build_only());
-        }
-    };
-    let repo_ref = fetch::RepoRef::parse(url)?;
-    match upgrade::open_repo(&ctx.root, &repo_ref, flags.allow_unsigned, flags.force) {
-        Ok(open) => Ok(Sourcing { mode: eff, ask, open: Some(open) }),
-        Err(e) if strict => Err(e).with_context(|| format!("repository {url} is not usable")),
-        Err(e) => {
-            crate::nawa_note!("repository {url} is not usable ({e:#}) — building from source");
-            Ok(Sourcing::build_only())
         }
     }
 }
@@ -600,7 +485,11 @@ pub(crate) fn run_plan(
     // first package is touched, not halfway through
     let mut sources: Vec<Source> = Vec::with_capacity(plan.items.len());
     for it in &plan.items {
-        sources.push(sourcing.pick(&it.rec)?);
+        let (source, note) = sourcing.pick(&it.rec)?;
+        if let Some(note) = note {
+            eprintln!("{note}");
+        }
+        sources.push(source);
     }
 
     print_plan(ctx, plan, extras, &sources, total);
@@ -776,7 +665,16 @@ pub(crate) fn cmd_update(
     }
     let plan = plan::install_plan(&targets, &installed, &known, plan::Why::Update, true)?;
     let repo_url = repo.or_else(|| ctx.repo.clone());
-    let sourcing = open_sourcing(ctx, mode, repo_url.as_deref(), flags)?;
+    let (sourcing, sourcing_notes) = plan_install::open_sourcing(
+        ctx,
+        mode,
+        repo_url.as_deref(),
+        flags.allow_unsigned,
+        flags.force,
+    )?;
+    for note in &sourcing_notes {
+        note.emit();
+    }
 
     // In strict repository mode, every update target must be available at
     // least at the version requested by its recipe. Never silently downgrade

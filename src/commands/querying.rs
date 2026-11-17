@@ -2,6 +2,7 @@
 
 use anyhow::{bail, Result};
 use std::collections::BTreeSet;
+use crate::application::features::package::query;
 use crate::ctx::Ctx;
 use std::collections::HashSet;
 use crate::color::Palette;
@@ -13,27 +14,15 @@ use crate::humanize::format_size;
 use crate::recipe;
 use crate::revdep;
 
-use crate::glob::glob_match;
-
 pub(crate) fn cmd_search(ctx: &Ctx, term: &str, glob: bool) -> Result<()> {
     let all = ctx.load_all()?;
     let db = db::Db::new(&ctx.root);
     let installed: HashSet<String> = db.installed()?.into_iter().map(|e| e.name).collect();
     let pal = Palette::auto(Stream::Stdout);
-    let needle = term.to_lowercase();
 
     let mut hits = 0usize;
-    for (name, rec) in &all {
+    for (name, rec) in query::search_matches(&all, term, glob) {
         let nl = name.to_lowercase();
-        let matched = if glob {
-            glob_match(&needle, &nl)
-        } else {
-            nl.contains(&needle)
-                || rec.package.summary.to_lowercase().contains(&needle)
-        };
-        if !matched {
-            continue;
-        }
         hits += 1;
         let mark = if installed.contains(name) {
             pal.ok("*")
@@ -139,15 +128,10 @@ pub(crate) fn cmd_info(ctx: &Ctx, name: &str) -> Result<()> {
 }
 
 pub(crate) fn cmd_why(ctx: &Ctx, name: &str, tree: bool) -> Result<()> {
-    let db = db::Db::new(&ctx.root);
     let pal = Palette::auto(Stream::Stdout);
-    let entry = db.entry(name)?;
-    let dependents: Vec<String> = db
-        .installed()?
-        .into_iter()
-        .filter(|e| e.run.iter().any(|r| r == name))
-        .map(|e| e.name)
-        .collect();
+    let data = query::why(&ctx.root, name)?;
+    let entry = data.entry;
+    let dependents = data.dependents;
 
     match &entry {
         Some(e) => {
@@ -177,22 +161,7 @@ pub(crate) fn cmd_why(ctx: &Ctx, name: &str, tree: bool) -> Result<()> {
 
     if tree {
         let all = ctx.load_all()?;
-        let mut rdeps: Vec<(String, Vec<&str>)> = Vec::new();
-        for (n, r) in &all {
-            if n == name {
-                continue;
-            }
-            let mut kinds: Vec<&str> = Vec::new();
-            if r.build_deps().iter().any(|d| d == name) {
-                kinds.push("build");
-            }
-            if r.depends.run.iter().any(|d| d == name) {
-                kinds.push("run");
-            }
-            if !kinds.is_empty() {
-                rdeps.push((n.clone(), kinds));
-            }
-        }
+        let rdeps = query::recipe_dependents(name, &all);
         if rdeps.is_empty() {
             println!("  no recipe in {} depends on it", ctx.recipes.display());
         } else {

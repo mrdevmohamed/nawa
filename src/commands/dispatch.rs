@@ -14,7 +14,7 @@ use crate::cli::{completions_script, Cmd, ConfigCmd, GroupCmd, HistoryCmd, Plugi
 use crate::ctx::{resolve_mode, resolve_repo, Ctx};
 
 pub(crate) fn run(ctx: &Ctx, cmd: Cmd, track_package_changes: bool) -> (Result<()>, bool) {
-    let mode = lock_mode(&cmd);
+    let mode = lock_mode(&cmd.lock_request());
     let snapshot_needs_shared_lock = mode.is_none();
     // held until a whole-command transaction completes
     let _db_lock = match mode {

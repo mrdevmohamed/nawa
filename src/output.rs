@@ -157,6 +157,18 @@ macro_rules! nawa_error {
     };
 }
 
+/// Render a use-case notice through the standard status macros. The method
+/// lives in the presentation layer on purpose: the application layer
+/// *returns* notices, it never prints them.
+impl crate::application::features::package::plan_install::Notice {
+    pub(crate) fn emit(&self) {
+        match self {
+            Self::Note(text) => crate::nawa_note!("{}", text),
+            Self::Info(text) => crate::nawa_info!("{}", text),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

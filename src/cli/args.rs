@@ -577,6 +577,79 @@ pub(crate) struct PlanFlags {
     pub(crate) offline: bool,
 }
 
+impl Cmd {
+    /// The application-layer view of this command for the lifecycle policy:
+    /// which package-database lock it needs (see
+    /// `application::lifecycle::lock_mode`). The CLI translates its parsed
+    /// arguments into a typed request; the application layer owns the
+    /// policy. The match is exhaustive, so a new `Cmd` variant cannot be
+    /// added without a lock decision.
+    pub(crate) fn lock_request(&self) -> crate::application::lifecycle::Request {
+        use crate::application::lifecycle::Request;
+        match self {
+            // installing archives holds the lock for the whole command;
+            // installing by name builds first, so (like `build --install`)
+            // it locks around each install step only
+            Cmd::Install { targets, .. } => {
+                if targets.iter().all(|t| crate::pathutil::is_archive_arg(t)) {
+                    Request::InstallArchives
+                } else {
+                    Request::InstallByName
+                }
+            }
+            Cmd::Remove { .. }
+            | Cmd::Rollback { .. }
+            | Cmd::Autoremove { .. }
+            | Cmd::History { .. } => Request::MutateDb,
+            Cmd::Upgrade { dry_run, .. } => Request::Upgrade { dry_run: *dry_run },
+            // `build --install` / `update` lock themselves around the install
+            // step only (holding the db lock through a full build would starve
+            // readers)
+            Cmd::Build { .. } | Cmd::Update { .. } => Request::PerStep,
+            // fetch and recipe check never touch the package database
+            Cmd::Fetch { .. } | Cmd::Recipe { .. } => Request::NoDb,
+            Cmd::Outdated => Request::ReadDb,
+            Cmd::Query { .. }
+            | Cmd::Info { .. }
+            | Cmd::Why { .. }
+            | Cmd::Files { .. }
+            | Cmd::Owner { .. }
+            | Cmd::Revdep { .. }
+            | Cmd::Deps { .. }
+            | Cmd::DepsAll { .. } => Request::ReadDb, // repo/sign tooling and everything below touches no package database
+            Cmd::RepoCreate { .. }
+            | Cmd::RepoUpdate { .. }
+            | Cmd::Keygen { .. }
+            | Cmd::Sign { .. }
+            | Cmd::Verify { .. }
+            | Cmd::Trust { .. }
+            | Cmd::Sync { .. }
+            | Cmd::Search { .. }
+            | Cmd::Completions { .. }
+            | Cmd::Config { .. }
+            | Cmd::Init { .. }
+            | Cmd::CompletePkgs => Request::NoDb,
+            // Group install delegates to the ordinary install path, which
+            // acquires short per-transaction locks itself. Holding an
+            // outer lock here would deadlock that path.
+            Cmd::Group { action } => match action {
+                GroupCmd::List | GroupCmd::Info { .. } | GroupCmd::Install { .. } => {
+                    Request::InstallByName
+                }
+                GroupCmd::Remove { .. } => Request::GroupRemove,
+            },
+            Cmd::Repolist { .. }
+            | Cmd::Repoquery { .. }
+            | Cmd::Makecache { .. }
+            | Cmd::Clean { .. }
+            | Cmd::Plugin { .. }
+            | Cmd::SandboxInit { .. }
+            | Cmd::SandboxProbe { .. }
+            | Cmd::External(_) => Request::NoDb,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 pub(crate) enum RecipeCmd {
     /// Run the source-independent checks of §14B (warnings only): assets,
@@ -668,7 +741,14 @@ pub(crate) enum Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::lifecycle::lock_mode;
     use clap::CommandFactory;
+
+    fn parsed_request(args: &[&str]) -> crate::application::lifecycle::Request {
+        let mut full = vec!["nawa"];
+        full.extend_from_slice(args);
+        Cli::try_parse_from(full).unwrap().cmd.lock_request()
+    }
 
     #[test]
     fn reserved_commands_cover_every_builtin_cli_command() {
@@ -678,6 +758,75 @@ mod tests {
             assert!(
                 crate::plugins::manifest::RESERVED_COMMANDS.contains(&name),
                 "built-in command {name:?} is missing from RESERVED_COMMANDS"
+            );
+        }
+    }
+
+    #[test]
+    fn archive_installs_take_one_exclusive_lock_name_installs_none() {
+        assert_eq!(
+            lock_mode(&parsed_request(&[
+                "install",
+                "build/out/curl-8.9-1.nawa.tar.zst"
+            ])),
+            Some(crate::lock::Mode::Exclusive)
+        );
+        assert_eq!(lock_mode(&parsed_request(&["install", "curl"])), None);
+        // mixing names and archives is rejected later, but the lock policy
+        // still reads it as the by-name path
+        assert_eq!(
+            lock_mode(&parsed_request(&["install", "curl", "a.nawa.tar.zst"])),
+            None
+        );
+    }
+
+    #[test]
+    fn group_install_delegates_group_remove_is_exclusive() {
+        assert_eq!(
+            lock_mode(&parsed_request(&["group", "install", "dev"])),
+            None
+        );
+        assert_eq!(
+            lock_mode(&parsed_request(&["group", "remove", "dev"])),
+            Some(crate::lock::Mode::Exclusive)
+        );
+    }
+
+    #[test]
+    fn upgrade_dry_run_reads_the_database() {
+        assert_eq!(
+            lock_mode(&parsed_request(&["upgrade", "--dry-run"])),
+            Some(crate::lock::Mode::Shared)
+        );
+        assert_eq!(
+            lock_mode(&parsed_request(&["upgrade"])),
+            Some(crate::lock::Mode::Exclusive)
+        );
+    }
+
+    #[test]
+    fn query_family_reads_fetch_never_touches() {
+        for args in [
+            ["query"].as_slice(),
+            ["info", "curl"].as_slice(),
+            ["revdep", "curl"].as_slice(),
+            ["deps", "curl"].as_slice(),
+        ] {
+            assert_eq!(
+                lock_mode(&parsed_request(args)),
+                Some(crate::lock::Mode::Shared),
+                "{args:?} reads the installed database"
+            );
+        }
+        for args in [
+            ["fetch", "curl"].as_slice(),
+            ["search", "curl"].as_slice(),
+            ["completions", "bash"].as_slice(),
+        ] {
+            assert_eq!(
+                lock_mode(&parsed_request(args)),
+                None,
+                "{args:?} needs no database"
             );
         }
     }

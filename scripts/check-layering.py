@@ -5,7 +5,14 @@ Checks (production code only; `#[cfg(test)]` items are ignored):
 
   1. no dependency cycle between top-level modules (`crate::a` -> `crate::b`
      -> `crate::a`, however long the chain);
-  2. no `use crate::*` glob import, which hides the real dependencies.
+  2. no `use crate::*` glob import, which hides the real dependencies;
+  3. dependency direction: modules outside the presentation layer must not
+     import presentation modules (`cli`, `commands`, `output`, `color`,
+     `diag`, `humanize`, `confirm`, `bootstrap`, `main`), except for the
+     explicitly allowlisted legacy edges below; use-case code under
+     `application/features/` may never import presentation, allowlist or
+     not. Stale allowlist entries (edges that no longer exist) also fail:
+     the list must shrink as use cases are extracted.
 
 Run from the repository root:  python3 scripts/check-layering.py
 Standard library only.
@@ -16,6 +23,45 @@ import re
 import sys
 
 SRC = "src"
+
+# Presentation renders, prompts and formats; everything else (application
+# policy, use cases, domain logic, adapters in transition) must not import
+# it. Presentation itself may import anything — rendering is the outermost
+# layer.
+PRESENTATION = frozenset({
+    "bootstrap",
+    "cli",
+    "color",
+    "commands",
+    "confirm",
+    "diag",
+    "humanize",
+    "main",
+    "output",
+})
+
+# Legacy adapter -> presentation edges that predate the feature-oriented
+# split. Every entry is waiting on a specific extraction documented in
+# docs/implementation-progress.md; removing the edge removes the entry.
+# Entries must shrink: an edge that no longer exists fails the check.
+LEGACY_PRESENTATION_IMPORTS = {
+    # undo prompts inside the compensation flow; moves behind the user
+    # interaction port with the history use cases
+    ("undo", "confirm"),
+    # fetch/fetchrun/install/plugins/repositories/slim/upgrade print progress
+    # notes and format sizes inline; those notes move out with the build,
+    # repository and plugin use-case extractions
+    ("fetch", "diag"),
+    ("fetch", "humanize"),
+    ("fetchrun", "diag"),
+    ("install", "diag"),
+    ("plugins", "diag"),
+    ("repositories", "humanize"),
+    ("slim", "humanize"),
+    ("upgrade", "color"),
+    ("upgrade", "confirm"),
+    ("upgrade", "diag"),
+}
 
 
 def strip_tests(text):
@@ -110,6 +156,51 @@ def main():
         print("error: `use crate::*` hides module dependencies; import items explicitly:")
         for g in globs:
             print(f"    {g}")
+
+    # use-case code under application/features/ is the new functional core:
+    # it never imports presentation, allowlist or not
+    def features_file(p):
+        return os.path.relpath(p, SRC).startswith("application/features/")
+
+    for m in sorted(names):
+        for t in sorted(edges[m]):
+            if t not in PRESENTATION:
+                continue
+            for p in sorted(edges[m][t]):
+                if features_file(p):
+                    failed = True
+                    print(f"error: use-case code must not import presentation {t}:")
+                    print(f"    {p}")
+
+    # direction rules: nothing outside presentation imports presentation code
+    def presentation_edge(m, t):
+        return t in PRESENTATION and m not in PRESENTATION and (m, t) not in LEGACY_PRESENTATION_IMPORTS
+
+    for m in sorted(names):
+        for t in sorted(edges[m]):
+            if not presentation_edge(m, t):
+                continue
+            general = [p for p in sorted(edges[m][t]) if not features_file(p)]
+            if not general:
+                continue  # covered by the application/features rule above
+            failed = True
+            print(
+                f"error: {m} imports presentation {t} — decide, render nothing:"
+                " move the message into the return value and print it in the handler,"
+                " or extend the documented allowlist if it is a legacy edge"
+            )
+            for p in general:
+                print(f"    {p}")
+
+    # the allowlist documents temporary exceptions and must shrink
+    for entry in sorted(LEGACY_PRESENTATION_IMPORTS):
+        if not edges[entry[0]].get(entry[1]):
+            failed = True
+            print(
+                f"error: stale layering allowlist entry ({entry[0]}, {entry[1]}):"
+                " the edge is gone — remove the exception"
+            )
+
     if failed:
         return 1
     print(f"layering ok: {len(names)} modules, no cycles, no glob imports of the crate root")

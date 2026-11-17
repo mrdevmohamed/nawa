@@ -11,8 +11,8 @@
 | Phase | State |
 |---|---|
 | 0 — Source audit | **DONE** (this session) |
-| 1 — Structural refactor + service removal | **in progress** (1a, 1b, 1c done; 1d next) |
-| 2 — Init-system detection & system capabilities | not started |
+| 1 — Structural refactor + service removal | **DONE** (1a, 1b, 1c, 1d) |
+| 2 — Init identity & capability foundation | **in progress** (next) |
 | 3 — Metadata & capability resolution | not started |
 | 4 — System profiles & planning | not started |
 | 5 — Migration engine | not started |
@@ -186,25 +186,103 @@
   `scripts/smoke-v06.sh` executed against the release build: **ALL
   V0.6 SMOKE TESTS PASSED**.
 
+### Phase 1d — use-case extraction + layering direction rules (2026-11-17)
+
+* **Typed lock request — the pragmatic `application → cli` edge is gone**
+  (the "decide during the work" item resolved in favor of the typed
+  enum; no allowlist entry needed). `application::lifecycle` no longer
+  matches on `cli::Cmd`: the CLI translates each parsed command into a
+  new `application::lifecycle::Request` (`cli::Cmd::lock_request`,
+  exhaustive match — a new `Cmd` variant cannot compile without a lock
+  decision) and `lock_mode(&Request)` owns the policy. Application now
+  imports no presentation module at all. The two old lifecycle tests
+  moved into `cli/args.rs` as four request-translation tests; the lock
+  policy is tested directly in `lifecycle.rs`;
+  `commands/dispatch.rs` calls `lock_mode(&cmd.lock_request())`.
+* **Direction rules in `scripts/check-layering.py`** (new check 3):
+  presentation = {`bootstrap`, `cli`, `color`, `commands`, `confirm`,
+  `diag`, `humanize`, `main`, `output`}; every module outside
+  presentation must not import presentation, except the documented
+  `LEGACY_PRESENTATION_IMPORTS` allowlist — 11 edges, each waiting on
+  its feature extraction: `undo→confirm`; `fetch→diag`, `fetch→humanize`;
+  `fetchrun→diag`; `install→diag`; `plugins→diag`;
+  `repositories→humanize`; `slim→humanize`; `upgrade→color/confirm/diag`.
+  Code under `application/features/**` may never import presentation
+  (allowlist or not), and **stale allowlist entries fail the check**
+  (the list must shrink as extractions land). All three failure modes
+  verified with negative probes (fake adapter→presentation import,
+  fake features import, fake stale entry) before proceeding.
+* **First use cases extracted** into `application/features/package/`:
+  * `plan_install.rs` — the decision core of install/update:
+    `Source`, `Sourcing` (its `pick` now returns the strict-mode
+    "repository has … — installing the repository version" stderr note
+    as data; `run_plan` prints it verbatim), `open_sourcing` (takes
+    typed booleans instead of `cli::PlanFlags` — no CLI type crosses
+    the boundary; its notes are returned, not printed), and `plan`
+    (targets → {plan, extras}: current repo-only packages become
+    up-to-date notices, older ones become extras, unknown names go to
+    the planner). Notices are `Notice::Note/Info` values accumulated in
+    an out-parameter and printed by the handler *even when planning
+    fails*, byte-identical to the inline order. `Notice::emit` lives in
+    `output.rs` (presentation) so the use case renders nothing. 11
+    unit tests with an offline in-memory `OpenRepo` fixture.
+  * `query.rs` — read-side decisions: `why` (entry + installed
+    dependents), `recipe_dependents` (the `--tree` half),
+    `search_matches` (glob / name+summary substring). Handlers keep
+    palettes, exit codes, `std::process::exit(1)` and every printed
+    byte. 3 unit tests over a real db via `testutil`.
+  * Deliberately not extracted yet: **apply-transaction** (`run_plan`,
+    `install_one`, confirm/print stay in `commands/installing.rs`) —
+    acquisition calls `commands::build_one` and the flow needs the
+    user-interaction port (design §4.3) before it can move; that is
+    the next extraction. `cmd_query`/`cmd_files`/`cmd_owner` are
+    formatting around plain db reads — no decision logic to move.
+* Verified: `cargo check --all-targets --offline` clean;
+  `cargo clippy --all-targets --offline -- -D warnings` clean;
+  `cargo test --all-targets --offline --no-fail-fast` → **581 passed /
+  2 ignored / 3 env-failed** (= 564 + 18 new tests − 1 net lifecycle
+  test; the same 3 pre-existing env failures);
+  `python3 scripts/check-layering.py` green (54 modules — the feature
+  files live under the `application` module).
+* Formatting (re-scoped gate): the three new files are rustfmt-clean;
+  dirty-hunk counts *decreased* in both touched handler files
+  (installing.rs 28→26, querying.rs 21→20 — extraction deleted dirty
+  code); every remaining hunk in touched files is a pre-existing one
+  outside the changed ranges, or the same import-block reorder HEAD
+  already had.
+* **Byte-identical behavior**: `--help`, `--version` and all three
+  completion scripts identical to a HEAD release build; additionally
+  12 read/planning commands (`search`, `--glob`, summary hit, no-hit,
+  `why`, `why --tree`, `info`, `query`, `deps`, `install -n`,
+  `outdated`, `update -n`) diffed between the HEAD and Phase-1d
+  binaries with and without a recipes tree (stdout+stderr+exit code) —
+  all identical, including the extracted `open_sourcing` note and the
+  planner's "did you mean" error.
+  `scripts/smoke-v06.sh` (release build): **ALL V0.6 SMOKE TESTS
+  PASSED** — install/upgrade/rollback run through the extracted
+  `plan_install`.
+
 ## Current task
 
-**Phase 1d — use-case extraction + layering direction rules** (last
-Phase-1 sub-phase; establishes the functional-core boundary):
+**Phase 2 — init identity and capability foundation** (design §5–§6;
+roadmap stage 2). Read-only observation first; no behavior change to
+any package command:
 
-1. Extract the first package use cases from the `commands/*` handlers
-   into `application/features/package/*` (start with the ones the
-   design names: plan-install, apply-transaction, query). Handlers keep
-   argument parsing + output formatting; use cases take typed requests
-   and return domain results.
-2. Extend `scripts/check-layering.py` with *direction* rules: domain
-   (`db`, `version`, `plan`, `recipe::model`, …) must not import
-   `cli`, `application`, `commands`, `output`, `color`, `diag`
-   (presentation); `application` must not import `commands` or `cli`
-   types (except the pragmatic `lifecycle` → `cli::Cmd` edge, or finish
-   moving `lock_mode` onto a typed request enum — decide during the
-   work).
-3. Keep every behavior and CLI message identical; integration tests
-   are the regression net.
+1. `application/features/system/detect.rs` (+ `domain/system/identity.rs`
+   types when needed): observe the runtime — PID 1 identity, boot
+   context — into typed `ObservedSystem` data, following §5.4 detection
+   rules and the §5.5 execution-context contract (live system, chroot,
+   container, offline `--root`; distinguish or report unknown).
+2. Decide the provider/capability data model (§6): what Nawa records
+   about providers and how binary-only packages declare them; keep it
+   readable alongside legacy metadata (§6.3) — schema proposal only,
+   no index writes yet (B3 governs the signed-index part).
+3. Every detection is unit-testable without booting anything: fake
+   `/proc`, `/run`, root layouts; no network, no host assumptions
+   (the test container boots runit-less; detection must not assume
+   PID 1 identity exists at all).
+4. Phase 2 test note: B1 (saq init selection) blocks *applying* a
+   migration, not read-only detection tests.
 
 ## Changed files (this phase, updated as work lands)
 
@@ -229,6 +307,22 @@ Phase-1 sub-phase; establishes the functional-core boundary):
   * `src/main.rs` (slimmed 430 → 110 lines)
   * `src/commands/dispatch.rs` (new — orchestration + dispatch moved)
   * `src/bootstrap.rs` (new — error rendering + exit codes)
+* Phase 1d:
+  * `src/application/lifecycle.rs` (typed `Request` + `lock_mode`;
+     `cli::Cmd` import removed)
+  * `src/cli/args.rs` (`Cmd::lock_request` translation + 4 tests)
+  * `src/commands/dispatch.rs` (`lock_mode(&cmd.lock_request())`)
+  * `src/application/features/{mod,package/mod}.rs` (new)
+  * `src/application/features/package/plan_install.rs` (new —
+    `Source`/`Sourcing`/`open_sourcing`/`plan`/`Notice` + 11 tests)
+  * `src/application/features/package/query.rs` (new —
+    `why`/`recipe_dependents`/`search_matches` + 3 tests)
+  * `src/output.rs` (`Notice::emit` renderer)
+  * `src/commands/installing.rs` (handler keeps rendering +
+    transaction loop; sourcing/plan calls the use case)
+  * `src/commands/querying.rs` (`cmd_search`/`cmd_why` call the use case)
+  * `scripts/check-layering.py` (direction rules + legacy allowlist +
+    stale-entry detection + `application/features/**` strictness)
 
 ## Tests actually executed
 
@@ -239,11 +333,13 @@ Phase-1 sub-phase; establishes the functional-core boundary):
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 1a tree) | 569 pass / 2 ignored / 3 env-failed (same 3; +3 new/moved tests) |
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 1b tree) | 564 pass / 2 ignored / 3 env-failed (same 3; −5 = deleted service unit tests) |
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 1c tree) | 564 pass / 2 ignored / 3 env-failed (identical to 1b; moved tests verified present) |
+| `cargo test --all-targets --offline --no-fail-fast` (Phase 1d tree) | 581 pass / 2 ignored / 3 env-failed (= 564 + 18 new − 1 net lifecycle test; same 3 env failures) |
 | `cargo clippy --all-targets --offline -- -D warnings` | pass (Phase 1a + 1b + 1c) |
 | `python3 scripts/check-layering.py` | pass (54 after 1a; 53 after 1b; 54 after 1c) |
-| `bash scripts/smoke-v06.sh` (release build, Phases 1b + 1c) | ALL V0.6 SMOKE TESTS PASSED |
+| `bash scripts/smoke-v06.sh` (release build, Phases 1b + 1c + 1d) | ALL V0.6 SMOKE TESTS PASSED |
 | HEAD-vs-1c behavior diff (`--help`, `--version`, completions × 3, isolated worktree build) | byte-identical |
-| `cargo fmt --all -- --check` | fails repo-wide at HEAD (pre-existing ~100 files; CI does not run fmt) — re-scoped to "no new violations in touched/new code", satisfied (1a + 1b + 1c) |
+| HEAD-vs-1d behavior diff (`--help`, `--version`, completions × 3 + 12 read/planning commands, isolated worktree build) | byte-identical |
+| `cargo fmt --all -- --check` | fails repo-wide at HEAD (pre-existing ~100 files; CI does not run fmt) — re-scoped to "no new violations in touched/new code", satisfied (1a–1d; 1d new files clean, dirty-hunk counts decreased in both touched handlers) |
 
 ## Known problems
 
@@ -273,12 +369,12 @@ Phase-1 sub-phase; establishes the functional-core boundary):
 
 ## Exact next task
 
-Execute the Phase 1d checklist in "Current task" above; verify with
-`cargo check --all-targets --offline && cargo test --all-targets
---offline --no-fail-fast && cargo clippy --all-targets --offline -- -D
-warnings` plus `python3 scripts/check-layering.py` (expect 564 pass /
-3 env-failed, layering green *with the new direction rules enforced*)
-and the byte-identical CLI check for any touched command; commit as one
-coherent unit ("first use cases + layering direction rules"); then
-Phase 1 is done — move to Phase 2 (init-system detection & system
-capabilities, design §5) or the next unblocked phase.
+Execute the Phase 2 checklist in "Current task" above (init-system
+detection use case, read-only); verify with `cargo check --all-targets
+--offline && cargo test --all-targets --offline --no-fail-fast && cargo
+clippy --all-targets --offline -- -D warnings` plus `python3
+scripts/check-layering.py`; keep CLI output byte-identical for any
+touched command (detection adds no CLI surface yet); commit as one
+coherent unit. The next use-case extraction after that is
+apply-transaction behind the user-interaction port (design §4.3),
+then narrowing the installer facade.
