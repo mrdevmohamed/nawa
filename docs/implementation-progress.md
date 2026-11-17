@@ -11,7 +11,7 @@
 | Phase | State |
 |---|---|
 | 0 — Source audit | **DONE** (this session) |
-| 1 — Structural refactor + service removal | **in progress** (1a done; 1b next) |
+| 1 — Structural refactor + service removal | **in progress** (1a, 1b done; 1c next) |
 | 2 — Init-system detection & system capabilities | not started |
 | 3 — Metadata & capability resolution | not started |
 | 4 — System profiles & planning | not started |
@@ -95,26 +95,73 @@
   `checksum` mod-list disorder, `ServiceCmd` brace quirk at cli.rs:660 —
   are left as-is; a repo-wide `cargo fmt` would be a mass rewrite).
 
+### Phase 1b — Service-subsystem removal (2026-11-17)
+
+* Removed (the one approved removal; audit §8.3 justification — runit
+  packaging left faseela-repo at `ac1c3bb`, `systemd-units` ships the
+  distribution's service policy in `80-faseela.preset`):
+  * `src/service.rs`, `src/commands/service.rs` deleted; `mod service;`
+    + `pub(crate) use service::*;` + `cmd_service` dispatch + the
+    `Cmd::Service`/`ServiceCmd` CLI types and the
+    `application::lifecycle` match arm removed.
+  * Completions: `service` removed from the bash commands list, the bash
+    `service)` case, the zsh `cmds` entry + `service)` case, and the
+    fish combined line + service actions.
+  * `src/install/payload.rs`: the `crate::service::keep_disabled` skip
+    in the staged-tree move is gone (dead code without runit packaging;
+    admin `disabled/` marker files are never deleted — documented).
+  * `src/plugins/manifest.rs`: `"service"` left `RESERVED_COMMANDS`
+    (the `reserved_commands_cover_every_builtin_cli_command` test keeps
+    reserved == built-ins in sync; a plugin may now legitimately
+    register a `service` command — it is no longer a built-in).
+  * `scripts/smoke-v06.sh`: §7 (runit services in a fake root) removed;
+    header comment updated. Executed end-to-end after a release build:
+    **ALL V0.6 SMOKE TESTS PASSED**.
+  * Docs: `docs/commands.md` service rows removed;
+    `docs/transactions-services-plugins.md` "runit services" section
+    replaced by a short "Services" note (service management belongs to
+    the init system / systemd presets; markers never touched);
+    `docs/index.md` and `README.md` feature bullets updated.
+  * CHANGELOG: new unreleased "removed: runit service subsystem" entry.
+* **Pre-existing CHANGELOG.md corruption repaired** (found while adding
+  the entry): from `b8f11bd` ("build: remove vendored Cargo
+  dependencies") onward, every line after the "runit service control"
+  section header had the header prepended to it (170 lines through EOF).
+  Fixed by stripping the injected prefix; result verified byte-identical
+  to the last clean ancestor (`290ea48`) plus the entries legitimately
+  added after it. The historical "fix: runit service control" entry is
+  kept (maintainer may drop it before release since the feature is now
+  removed).
+* Verified: `cargo check --all-targets --offline` clean;
+  `cargo clippy --all-targets --offline -- -D warnings` clean;
+  `cargo test --all-targets --offline --no-fail-fast` → 564 passed /
+  2 ignored / 3 env-failed (same 3 as always; −5 = exactly the deleted
+  service unit tests); `python3 scripts/check-layering.py` green
+  (53 modules — service removed one);
+  `cargo fmt --all -- --check` unchanged violations only (no new ones in
+  touched files). `nawa --help` and all three completions no longer
+  mention `service`; `nawa service …` now reports "unknown command"
+  (routed through plugin dispatch).
+
 ## Current task
 
-**Phase 1b — service-subsystem removal** (the one approved removal;
-everything else keeps its behavior):
+**Phase 1c — CLI split, `main.rs` slimming, bootstrap** (mechanical;
+behavior preserved):
 
-1. Delete `src/service.rs`, `src/commands/service.rs`, `Cmd::Service` /
-   `ServiceCmd` from `src/cli.rs`, `mod service;` from `main.rs` and
-   `commands/mod.rs`, `cmd_service` dispatch from `main.rs`, the
-   `Cmd::Service` match arm from `application/lifecycle.rs`.
-2. Remove the service section from the shell completions (bash/zsh/fish
-   blocks in `cli.rs`).
-3. Remove the service unit tests; update `scripts/smoke-v06.sh` (§7).
-4. `src/install/payload.rs:563`: drop the `keep_disabled` call with the
-   audit §8.3 justification (runit packaging removed from faseela-repo
-   at `ac1c3bb`; `systemd-units` ships the distribution's preset policy;
-   nawa never deletes admin `disabled/` markers — only stops *skipping*
-   the runit link install, which is dead code without runit packaging).
-5. Check `plugins/manifest.rs` `RESERVED_COMMANDS` (and the CI test that
-   pins it) so `service` leaves the reserved list consistently; add a
-   CHANGELOG entry.
+1. Split `src/cli.rs` into a `src/cli/` module: `cli/mod.rs` (types +
+   `completions_script`), `cli/args.rs` (the clap `Cli`/`Cmd`/subcommand
+   enums), `cli/completions.rs` (the three `COMPLETION_*` constants).
+   Pure move, no behavior change.
+2. Slim `main.rs`: the ~600-line dispatch `match` moves into the
+   commands layer (`src/commands/mod.rs::dispatch` or a new
+   `src/commands/dispatch.rs`); `main.rs` keeps only bootstrap (env,
+   color, context setup, lock acquisition, dispatch call, error
+   rendering).
+3. Add `src/bootstrap.rs`: the process-entry prelude (env normalization,
+   `NAWA_COLOR`/`NO_COLOR`, sysconfdir resolution) as its own module so
+   the imperative shell starts at one identifiable place.
+4. Verify: all commands still parse and run identically (CLI
+   integration tests cover this), gates green, then commit.
 
 ## Changed files (this phase, updated as work lands)
 
@@ -126,17 +173,27 @@ everything else keeps its behavior):
   * `src/main.rs` (`mod application;` + `use application::lifecycle::lock_mode;`)
   * `src/lock.rs` (fail-closed exclusive under `NAWA_LOCK_HELD` + docs)
   * `tests/lock.rs` (2 new forged-marker / control tests)
+* Phase 1b:
+  * `src/service.rs`, `src/commands/service.rs` (deleted)
+  * `src/cli.rs`, `src/main.rs`, `src/commands/mod.rs`,
+    `src/application/lifecycle.rs`, `src/install/payload.rs`,
+    `src/plugins/manifest.rs` (service references removed)
+  * `scripts/smoke-v06.sh` (§7 removed), `CHANGELOG.md` (removal entry +
+    pre-existing corruption repaired), `README.md`, `docs/index.md`,
+    `docs/commands.md`, `docs/transactions-services-plugins.md`
 
 ## Tests actually executed
 
 | Command | Result |
 |---|---|
-| `cargo check --all-targets --offline` | pass (Phase 0 + 1a) |
+| `cargo check --all-targets --offline` | pass (Phase 0 + 1a + 1b) |
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 0, re-measured at HEAD) | 566 pass / 2 ignored / 3 env-failed (baseline, pre-existing) |
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 1a tree) | 569 pass / 2 ignored / 3 env-failed (same 3; +3 new/moved tests) |
-| `cargo clippy --all-targets --offline -- -D warnings` | pass (Phase 1a) |
-| `python3 scripts/check-layering.py` | pass (54 modules after Phase 1a) |
-| `cargo fmt --all -- --check` | fails repo-wide at HEAD (pre-existing ~100 files; CI does not run fmt) — re-scoped to "no new violations in touched/new code", satisfied |
+| `cargo test --all-targets --offline --no-fail-fast` (Phase 1b tree) | 564 pass / 2 ignored / 3 env-failed (same 3; −5 = deleted service unit tests) |
+| `cargo clippy --all-targets --offline -- -D warnings` | pass (Phase 1a + 1b) |
+| `python3 scripts/check-layering.py` | pass (54 modules after 1a; 53 after 1b) |
+| `bash scripts/smoke-v06.sh` (release build, Phase 1b) | ALL V0.6 SMOKE TESTS PASSED |
+| `cargo fmt --all -- --check` | fails repo-wide at HEAD (pre-existing ~100 files; CI does not run fmt) — re-scoped to "no new violations in touched/new code", satisfied (1a + 1b) |
 
 ## Known problems
 
@@ -146,8 +203,10 @@ everything else keeps its behavior):
   files (no `rustfmt.toml`; CI runs clippy/tests but never fmt). The
   phase gate is re-scoped to "new/touched code is rustfmt-clean"; a
   repo-wide reformat is deliberately deferred (mass rewrite).
-* `scripts/smoke-v06.sh` §7 tests `nawa service`; Phase 1b removes that
-  section together with the command.
+* `CHANGELOG.md` corruption (introduced by `b8f11bd`, repaired in
+  Phase 1b): the historical "fix: runit service control" entry remains
+  in the Unreleased list although the feature it improves is removed;
+  the maintainer may delete that entry before the next release.
 * No `Cargo.lock` change needed so far.
 
 ## Unresolved external dependencies (blockers)
@@ -164,12 +223,12 @@ everything else keeps its behavior):
 
 ## Exact next task
 
-Execute the Phase 1b checklist in "Current task" above; verify with
+Execute the Phase 1c checklist in "Current task" above; verify with
 `cargo check --all-targets --offline && cargo test --all-targets
 --offline --no-fail-fast && cargo clippy --all-targets --offline -- -D
-warnings` plus `python3 scripts/check-layering.py` (expect 569+Δ pass /
-3 env-failed), confirm `service` is gone from `--help`, completions,
-`RESERVED_COMMANDS` and the smoke script; commit as one coherent unit
-("remove the service subsystem"), then proceed to Phase 1c (`cli.rs`
-split into `cli/args.rs` + `cli/completions.rs`, `main.rs` slimming,
-`bootstrap.rs`).
+warnings` plus `python3 scripts/check-layering.py` (expect 564 pass /
+3 env-failed) and confirm `nawa --help`, `nawa completions …` and the
+CLI integration tests behave identically; commit as one coherent unit
+("cli module split + main.rs slimming + bootstrap"); then proceed to
+Phase 1d (use-case extraction into `application/features/*`, layering
+direction rules in `scripts/check-layering.py`).

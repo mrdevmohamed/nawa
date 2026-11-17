@@ -9,7 +9,7 @@ mod plugins;
 mod querying;
 mod recipes;
 mod sandbox;
-mod service;
+
 mod signing;
 
 pub(crate) use building::*;
@@ -22,5 +22,4 @@ pub(crate) use plugins::*;
 pub(crate) use querying::*;
 pub(crate) use recipes::*;
 pub(crate) use sandbox::*;
-pub(crate) use service::*;
 pub(crate) use signing::*;

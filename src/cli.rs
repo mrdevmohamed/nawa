@@ -500,12 +500,6 @@ pub(crate) enum Cmd {
         limit: Option<usize>,
     },
 
-    /// Manage runit services (enable/disable/start/stop/restart/list/status)
-    Service {
-        #[command(subcommand)]
-        action: ServiceCmd,
-    },
-
     /// Show the effective configuration and where each value comes from
     Config {
         #[command(subcommand)]
@@ -660,33 +654,6 @@ pub(crate) enum HistoryCmd {
 }
 
 #[derive(Subcommand)]
-pub(crate) enum ServiceCmd {    /// List services in /etc/sv and their enabled state
-    List,
-    /// Enable a service (link into the default runsvdir); --now also starts it
-    Enable {
-        name: String,
-        /// start it immediately and wait until it is running
-        #[arg(long)]
-        now: bool,
-    },
-    /// Disable a service (remove the runsvdir link); --now stops it first
-    Disable {
-        name: String,
-        /// stop it first and wait until it is down
-        #[arg(long)]
-        now: bool,
-    },
-    /// Start an enabled service now
-    Start { name: String },
-    /// Stop a service now (stays enabled: it starts again at next boot)
-    Stop { name: String },
-    /// Restart an enabled service
-    Restart { name: String },
-    /// Show service status (static state + live `sv status` when supervised)
-    Status { name: Option<String> },
-}
-
-#[derive(Subcommand)]
 pub(crate) enum ConfigCmd {
     /// Print the effective configuration, annotated with each value's source
     Show,
@@ -703,7 +670,7 @@ pub(crate) const COMPLETION_BASH: &str = r#"# bash completion for nawa (generate
 _nawa() {
     local cur prev commands pkgs
     cur="${COMP_WORDS[COMP_CWORD]}"
-    commands="build install outdated update autoremove deps deps-all search info why query list remove files owner revdep repo-create repo-update sync keygen sign verify trust upgrade rollback repolist makecache repoquery fetch recipe clean group history plugin service config init completions"
+    commands="build install outdated update autoremove deps deps-all search info why query list remove files owner revdep repo-create repo-update sync keygen sign verify trust upgrade rollback repolist makecache repoquery fetch recipe clean group history plugin config init completions"
     pkgs="$(nawa __complete_pkgs 2>/dev/null)"
     if [ "$COMP_CWORD" -eq 1 ]; then
         COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
@@ -727,12 +694,6 @@ _nawa() {
         group)
             if [ "$COMP_CWORD" -eq 2 ]; then
                 COMPREPLY=( $(compgen -W "list info install remove" -- "$cur") )
-            fi ;;
-        service)
-            if [ "$COMP_CWORD" -eq 2 ]; then
-                COMPREPLY=( $(compgen -W "list enable disable start stop restart status" -- "$cur") )
-            else
-                COMPREPLY=( $(compgen -W "$(nawa service list 2>/dev/null | awk '{print $1}' | grep -v '^SERVICE$')" -- "$cur") )
             fi ;;
         config)
             COMPREPLY=( $(compgen -W "show" -- "$cur") ) ;;
@@ -778,7 +739,6 @@ _nawa() {
         'recipe:Inspect and check recipes (check: source-independent warnings)'
         'history:Show the package transaction history'
         'plugin:Manage and run plugins'
-        'service:Manage runit services'
         'config:Show the effective configuration'
         'init:Write a nawa.toml template'
         'completions:Print shell completion scripts'
@@ -794,13 +754,6 @@ _nawa() {
             install)
                 _describe -t packages 'package' pkgs
                 _files ;;
-            service)
-                if (( CURRENT == 3 )); then
-                    _values 'action' list enable disable start stop restart status
-                else
-                    _describe -t services 'service' \
-                        services=($(nawa service list 2>/dev/null | awk 'NR>1{print $1}'))
-                fi ;;
             config)
                 _values 'action' show ;;
             recipe)
@@ -830,12 +783,10 @@ complete -c nawa -n '__fish_use_subcommand' -a 'remove' -d 'Remove an installed 
 complete -c nawa -n '__fish_use_subcommand' -a 'fetch' -d 'Download and verify sources, then run the fetch backends'
 complete -c nawa -n '__fish_use_subcommand' -a 'recipe' -d 'Inspect and check recipes'
 complete -c nawa -n '__fish_seen_subcommand_from recipe' -a 'check' -d 'Source-independent recipe warnings'
-complete -c nawa -n '__fish_use_subcommand' -a 'files owner repo-create repo-update keygen sign verify trust upgrade rollback service config init completions'
+complete -c nawa -n '__fish_use_subcommand' -a 'files owner repo-create repo-update keygen sign verify trust upgrade rollback config init completions'
 # package names, completed dynamically
 set -l pkg_cmds build install update deps deps-all info files remove rollback why query list
 complete -c nawa -n "__fish_seen_subcommand_from $pkg_cmds" -a "(nawa __complete_pkgs 2>/dev/null)"
-# service actions
-complete -c nawa -n '__fish_seen_subcommand_from service; and not __fish_seen_subcommand_from list enable disable start stop restart status' -a 'list enable disable start stop restart status'
 # config actions
 complete -c nawa -n '__fish_seen_subcommand_from config' -a 'show'
 # completion shells

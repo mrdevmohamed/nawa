@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # e2e CLI smoke test for nawa v0.6 features: remote http(s) repositories
-# (index + archive fetch, signature check, cache reuse, offline fallback)
-# and runit service management.
+# (index + archive fetch, signature check, cache reuse, offline fallback).
 set -euo pipefail
 
 # locate the repo relative to this script so it works from any checkout
@@ -84,27 +83,6 @@ grep -q v3 "$ROOT/usr/bin/demo"
 $NAWA rollback --root "$ROOT" demo >/dev/null
 grep -q v2 "$ROOT/usr/bin/demo"
 echo "   (remote upgrade + rollback: OK)"
-
-echo "== 7. runit services in a fake root =="
-SVCROOT=$WORK/svcroot
-mkdir -p "$SVCROOT/etc/sv/sshd" "$SVCROOT/etc/sv/crond"
-printf '#!/bin/sh\nexec sshd -D\n' > "$SVCROOT/etc/sv/sshd/run"
-printf '#!/bin/sh\nexec crond -n\n' > "$SVCROOT/etc/sv/crond/run"
-$NAWA service list --root "$SVCROOT" | grep -q "sshd *no *yes"
-$NAWA service enable --root "$SVCROOT" sshd >/dev/null
-test "$(readlink "$SVCROOT/etc/runit/runsvdir/default/sshd")" = "/etc/sv/sshd"
-if $NAWA service enable --root "$SVCROOT" sshd >/dev/null 2>&1; then
-    echo "FAIL: double enable accepted"; exit 1
-fi
-$NAWA service status --root "$SVCROOT" sshd | grep -q "sshd *enabled"
-$NAWA service disable --root "$SVCROOT" sshd >/dev/null
-test ! -e "$SVCROOT/etc/runit/runsvdir/default/sshd"
-mkdir -p "$SVCROOT/etc/runit/runsvdir/default/realdir"
-if $NAWA service disable --root "$SVCROOT" realdir >/dev/null 2>&1; then
-    echo "FAIL: non-symlink removed"; exit 1
-fi
-test -d "$SVCROOT/etc/runit/runsvdir/default/realdir"
-echo "   (enable/disable/status + safety refusals: OK)"
 
 echo
 echo "ALL V0.6 SMOKE TESTS PASSED"

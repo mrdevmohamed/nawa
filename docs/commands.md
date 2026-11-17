@@ -108,11 +108,6 @@ Repository creation has schema-specific requirements. Index schema v2 and later 
 | nawa history | List recent package transactions. |
 | nawa history info ID | Show a transaction record. |
 | nawa history undo ID | Create a compensating transaction for a prior transaction. |
-| nawa service list | List available runit services and enabled state. |
-| nawa service status [NAME] | Show static and, when available, live service status. |
-| nawa service enable NAME [--now] | Enable a runit service; optionally start it immediately. |
-| nawa service disable NAME [--now] | Disable a service; optionally stop it first. |
-| nawa service start, stop, or restart NAME | Control an enabled service. |
 | nawa plugin list | List discovered plugins. |
 | nawa plugin info ID | Show plugin manifest details. |
 | nawa plugin enable or disable ID | Change plugin state. |

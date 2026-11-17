@@ -19,7 +19,7 @@ Nawa builds packages from declarative TOML recipes, can install prebuilt package
 - **Build isolation:** choose none, env, sandbox, or closure isolation.
 - **Package management:** install, update, remove, query, and inspect packages and their files.
 - **Recovery:** record package-changing operations, recover interrupted work, and undo supported transactions.
-- **System integration:** manage runit services and inspect broken ELF shared-library dependencies.
+- **System integration:** inspect broken ELF shared-library dependencies.
 - **Extensibility:** discover and run external plugins through Nawa's plugin interface.
 
 Nawa does **not** ship a package recipe collection. A distribution or administrator supplies a recipe tree and, optionally, architecture-specific build profiles.

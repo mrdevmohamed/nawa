@@ -57,7 +57,6 @@ pub(crate) fn lock_mode(cmd: &Cmd) -> Option<lock::Mode> {
         | Cmd::Completions { .. }
         | Cmd::Config { .. }
         | Cmd::Init { .. }
-        | Cmd::Service { .. }
         | Cmd::CompletePkgs => None,
         Cmd::Group { action } => match action {
             // Group install delegates to the ordinary install path, which

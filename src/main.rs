@@ -41,7 +41,6 @@ mod repo;
 mod repositories;
 mod revdep;
 mod sandbox;
-mod service;
 mod sign;
 mod slim;
 mod sources;
@@ -373,7 +372,6 @@ fn run_command(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         Cmd::External(values) => cmd_plugin_external(ctx, values),
         Cmd::Rollback { name } => install::rollback(&name, &ctx.root),
         Cmd::History { action, limit } => cmd_history(ctx, action, limit),
-        Cmd::Service { action } => cmd_service(ctx, action),
         Cmd::Config { action } => match action {
             ConfigCmd::Show => cmd_config_show(ctx),
         },
