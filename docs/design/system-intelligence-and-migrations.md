@@ -249,8 +249,6 @@ The following is a possible model, not the current recipe or repository schema:
       "init-system=runit",
       "service-manager=runit"
     ]
-
-    [capabilities]
     requires = [
       "session-manager"
     ]
