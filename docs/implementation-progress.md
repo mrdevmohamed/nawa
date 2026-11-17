@@ -13,7 +13,7 @@
 | 0 — Source audit | **DONE** (this session) |
 | 1 — Structural refactor + service removal | **DONE** (1a, 1b, 1c, 1d, 1e — 1e is the deferred apply-transaction extraction) |
 | 2 — Init identity & capability foundation | **DONE** (detection + capability/identity domain model) |
-| 3 — Metadata & capability resolution | in progress: B3 proposal + normalized install planner in `domain/planning/` (behavior verified byte-identical); next: removal/query planners + Phase 4 profile |
+| 3 — Metadata & capability resolution | in progress: B3 proposal + the whole package planner (install + outdated/orphans/removal) in `domain/planning/`, behavior verified byte-identical; next: Phase 4 profiles |
 | 4 — System profiles & planning | not started |
 | 5 — Migration engine | not started |
 | 6 — Faseela runit→systemd migration | **BLOCKED** (see blockers) |
@@ -476,6 +476,49 @@ expressed over normalized inputs so the profile-driven provider selection
   resolver-error probe (cycle / missing dep / --no-deps) produce identical
   transcripts against an isolated HEAD worktree build.
 
+### Done within Phase 3 so far (3): the removal/query planners
+
+`plan::outdated`, `plan::orphans` and `plan::removal_order` moved behind
+`domain/planning/` the same way the install resolver did — the signatures
+(and therefore every call site: `cmd_outdated`/`cmd_update`/
+`cmd_autoremove`, group removal, undo) are unchanged, and the bodies are
+now thin adapters over normalized inputs:
+
+* `domain/planning/install.rs` gains `outdated(installed: &[(name,
+  version-rel)], known: &BTreeMap<String, Candidate>) -> Vec<String>`: the
+  update-candidate query with the same strictly-newer comparison the
+  install planner applies to a target (`vercmp` on `version-rel`), in the
+  order the installed records were given. A package without a candidate is
+  not "outdated", just unknown.
+* `domain/planning/removal.rs` (new): `InstalledPkg { name, is_dependency,
+  run }` (§8.1 installed records; `is_dependency` ⇔ db reason
+  `dependency`), `orphans(installed, known_deps, build_deps)` — kept-set
+  walk over recorded run deps plus the candidate's full dependency list
+  (skipped under `--build-deps`), filtered to installed names — and
+  `removal_order(names, run_edges)` — dependents first, a cycle goes last
+  unchanged. The adapter pre-filters the run edges to the removal set, so
+  the domain function never sees out-of-set edges.
+* `plan.rs` adapts: `outdated` maps the domain's name list back to
+  `(&Entry, &Recipe)`; `orphans` stamps `is_dependency` from the exact db
+  reason string and builds `known_deps` from `deps_of(rec)` (build + run,
+  declaration order, the same sequence the candidate `deps` carry);
+  `removal_order` builds the filtered run-edge map. Dead code dropped:
+  `recipe_full`, `newer_than_installed`, the now-unused `vercmp`/`Ordering`
+  imports.
+* The 12 plan.rs baseline tests pass byte-identical through the adapters
+  (they run the full adapter → domain path).
+* Verification: 10 new domain tests (2 `outdated` in install.rs — strictly
+  newer in input order, equal/older/unknown skipped; 8 in removal.rs —
+  kept run/candidate deps, transitive reachability, only-installed deps
+  walked, non-dependency roots, dependents-first, cycle last, no-edge
+  input order); full suite 658 passed (+10); `--help`/`--version`/
+  completions × 3 byte-identical vs HEAD; the paired 8-step scenario, a
+  query probe (`outdated` + `autoremove -n` + `update -n` over a seeded db
+  with explicit/dependency reasons and recorded run deps — autoremove
+  prints the dependents-first removal order) and a real `remove --yes`
+  probe (transcript + resulting db state) produce identical outputs
+  against an isolated HEAD worktree build.
+
 ## Changed files (this phase, updated as work lands)
 
 * `docs/architecture-audit.md` (new, Phase 0)
@@ -554,6 +597,15 @@ expressed over normalized inputs so the profile-driven provider selection
     `Why` re-export + db-reason/label impls stay; `outdated`/`orphans`/
     `removal_order` unchanged; baseline tests kept byte-identical)
   * `src/domain/mod.rs` (one-line `pub(crate) mod planning;`)
+  * Phase 3 (removal/query planners):
+  * `src/domain/planning/removal.rs` (new — `InstalledPkg`, `orphans`,
+    `removal_order` + 8 tests)
+  * `src/domain/planning/install.rs` (gains `outdated` + 2 tests)
+  * `src/domain/planning/mod.rs` (registers `removal`, doc updated)
+  * `src/plan.rs` (`outdated`/`orphans`/`removal_order` bodies become
+    delegation adapters; signatures unchanged; `recipe_full`/
+    `newer_than_installed` + `vercmp`/`Ordering`/`BTreeSet` imports
+    dropped; baseline tests byte-identical)
 
 ## Tests actually executed
 
@@ -569,8 +621,9 @@ expressed over normalized inputs so the profile-driven provider selection
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 1e tree) | 622 pass / 2 ignored / 3 env-failed (= 614 + 8 new apply-transaction tests; same 3 env failures) |
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 3 B3 tree) | 637 pass / 2 ignored / 3 env-failed (= 622 + 15 new metadata tests; same 3 env failures) |
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 3 solver tree) | 648 pass / 2 ignored / 3 env-failed (= 637 + 11 new domain-planner tests; same 3 env failures) |
-| `cargo clippy --all-targets --offline -- -D warnings` | pass (Phase 1a + 1b + 1c + 1d + 1e + 2 + 3/B3 + 3/solver) |
-| `python3 scripts/check-layering.py` | pass (54 after 1a; 53 after 1b; 54 after 1c; 55 after 2 — the new `domain` layer; 55 after 3/B3 and 3/solver — the count is top-level modules, the new `domain/package` + `domain/planning` submodules are scanned) |
+| `cargo test --all-targets --offline --no-fail-fast` (Phase 3 removal tree) | 658 pass / 2 ignored / 3 env-failed (= 648 + 8 removal + 2 outdated domain tests; same 3 env failures) |
+| `cargo clippy --all-targets --offline -- -D warnings` | pass (Phase 1a + 1b + 1c + 1d + 1e + 2 + 3/B3 + 3/solver + 3/removal) |
+| `python3 scripts/check-layering.py` | pass (54 after 1a; 53 after 1b; 54 after 1c; 55 after 2 — the new `domain` layer; 55 after 3/B3, 3/solver and 3/removal — the count is top-level modules, the new `domain/package` + `domain/planning` submodules are scanned) |
 | `bash scripts/smoke-v06.sh` (release build, Phases 1b + 1c + 1d + 2) | ALL V0.6 SMOKE TESTS PASSED |
 | `bash scripts/smoke-v05.sh` (release build, Phases 1d + 2) | ALL SMOKE TESTS PASSED |
 | HEAD-vs-1c behavior diff (`--help`, `--version`, completions × 3, isolated worktree build) | byte-identical |
@@ -581,7 +634,10 @@ expressed over normalized inputs so the profile-driven provider selection
 | HEAD-vs-3(solver) behavior diff (`--help`, `--version`, completions × 3, isolated CARGO_TARGET_DIR builds) | byte-identical |
 | HEAD-vs-3(solver) paired 8-step install/update scenario (same script, isolated builds) | identical transcripts |
 | HEAD-vs-3(solver) resolver-error probe (cycle a→b→a / missing dep ghost / `--no-deps` dry run, isolated builds) | identical transcripts + exit codes |
-| `cargo fmt --all -- --check` | fails repo-wide at HEAD (pre-existing ~100 files; CI does not run fmt) — re-scoped to "no new violations in touched/new code", satisfied (1a–1e, 2, 3/B3, 3/solver: new files clean; plan.rs dirty hunks 19 → 16 — the deleted resolution core carried three away, the added adapter/impl code is clean) |
+| HEAD-vs-3(removal) behavior diff (`--help`, `--version`, completions × 3, isolated CARGO_TARGET_DIR builds) | byte-identical |
+| HEAD-vs-3(removal) paired 8-step install/update scenario (same script, isolated builds) | identical transcripts |
+| HEAD-vs-3(removal) query/remove probes over a seeded db (reasons explicit/dependency, recorded run deps): `outdated` / `autoremove -n` (prints the dependents-first removal order) / `update -n` / real `remove --yes` (transcript + resulting db state), isolated builds | identical transcripts + db state |
+| `cargo fmt --all -- --check` | fails repo-wide at HEAD (pre-existing ~100 files; CI does not run fmt) — re-scoped to "no new violations in touched/new code", satisfied (1a–1e, 2, 3/B3, 3/solver, 3/removal: new files clean; plan.rs dirty hunks 19 → 13 — the deleted planner bodies carried six away across the two slices, the added adapter code is clean) |
 
 ## Known problems
 
@@ -611,15 +667,19 @@ expressed over normalized inputs so the profile-driven provider selection
 
 ## Exact next task
 
-**Phase 3, remaining slice: removal/query planners into the domain** — move
-`plan::orphans` / `plan::removal_order` / `plan::outdated` behind
-`domain/planning/removal.rs` (§4.3 tree) the same way the install resolver
-moved, and the `query.rs` use cases onto it if the extraction touches them.
-After that, Phase 3's package-planning half is complete and **Phase 4 (system
-profiles, §7/§16.3)** starts: the internal profile model + merge rules behind
-a port (the Faseela location contract, blocker B4, only pins where the files
-live), then dry-run plan explanations for the init-provider decision (§8.2).
-Verify with `cargo check --all-targets --offline && cargo test --all-targets
---offline --no-fail-fast && cargo clippy --all-targets --offline -- -D
-warnings` plus `python3 scripts/check-layering.py`; new files rustfmt-clean;
-paired transcripts identical; commit as one coherent unit.
+**Phase 4 — system profiles & planning (design §7, §16.3)**: build the
+internal profile model + merge rules behind a port — distribution defaults
+shipped by the distribution, local administrator overrides stored
+separately (never silently overwritten by a package update), the effective
+target profile produced by merging, and observed runtime state reported
+independently by the detector (already `domain/system/identity.rs` +
+`features/system/detect.rs`). Blocker B4 only pins **where the profile
+files live** (Faseela agreement); the model and merge rules can land now
+with the paths injected. Then wire the profile into plan generation so a
+dry-run plan explains the init-provider decision (§8.2) — that is
+Stage 3's exit condition: "dry-run plans explain every init-provider and
+package decision without managing services". Verify with `cargo check
+--all-targets --offline && cargo test --all-targets --offline
+--no-fail-fast && cargo clippy --all-targets --offline -- -D warnings`
+plus `python3 scripts/check-layering.py`; new files rustfmt-clean; paired
+transcripts identical; commit as one coherent unit.

@@ -10,19 +10,20 @@
 //! The install/update resolution core is `domain::planning::install`
 //! (design §8): this module adapts recipes and database records to the
 //! normalized candidate model and delegates, so there is exactly one
-//! resolver. `outdated`, `orphans` and `removal_order` are the query and
-//! removal planners; they move to `domain/planning/` with their use cases.
+//! resolver. `outdated`, `orphans` and `removal_order` are thin adapters
+//! over the same model: the update-candidate query lives in
+//! `domain::planning::install`, autoremove and removal ordering in
+//! `domain::planning::removal`.
 
 use anyhow::Result;
-use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::db::Entry;
 pub(crate) use crate::domain::planning::install::Why;
 use crate::domain::planning::install::{self, Candidate};
+use crate::domain::planning::removal::{self, InstalledPkg};
 use crate::domain::system::capability::Provides;
 use crate::recipe::Recipe;
-use crate::version::vercmp;
 
 /// The planning semantics of [`Why`] are the domain enum; the database
 /// reason mapping and the label stay here, with the adapters.
@@ -68,15 +69,6 @@ fn full(version: &str, rel: u32) -> String {
     format!("{version}-{rel}")
 }
 
-fn recipe_full(r: &Recipe) -> String {
-    full(&r.package.version, r.package.rel)
-}
-
-/// Is the recipe strictly newer than what is installed?
-fn newer_than_installed(r: &Recipe, e: &Entry) -> bool {
-    vercmp(&recipe_full(r), &full(&e.version, e.rel)) == Ordering::Greater
-}
-
 /// Everything that must exist before `rec` can be built and used.
 fn deps_of(
     rec: &Recipe,
@@ -101,10 +93,7 @@ pub(crate) fn install_plan(
         .iter()
         .map(|(name, e)| (name.clone(), full(&e.version, e.rel)))
         .collect();
-    let candidates: BTreeMap<String, Candidate> = known
-        .iter()
-        .map(|(name, rec)| (name.clone(), candidate_of(rec)))
-        .collect();
+    let candidates = candidates_of(known);
     let resolved =
         install::install_plan(targets, &installed_full, &candidates, target_why, with_deps)?;
     // The planner only resolves items for candidates it found, so every
@@ -140,16 +129,31 @@ fn candidate_of(rec: &Recipe) -> Candidate {
     }
 }
 
-/// Installed packages whose recipe is newer: `(installed entry, recipe)`,
+fn candidates_of(known: &BTreeMap<String, Recipe>) -> BTreeMap<String, Candidate> {
+    known
+        .iter()
+        .map(|(name, rec)| (name.clone(), candidate_of(rec)))
+        .collect()
+}
+
+/// Installed packages whose candidate is newer: `(installed entry, recipe)`,
 /// alphabetical. Packages without a recipe are not "outdated", just unknown.
 pub(crate) fn outdated<'a>(
     installed: &'a [Entry],
     known: &'a BTreeMap<String, Recipe>,
 ) -> Vec<(&'a Entry, &'a Recipe)> {
-    installed
+    let installed_full: Vec<(String, String)> = installed
         .iter()
-        .filter_map(|e| known.get(&e.name).map(|r| (e, r)))
-        .filter(|(e, r)| newer_than_installed(r, e))
+        .map(|e| (e.name.clone(), full(&e.version, e.rel)))
+        .collect();
+    let by_name: HashMap<&str, &Entry> = installed.iter().map(|e| (e.name.as_str(), e)).collect();
+    install::outdated(&installed_full, &candidates_of(known))
+        .into_iter()
+        .filter_map(|name| {
+            let e = by_name.get(name.as_str())?;
+            let r = known.get(&name)?;
+            Some((*e, r))
+        })
         .collect()
 }
 
@@ -165,31 +169,19 @@ pub(crate) fn orphans(
     known: &BTreeMap<String, Recipe>,
     build_deps: bool,
 ) -> Vec<String> {
-    let by_name: HashMap<&str, &Entry> = installed.iter().map(|e| (e.name.as_str(), e)).collect();
-    let mut keep: BTreeSet<String> = BTreeSet::new();
-    let mut stack: Vec<String> = installed
+    let pkgs: Vec<InstalledPkg> = installed
         .iter()
-        .filter(|e| e.reason != "dependency")
-        .map(|e| e.name.clone())
+        .map(|e| InstalledPkg {
+            name: e.name.clone(),
+            is_dependency: e.reason == "dependency",
+            run: e.run.clone(),
+        })
         .collect();
-    while let Some(n) = stack.pop() {
-        if !keep.insert(n.clone()) {
-            continue;
-        }
-        if let Some(e) = by_name.get(n.as_str()) {
-            stack.extend(e.run.iter().filter(|d| by_name.contains_key(d.as_str())).cloned());
-        }
-        if !build_deps {
-            if let Some(r) = known.get(&n) {
-                stack.extend(deps_of(r).filter(|d| by_name.contains_key(d.as_str())));
-            }
-        }
-    }
-    installed
+    let known_deps: BTreeMap<String, Vec<String>> = known
         .iter()
-        .filter(|e| e.reason == "dependency" && !keep.contains(&e.name))
-        .map(|e| e.name.clone())
-        .collect()
+        .map(|(name, rec)| (name.clone(), deps_of(rec).collect()))
+        .collect();
+    removal::orphans(&pkgs, &known_deps, build_deps)
 }
 
 /// Order `names` so that a package is removed before the packages it
@@ -197,30 +189,21 @@ pub(crate) fn orphans(
 /// dependency. Anything that cannot be ordered (a cycle) goes last.
 pub(crate) fn removal_order(names: &[String], installed: &[Entry]) -> Vec<String> {
     let set: HashSet<&str> = names.iter().map(|s| s.as_str()).collect();
-    let run: HashMap<&str, Vec<&str>> = installed
+    let run_edges: HashMap<String, Vec<String>> = installed
         .iter()
         .filter(|e| set.contains(e.name.as_str()))
-        .map(|e| (e.name.as_str(), e.run.iter().map(|s| s.as_str()).filter(|d| set.contains(d)).collect()))
+        .map(|e| {
+            (
+                e.name.clone(),
+                e.run
+                    .iter()
+                    .filter(|d| set.contains(d.as_str()))
+                    .cloned()
+                    .collect(),
+            )
+        })
         .collect();
-    let mut left: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
-    let mut out: Vec<String> = Vec::new();
-    while !left.is_empty() {
-        // removable now: no remaining package still needs it
-        let pick: Vec<&str> = left
-            .iter()
-            .copied()
-            .filter(|n| !left.iter().any(|o| o != n && run.get(o).is_some_and(|d| d.contains(n))))
-            .collect();
-        if pick.is_empty() {
-            out.extend(left.iter().map(|s| s.to_string()));
-            break;
-        }
-        for p in &pick {
-            out.push(p.to_string());
-        }
-        left.retain(|n| !pick.contains(n));
-    }
-    out
+    removal::removal_order(names, &run_edges)
 }
 
 #[cfg(test)]

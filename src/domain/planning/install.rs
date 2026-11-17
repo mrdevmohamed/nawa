@@ -215,6 +215,31 @@ fn visit(
     Ok(())
 }
 
+/// Installed packages whose candidate is newer: their names, in the order
+/// the installed records were given (the database lists them sorted, so
+/// this is alphabetical in practice).
+///
+/// * `installed` — `(name, version-rel)` pairs; a package without a
+///   candidate is not "outdated", just unknown to the planner
+///
+/// The same comparison `install_plan` applies to a requested target: a
+/// candidate only replaces an installed package when it is strictly newer
+/// (`update` keeps the db's reason).
+pub(crate) fn outdated(
+    installed: &[(String, String)],
+    known: &BTreeMap<String, Candidate>,
+) -> Vec<String> {
+    installed
+        .iter()
+        .filter(|(name, have)| {
+            known
+                .get(name)
+                .is_some_and(|c| vercmp(&c.full(), have) == std::cmp::Ordering::Greater)
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,5 +415,39 @@ mod tests {
         let a = install_plan(&targets, &HashMap::new(), &known, Why::Explicit, true).unwrap();
         let b = install_plan(&targets, &HashMap::new(), &known, Why::Explicit, true).unwrap();
         assert_eq!(format!("{a:?}"), format!("{b:?}"));
+    }
+
+    #[test]
+    fn outdated_lists_strictly_newer_in_input_order() {
+        let known = tree(vec![
+            cand("a", "1.10", 1, &[]),
+            cand("b", "2", 1, &[]),
+            cand("c", "1", 1, &[]),
+        ]);
+        // given unsorted, to prove the input order is preserved
+        let have = vec![
+            ("c".to_string(), "1-1".to_string()),
+            ("b".to_string(), "1-1".to_string()),
+            ("a".to_string(), "1.9-1".to_string()),
+        ];
+        assert_eq!(
+            outdated(&have, &known),
+            ["b", "a"],
+            "1.10 > 1.9, rel counts"
+        );
+    }
+
+    #[test]
+    fn outdated_skips_equal_older_and_unknown() {
+        let known = tree(vec![cand("a", "1", 2, &[]), cand("b", "1", 1, &[])]);
+        let have = vec![
+            // same version, same rel: up to date
+            ("a".to_string(), "1-2".to_string()),
+            // same version, older rel: not outdated
+            ("b".to_string(), "1-1".to_string()),
+            // no candidate: unknown, not outdated
+            ("ghost".to_string(), "0-1".to_string()),
+        ];
+        assert_eq!(outdated(&have, &known), Vec::<String>::new());
     }
 }

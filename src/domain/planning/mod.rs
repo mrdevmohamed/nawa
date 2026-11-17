@@ -4,7 +4,9 @@
 //! from recipes, repository indexes and the local database.
 //!
 //! `install.rs` owns the install/update resolution core (§8.2's package
-//! decisions). Removal planning and conflict modeling move here when their
-//! use cases are extracted (`removal.rs`, `conflicts.rs` in the §4.3 tree).
+//! decisions); `removal.rs` owns autoremove/removal planning. Conflict
+//! modeling moves here when its use case is extracted (`conflicts.rs` in
+//! the §4.3 tree).
 
 pub(crate) mod install;
+pub(crate) mod removal;
