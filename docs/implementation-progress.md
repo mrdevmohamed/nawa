@@ -14,8 +14,8 @@
 | 1 — Structural refactor + service removal | **DONE** (1a, 1b, 1c, 1d, 1e — 1e is the deferred apply-transaction extraction) |
 | 2 — Init identity & capability foundation | **DONE** (detection + capability/identity domain model) |
 | 3 — Metadata & capability resolution | **DONE** (B3 proposal; the whole package planner — install, outdated, orphans, removal ordering — in `domain/planning/`, behavior verified byte-identical) |
-| 4 — System profiles & planning | in progress: profile model + merge rules + loader landed (§7); the profile is wired into plan generation (§8.1–8.4 explanations) — install/update report the init decision and fail closed on invalid profiles; next: Phase 5 migration engine |
-| 5 — Migration engine | not started |
+| 4 — System profiles & planning | **DONE** (profile model + merge rules + loader §7; profile wired into plan generation §8.1–8.4 — install/update report the init decision, invalid profiles fail closed; byte-identity + probes verified. Stage-3 exit met: dry-run plans explain every init-provider and package decision without managing services. The candidate→provider capability comparison still awaits the B3 index schema — see blockers) |
+| 5 — Migration engine | in progress: the migration domain model (definition, durable state machine, record model) + the durable record store landed (§10.1–§10.3, unwired with justification); next: gate wiring + coordinator/stages |
 | 6 — Faseela runit→systemd migration | **BLOCKED** (see blockers) |
 | 7 — Final verification | not started |
 
@@ -614,6 +614,76 @@ override profile → note (override path); defaults-only profile → note
 init role → no note; invalid profile → `install` **and** `update` fail
 closed with exit 1 naming the file.
 
+### Done within Phase 5 so far (1): the migration domain model and record store (§10.1–§10.3)
+
+Phase 5 = design Stage 4 (migration framework). First slice: the pure
+model of the migration framework — no command wiring yet, so CLI
+behavior is unchanged (verified; see below). The persistent mutation-gate
+*check* and the coordinator are the next slices.
+
+* `domain/system/migration.rs` (new, pure — no I/O, no serde):
+  * `MigrationDefinition` (§10.1): typed, versioned, validated — the id is
+    file-name-safe (lowercase `a-z0-9._-`, ≤ 128 bytes, traversal-proof),
+    `from`/`to` are `init-system` capabilities limited to the §6 scope
+    (`runit`/`systemd`), the transition must move somewhere, and the
+    handler binding is enforced: the built-in runit→systemd handler owns
+    exactly that transition and requires the reboot boundary.
+  * `HandlerId` (§10.2): an allowlisted typed enum (`as_str`/strict
+    `parse`) — a repository can never name an executable path or shell
+    command; unknown handlers fail closed.
+  * `MigrationState` + `Transition` + `transition()` (§10.3): the durable
+    state machine — `planned → preparing → awaiting-reboot → verifying →
+    completed`, with `preparing` failures split by whether compensation
+    succeeded (`failed` after compensation / `needs-recovery` otherwise),
+    post-reboot verification failure → `rollback-required` (only when a
+    documented rollback exists) → `failed` after a verified rollback, and
+    `Ambiguous` reachable from every gate-active state. Terminal states
+    have no exits (a retry is a new, re-approved plan). Illegal
+    transitions are named errors; states roundtrip through the exact
+    §10.3 table names, unknown names fail closed.
+  * The gate policy is model, not I/O: `keeps_gate()` is exactly §10.3's
+    active set (`preparing`, `awaiting-reboot`, `verifying`,
+    `rollback-required`, `needs-recovery`); `planned` is deliberately not
+    gate-active (its record is created immediately *before* the gate is
+    taken).
+  * `StepRecord`/`StepOutcome` + `MigrationRecord` (§10.3, §11): ordered
+    write-ahead steps (intent persisted before the side effect, outcome
+    after; an intent without outcome stays interrupted until
+    reconciliation), the record schema pinned to 1 with the definition
+    version, source/target capabilities and handler bound in.
+* `application/features/system/migrate.rs` (new): the durable record
+  store — `<root>/var/lib/nawa/migrations/<migration-id>.toml`, one
+  versioned file per migration:
+  * `save` publishes through the shared `atomic::write_atomic`
+    (temp + fsync + rename + dir fsync) at mode 0600 — restrictive
+    permissions like the transaction journal, crash never leaves a torn
+    record.
+  * `load` treats absence as `Ok(None)` (not an error, not a decision)
+    and validates fail closed: unknown schema/state/handler, a failed
+    step without a reason, or a succeeded step with a failure is an
+    error naming the file.
+  * `active_gates` scans the record directory and reports every
+    gate-keeping record sorted by id (`ActiveGate { id, state }`) — the
+    gate-check wiring consumes it in the next slice.
+  * Creation semantics belong to the use case, documented in the module
+    header: the durable `planned` record is written only after live-host
+    preflight + explicit approval; offline-root planning stays read-only.
+* Both modules carry module-scope `dead_code` allows with justifications:
+  nothing consumes them in production until the coordinator/gate wiring
+  lands (next slice).
+* Verification: 20 new tests (13 domain: the §10.1 example, fail-closed
+  definition validation incl. path-looking ids, the handler allowlist vs
+  paths, state roundtrip, the legal forward path, compensation split,
+  rollback→failed, ambiguity reachability, illegal-transition errors,
+  the §10.3 gate set, fresh record, step intents; 7 store: roundtrip,
+  absent, restrictive 0600 + replace, corrupt/unknown records fail
+  closed naming the file, traversal-proof ids, gate scan sorted,
+  gate-active states survive the format). Gates green; byte-identity
+  held: `--help`/`--version`/completions × 3 + 8-step scenario identical
+  vs HEAD, and a seeded `preparing` migration record under a scenario
+  root leaves `install -n`/`update -n` output unchanged (nothing reads
+  records yet — the module is inert by construction).
+
 ## Changed files (this phase, updated as work lands)
 
 * `docs/architecture-audit.md` (new, Phase 0)
@@ -729,6 +799,16 @@ closed with exit 1 naming the file.
     `desired_init(root)`; 3 new tests)
   * `src/domain/system/profile.rs` (module `dead_code` justification
     comment updated — no code change)
+* Phase 5 (migration model, in progress):
+  * `src/domain/system/migration.rs` (new — `MigrationDefinition`,
+    `HandlerId` allowlist, `check_id`, `MigrationState`/`Transition`/
+    `transition()`, `StepRecord`/`StepOutcome`, `MigrationRecord` +
+    13 tests; pure, unwired with justification)
+  * `src/application/features/system/migrate.rs` (new — the durable
+    record store: `save` via `atomic::write_atomic` 0600, `load` fail
+    closed, `active_gates` scan + 7 tests; unwired with justification)
+  * `src/domain/system/mod.rs`, `src/application/features/system/mod.rs`
+    (one-line registrations + doc updates)
 
 ## Tests actually executed
 
@@ -747,8 +827,9 @@ closed with exit 1 naming the file.
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 3 removal tree) | 658 pass / 2 ignored / 3 env-failed (= 648 + 8 removal + 2 outdated domain tests; same 3 env failures) |
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 4 profile tree) | 678 pass / 2 ignored / 3 env-failed (= 658 + 11 domain + 9 loader profile tests; same 3 env failures) |
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 4 wiring tree) | 686 pass / 2 ignored / 3 env-failed (= 678 + 3 InitSelection + 1 loader provenance + 1 plan note + 3 desired-init tests; same 3 env failures) |
-| `cargo clippy --all-targets --offline -- -D warnings` | pass (Phase 1a + 1b + 1c + 1d + 1e + 2 + 3/B3 + 3/solver + 3/removal + 4/profile + 4/wiring) |
-| `python3 scripts/check-layering.py` | pass (54 after 1a; 53 after 1b; 54 after 1c; 55 after 2 — the new `domain` layer; 55 after 3/B3, 3/solver, 3/removal and 4/profile — the count is top-level modules, the new `domain/package`, `domain/planning`, `domain/system/profile` + `features/system/profile` submodules are scanned; 55 after 4/wiring) |
+| `cargo test --all-targets --offline --no-fail-fast` (Phase 5 migration-model tree) | 706 pass / 2 ignored / 3 env-failed (= 686 + 13 domain migration + 7 record-store tests; same 3 env failures) |
+| `cargo clippy --all-targets --offline -- -D warnings` | pass (Phase 1a + 1b + 1c + 1d + 1e + 2 + 3/B3 + 3/solver + 3/removal + 4/profile + 4/wiring + 5/model) |
+| `python3 scripts/check-layering.py` | pass (54 after 1a; 53 after 1b; 54 after 1c; 55 after 2 — the new `domain` layer; 55 after 3/B3, 3/solver, 3/removal and 4/profile — the count is top-level modules, the new `domain/package`, `domain/planning`, `domain/system/profile` + `features/system/profile` submodules are scanned; 55 after 4/wiring and 5/model — `domain/system/migration` + `features/system/migrate` are submodules of existing top-level modules) |
 | `bash scripts/smoke-v06.sh` (release build, Phases 1b + 1c + 1d + 2) | ALL V0.6 SMOKE TESTS PASSED |
 | `bash scripts/smoke-v05.sh` (release build, Phases 1d + 2) | ALL SMOKE TESTS PASSED |
 | HEAD-vs-1c behavior diff (`--help`, `--version`, completions × 3, isolated worktree build) | byte-identical |
@@ -765,7 +846,14 @@ closed with exit 1 naming the file.
 | HEAD-vs-4(profile) behavior diff (`--help`, `--version`, completions × 3, paired 8-step scenario, isolated CARGO_TARGET_DIR builds) | byte-identical (the loader is unwired; no production path changed) |
 | HEAD-vs-4(wiring) behavior diff (`--help`, `--version`, completions × 3, paired 8-step scenario, isolated CARGO_TARGET_DIR builds) | byte-identical (no fixture carries a profile; the note prints only when one declares `init-system`) |
 | HEAD-vs-4(wiring) positive probes on the new binary (seeded profiles in a fake root): override declaring `init-system` → `install -n`/`update -n` print the §8.4 note with the override path; defaults-only profile → note names the defaults path; profile without the init role → no note; invalid profile → `install` and `update` refuse with exit 1 naming the file + cause | pass |
-| `cargo fmt --all -- --check` | fails repo-wide at HEAD (pre-existing ~100 files; CI does not run fmt) — re-scoped to "no new violations in touched/new code", satisfied (1a–1e, 2, 3/B3, 3/solver, 3/removal, 4/profile, 4/wiring: new files clean; plan.rs dirty hunks 19 → 13 → **12** — the deleted planner bodies carried six away across the two slices, one over-long test call was canonicalized while adding the profile arg; installing.rs stays at its pre-existing 18 hunks, none on lines touched here) |
+| HEAD-vs-5(model) behavior diff (`--help`, `--version`, completions × 3, paired 8-step scenario, isolated CARGO_TARGET_DIR builds) | byte-identical (the migration model + record store are unwired; no production path reads records) |
+| HEAD-vs-5(model) inertness probe (a `preparing` migration record seeded under a scenario root: `install -n` and `update -n` on both builds) | identical transcripts (the gate check is not wired yet) |
+| `cargo fmt --all -- --check` | fails repo-wide at HEAD (pre-existing ~100 files; CI does not run fmt) — re-scoped to "no new violations in touched/new code", satisfied (1a–1e, 2, 3/B3, 3/solver, 3/removal, 4/profile, 4/wiring,
+5/model: new files clean; plan.rs dirty hunks 19 → 13 → **12** — the
+deleted planner bodies carried six away across the two slices, one
+over-long test call was canonicalized while adding the profile arg;
+installing.rs stays at its pre-existing 18 hunks, none on lines touched
+here) |
 
 ## Known problems
 
@@ -795,24 +883,30 @@ closed with exit 1 naming the file.
 
 ## Exact next task
 
-**Phase 5, first slice: the migration domain model (§10.1–§10.3)** —
-`domain/migration/` (pure): the typed, versioned `MigrationDefinition`
-(id, from/to capability identity, built-in handler ID binding — §10.2:
-never a repository-supplied executable; versioned + validated like the B3
-chain), the durable state machine over
-`planned → preparing → awaiting-reboot → verifying → completed` with
-`failed`/`rollback-required`/`needs-recovery` side exits and the §10.3
-transition rules (failure in `preparing` ⇒ `failed` only after
-compensation, ambiguous ⇒ `needs-recovery` with the gate kept), and the
-migration record (versioned TOML under
-`<root>/var/lib/nawa/migrations/<migration-id>.toml`: state, write-ahead
-step intents + outcomes with atomic publication, restrictive permissions;
-offline-root planning is read-only and must not create a record). The
-persistent mutation-gate *check* (§10.3: all package-mutating entry points
-stop while a gate is active; checked before honoring `NAWA_LOCK_HELD`;
-only the typed in-process coordinator permit bypasses) may land as the
-second slice with the gate wiring — the pure state machine first, wiring
-after. Blockers B5/B6 gate the boot-critical handler internals, not this
-model. Gates as always (check/test/clippy/layering; new files
-rustfmt-clean; byte-identity for existing CLI paths — the migration
-surface is additive), then commit and update this tracker.
+**Phase 5, second slice: the persistent mutation-gate check (§10.3)** —
+wire the gate into the package-mutating entry points, per §10.3's rules:
+
+* Every Nawa-owned package-mutating command (install/update/remove/
+  autoremove/groups/plugins-runs-that-mutate) must stop *before changing
+  the package set* while `features/system/migrate::active_gates` finds a
+  gate-keeping record under the selected root. The check runs **before
+  honoring `NAWA_LOCK_HELD`** (the marker is forgeable and never
+  authorizes mutation or skips the gate) and while the exclusive package
+  database lock is held — or under the already-held parent lock for a
+  nested read-only check (§10.3's exact wording governs the shortcut).
+* Read-only commands stay available; nested read-only may bypass only
+  where Stage 0 proves the snapshot consistent, else fail fast with a
+  clear diagnostic.
+* Refusal message names the migration id and its state and points at the
+  documented recovery route (`needs-recovery` keeps the gate; only
+  verified completion or a completed, verified rollback clears it).
+* The private typed in-process coordinator permit (§10.3) lands with the
+  coordinator slice — this slice only ever *blocks*: no permit exists
+  yet, so no bypass must exist yet.
+* Tests: seeded gate record blocks install/update/remove/autoremove with
+  exit 1 (transcript asserts the id + state are named); read-only
+  commands still work; `NAWA_LOCK_HELD` does not bypass the gate (the
+  existing lock tests cover the marker semantics — extend with a
+  gate-present case); offline-root planning does not create records.
+  Gates as always + byte-identity vs HEAD on the gate-free scenario;
+  commit and update this tracker.
