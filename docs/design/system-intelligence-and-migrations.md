@@ -175,155 +175,352 @@ This proposal does not require:
   back automatically.
 - Supporting every Linux init system in the first implementation.
 
-## 4. Proposed architecture
+## 4. Target architecture: Feature-Oriented Hexagonal Architecture
 
-Keep the current CLI and package-management core. Add a system-planning layer
-that coordinates existing facilities and a small set of new domain components.
+The target architecture for Nawa is **Feature-Oriented Hexagonal Architecture
+with a Functional Core / Imperative Shell**. Nawa remains one Rust application
+(a modular monolith); this does not introduce microservices or require a
+multi-crate Cargo workspace.
 
-    nawa CLI
-      |
-      +-- package commands
-      |
-      +-- system commands
-              |
-              v
-        System Intelligence
-          - Init-System Detector
-          - System Profile
-          - Optional Capability Catalog
-          - Dependency / Capability Solver
-          - Conflict and Impact Analysis
-          - Plan Builder
-          - Migration Planner
-              |
-              v
-        Execution Coordination
-          - Existing package installer
-          - Existing transaction history / journal
-          - Trusted Migration Handlers
-          - Post-reboot Init Verification
-              |
-              v
-        Target Root and System State
+This combines three complementary ideas:
 
-Responsibilities should remain separate:
+- **Feature-oriented organization:** user-visible use cases are grouped by
+  capability, such as package installation, removal, build, query, repository,
+  and history. A feature owns its application workflow instead of scattering
+  that workflow across generic command and utility modules.
+- **Hexagonal architecture:** application use cases depend on narrow ports.
+  Concrete adapters implement those ports for the filesystem, package
+  database, repositories, archive handling, signature verification, process
+  execution, sandboxing, and transaction storage.
+- **Functional Core / Imperative Shell:** package policy, dependency solving,
+  conflict analysis, and plan construction are deterministic logic over
+  explicit inputs. Network, filesystem, process, privilege, locking, and
+  durable-state effects happen at the application and adapter boundaries.
 
-| Component | Responsibility |
-|---|---|
-| Init-System Detector | Read-only detection of the init system in the relevant live or target-root context. |
-| System Profile | Describe the intended init system and distribution migration policy. |
-| Capability Catalog | Normalize the narrowly scoped capabilities required by the approved migration. |
-| Solver | Select a valid package solution from installed and trusted repository candidates. |
-| Conflict Analyzer | Detect file conflicts, removals, and affected package dependents. |
-| Plan Builder | Produce an ordered, explainable plan without mutating the system. |
-| Migration Planner | Match current and target init states to a supported transition. |
-| Transaction Coordinator | Execute package changes and durable migration steps with recovery records. |
-| Migration Handler | Perform a narrowly scoped, built-in, reviewed system transition. |
-| Verifier | Check init-system and boot postconditions, including after reboot. |
+This is the selected direction for the refactor. It supersedes a generic
+"four folders only" interpretation of layered architecture. The layers still
+exist as dependency boundaries, but the application layer is organized around
+features and use cases.
 
-These are domain responsibilities, not a requirement to create one Rust crate
-or one file per row. Preserve Nawa's existing module-layering rules. Lower-level
-modules must not depend on CLI or command modules.
+### 4.1 Architectural responsibilities
 
-### 4.1 Required code boundaries
-
-Nawa should become a modular monolith with explicit dependency direction. Do
-not split it into multiple crates during this refactor unless a real independent
-release or reuse boundary is demonstrated.
-
-| Layer | Owns | Must not do |
+| Area | Responsibility | Must not do |
 |---|---|---|
-| CLI / presentation | Clap argument types, shell completions, terminal rendering, prompts, JSON/text presentation. | Implement package policy, dependency solving, filesystem mutations, or transaction recovery. |
-| Application | User-facing use cases, command dispatch, orchestration, authorization/confirmation flow, and lifecycle coordination. | Reimplement package rules or contain low-level archive/filesystem/network code. |
-| Domain | Package and recipe concepts, dependency rules, plans, provider policy, init-system identity, and migration state transitions. | Read environment variables, contact the network, spawn processes, or mutate the filesystem directly. |
-| Infrastructure | Concrete package database, repository transport, archive/signature handling, filesystem operations, sandbox/process execution, locks, and durable journal storage. | Decide user intent or distribution policy. |
+| CLI | Parse arguments, validate command-line shape, and route a request to an application use case. | Resolve dependencies, modify package files, or own transaction policy. |
+| Application features | Orchestrate one user operation: gather inputs, call domain logic, request confirmation, coordinate execution, and report the outcome. | Reimplement domain rules or contain low-level transport/filesystem details. |
+| Domain | Own package, dependency, recipe, plan, transaction, system-profile, and migration models and deterministic rules. | Read environment variables, access the network, spawn processes, or mutate the filesystem. |
+| Application ports | Define the external capabilities a use case needs through narrow interfaces. | Contain adapter implementations or become a generic interface for every helper function. |
+| Adapters | Implement ports using concrete storage, network, archive, filesystem, signing, process, and sandbox facilities. | Decide user intent or package/provider policy. |
+| Presentation | Render plans, diagnostics, confirmations, and human/machine-readable output. | Own package-management decisions. |
+| Bootstrap | Construct concrete adapters, connect them to use cases, and start the selected command. | Become another place for business logic. |
 
-The allowed dependency direction is:
+The dependency direction is inward:
 
-    CLI / Presentation
-            |
-            v
-       Application ------> Domain
-            |                 ^
-            v                 |
-       Infrastructure --------+
+    CLI ----------------------> Application Features
+                                      |
+                                      v
+                                  Domain
+                                      ^
+                                      |
+    Adapters ----------------> Application Ports
 
-Infrastructure implements narrow ports needed by Application or Domain; the
-composition root wires concrete implementations. Domain code must not import
-CLI, command handlers, or infrastructure adapters. Infrastructure must not
-depend on CLI. Avoid circular dependencies and avoid making every helper a
-trait: introduce an abstraction only at a boundary that needs substitution,
-testing, or isolation.
+    Bootstrap wires CLI + Application + Ports + Adapters together.
 
-### 4.2 Practical module organization
+Application defines the ports it needs. Adapters implement those ports and may
+depend on the port contracts and domain types. Domain remains independent of
+Application, CLI, and Adapters. CLI must not call adapter implementations
+directly. No layer may create a circular dependency.
 
-The following is a target grouping, not a mandate to create every directory
-immediately:
+Ports should be introduced where an external effect must be substituted,
+isolated, or tested. Do not create a trait for every function or wrap simple
+pure calculations in interfaces. Prefer concrete domain types and small
+application-facing ports.
+
+### 4.2 Functional Core and Imperative Shell
+
+The **Functional Core** is primarily the `domain/` tree:
+
+- Normalize and compare package versions.
+- Resolve package and capability requirements.
+- Build install, update, upgrade, and removal plans.
+- Detect dependency cycles and package conflicts.
+- Calculate reverse dependencies and autoremove candidates.
+- Validate recipe and migration definitions.
+- Determine legal transaction and migration state transitions.
+- Explain why a package or provider is included in a plan.
+
+These operations receive their inputs explicitly and return values or
+structured errors. The same inputs and policy must produce the same result.
+They must not read the live package database, download metadata, inspect
+`/proc`, invoke commands, or write files.
+
+The **Imperative Shell** is the application workflow plus concrete adapters:
+
+- Read installed state and trusted repository candidates through ports.
+- Invoke domain planning functions with explicit snapshots.
+- Present the plan and collect the required authorization.
+- Acquire the appropriate lock and revalidate assumptions at the mutation
+  boundary.
+- Download and authenticate artifacts, apply payloads, update the database,
+  and record transaction intents/outcomes through adapters.
+- Verify results and report failures or recovery requirements.
+
+Do not hold package database locks across long downloads or builds. Preserve
+Nawa's existing lock and transaction guarantees while making their ownership
+explicit. A plan built from an earlier snapshot must not be applied blindly if
+the relevant installed state or repository inputs have changed before commit.
+
+### 4.3 Practical Rust module organization
+
+The following is the target grouping. It describes ownership, not a requirement
+to create every file or directory immediately. Keep Nawa in one Cargo crate
+during the refactor.
 
     src/
-      main.rs                 # process entry point and composition root
-      cli/                    # Clap types and completions
+      main.rs                 # minimal process entry point
+      bootstrap.rs            # composition root and concrete wiring
+
+      cli/
+        mod.rs
+        args.rs
+        commands/
+          package.rs
+          build.rs
+          repository.rs
+          history.rs
+          system.rs
+
       application/
+        mod.rs
         context.rs
-        dispatch.rs
-        lifecycle.rs          # lock / recovery / post-transaction coordination
-        package/              # install, remove, update, upgrade, autoremove
-        query/                # search, info, deps, why, files, owner
-        build/                # build use case and build orchestration
-        repository/           # repo-facing use cases
-        history/              # history and rollback use cases
-        system/               # status, plan, migrate use cases (later)
+        lifecycle.rs          # lock, recovery, post-transaction coordination
+        ports/
+          package_database.rs
+          repository.rs
+          artifact_store.rs
+          filesystem.rs
+          signature_verifier.rs
+          process_runner.rs
+          transaction_journal.rs
+        features/
+          package/
+            install.rs
+            remove.rs
+            update.rs
+            upgrade.rs
+            autoremove.rs
+          build/
+            build.rs
+            cache.rs
+          query/
+            search.rs
+            info.rs
+            deps.rs
+            why.rs
+            files.rs
+          repository/
+            sync.rs
+            create.rs
+            verify.rs
+          history/
+            list.rs
+            undo.rs
+            rollback.rs
+          system/
+            detect.rs
+            profile.rs
+            plan.rs
+            migrate.rs
+
       domain/
-        package/              # package identity, dependency and plan rules
-        recipe/               # recipe model and validation rules
-        system/               # init detection model, profile, capability, migration
-        transaction/          # operation and migration state models
-      infrastructure/
+        package/
+          model.rs
+          version.rs
+        dependency/
+          resolver.rs
+          graph.rs
+        planning/
+          install.rs
+          removal.rs
+          conflicts.rs
+        recipe/
+          model.rs
+          validation.rs
+        transaction/
+          model.rs
+          state.rs
+        system/
+          identity.rs
+          profile.rs
+          capability.rs
+          migration.rs
+
+      adapters/
         database/
         repository/
         archive/
-        filesystem/
         signing/
-        fetch/
+        filesystem/
         process/
         sandbox/
-        transaction_store/
-      presentation/           # output, diagnostics, confirmation
+        transaction/
 
-Keep cohesive existing subsystems such as build, repository, recipe, and
-transaction as modules where appropriate; move them only when doing so clarifies
-ownership. A file's size alone is not a reason to split it. Split when it owns
-multiple independently testable use cases or mixes policy with I/O.
+      presentation/
+        output.rs
+        diagnostics.rs
+        confirmation.rs
+        formatting.rs
 
-### 4.3 Refactoring rules
+The tree may retain cohesive existing subsystems during early stages. For
+example, the build pipeline, sandbox implementation, archive format, and
+repository-index implementation do not need to be flattened or rewritten merely
+to match this diagram. Move or split a module only when its current ownership
+crosses a boundary or makes a use case difficult to test.
 
-- Keep `main.rs` as the composition root: parse input, construct application
-  dependencies, run the selected use case, and map the final result to an exit
-  code. Move lifecycle policy and command orchestration into Application.
-- Keep `cli.rs` (or the future `cli/` module) concerned with parsing and
-  presentation-facing types. Move lock/recovery policy out of CLI definitions.
-- Make each command handler a thin adapter to one Application use case.
-  Separate install, remove, update, upgrade, and autoremove instead of growing
-  one catch-all package command module.
-- Keep installer implementation behind a small facade. Separate archive
-  validation/authentication, payload application, file journaling, rollback,
-  and package-database persistence by responsibility; do not make command
-  handlers reach into installer internals.
-- Keep package/dependency planning pure wherever possible. Filesystem,
-  repository, process, and privilege effects must be explicit at Application
-  or Infrastructure boundaries.
-- Make context dependencies explicit. Avoid a global mutable context or
-  passing a large context object to modules that need only one or two values.
-- Prefer domain-specific module names over a generic `utils` or `common`
-  dumping ground. Avoid broad `pub(crate)` exports when a narrower API is
-  sufficient.
-- Do not combine a structural move with a behavior change. Preserve CLI
-  behavior, recipe compatibility, package formats, repository indexes,
-  database records, and transaction recovery while refactoring.
+The exact names and placement of modules should be settled by the Stage 0
+source audit. The target tree is a guide, not a license for a mass file move.
 
-Architecture tests and code review should enforce the dependency direction.
-A new module must have a clear owner, a narrow API, and tests at the layer where
-its rules belong.
+### 4.4 Example: the `nawa install firefox` flow
+
+The intended flow separates planning from effects:
+
+1. **CLI adapter:** parses `nawa install firefox` and constructs an install
+   request. It does not load the package database or invoke the installer.
+2. **Install use case:** coordinates the operation and requests the required
+   inputs through application ports.
+3. **Input adapters:** obtain a consistent installed-package snapshot and
+   authenticated repository/recipe candidates.
+4. **Functional Core:** the domain planner resolves dependencies, selects
+   eligible versions, detects conflicts, determines install order, and
+   returns an explainable plan. It performs no I/O.
+5. **Presentation:** renders the complete plan and obtains the required
+   confirmation. Dry-run ends here without mutation.
+6. **Execution coordination:** checks cancellation and preconditions, acquires
+   the required lock at the correct boundary, and records transaction intent.
+7. **Effect adapters:** fetch and verify the selected artifact, apply the
+   package payload, update installed state, and persist each transaction
+   outcome. Existing archive authentication, file-conflict, journaling, and
+   recovery guarantees must be preserved.
+8. **Post-transaction lifecycle:** after releasing the package lock, dispatch
+   eligible distribution maintenance triggers and observer events, then report
+   the final outcome.
+
+Conceptually:
+
+    InstallRequest
+        |
+        v
+    InstallUseCase
+        |
+        +----> PackageDatabasePort ----> DatabaseAdapter
+        |
+        +----> RepositoryPort ----------> RepositoryAdapter
+        |
+        v
+    DomainPlanner (pure)
+        |
+        v
+    Explainable InstallPlan
+        |
+        v
+    Confirmation / Authorization
+        |
+        v
+    Transaction Coordinator
+        |
+        +----> ArtifactStorePort -------> Fetch / Cache Adapter
+        +----> SignatureVerifierPort --> Signing Adapter
+        +----> FilesystemPort ----------> Payload Adapter
+        +----> TransactionJournalPort -> Journal Adapter
+        |
+        v
+    Install Result
+
+The exact execution ordering remains governed by the transaction and
+installer contracts. This diagram is an ownership model, not a replacement
+transaction algorithm.
+
+### 4.5 Mapping the current source tree
+
+The first mapping from current `master` to the target architecture is:
+
+| Current code | Target ownership |
+|---|---|
+| `main.rs` | Minimal process entry point; move command lifecycle coordination and concrete wiring into dedicated application/bootstrap modules. |
+| `cli.rs` | `cli/`: argument definitions, command types, and shell completions. Lock policy moves out of CLI definitions. |
+| `commands/mod.rs` and `commands/*.rs` | Split into thin CLI adapters and feature-specific application use cases. |
+| `commands/installing.rs` | Split by install, remove, update, upgrade, and autoremove use cases; keep shared workflow coordination small and explicit. |
+| `plan.rs` and `deps.rs` | `domain/planning/` and `domain/dependency/`: pure planning and graph rules. |
+| `install/mod.rs` | Keep a narrow installer facade while separating payload application, authentication, journals, rollback, and persistence responsibilities. |
+| `install/payload.rs` | Filesystem/package-payload adapter responsibilities. |
+| `install/journal.rs`, `previous.rs`, `rollback.rs`, `step.rs` | Transaction and filesystem adapter implementations, with transaction state models separated from storage. |
+| `db.rs` | Database adapter and persistence mapping; keep domain package/state types independent of file formats. |
+| `repo/`, `repositories.rs`, `fetch/` | Repository and fetch adapters; keep authenticated index/package data models explicit and validated. |
+| `recipe/model.rs`, `validate.rs`, `expand.rs` | Domain recipe model and validation/expansion rules; file discovery and loading remain an I/O boundary. |
+| `build/`, `buildenv.rs`, `fetchrun/`, `sandbox/` | Build use case and cohesive build subsystem, with process, fetch, and sandbox effects behind adapter boundaries where needed. |
+| `transaction/`, `recovery.rs`, `lock.rs`, `undo.rs` | Separate transaction domain/state, application lifecycle coordination, and durable journal/lock adapters. |
+| `config.rs`, `profile.rs`, `sys.rs` | Split configuration loading and host observations from validated domain configuration/profile models. |
+| `output.rs`, `diag.rs`, `color.rs`, `confirm.rs`, `humanize.rs` | Presentation and user-interaction responsibilities. |
+| `service.rs`, `commands/service.rs` | Delete as part of the accepted removal of service management from Nawa. |
+
+This table is an initial ownership hypothesis. Stage 0 must inspect imports,
+call sites, and tests before assigning the final destination of each module.
+In particular, do not mechanically move every current file into the proposed
+folder with the same name.
+
+### 4.6 Refactoring and dependency rules
+
+- Keep `main.rs` minimal. Use `bootstrap.rs` to construct adapters and connect
+  them to application use cases.
+- Keep CLI types and parsing separate from application orchestration and
+  package policy.
+- Make each feature use case responsible for one user operation. Shared
+  behavior belongs in a named application service or domain function only
+  when it is genuinely shared.
+- Keep dependency resolution and plan construction pure and deterministic.
+- Keep installer internals behind a narrow application-facing API. Command
+  handlers must not reach into payload, journal, rollback, or database internals.
+- Define ports around meaningful external boundaries. Avoid unnecessary traits,
+  generic repositories, service locators, global mutable state, and a large
+  context object passed everywhere.
+- Domain modules may depend on other domain modules, but not on CLI,
+  Application, or Adapters.
+- Application may depend on Domain and its own port contracts.
+- Adapters may depend on port contracts and domain data types, but never on
+  CLI or presentation code.
+- No adapter may silently bypass signature verification, package conflict
+  checks, transaction recording, or migration authorization.
+- No service-management APIs, providers, service state, or service-manager
+  invocations are permitted in Nawa. Service definitions and presets remain
+  ordinary package payload files.
+- Do not change recipe syntax, archive format, repository index format,
+  installed database format, CLI behavior, or recovery semantics as an
+  incidental result of structural refactoring.
+- Do not split into multiple Cargo crates or introduce plugin interfaces
+  without a demonstrated need and a separately reviewed boundary.
+
+A new module must have one clear owner, a narrow API, and tests at the layer
+where its rules belong. Enforce dependency direction through module visibility,
+code review, and focused architecture checks; do not rely on folder names alone.
+
+### 4.7 Testing strategy for this architecture
+
+- **Domain unit tests:** run without filesystem, network, subprocess, root
+  privileges, or a temporary installed system. Cover dependency resolution,
+  version selection, conflicts, planning, and state transitions.
+- **Application tests:** use small fake/in-memory port implementations to
+  verify use-case orchestration, confirmation gates, failure handling, and
+  transaction boundaries.
+- **Adapter tests:** exercise real filesystem/database/archive behavior with
+  temporary roots, plus controlled local HTTP fixtures for repository and
+  fetch behavior.
+- **Integration tests:** verify that adapters are wired correctly and that
+  existing package commands preserve their observable behavior.
+- **End-to-end tests:** use disposable VMs for boot-critical init migration;
+  unit tests alone cannot establish that a machine reboots successfully.
+
+Do not mock the domain planner to test its own rules. Do not use real root
+filesystem mutations or live network dependencies in ordinary domain tests.
 
 
 ## 5. System state: observed, installed, and desired
@@ -895,8 +1092,10 @@ Record the exact VM image, commit, boot configuration, and test result.
 
 ## 15. Incremental implementation roadmap
 
-Implementation should be split into reviewable changes. Do not combine this
-proposal with unrelated recipe, repository, package, or distribution changes.
+Implementation should follow the Feature-Oriented Hexagonal Architecture
+with a Functional Core / Imperative Shell defined in Section 4. Split work
+into reviewable changes. Do not combine this proposal with unrelated recipe,
+repository, package, or distribution changes.
 
 | Stage | Scope | Exit condition |
 |---|---|---|
@@ -938,8 +1137,13 @@ schemas:
 
 The proposal is ready to become an implementation plan when:
 
-- The current source extension points and compatibility constraints have been
-  audited.
+- The current source extension points, module ownership, dependency graph, and
+  compatibility constraints have been audited.
+- The Feature-Oriented Hexagonal Architecture with Functional Core /
+  Imperative Shell is documented and its dependency direction is enforced.
+- Core planning rules are testable without filesystem, network, or process I/O.
+- Application use cases are testable through fake ports, and adapters are
+  tested independently.
 - Capability and profile schemas have been reviewed and versioned.
 - The solver can explain init-system selection and every planned package
   action.
