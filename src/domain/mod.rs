@@ -3,4 +3,5 @@
 //! nothing from the layers above it.
 
 pub(crate) mod package;
+pub(crate) mod planning;
 pub(crate) mod system;

@@ -1,0 +1,394 @@
+//! The install planner (design §8.1–8.2): deterministic dependency
+//! resolution over normalized candidates. This is the domain core of
+//! `nawa install` / `nawa update` planning — the same resolution `plan.rs`
+//! has always performed, expressed over the §8.1 candidate model instead of
+//! recipe and database types, so the profile-driven provider selection
+//! (Phase 4) and the migration planner consume the same values.
+//!
+//! The planner performs no I/O and imports no adapter types: candidates and
+//! installed state arrive normalized (`version-rel` strings, dependency
+//! name lists). Error wording is part of the observable behavior and stays
+//! byte-identical to the planner this replaces.
+//!
+//! Design notes (§8):
+//!
+//! - It extends the existing resolution rather than being a second
+//!   resolver: `plan::install_plan` adapts recipes and database records to
+//!   candidates and delegates here.
+//! - Dependency forms supported: plain name edges, build + run for a
+//!   source-backed candidate (§8.1). No version ranges and no
+//!   provides-edges: binary-only candidates would carry their runtime
+//!   dependencies in authenticated metadata (the B3 chain, §6.3); until
+//!   that schema is agreed, repository-only packages stay unresolvable
+//!   extras, exactly as before.
+//! - Provider selection (§6.2, the exclusive init-system role) needs the
+//!   target profile (§7), which arrives with Phase 4. Candidates already
+//!   carry their declared capabilities, so nothing has to be re-modeled.
+//! - Architecture filtering is not a resolution rule: the application
+//!   layer assembles candidates only from sources that fit the machine
+//!   (`sys::arch_fits`), so the planner sees a feasible candidate set.
+
+use anyhow::{bail, Result};
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+use crate::domain::system::capability::Provides;
+use crate::suggest;
+use crate::version::vercmp;
+
+/// Why a package is part of a plan (the `reason` recorded in the database).
+/// The database mapping lives with the application layer (`plan.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Why {
+    /// named on the command line
+    Explicit,
+    /// pulled in as a dependency of something else
+    Dependency,
+    /// requested directly as a member of a package group
+    Group,
+    /// an installed package being brought to the candidate's version
+    /// (keeps whatever reason it already had)
+    Update,
+}
+
+/// One normalized candidate (§8.1): a trusted package the planner may
+/// select. Source-backed candidates come from recipes (build + run edges);
+/// binary-only candidates would come from authenticated index metadata and
+/// do not exist yet.
+#[derive(Debug, Clone)]
+pub(crate) struct Candidate {
+    pub(crate) name: String,
+    /// version without the rel; [`version_rel`] joins it for comparisons
+    pub(crate) version: String,
+    pub(crate) rel: u32,
+    /// The dependency edges the planner follows, in declaration order:
+    /// build + run for a source-backed candidate (§8.1). Duplicates are
+    /// allowed and harmless (a repeated edge is a satisfied no-op).
+    pub(crate) deps: Vec<String>,
+    /// capability declarations (the B3 chain, §6.3). No recipe, archive or
+    /// index spelling is wired yet, so every candidate is
+    /// [`Provides::Unknown`] today; provider selection consumes this with
+    /// the Phase 4 system profile (§6.2, §7).
+    #[allow(dead_code)] // read by provider selection once the profile lands
+    pub(crate) provides: Provides,
+}
+
+/// The installed-state value format the planner compares: `version-rel`.
+pub(crate) fn version_rel(version: &str, rel: u32) -> String {
+    format!("{version}-{rel}")
+}
+
+impl Candidate {
+    /// The candidate's own `version-rel`.
+    fn full(&self) -> String {
+        version_rel(&self.version, self.rel)
+    }
+}
+
+/// The normalized planner output (§8.2): the package decisions. Provider
+/// selection and migration-candidate fields arrive with the Phase 4/5 work.
+#[derive(Debug, Default)]
+pub(crate) struct Resolution {
+    /// build + install order: dependencies first
+    pub(crate) items: Vec<ResolvedItem>,
+    /// requested targets that need no work — reported, not rebuilt
+    pub(crate) up_to_date: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedItem {
+    pub(crate) name: String,
+    pub(crate) why: Why,
+    /// the installed `version-rel` this plan replaces
+    pub(crate) replaces: Option<String>,
+}
+
+/// Plan the installation of `targets`.
+///
+/// * `installed` — the installed `version-rel` per package name; an
+///   installed package that is not a requested target is satisfied and its
+///   own dependencies are not walked
+/// * `target_why` — `Explicit` for `nawa install`, `Update` for `nawa update`
+/// * `with_deps` — follow dependency edges (`--no-deps` turns this off)
+///
+/// Deterministic for identical inputs (§8.2): the walk order follows the
+/// target order and the candidate dependency lists.
+pub(crate) fn install_plan(
+    targets: &[String],
+    installed: &HashMap<String, String>,
+    known: &BTreeMap<String, Candidate>,
+    target_why: Why,
+    with_deps: bool,
+) -> Result<Resolution> {
+    let wanted: HashSet<&str> = targets.iter().map(|s| s.as_str()).collect();
+    let mut resolution = Resolution::default();
+    let mut done: HashSet<String> = HashSet::new();
+    let mut visiting: Vec<String> = Vec::new();
+
+    for t in targets {
+        visit(
+            t,
+            &wanted,
+            installed,
+            known,
+            target_why,
+            with_deps,
+            &mut done,
+            &mut visiting,
+            &mut resolution,
+        )?;
+    }
+    Ok(resolution)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn visit(
+    name: &str,
+    wanted: &HashSet<&str>,
+    installed: &HashMap<String, String>,
+    known: &BTreeMap<String, Candidate>,
+    target_why: Why,
+    with_deps: bool,
+    done: &mut HashSet<String>,
+    visiting: &mut Vec<String>,
+    resolution: &mut Resolution,
+) -> Result<()> {
+    if done.contains(name) {
+        return Ok(());
+    }
+    let is_target = wanted.contains(name);
+    let cand = match known.get(name) {
+        Some(c) => c,
+        None if installed.contains_key(name) && !is_target => {
+            // installed from somewhere else (seed, third-party repo): satisfied
+            done.insert(name.to_string());
+            return Ok(());
+        }
+        None => {
+            let names: Vec<String> = known.keys().cloned().collect();
+            let hint = suggest::hint(name, &names);
+            if is_target {
+                bail!("no recipe for `{name}`{hint}");
+            }
+            let chain = visiting.join(" -> ");
+            bail!("dependency `{name}` (needed by {chain}) is neither installed nor has a recipe{hint}");
+        }
+    };
+
+    // an installed package only needs work when it is a requested target and
+    // the candidate is newer; installed dependencies are simply satisfied
+    let current = installed.get(name);
+    if let Some(have) = current {
+        if !is_target || vercmp(&cand.full(), have) != std::cmp::Ordering::Greater {
+            if is_target {
+                resolution.up_to_date.push(name.to_string());
+            }
+            done.insert(name.to_string());
+            return Ok(());
+        }
+    }
+
+    if visiting.iter().any(|v| v == name) {
+        let mut cycle = visiting.clone();
+        cycle.push(name.to_string());
+        bail!("circular dependency: {}", cycle.join(" -> "));
+    }
+    visiting.push(name.to_string());
+    if with_deps {
+        for dep in &cand.deps {
+            visit(
+                dep, wanted, installed, known, target_why, with_deps, done, visiting, resolution,
+            )?;
+        }
+    }
+    visiting.pop();
+
+    done.insert(name.to_string());
+    resolution.items.push(ResolvedItem {
+        name: cand.name.clone(),
+        why: if is_target {
+            target_why
+        } else {
+            Why::Dependency
+        },
+        replaces: current.cloned(),
+    });
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cand(name: &str, ver: &str, rel: u32, deps: &[&str]) -> Candidate {
+        Candidate {
+            name: name.to_string(),
+            version: ver.to_string(),
+            rel,
+            deps: deps.iter().map(|d| d.to_string()).collect(),
+            provides: Provides::Unknown,
+        }
+    }
+
+    fn tree(cands: Vec<Candidate>) -> BTreeMap<String, Candidate> {
+        cands.into_iter().map(|c| (c.name.clone(), c)).collect()
+    }
+
+    fn inst(full: &[(&str, &str)]) -> HashMap<String, String> {
+        full.iter()
+            .map(|(n, v)| (n.to_string(), v.to_string()))
+            .collect()
+    }
+
+    fn names(r: &Resolution) -> Vec<&str> {
+        r.items.iter().map(|i| i.name.as_str()).collect()
+    }
+
+    #[test]
+    fn version_rel_is_the_installed_state_format() {
+        assert_eq!(version_rel("1.2.3", 4), "1.2.3-4");
+    }
+
+    #[test]
+    fn candidates_declare_no_capabilities_until_the_schema_is_agreed() {
+        // the B3 chain is unwired: the adapter stamps Unknown, never empty
+        let c = cand("runit", "2.1.2", 2, &[]);
+        assert_eq!(c.provides, Provides::Unknown);
+    }
+
+    #[test]
+    fn pulls_deps_in_order_and_marks_them_dependencies() {
+        let known = tree(vec![
+            cand("zlib", "1", 1, &[]),
+            cand("openssl", "1", 1, &[]),
+            cand("curl", "1", 1, &["zlib", "openssl"]),
+        ]);
+        let r = install_plan(
+            &["curl".to_string()],
+            &HashMap::new(),
+            &known,
+            Why::Explicit,
+            true,
+        )
+        .unwrap();
+        assert_eq!(names(&r), ["zlib", "openssl", "curl"]);
+        assert_eq!(r.items[0].why, Why::Dependency);
+        assert_eq!(r.items[2].why, Why::Explicit);
+        assert!(r.items.iter().all(|i| i.replaces.is_none()));
+        assert!(r.up_to_date.is_empty());
+    }
+
+    #[test]
+    fn installed_deps_are_satisfied_and_not_walked() {
+        let known = tree(vec![
+            cand("zlib", "1", 1, &[]),
+            cand("curl", "1", 1, &["zlib"]),
+        ]);
+        let have = inst(&[("zlib", "0.5-1")]);
+        let r = install_plan(&["curl".to_string()], &have, &known, Why::Explicit, true).unwrap();
+        assert_eq!(
+            names(&r),
+            ["curl"],
+            "an installed (even older) dep is satisfied"
+        );
+    }
+
+    #[test]
+    fn an_installed_dep_without_a_candidate_is_satisfied() {
+        // installed from a seed or third-party repository: no candidate
+        // exists, the planner must not invent one
+        let known = tree(vec![cand("curl", "1", 1, &["zlib"])]);
+        let have = inst(&[("zlib", "0.5-1")]);
+        let r = install_plan(&["curl".to_string()], &have, &known, Why::Explicit, true).unwrap();
+        assert_eq!(names(&r), ["curl"]);
+    }
+
+    #[test]
+    fn up_to_date_target_is_reported_not_rebuilt() {
+        let known = tree(vec![cand("zlib", "1", 1, &[])]);
+        let have = inst(&[("zlib", "1-1")]);
+        let r = install_plan(&["zlib".to_string()], &have, &known, Why::Explicit, true).unwrap();
+        assert!(r.items.is_empty());
+        assert_eq!(r.up_to_date, ["zlib"]);
+    }
+
+    #[test]
+    fn an_older_installed_target_is_replaced_with_its_installed_version() {
+        let known = tree(vec![cand("zlib", "1.3", 1, &[])]);
+        let have = inst(&[("zlib", "1.2-1")]);
+        let r = install_plan(&["zlib".to_string()], &have, &known, Why::Explicit, true).unwrap();
+        assert_eq!(r.items[0].replaces.as_deref(), Some("1.2-1"));
+    }
+
+    #[test]
+    fn no_deps_plans_only_the_target() {
+        let known = tree(vec![
+            cand("zlib", "1", 1, &[]),
+            cand("curl", "1", 1, &["zlib"]),
+        ]);
+        let r = install_plan(
+            &["curl".to_string()],
+            &HashMap::new(),
+            &known,
+            Why::Explicit,
+            false,
+        )
+        .unwrap();
+        assert_eq!(names(&r), ["curl"]);
+    }
+
+    #[test]
+    fn a_typo_gets_a_suggestion_and_a_cycle_is_an_error() {
+        let known = tree(vec![cand("zlib", "1", 1, &[])]);
+        let e = install_plan(
+            &["zlb".to_string()],
+            &HashMap::new(),
+            &known,
+            Why::Explicit,
+            true,
+        )
+        .unwrap_err();
+        assert!(e.to_string().contains("no recipe for `zlb`"), "{e}");
+        assert!(e.to_string().contains("zlib"), "{e}");
+
+        let cyc = tree(vec![cand("a", "1", 1, &["b"]), cand("b", "1", 1, &["a"])]);
+        let e = install_plan(
+            &["a".to_string()],
+            &HashMap::new(),
+            &cyc,
+            Why::Explicit,
+            true,
+        )
+        .unwrap_err();
+        assert!(
+            e.to_string().contains("circular dependency: a -> b -> a"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn a_missing_dependency_names_who_needs_it() {
+        let known = tree(vec![cand("a", "1", 1, &["ghost"])]);
+        let e = install_plan(
+            &["a".to_string()],
+            &HashMap::new(),
+            &known,
+            Why::Explicit,
+            true,
+        )
+        .unwrap_err();
+        let s = e.to_string();
+        assert!(s.contains("ghost") && s.contains("needed by a"), "{s}");
+    }
+
+    #[test]
+    fn resolution_is_deterministic_for_identical_inputs() {
+        let known = tree(vec![
+            cand("zlib", "1", 1, &[]),
+            cand("curl", "1", 1, &["zlib"]),
+        ]);
+        let targets = ["curl".to_string()];
+        let a = install_plan(&targets, &HashMap::new(), &known, Why::Explicit, true).unwrap();
+        let b = install_plan(&targets, &HashMap::new(), &known, Why::Explicit, true).unwrap();
+        assert_eq!(format!("{a:?}"), format!("{b:?}"));
+    }
+}

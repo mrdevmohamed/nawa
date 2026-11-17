@@ -6,29 +6,26 @@
 //! (needed to compile) **and** `depends.run` (needed to work). Whatever is
 //! already installed counts as satisfied and its own dependencies are not
 //! walked — the same rule `nawa deps` uses.
+//!
+//! The install/update resolution core is `domain::planning::install`
+//! (design §8): this module adapts recipes and database records to the
+//! normalized candidate model and delegates, so there is exactly one
+//! resolver. `outdated`, `orphans` and `removal_order` are the query and
+//! removal planners; they move to `domain/planning/` with their use cases.
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::db::Entry;
+pub(crate) use crate::domain::planning::install::Why;
+use crate::domain::planning::install::{self, Candidate};
+use crate::domain::system::capability::Provides;
 use crate::recipe::Recipe;
 use crate::version::vercmp;
 
-/// Why a package is part of a plan; decides the `reason` recorded in the db.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Why {
-    /// named on the command line
-    Explicit,
-    /// pulled in as a dependency of something else
-    Dependency,
-    /// requested directly as a member of a package group
-    Group,
-    /// an installed package being brought to the recipe's version
-    /// (keeps whatever reason it already had)
-    Update,
-}
-
+/// The planning semantics of [`Why`] are the domain enum; the database
+/// reason mapping and the label stay here, with the adapters.
 impl Why {
     /// the `reason` argument of `install::install_archive`
     pub fn db_reason(self) -> crate::db::InstallReason {
@@ -87,7 +84,9 @@ fn deps_of(
     rec.build_deps().into_iter().chain(rec.depends.run.iter().cloned())
 }
 
-/// Plan the installation of `targets`.
+/// Plan the installation of `targets`: adapt recipes and database records
+/// to the normalized candidate model (§8.1) and delegate the resolution to
+/// the domain planner — the one resolver (design §8).
 ///
 /// * `target_why` — `Explicit` for `nawa install`, `Update` for `nawa update`
 /// * `with_deps`  — follow dependencies (`--no-deps` turns this off)
@@ -98,84 +97,47 @@ pub(crate) fn install_plan(
     target_why: Why,
     with_deps: bool,
 ) -> Result<Plan> {
-    let wanted: HashSet<&str> = targets.iter().map(|s| s.as_str()).collect();
-    let mut plan = Plan::default();
-    let mut done: HashSet<String> = HashSet::new();
-    let mut visiting: Vec<String> = Vec::new();
-
-    for t in targets {
-        visit(t, &wanted, installed, known, target_why, with_deps, &mut done, &mut visiting, &mut plan)?;
-    }
-    Ok(plan)
+    let installed_full: HashMap<String, String> = installed
+        .iter()
+        .map(|(name, e)| (name.clone(), full(&e.version, e.rel)))
+        .collect();
+    let candidates: BTreeMap<String, Candidate> = known
+        .iter()
+        .map(|(name, rec)| (name.clone(), candidate_of(rec)))
+        .collect();
+    let resolved =
+        install::install_plan(targets, &installed_full, &candidates, target_why, with_deps)?;
+    // The planner only resolves items for candidates it found, so every
+    // resolved name is a recipe here.
+    let items = resolved
+        .items
+        .into_iter()
+        .map(|it| Item {
+            rec: known
+                .get(&it.name)
+                .expect("the planner only resolves known candidates")
+                .clone(),
+            why: it.why,
+            replaces: it.replaces,
+        })
+        .collect();
+    Ok(Plan {
+        items,
+        up_to_date: resolved.up_to_date,
+    })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn visit(
-    name: &str,
-    wanted: &HashSet<&str>,
-    installed: &HashMap<String, Entry>,
-    known: &BTreeMap<String, Recipe>,
-    target_why: Why,
-    with_deps: bool,
-    done: &mut HashSet<String>,
-    visiting: &mut Vec<String>,
-    plan: &mut Plan,
-) -> Result<()> {
-    if done.contains(name) {
-        return Ok(());
+/// The normalized candidate (§8.1) of a source-backed package: build + run
+/// edges in declaration order; no capability declarations yet (the recipe
+/// `[capabilities]` spelling is the unwired B3 proposal).
+fn candidate_of(rec: &Recipe) -> Candidate {
+    Candidate {
+        name: rec.package.name.clone(),
+        version: rec.package.version.clone(),
+        rel: rec.package.rel,
+        deps: deps_of(rec).collect(),
+        provides: Provides::Unknown,
     }
-    let is_target = wanted.contains(name);
-    let rec = match known.get(name) {
-        Some(r) => r,
-        None if installed.contains_key(name) && !is_target => {
-            // installed from somewhere else (seed, third-party repo): satisfied
-            done.insert(name.to_string());
-            return Ok(());
-        }
-        None => {
-            let names: Vec<String> = known.keys().cloned().collect();
-            let hint = crate::suggest::hint(name, &names);
-            if is_target {
-                bail!("no recipe for `{name}`{hint}");
-            }
-            let chain = visiting.join(" -> ");
-            bail!("dependency `{name}` (needed by {chain}) is neither installed nor has a recipe{hint}");
-        }
-    };
-
-    // an installed package only needs work when it is a requested target and
-    // the recipe is newer; installed dependencies are simply satisfied
-    let current = installed.get(name);
-    if let Some(e) = current {
-        if !is_target || !newer_than_installed(rec, e) {
-            if is_target {
-                plan.up_to_date.push(name.to_string());
-            }
-            done.insert(name.to_string());
-            return Ok(());
-        }
-    }
-
-    if visiting.iter().any(|v| v == name) {
-        let mut cycle = visiting.clone();
-        cycle.push(name.to_string());
-        bail!("circular dependency: {}", cycle.join(" -> "));
-    }
-    visiting.push(name.to_string());
-    if with_deps {
-        for dep in deps_of(rec) {
-            visit(&dep, wanted, installed, known, target_why, with_deps, done, visiting, plan)?;
-        }
-    }
-    visiting.pop();
-
-    done.insert(name.to_string());
-    plan.items.push(Item {
-        rec: rec.clone(),
-        why: if is_target { target_why } else { Why::Dependency },
-        replaces: current.map(|e| full(&e.version, e.rel)),
-    });
-    Ok(())
 }
 
 /// Installed packages whose recipe is newer: `(installed entry, recipe)`,
