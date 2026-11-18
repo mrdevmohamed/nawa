@@ -190,6 +190,16 @@ supported legacy installations.
   `system plan` confidence fix landed. Do not mark these changes verified
   until a workflow run for the current branch head succeeds.
 
+* CI diagnosis and correction after the observation-hardening changes:
+  run [#44392991289](https://github.com/mrdevmohamed/nawa/actions/runs/44392991289)
+  built successfully and passed layering, the root/user matrices, all isolation
+  modes, CLI smoke and static musl. The Ubuntu 24.04 Clippy job failed only
+  because two new profile symlink fixtures ignored the `symlink()` result
+  (`unused_must_use`). Both fixture creations now use `.unwrap()` in commit
+  `c1234d2ac396aea3b5ec979b67419266fd413fc1`. This is a test-harness fix;
+  a fresh CI run on the current branch head is required before calling the
+  review fixes green.
+
 ## Completed phases
 
 ### Phase 0 — Complete source audit (2026-11-17)
