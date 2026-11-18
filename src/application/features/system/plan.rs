@@ -6,7 +6,6 @@
 //! migration. Exact signed-index and archive identities are retained for a
 //! later approval/execution integration; no resolver is repeated here.
 
-use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::application::features::system::observation::{
@@ -230,12 +229,12 @@ mod tests {
         let second = build(&root, Path::new("/proc"), None);
 
         assert!(matches!(
-            first.snapshot.observed.context,
+            &first.snapshot.observed.context,
             crate::domain::system::observation::Context::OfflineRoot { .. }
         ));
         assert_eq!(first.repository, RepositoryAssessment::NotConfigured);
         assert!(matches!(
-            first.transition,
+            &first.transition,
             TransitionAssessment::NotEvaluated { .. }
         ));
         assert_eq!(first.identity, second.identity);

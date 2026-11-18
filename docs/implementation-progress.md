@@ -1981,31 +1981,6 @@ The first read-only integration slice is implemented. Continue in this order:
    disposable BIOS/UEFI VMs with retained external-rescue evidence.
 
 
-1. Introduce one typed, immutable, read-only system plan that consumes a single
-   `SystemSnapshot`, effective profile/policy and authenticated repository
-   candidates, while retaining package action order, source, version, digest,
-   metadata trust, provenance, blockers and per-action explanations.
-2. Make the init-system resolver consume the policy model directly: required
-   selects the exact target, preferred remains advisory, forbidden rejects a
-   provider, and ambiguous/unknown/untrusted candidates remain unresolved.
-   Keep non-init policy domains descriptive until their own compatibility and
-   solver contracts are tested.
-3. Pin the resulting system plan to exact repository/index/artifact identities
-   across explicit approval and execution through the existing transaction
-   executor. Do not allow a fresh resolve to substitute a different artifact
-   after approval.
-4. Complete missing general solver semantics (version constraints, conflicts,
-   replacements) only as explicit metadata and deterministic resolution rules.
-5. Strengthen migration record and snapshot filesystem access with race-resistant
-   dirfd/openat operations where supported; keep no-follow and ownership checks.
-6. Bind boot snapshot manifests and root identity to migration records, then wire
-   capture/restore into coordinator and recovery with lifecycle cleanup and
-   tamper handling.
-7. Implement post-boot verification/finalization only after the restore path is
-   proven, then run interrupted-install, failed-boot, rescue and rollback cases
-   in disposable BIOS/UEFI VMs with retained external-rescue evidence.
-
-
 The real runit-to-systemd handler must remain fail-closed until the
 distribution-owned boot and recovery contracts are resolved:
 

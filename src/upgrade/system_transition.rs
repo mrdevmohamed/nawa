@@ -532,8 +532,16 @@ pub(crate) fn render(preview: &Preview) -> Vec<String> {
                     (None, _) => action.target.clone(),
                 };
                 lines.push(format!("    {marker} {} {version_text} — {}", action.name, action.reason));
+                let source = match action.source {
+                    PackageActionSource::AuthenticatedRepository => "authenticated repository",
+                };
+                let location = if action.download_url.is_some() {
+                    "per-package download location pinned"
+                } else {
+                    "index-relative archive location pinned"
+                };
                 lines.push(format!(
-                    "      source: authenticated repository; archive: {}; size: {} bytes; sha256: {}",
+                    "      source: {source}; {location}; archive: {}; size: {} bytes; sha256: {}",
                     action.archive, action.size, action.sha256
                 ));
             }
@@ -658,6 +666,13 @@ mod tests {
                 assert_eq!(to, "init-system=systemd");
                 assert_eq!(action_names(&package_actions), ["libfoo", "systemd"]);
                 assert!(package_actions.iter().all(|action| action.kind == PackageActionKind::Install));
+                assert!(package_actions.iter().all(|action| {
+                    action.source == PackageActionSource::AuthenticatedRepository
+                        && action.archive.ends_with(".nawa.tar.zst")
+                        && action.sha256 == "00".repeat(32)
+                        && action.size == 1
+                        && action.download_url.is_none()
+                }));
                 assert!(!action_names(&package_actions).contains(&"runit"));
             }
             other => panic!("expected Candidate, got {other:?}"),
