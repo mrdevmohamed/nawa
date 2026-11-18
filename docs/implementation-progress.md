@@ -92,9 +92,9 @@ supported legacy installations.
   state. It requires the trusted signed repository path and does not allow
   ordinary unsigned-repository flags to authorize a system transition.
   Offline/no-repository behavior is isolated in the integration fixture.
-* CI run [#44343755065](https://github.com/mrdevmohamed/nawa/actions/runs/44343755065)
+* CI run [#44347001099](https://github.com/mrdevmohamed/nawa/actions/runs/44347001099)
   completed successfully on tested commit
-  `4ea357c30a0f216c91b74c75b40ba9107fad35be`: build, Clippy, unit tests,
+  `d29ea2c2281fa2abf8c77d9782a1bb11d4b196bb`: build, Clippy, unit tests,
   root/user test matrices on Ubuntu 22.04 and 24.04, CLI smoke tests, static
   musl build, and all isolation modes passed.
 * Do not wire snapshot execution into the boot-changing coordinator until the
@@ -109,7 +109,7 @@ supported legacy installations.
   The same normalized inventory is passed into the authenticated provider
   resolver, avoiding a second package-database read during `nawa system plan`.
   Tests cover empty, populated and corrupt inventories, plus malformed
-  repository metadata. This integration is awaiting CI.
+  repository metadata. This integration passed the complete CI workflow on commit `d29ea2c2281fa2abf8c77d9782a1bb11d4b196bb` (Actions [#44347001099](https://github.com/mrdevmohamed/nawa/actions/runs/44347001099)).
 
 * Capability provider lookup is now a reusable pure-domain operation in
   `domain/planning/install.rs`: it distinguishes exact matches, multiple
@@ -117,11 +117,11 @@ supported legacy installations.
   whose declarations are unknown. The init-system transition preview now
   consumes this shared lookup instead of maintaining its own provider scan.
   Other domains remain non-actionable until their policy and compatibility
-  contracts are defined. This refactor is awaiting CI.
+  contracts are defined. This refactor passed the complete CI workflow on commit `d29ea2c2281fa2abf8c77d9782a1bb11d4b196bb` (Actions [#44347001099](https://github.com/mrdevmohamed/nawa/actions/runs/44347001099)).
 
-* The latest completed CI run before the next planning change passed on
-  commit `4ea357c30a0f216c91b74c75b40ba9107fad35be` (Actions
-  [#44343755065](https://github.com/mrdevmohamed/nawa/actions/runs/44343755065)):
+* The latest completed CI run passed on commit
+  `d29ea2c2281fa2abf8c77d9782a1bb11d4b196bb` (Actions
+  [#44347001099](https://github.com/mrdevmohamed/nawa/actions/runs/44347001099)):
   all build, Clippy, unit/integration, root/user, CLI smoke, isolation and
   static-musl jobs succeeded.
 * `nawa system plan` now treats repository open/parse/authentication failures
