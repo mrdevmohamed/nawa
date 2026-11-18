@@ -18,7 +18,7 @@ fn nawa() -> Command {
         "nawa-system-intelligence-no-repo-{}.toml",
         std::process::id()
     ));
-    fs::write(&config, "repo = \"\"\\n").unwrap();
+    fs::write(&config, "repo = \"\"\n").unwrap();
     command.env("NAWA_CONFIG", config);
     command.current_dir(std::env::temp_dir());
     command
