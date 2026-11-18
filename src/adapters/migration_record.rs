@@ -61,7 +61,7 @@ pub(crate) fn migrations_dir(root: &Path) -> PathBuf {
 /// a time for writers. The root itself is canonicalized once so an explicitly
 /// supplied root alias is resolved before the no-follow walk begins.
 fn checked_records_dir(root: &Path, create: bool) -> Result<Option<PathBuf>> {
-    use std::os::unix::fs::DirBuilderExt;
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
     let canonical_root = root
         .canonicalize()
@@ -645,6 +645,38 @@ mod tests {
             format!("{e:#}").contains("failed without a reason"),
             "{e:#}"
         );
+    }
+
+    #[test]
+    fn symlinked_state_directory_ancestors_are_refused_by_all_store_operations() {
+        for component in ["var", "lib", "nawa"] {
+            let root = crate::testutil::tmpdir(&format!("migrate-store-parent-link-{component}"));
+            let outside = crate::testutil::tmpdir(&format!("migrate-store-parent-outside-{component}"));
+            let record = MigrationRecord::new(&definition());
+
+            let link = match component {
+                "var" => root.join("var"),
+                "lib" => {
+                    std::fs::create_dir_all(root.join("var")).unwrap();
+                    root.join("var/lib")
+                }
+                "nawa" => {
+                    std::fs::create_dir_all(root.join("var/lib")).unwrap();
+                    root.join("var/lib/nawa")
+                }
+                _ => unreachable!(),
+            };
+            std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+            assert!(save(&root, &record).is_err(), "save followed {component}");
+            assert!(load(&root, &record.id).is_err(), "load followed {component}");
+            assert!(record_ids(&root).is_err(), "record_ids followed {component}");
+            assert!(remove(&root, &record.id).is_err(), "remove followed {component}");
+            assert!(
+                !outside.join("migrations").exists(),
+                "no state was created outside the selected root through {component}"
+            );
+        }
     }
 
     #[test]
