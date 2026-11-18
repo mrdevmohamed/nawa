@@ -95,7 +95,14 @@ fn system_plan_keeps_an_offline_runtime_unresolved_and_is_explicitly_read_only()
 #[test]
 fn system_plan_reports_unavailable_repository_metadata_as_unresolved() {
     let root = scratch("plan-repository-unavailable");
-    write_profile(&root, "usr/share/nawa/system-profile.toml", "schema = 1\\n[providers]\\ninit-system = \\"systemd\\"\\n");
+    write_profile(
+        &root,
+        "usr/share/nawa/system-profile.toml",
+        r#"schema = 1
+[providers]
+init-system = "systemd"
+"#,
+    );
     let repository = root.join("repository");
     fs::create_dir_all(&repository).unwrap();
     fs::write(repository.join("index.toml"), "not valid TOML").unwrap();
@@ -103,7 +110,7 @@ fn system_plan_reports_unavailable_repository_metadata_as_unresolved() {
     let config = root.join("nawa.toml");
     fs::write(
         &config,
-        format!("repo = {:?}\\n", repository.to_string_lossy()),
+        format!("repo = {:?}\n", repository.to_string_lossy()),
     )
     .unwrap();
     let output = nawa()
