@@ -311,6 +311,8 @@ pub(crate) fn restore(root: &Path, migration_id: &str) -> Result<SnapshotInfo> {
         }
     }
 
+    remove_untracked_runit_entries(&root, &validated)?;
+
     Ok(SnapshotInfo {
         migration_id: migration_id.to_string(),
         entries: validated.len(),
@@ -551,6 +553,7 @@ fn load_validated(
 
     let mut validated = Vec::with_capacity(manifest.entries.len());
     let mut seen = HashSet::new();
+    let mut service_directories = HashSet::new();
     for entry in manifest.entries {
         let relative = PathBuf::from(&entry.path);
         if !allowed_path(&relative) {
@@ -620,6 +623,11 @@ fn load_validated(
                         entry.path
                     );
                 }
+                if entry.path == "etc/runit/runsvdir/default"
+                    || entry.path.starts_with("etc/runit/runsvdir/default/")
+                {
+                    service_directories.insert(entry.path.clone());
+                }
                 Restorable::Directory { mode }
             }
             "symlink" => {
@@ -660,6 +668,28 @@ fn load_validated(
     if !seen.contains("etc/runit/runsvdir/default") {
         bail!("boot recovery manifest is missing the required runit service tree");
     }
+    for entry in &validated {
+        let value = entry.path.to_string_lossy();
+        if value.starts_with("etc/runit/runsvdir/default/")
+        {
+            let mut parent = entry.path.parent();
+            while let Some(path) = parent {
+                let parent_name = path.to_string_lossy();
+                if !parent_name.starts_with("etc/runit/runsvdir/default") {
+                    break;
+                }
+                if !service_directories.contains(parent_name.as_ref()) {
+                    bail!(
+                        "boot recovery manifest is missing runit service directory {parent_name:?}"
+                    );
+                }
+                if parent_name == "etc/runit/runsvdir/default" {
+                    break;
+                }
+                parent = path.parent();
+            }
+        }
+    }
     Ok(validated)
 }
 
@@ -669,6 +699,50 @@ fn valid_blob_name(name: &str) -> bool {
         && bytes.starts_with(b"entry-")
         && bytes.ends_with(b".bin")
         && bytes[6..9].iter().all(u8::is_ascii_digit)
+}
+
+/// Remove entries created under the runit service tree after capture. The
+/// manifest has already been fully validated and must contain every ancestor
+/// directory, so an unrecorded directory cannot contain a path we intend to
+/// preserve. Symlink leaves are removed as links and are never traversed.
+fn remove_untracked_runit_entries(root: &Path, validated: &[ValidatedEntry]) -> Result<()> {
+    const SERVICE_ROOT: &str = "etc/runit/runsvdir/default";
+    let expected: HashSet<String> = validated
+        .iter()
+        .map(|entry| entry.path.to_string_lossy().into_owned())
+        .filter(|path| path == SERVICE_ROOT || path.starts_with("etc/runit/runsvdir/default/"))
+        .collect();
+
+    let mut extras: Vec<PathBuf> = collect_runit_service_paths(root)?
+        .into_iter()
+        .filter(|path| !expected.contains(path))
+        .map(PathBuf::from)
+        .collect();
+    extras.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+
+    for relative in extras {
+        let destination = root.join(&relative);
+        let metadata = fs::symlink_metadata(&destination)
+            .with_context(|| format!("inspect untracked runit service entry {}", destination.display()))?;
+        if metadata.file_type().is_symlink() || metadata.is_file() {
+            fs::remove_file(&destination).with_context(|| {
+                format!("remove untracked runit service entry {}", destination.display())
+            })?;
+        } else if metadata.is_dir() {
+            fs::remove_dir(&destination).with_context(|| {
+                format!("remove untracked runit service directory {}", destination.display())
+            })?;
+        } else {
+            bail!(
+                "untracked runit service entry {} is not a regular file, directory or symlink",
+                destination.display()
+            );
+        }
+        if let Some(parent) = destination.parent() {
+            atomic::sync_directory(parent)?;
+        }
+    }
+    Ok(())
 }
 
 /// Return every regular-file or symlink leaf below the required runit service
@@ -1104,6 +1178,12 @@ mod tests {
             root.join("etc/runit/runsvdir/default/networking/agetty-link"),
         )
         .unwrap();
+        fs::create_dir_all(root.join("etc/runit/runsvdir/default/new-service")).unwrap();
+        fs::write(
+            root.join("etc/runit/runsvdir/default/new-service/run"),
+            b"new service after snapshot\n",
+        )
+        .unwrap();
 
         restore(&root, "faseela-runit-to-systemd-v1").unwrap();
         assert_eq!(
@@ -1124,6 +1204,7 @@ mod tests {
             fs::read_link(root.join("etc/runit/runsvdir/default/networking/agetty-link")).unwrap(),
             PathBuf::from("../agetty-tty1")
         );
+        assert!(!root.join("etc/runit/runsvdir/default/new-service").exists());
         assert!(info.entries >= FIXED_PATHS.len() + 8);
         let manifest: Manifest = toml::from_str(
             &fs::read_to_string(info.directory.join("manifest.toml")).unwrap(),
