@@ -12,9 +12,14 @@ fn nawa() -> Command {
     let mut command = Command::new(nawa_bin());
     for key in ["NAWA_CONFIG", "NAWA_ROOT", "NAWA_RECIPES", "NAWA_BUILDDIR", "NAWA_PROFILES", "NAWA_JOBS", "NAWA_REPO", "NAWA_INSTALL_MODE"] { command.env_remove(key); }
     command.env("NAWA_SYSCONFDIR", std::env::temp_dir().join("nawa-system-intelligence-no-sysconf"));
-    // Disable the built-in stable repository so this offline-root test proves
-    // the no-repository plan path without network or trust-store dependencies.
-    command.env("NAWA_REPO", "");
+    // The built-in stable repository is the last config fallback, so an empty
+    // NAWA_REPO cannot disable it. Use an isolated config file with repo="".
+    let config = std::env::temp_dir().join(format!(
+        "nawa-system-intelligence-no-repo-{}.toml",
+        std::process::id()
+    ));
+    fs::write(&config, "repo = \"\"\\n").unwrap();
+    command.env("NAWA_CONFIG", config);
     command.current_dir(std::env::temp_dir());
     command
 }
