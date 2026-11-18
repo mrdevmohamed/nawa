@@ -172,7 +172,7 @@ pub(crate) fn open_sourcing(
 pub(crate) struct PlanOutcome {
     /// recipe-backed packages in build + install order: dependencies first
     pub(crate) plan: plan::Plan,
-    /// repository packages without a recipe, installed last
+    /// binary-only repository actions, indexed by the unified plan order
     pub(crate) extras: Vec<RepoEntry>,
 }
 
@@ -252,12 +252,10 @@ pub(crate) fn provider_note(plan: &crate::application::features::package::plan::
     }
 }
 
-/// Plan the recipe-backed part of an install and split the remaining
-/// targets: repository-only packages that are current become up-to-date
-/// notices, the rest become `extras`; names that are neither a recipe nor a
-/// repository package go to the planner, which reports them with a
-/// "did you mean" hint. `profile` is the effective target profile (§8.1
-/// plan input; its init decision is explained when it declares one, §8.4).
+/// Plan the install across recipe candidates and authenticated, architecture-
+/// compatible repository candidates. Both source types enter one resolver;
+/// the resulting binary pool is only an adapter projection of that order.
+/// `profile` supplies the target system decision (§8.1–8.4).
 /// Notices accumulate here and the handler prints them even when planning
 /// fails, exactly as the inline code did.
 #[allow(clippy::too_many_arguments)]

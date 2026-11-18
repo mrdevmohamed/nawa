@@ -183,7 +183,7 @@ pub(crate) fn install_plan_with_binaries(
     ))
 }
 
-/// The normalized candidate (§8.1) of a source-backed package:/// The normalized candidate (§8.1) of a source-backed package: build + run
+/// The normalized candidate (§8.1) of a source-backed package: build + run
 /// edges in declaration order, plus the capabilities declared in its
 /// `[capabilities]` table (B3 chain §3). A recipe without the table is
 /// `Provides::Unknown`, never an empty declaration (§7).

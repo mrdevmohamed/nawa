@@ -11,7 +11,7 @@ use crate::domain::system::observation::{
     Confidence, Context, DesiredInit, ObservedSystem, RuntimeInit,
 };
 use crate::domain::package::metadata::RunDeps;
-use crate::domain::planning::install::{self, Candidate, Why};
+use crate::domain::planning::install::{self, Candidate, CandidateOrigin, Why};
 
 use super::{ArchiveAuth, OpenRepo};
 
@@ -178,6 +178,8 @@ fn build_from_observation(
                 // The actual install candidates below require known runtime
                 // dependencies before they can enter the package solver.
                 deps: Vec::new(),
+                dependencies_known: false,
+                origin: CandidateOrigin::Repository,
                 provides: metadata.provides,
             },
         );
@@ -253,6 +255,8 @@ fn build_from_observation(
                 version: entry.version.clone(),
                 rel: entry.rel,
                 deps,
+                dependencies_known: true,
+                origin: CandidateOrigin::Repository,
                 provides: metadata.provides,
             },
         );

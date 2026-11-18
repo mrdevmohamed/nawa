@@ -260,7 +260,7 @@ pub(crate) fn apply_transaction(
     Ok(Applied::Done { changed, seconds: started.elapsed().as_secs() })
 }
 
-/// Get the archive for one plan item: fetch it from the repository or build/// Get the archive for one plan item: fetch it from the repository or build
+/// Get the archive for one plan item: fetch it from the repository or build
 /// it. Returns the archive path, the repository index sha256 (repository
 /// copies only) and whether a signed index authenticated it. In `auto` mode a
 /// failed repository fetch falls back to a build (the recipe pins its
@@ -532,7 +532,7 @@ fn plan_view(plan: &plan::Plan, extras: &[repo::RepoEntry], sources: &[Source]) 
             }
             plan::PlanStep::Binary(index) => {
                 let re = &extras[index];
-                let why = plan.binary_whys.get(index).copied().unwrap_or(Why::Explicit);
+                let why = plan.binary_whys.get(index).copied().unwrap_or(plan::Why::Explicit);
                 let mut note = why.label().to_string();
                 if let Some(old) = plan.binary_replaces.get(index).and_then(Option::as_ref) {
                     note.push_str(&format!(" (replaces {old})"));
