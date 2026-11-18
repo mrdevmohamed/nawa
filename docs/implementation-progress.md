@@ -146,6 +146,31 @@ supported legacy installations.
   observation or masquerade as an empty package plan. A regression test covers
   a malformed local index; this change passed the complete CI workflow on commit `d29ea2c2281fa2abf8c77d9782a1bb11d4b196bb` (Actions [#44347001099](https://github.com/mrdevmohamed/nawa/actions/runs/44347001099)).
 
+## Review follow-up — system observation hardening (2026-11-18)
+
+* Init identity detection now matches exact executable basenames only:
+  `systemd`, `runit`, and `runit-init`. Provider words in parent paths
+  or lookalike executable names are retained as another/unknown identity,
+  never promoted to a supported init. Regression coverage lives in
+  `domain/system/identity.rs`.
+* Installed-init observation now resolves each candidate's parent path and
+  verifies that it remains below the canonical selected target root before
+  inspecting the final entry. This prevents an Offline root such as
+  `<root>/usr -> /host/usr` from leaking host-side provider evidence.
+  In-root merged-`usr` ancestor links remain accepted; the final entry is
+  still checked with `symlink_metadata`, preserving broken-link evidence.
+  Escape and in-root-link regressions live in
+  `application/features/system/detect.rs`.
+* Commits: `6933f9baa1a12c66ece6e185ec7a9530ae0b1be8` and
+  `b482a2bd284a0cd4b0b23ac788ff940e9eef7a19`.
+* Verification boundary: the last completed green CI before these changes is
+  run [#44387912047](https://github.com/mrdevmohamed/nawa/actions/runs/44387912047)
+  on `fcddf56e6f2b876e8f691cb3c27dddb668eef91d`. Run [#44391778761](https://github.com/mrdevmohamed/nawa/actions/runs/44391778761)
+  was created for `6933f9baa1a12c66ece6e185ec7a9530ae0b1be8` and was still
+  in progress when the second change landed; it does not verify the current
+  branch head. Treat both new hardening changes as **awaiting CI** until a
+  workflow run for the current head succeeds.
+
 ## Completed phases
 
 ### Phase 0 — Complete source audit (2026-11-17)
