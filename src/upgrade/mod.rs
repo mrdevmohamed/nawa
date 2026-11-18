@@ -32,6 +32,9 @@ pub(crate) use source::{archive_download_url, fetch_entry, open_repo, ArchiveAut
 pub(crate) use system_transition::{
     plan as plan_system_transition,
     render as render_system_transition,
+    PackageAction,
+    PackageActionKind,
+    PackageActionSource,
     Preview as SystemTransitionPreview,
 };
 
