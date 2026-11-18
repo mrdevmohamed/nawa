@@ -25,6 +25,7 @@ use crate::adapters::sign;
 use crate::domain::package::version::vercmp;
 
 mod source;
+mod system_transition;
 
 pub(crate) use source::{archive_download_url, fetch_entry, open_repo, ArchiveAuth, OpenRepo};
 
@@ -44,19 +45,30 @@ pub(crate) fn upgrade(
     opts: &UpgradeOpts,
 ) -> Result<()> {
     let open = open_repo(root, repo_ref, opts.allow_unsigned, opts.force)?;
-    let Some(plan) = build_plan(root, &open.index, recipes)? else {
+    let mut plan = build_plan(root, &open.index, recipes)?;
+    plan.system_transition = system_transition::plan(root, &open, &plan.installed);
+
+    if plan.upgrades.is_empty() && plan.system_transition.is_none() {
+        crate::nawa_info!("everything up to date ({} installed)", plan.installed.len());
         return Ok(());
-    };
+    }
     print_plan(&plan);
 
     if opts.dry_run {
         crate::nawa_info!("dry run — no changes made");
         return Ok(());
     }
+    if plan.upgrades.is_empty() {
+        crate::nawa_info!("no ordinary package upgrades to apply; any system migration remains a separate, explicitly authorized operation");
+        return Ok(());
+    }
 
-    // the plan is on the table; a real run needs an explicit go-ahead
-    // (scripts pass --yes; a piped stdin without it is refused, not guessed)
-    crate::presentation::confirm::confirm("nawa: proceed with the upgrade?", opts.yes)?;
+    // --yes authorizes only the ordinary package upgrade. The separately
+    // displayed system migration candidate is never applied by this command.
+    crate::presentation::confirm::confirm(
+        "nawa: proceed with the package upgrades? (system migration is not included)",
+        opts.yes,
+    )?;
     apply_plan(root, &open, &plan, opts)
 }
 
@@ -68,6 +80,7 @@ struct PlannedUpgrade<'a> {
 struct UpgradePlan<'a> {
     installed: HashMap<String, crate::adapters::db::Entry>,
     upgrades: Vec<PlannedUpgrade<'a>>,
+    system_transition: Option<system_transition::Preview>,
 }
 
 /// Compare the local database against the repository index and order the
@@ -76,7 +89,7 @@ fn build_plan<'a>(
     root: &Path,
     index: &'a repo::Index,
     recipes: &Path,
-) -> Result<Option<UpgradePlan<'a>>> {
+) -> Result<UpgradePlan<'a>> {
     let db = Db::new(root);
     let installed_map: HashMap<String, crate::adapters::db::Entry> =
         db.installed()?.into_iter().map(|e| (e.name.clone(), e)).collect();
@@ -97,8 +110,11 @@ fn build_plan<'a>(
     }
 
     if candidates.is_empty() {
-        crate::nawa_info!("everything up to date ({} installed)", installed_map.len());
-        return Ok(None);
+        return Ok(UpgradePlan {
+            installed: installed_map,
+            upgrades: Vec::new(),
+            system_transition: None,
+        });
     }
 
     // dependency order when the recipe tree is available; packages that have
@@ -128,22 +144,32 @@ fn build_plan<'a>(
             PlannedUpgrade { entry, new_version: new_version.clone() }
         })
         .collect();
-    Ok(Some(UpgradePlan { installed: installed_map, upgrades }))
+    Ok(UpgradePlan { installed: installed_map, upgrades, system_transition: None })
 }
 
 fn print_plan(plan: &UpgradePlan<'_>) {
     let pal = crate::presentation::color::Palette::auto(crate::presentation::color::Stream::Stdout);
-    crate::nawa_info!("{} package(s) to upgrade:", plan.upgrades.len());
-    for upgrade in &plan.upgrades {
-        let name = &upgrade.entry.name;
-        let cur = plan.installed.get(name).map(|e| e.version_full()).unwrap_or_default();
-        println!(
-            "  {} {} {} {}",
-            pal.name(&format!("{name:<24}")),
-            pal.ver(&cur),
-            pal.dim("->"),
-            pal.ok(&upgrade.new_version),
-        );
+    if plan.upgrades.is_empty() {
+        crate::nawa_info!("no ordinary package upgrades are required");
+    } else {
+        crate::nawa_info!("{} package(s) to upgrade:", plan.upgrades.len());
+        for upgrade in &plan.upgrades {
+            let name = &upgrade.entry.name;
+            let cur = plan.installed.get(name).map(|e| e.version_full()).unwrap_or_default();
+            println!(
+                "  {} {} {} {}",
+                pal.name(&format!("{name:<24}")),
+                pal.ver(&cur),
+                pal.dim("->"),
+                pal.ok(&upgrade.new_version),
+            );
+        }
+    }
+    if let Some(preview) = &plan.system_transition {
+        println!();
+        for line in system_transition::render(preview) {
+            println!("{line}");
+        }
     }
 }
 

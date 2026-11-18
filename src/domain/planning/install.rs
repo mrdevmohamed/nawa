@@ -16,11 +16,11 @@
 //!   resolver: `plan::install_plan` adapts recipes and database records to
 //!   candidates and delegates here.
 //! - Dependency forms supported: plain name edges, build + run for a
-//!   source-backed candidate (§8.1). No version ranges and no
-//!   provides-edges: binary-only candidates would carry their runtime
-//!   dependencies in authenticated metadata (the B3 chain, §6.3); until
-//!   that schema is agreed, repository-only packages stay unresolvable
-//!   extras, exactly as before.
+//!   source-backed candidate (§8.1). Authenticated schema-v4 binary
+//!   candidates also carry runtime dependency names and provided
+//!   capabilities; the repository adapter normalizes those values into
+//!   this same resolver. Version ranges, conflicts and replacements are
+//!   not yet represented by the current index schema.
 //! - Provider selection (§6.2, the exclusive init-system role) needs the
 //!   target profile (§7), which arrives with Phase 4. Candidates already
 //!   carry their declared capabilities, so nothing has to be re-modeled.

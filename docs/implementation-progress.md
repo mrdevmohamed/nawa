@@ -401,12 +401,7 @@ the handlers own only parsing, rendering and prompts.
 
 ## Current task
 
-**Phase 7 — system inspection UX and final quality gate.** Phase 7a/7b
-reorganized the source tree and synchronized the architecture audit. This
-branch now includes read-only `system status`, `system profile show`,
-`system plan` and `system explain init-system` commands with integration
-coverage. The Nawa-side migration framework is implemented; the real Faseela
-boot transition remains blocked by the external contracts listed below.
+**Phase 7 — system inspection UX, package-transition preview and final quality gate.** Phase 7a/7b reorganized the source tree and synchronized the architecture audit. The branch includes read-only `system status`, `system profile show`, `system plan` and `system explain init-system` commands, plus a separate `upgrade` migration-candidate preview using trusted index-v4 provider metadata and the existing dependency resolver. The preview is not an executable migration transaction: the current metadata lacks version ranges, conflicts and replacements. The Nawa-side migration framework is implemented; the real Faseela boot transition remains blocked by the external contracts listed below.
 Historical Phase 3–6 notes are retained as an implementation log; later
 entries and the blocker table record the current state.
 
