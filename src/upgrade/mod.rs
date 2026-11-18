@@ -64,23 +64,6 @@ pub(crate) fn upgrade_with_observation(
     upgrade_inner(root, repo_ref, recipes, Some(observed), opts)
 }
 
-/// Build the read-only system-transition preview from the same authenticated
-/// repository metadata and normalized installed state used by `nawa upgrade`.
-/// This keeps `nawa system plan` from growing a second provider resolver.
-/// System migrations always require a trusted signed index; callers cannot
-/// weaken this boundary with the ordinary package `--allow-unsigned` option.
-pub(crate) fn preview_system_transition(
-    root: &Path,
-    repo_ref: &RepoRef,
-    observed: &ObservedSystem,
-    installed_versions: &HashMap<String, String>,
-) -> Result<Option<Vec<String>>> {
-    let open = open_repo(root, repo_ref, false, false)?;
-    let Some(preview) = system_transition::plan(observed, &open, installed_versions) else {
-        return Ok(None);
-    };
-    Ok(Some(system_transition::render(&preview)))
-}
 
 fn upgrade_inner(
     root: &Path,
