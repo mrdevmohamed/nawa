@@ -10,8 +10,8 @@
 //! `apply` performs the real live-host preflight — canonical live root, no
 //! chroot/container, root privileges, observed source provider and declared
 //! target provider — and consumes an explicit, migration-specific approval
-//! (§12.4: a generic `--yes` is never enough). It then stages the approved
-//! package plan through the existing coordinator.
+//! (§12.4: a generic `--yes` is never enough). The coordinator is not invoked
+//! while the distribution-owned boot/recovery contract remains blocked.
 //!
 //! **Current production status:** the built-in handler's boot/initramfs side
 //! of the transition is still blocked on external Faseela/SAQ decisions
