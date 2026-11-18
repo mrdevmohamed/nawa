@@ -18,6 +18,7 @@
 use anyhow::Result;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use crate::adapters::config::InstallMode;
 use crate::adapters::db::Entry;
 use crate::domain::planning::install::{self, Candidate, CandidateOrigin};
 pub(crate) use crate::domain::planning::install::{InitSelection, Why};
@@ -76,8 +77,8 @@ pub(crate) struct Plan {
     pub binary_replaces: Vec<Option<String>>,
     /// repository packages whose runtime dependency closure is unknown.
     pub unknown_dependencies: Vec<String>,
-    /// requested targets that need nothing (already at the recipe's version
-    /// or newer) — reported, not rebuilt
+    /// requested targets that need nothing at the selected source version
+    /// or newer — reported, not rebuilt
     pub up_to_date: Vec<String>,
     /// the init-provider decision the target profile makes (§8.2)
     pub init: InitSelection,
@@ -114,7 +115,7 @@ pub(crate) fn install_plan(
     with_deps: bool,
 ) -> Result<Plan> {
     let (plan, _) = install_plan_with_binaries(
-        targets, installed, known, &BTreeMap::new(), profile, target_why, with_deps,
+        targets, installed, known, &BTreeMap::new(), InstallMode::Build, profile, target_why, with_deps,
     )?;
     Ok(plan)
 }
@@ -126,6 +127,7 @@ pub(crate) fn install_plan_with_binaries(
     installed: &HashMap<String, Entry>,
     known: &BTreeMap<String, Recipe>,
     binaries: &BTreeMap<String, RepoEntry>,
+    mode: InstallMode,
     profile: Option<&SystemProfile>,
     target_why: Why,
     with_deps: bool,
@@ -134,7 +136,7 @@ pub(crate) fn install_plan_with_binaries(
         .iter()
         .map(|(name, e)| (name.clone(), full(&e.version, e.rel)))
         .collect();
-    let candidates = candidates_of_with_binaries(known, binaries)?;
+    let candidates = candidates_of_with_binaries(known, binaries, mode)?;
     let init_providers = match profile.and_then(|p| p.init_capability()) {
         Some(cap) => install::init_provider_names(&candidates, &cap.identity),
         None => Vec::new(),
@@ -236,14 +238,61 @@ fn binary_candidate_of(entry: &RepoEntry) -> Result<Candidate> {
 fn candidates_of_with_binaries(
     known: &BTreeMap<String, Recipe>,
     binaries: &BTreeMap<String, RepoEntry>,
+    mode: InstallMode,
 ) -> Result<BTreeMap<String, Candidate>> {
-    let mut candidates = candidates_of(known);
-    for (name, entry) in binaries {
-        if !candidates.contains_key(name) {
-            candidates.insert(name.clone(), binary_candidate_of(entry)?);
+    match mode {
+        InstallMode::Build => Ok(candidates_of(known)),
+        // Strict repository mode must resolve the package that will actually
+        // be fetched, not the recipe that happens to share its name.
+        InstallMode::Repo => binaries
+            .iter()
+            .map(|(name, entry)| Ok((name.clone(), binary_candidate_of(entry)?)))
+            .collect(),
+        InstallMode::Auto | InstallMode::Ask => {
+            let mut candidates = candidates_of(known);
+            for (name, entry) in binaries {
+                match known.get(name) {
+                    Some(recipe) => {
+                        let recipe_version = full(&recipe.package.version, recipe.package.rel);
+                        let repository_version = full(&entry.version, entry.rel);
+                        if crate::domain::package::version::vercmp(
+                            &repository_version,
+                            &recipe_version,
+                        ) != std::cmp::Ordering::Less
+                        {
+                            // Auto can fetch this archive or fall back to the
+                            // recipe; Ask can choose either source. Preserve a
+                            // recipe action for the executor, but plan a
+                            // conservative union of both possible closures.
+                            let mut candidate = candidate_of(recipe);
+                            let binary = binary_candidate_of(entry)?;
+                            candidate.version = binary.version;
+                            candidate.rel = binary.rel;
+                            let mut seen: HashSet<String> =
+                                candidate.deps.iter().cloned().collect();
+                            for dependency in binary.deps {
+                                if seen.insert(dependency.clone()) {
+                                    candidate.deps.push(dependency);
+                                }
+                            }
+                            candidate.dependencies_known = binary.dependencies_known;
+                            // The selected artifact may change on fallback.
+                            // Only explain a provider when both source
+                            // declarations agree exactly.
+                            if candidate.provides != binary.provides {
+                                candidate.provides = Provides::Unknown;
+                            }
+                            candidates.insert(name.clone(), candidate);
+                        }
+                    }
+                    None => {
+                        candidates.insert(name.clone(), binary_candidate_of(entry)?);
+                    }
+                }
+            }
+            Ok(candidates)
         }
     }
-    Ok(candidates)
 }
 
 /// Installed packages whose candidate is newer: `(installed entry, recipe)`,

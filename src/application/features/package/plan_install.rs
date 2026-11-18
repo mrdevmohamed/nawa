@@ -283,7 +283,7 @@ pub(crate) fn plan(
     }
 
     let (plan, extras) = match plan::install_plan_with_binaries(
-        targets, installed, known, &binaries, profile.profile.as_ref(), why, with_deps,
+        targets, installed, known, &binaries, sourcing.mode, profile.profile.as_ref(), why, with_deps,
     ) {
         Ok(result) => result,
         Err(error) => {
@@ -334,6 +334,10 @@ mod tests {
     use std::path::PathBuf;
 
     fn rec(name: &str, ver: &str, run: &[&str]) -> Recipe {
+        rec_with_deps(name, ver, &[], run)
+    }
+
+    fn rec_with_deps(name: &str, ver: &str, build: &[&str], run: &[&str]) -> Recipe {
         let q = |l: &[&str]| {
             l.iter()
                 .map(|d| format!("{d:?}"))
@@ -342,13 +346,14 @@ mod tests {
         };
         toml::from_str(&format!(
             "[package]\nname = \"{name}\"\nversion = \"{ver}\"\n\
-             [depends]\nbuild = []\nrun = [{}]\n[build]\ninstall = \"true\"\n",
+             [depends]\nbuild = [{}]\nrun = [{}]\n[build]\ninstall = \"true\"\n",
+            q(build),
             q(run)
         ))
         .unwrap()
     }
 
-    fn entry(name: &str, ver: &str, reason: &str, run: &[&str]) -> Entry {
+    fn entry(    fn entry(name: &str, ver: &str, reason: &str, run: &[&str]) -> Entry {
         Entry {
             name: name.into(),
             version: ver.into(),
@@ -533,6 +538,155 @@ mod tests {
         assert!(notices.is_empty());
         assert_eq!(outcome.extras.len(), 1);
         assert_eq!(outcome.extras[0].version, "2.0");
+    }
+
+    #[test]
+    fn repo_mode_uses_only_repository_runtime_dependencies_for_recipe_names() {
+        let mut binary_app = repo_entry("app", "2.0", 1);
+        binary_app.rundeps = Some(vec!["binary-lib".to_string()]);
+        let sourcing = Sourcing {
+            mode: InstallMode::Repo,
+            ask: false,
+            open: Some(open_repo(vec![binary_app, repo_entry("binary-lib", "1.0", 1)])),
+        };
+        let known = BTreeMap::from([
+            ("app".to_string(), rec_with_deps("app", "1.0", &["build-only"], &[])),
+            ("build-only".to_string(), rec("build-only", "1.0", &[])),
+        ]);
+        let outcome = plan(
+            &["app".to_string()], &known, &inst(vec![]), &sourcing,
+            &no_profile(), Why::Explicit, true, &mut Vec::new(),
+        ).unwrap();
+
+        assert_eq!(
+            outcome.plan.order,
+            [plan::PlanStep::Binary(0), plan::PlanStep::Binary(1)]
+        );
+        assert_eq!(
+            outcome.extras.iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>(),
+            ["binary-lib", "app"]
+        );
+        assert!(outcome.plan.items.is_empty());
+    }
+
+    #[test]
+    fn build_mode_uses_recipe_dependencies_and_ignores_binary_candidates() {
+        let mut binary_app = repo_entry("app", "2.0", 1);
+        binary_app.rundeps = Some(vec!["binary-only".to_string()]);
+        let sourcing = Sourcing {
+            mode: InstallMode::Build,
+            ask: false,
+            open: Some(open_repo(vec![
+                binary_app,
+                repo_entry("binary-only", "1.0", 1),
+            ])),
+        };
+        let known = BTreeMap::from([
+            ("app".to_string(), rec_with_deps("app", "1.0", &["build-lib"], &[])),
+            ("build-lib".to_string(), rec("build-lib", "1.0", &[])),
+        ]);
+        let outcome = plan(
+            &["app".to_string()], &known, &inst(vec![]), &sourcing,
+            &no_profile(), Why::Explicit, true, &mut Vec::new(),
+        ).unwrap();
+
+        assert_eq!(
+            outcome.plan.order,
+            [plan::PlanStep::Recipe(0), plan::PlanStep::Recipe(1)]
+        );
+        assert_eq!(
+            outcome.plan.items.iter().map(|item| item.rec.package.name.as_str()).collect::<Vec<_>>(),
+            ["build-lib", "app"]
+        );
+        assert!(outcome.extras.is_empty());
+    }
+
+    #[test]
+    fn auto_mode_resolves_both_source_closures_and_uses_repository_version() {
+        let mut binary_app = repo_entry("app", "2.0", 1);
+        binary_app.rundeps = Some(vec!["binary-lib".to_string()]);
+        let sourcing = Sourcing {
+            mode: InstallMode::Auto,
+            ask: false,
+            open: Some(open_repo(vec![binary_app, repo_entry("binary-lib", "1.0", 1)])),
+        };
+        let known = BTreeMap::from([
+            ("app".to_string(), rec_with_deps("app", "1.0", &["build-lib"], &[])),
+            ("build-lib".to_string(), rec("build-lib", "1.0", &[])),
+        ]);
+        let outcome = plan(
+            &["app".to_string()], &known, &inst(vec![]), &sourcing,
+            &no_profile(), Why::Explicit, true, &mut Vec::new(),
+        ).unwrap();
+
+        assert_eq!(
+            outcome.plan.order,
+            [
+                plan::PlanStep::Recipe(0),
+                plan::PlanStep::Binary(0),
+                plan::PlanStep::Recipe(1),
+            ]
+        );
+        assert_eq!(
+            outcome.plan.items.iter().map(|item| item.rec.package.name.as_str()).collect::<Vec<_>>(),
+            ["build-lib", "app"]
+        );
+        assert_eq!(outcome.extras[0].name, "binary-lib");
+        assert!(matches!(sourcing.pick(&known["app"]).unwrap().0, Source::Repo(_)));
+    }
+
+    #[test]
+    fn ask_mode_resolves_the_union_until_the_global_source_choice() {
+        let mut binary_app = repo_entry("app", "2.0", 1);
+        binary_app.rundeps = Some(vec!["binary-lib".to_string()]);
+        let sourcing = Sourcing {
+            mode: InstallMode::Ask,
+            ask: true,
+            open: Some(open_repo(vec![binary_app, repo_entry("binary-lib", "1.0", 1)])),
+        };
+        let known = BTreeMap::from([
+            ("app".to_string(), rec_with_deps("app", "1.0", &["build-lib"], &[])),
+            ("build-lib".to_string(), rec("build-lib", "1.0", &[])),
+        ]);
+        let outcome = plan(
+            &["app".to_string()], &known, &inst(vec![]), &sourcing,
+            &no_profile(), Why::Explicit, true, &mut Vec::new(),
+        ).unwrap();
+
+        assert_eq!(
+            outcome.plan.order,
+            [
+                plan::PlanStep::Recipe(0),
+                plan::PlanStep::Binary(0),
+                plan::PlanStep::Recipe(1),
+            ]
+        );
+        assert_eq!(outcome.extras[0].name, "binary-lib");
+    }
+
+    #[test]
+    fn auto_mode_keeps_recipe_when_repository_version_is_older() {
+        let mut binary_app = repo_entry("app", "0.9", 1);
+        binary_app.rundeps = Some(vec!["binary-lib".to_string()]);
+        let sourcing = Sourcing {
+            mode: InstallMode::Auto,
+            ask: false,
+            open: Some(open_repo(vec![binary_app, repo_entry("binary-lib", "1.0", 1)])),
+        };
+        let known = BTreeMap::from([
+            ("app".to_string(), rec_with_deps("app", "1.0", &[], &["recipe-lib"])),
+            ("recipe-lib".to_string(), rec("recipe-lib", "1.0", &[])),
+        ]);
+        let outcome = plan(
+            &["app".to_string()], &known, &inst(vec![]), &sourcing,
+            &no_profile(), Why::Explicit, true, &mut Vec::new(),
+        ).unwrap();
+
+        assert_eq!(
+            outcome.plan.order,
+            [plan::PlanStep::Recipe(0), plan::PlanStep::Recipe(1)]
+        );
+        assert!(outcome.extras.is_empty());
     }
 
     #[test]
