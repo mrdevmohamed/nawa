@@ -77,22 +77,26 @@ supported legacy installations.
   `docs/design/system-intelligence-and-migrations.md`. It defines the shared
   observation, capability/provider, planning, policy, transaction and
   recovery contracts; it explicitly keeps migration as a high-risk consumer.
-* Migration record storage now validates each path component below the
+* Migration record storage now validates every path component below the
   canonical target root (`var/lib/nawa/migrations`) with no-follow metadata
-  checks, creates missing components one level at a time, and tightens the
-  final record directory to mode 0700. Tests exercise symlinked `var`,
-  `var/lib`, and `var/lib/nawa` ancestors across save/load/list/remove.
-  This is a path-hardening improvement, not yet a race-free dirfd/openat
-  implementation; that stronger boundary remains a security follow-up.
-* The latest observed CI run after these changes failed and must not be
-  described as green: Clippy rejected the now-test-only `record_path`
-  helper as dead code; the migration security integration test expected the
-  OS-style `Not a directory` diagnostic; and the offline system-plan test
-  inherited the built-in repository instead of explicitly disabling it.
-  The dead-code and diagnostic issues have been corrected, and the test now
-  supplies an isolated `NAWA_CONFIG` containing `repo = ""` (the empty
-  environment variable is intentionally ignored by config resolution). These corrections
-  require a fresh CI result.
+  checks, rejects directories owned by unrelated users or writable by group
+  or world, rejects untrusted/writable record files, creates missing
+  components one level at a time, and tightens the final record directory to
+  mode 0700. Tests exercise symlinked `var`, `var/lib`, and
+  `var/lib/nawa` ancestors across save/load/list/remove, plus writable
+  parent directories and record files. This is path hardening, not yet a
+  race-free dirfd/openat implementation; that stronger boundary remains a
+  security follow-up.
+* `nawa system plan` now reuses the authenticated transition preview from
+  `nawa upgrade`, including the same provider resolver and installed-package
+  state. It requires the trusted signed repository path and does not allow
+  ordinary unsigned-repository flags to authorize a system transition.
+  Offline/no-repository behavior is isolated in the integration fixture.
+* CI run [#44343755065](https://github.com/mrdevmohamed/nawa/actions/runs/44343755065)
+  completed successfully on tested commit
+  `4ea357c30a0f216c91b74c75b40ba9107fad35be`: build, Clippy, unit tests,
+  root/user test matrices on Ubuntu 22.04 and 24.04, CLI smoke tests, static
+  musl build, and all isolation modes passed.
 * Do not wire snapshot execution into the boot-changing coordinator until the
   record-store and snapshot path contracts are hardened and their integration
   tests are passing.
