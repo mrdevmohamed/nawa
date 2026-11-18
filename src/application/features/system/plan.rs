@@ -8,11 +8,15 @@
 
 use std::path::Path;
 
+use anyhow::{bail, Context, Result};
+
 use crate::application::features::system::observation::{
     self, PackageInventory, SystemSnapshot,
 };
 use crate::fetch::RepoRef;
-use crate::upgrade::{ArchiveAuth, OpenRepo, SystemTransitionPreview};
+use crate::upgrade::{
+    ArchiveAuth, OpenRepo, PackageActionKind, PackageActionSource, SystemTransitionPreview,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RepositoryKind {
@@ -68,6 +72,96 @@ pub(crate) struct SystemPlan {
     pub(crate) repository: RepositoryAssessment,
     pub(crate) transition: TransitionAssessment,
     pub(crate) identity: String,
+}
+
+/// Exact identities copied from the reviewed SystemPlan into migration approval.
+/// The ordered artifact vector is authoritative; execution must not re-solve.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SystemPlanPin {
+    pub(crate) identity: String,
+    pub(crate) migration_id: String,
+    pub(crate) source_fingerprint: String,
+    pub(crate) index_sha256: String,
+    pub(crate) signer_sha256: String,
+    pub(crate) observed_sha256: String,
+    pub(crate) installed_packages: Vec<(String, String)>,
+    pub(crate) artifacts: Vec<ArtifactPin>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ArtifactPin {
+    pub(crate) kind: PackageActionKind,
+    pub(crate) source: PackageActionSource,
+    pub(crate) name: String,
+    pub(crate) current: Option<String>,
+    pub(crate) target: String,
+    pub(crate) archive: String,
+    pub(crate) sha256: String,
+    pub(crate) size: u64,
+    pub(crate) download_url: Option<String>,
+}
+
+impl SystemPlan {
+    /// Only a fully resolved transition backed by a trusted signed v4 index
+    /// can be turned into an explicit migration approval.
+    pub(crate) fn approval_pin(&self, expected_migration_id: &str) -> Result<SystemPlanPin> {
+        let (source_fingerprint, index_sha256, signer_sha256) = match &self.repository {
+            RepositoryAssessment::Opened {
+                source_fingerprint,
+                index_schema: Some(4),
+                index_sha256,
+                trusted_signer_sha256: Some(signer),
+                authenticated_by_trusted_key: true,
+                archive_auth: ArchiveAuth::SignedIndexSha256,
+                ..
+            } => (source_fingerprint.clone(), index_sha256.clone(), signer.clone()),
+            _ => bail!("migration approval requires a trusted signed schema-v4 repository index"),
+        };
+
+        let actions = match &self.transition {
+            TransitionAssessment::Preview(SystemTransitionPreview::Candidate {
+                id,
+                package_actions,
+                ..
+            }) if id == expected_migration_id => package_actions,
+            TransitionAssessment::Preview(SystemTransitionPreview::Candidate { id, .. }) => {
+                bail!("the reviewed plan selects migration {id}, not {expected_migration_id}")
+            }
+            TransitionAssessment::Preview(SystemTransitionPreview::Unresolved { reason, .. }) => {
+                bail!("an unresolved system plan cannot be approved: {reason}")
+            }
+            TransitionAssessment::NotEvaluated { reason } => {
+                bail!("system transition was not evaluated: {reason}")
+            }
+            TransitionAssessment::NoChange => {
+                bail!("the reviewed SystemPlan contains no init-system transition to approve")
+            }
+        };
+
+        let installed_packages = installed_packages(&self.snapshot)?;
+        let artifacts = actions.iter().map(|action| ArtifactPin {
+            kind: action.kind,
+            source: action.source,
+            name: action.name.clone(),
+            current: action.current.clone(),
+            target: action.target.clone(),
+            archive: action.archive.clone(),
+            sha256: action.sha256.clone(),
+            size: action.size,
+            download_url: action.download_url.clone(),
+        }).collect();
+
+        Ok(SystemPlanPin {
+            identity: self.identity.clone(),
+            migration_id: expected_migration_id.to_string(),
+            source_fingerprint,
+            index_sha256,
+            signer_sha256,
+            observed_sha256: fingerprint(format!("{:?}", self.snapshot.observed).as_bytes()),
+            installed_packages,
+            artifacts,
+        })
+    }
 }
 
 pub(crate) fn build(root: &Path, proc: &Path, repository: Option<&str>) -> SystemPlan {
@@ -145,6 +239,89 @@ pub(crate) fn build(root: &Path, proc: &Path, repository: Option<&str>) -> Syste
         transition,
         identity,
     }
+}
+
+/// Verify an approved plan without running the dependency solver again.
+/// Current observations, inventory, repository proof and every ordered archive
+/// identity must still match the explicit approval.
+pub(crate) fn verify_approval_pin(
+    root: &Path,
+    proc: &Path,
+    repository: &str,
+    pin: &SystemPlanPin,
+) -> Result<()> {
+    if !pin.identity.starts_with("sp-") || pin.identity.len() != 67 {
+        bail!("migration approval contains an invalid SystemPlan identity");
+    }
+    if pin.migration_id != crate::domain::system::migration::builtin_faseela_runit_to_systemd().id {
+        bail!("migration approval is bound to an unknown migration definition");
+    }
+
+    let snapshot = observation::observe(root, proc);
+    let current_observed = fingerprint(format!("{:?}", snapshot.observed).as_bytes());
+    if current_observed != pin.observed_sha256 {
+        bail!("observed system facts changed after approval; create and review a new SystemPlan");
+    }
+    if installed_packages(&snapshot)? != pin.installed_packages {
+        bail!("installed package inventory changed after approval; create and review a new SystemPlan");
+    }
+
+    let repo_ref = RepoRef::parse(repository).context("parse approved repository source")?;
+    let (_, source_fingerprint) = repository_source(&repo_ref);
+    if source_fingerprint != pin.source_fingerprint {
+        bail!("configured repository source changed after approval");
+    }
+
+    let open = crate::upgrade::open_repo(root, &repo_ref, false, false)
+        .context("re-open and authenticate approved repository")?;
+    if fingerprint(&open.index_bytes) != pin.index_sha256 {
+        bail!("authenticated repository index changed after approval; refusing stale migration plan");
+    }
+    let signer = open.signer_public.as_deref().map(fingerprint);
+    if signer.as_deref() != Some(pin.signer_sha256.as_str()) {
+        bail!("trusted repository signing key changed after approval");
+    }
+    if open.index.repository.as_ref().map(|meta| meta.schema) != Some(4)
+        || open.archive_auth != ArchiveAuth::SignedIndexSha256
+    {
+        bail!("approved repository no longer satisfies the signed schema-v4 migration policy");
+    }
+
+    for artifact in &pin.artifacts {
+        if artifact.source != PackageActionSource::AuthenticatedRepository {
+            bail!("package {} has an unsupported source in the approved plan", artifact.name);
+        }
+        let entry = open.index.find(&artifact.name).with_context(|| {
+            format!("approved package {} is no longer present in the authenticated index", artifact.name)
+        })?;
+        let version = crate::domain::planning::install::version_rel(&entry.version, entry.rel);
+        if version != artifact.target
+            || entry.file != artifact.archive
+            || entry.sha256 != artifact.sha256
+            || entry.size != artifact.size
+            || entry.download_url != artifact.download_url
+        {
+            bail!(
+                "authenticated artifact for {} changed after approval; expected {} with sha256 {}",
+                artifact.name, artifact.archive, artifact.sha256
+            );
+        }
+    }
+    Ok(())
+}
+
+fn installed_packages(snapshot: &SystemSnapshot) -> Result<Vec<(String, String)>> {
+    let packages = match &snapshot.packages {
+        PackageInventory::Available(packages) => packages,
+        PackageInventory::Unavailable { reason } => {
+            bail!("installed package inventory is unavailable: {reason}");
+        }
+    };
+    let mut installed: Vec<_> = packages.iter()
+        .map(|(name, version)| (name.clone(), version.clone()))
+        .collect();
+    installed.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(installed)
 }
 
 fn repository_source(repo_ref: &RepoRef) -> (RepositoryKind, String) {
