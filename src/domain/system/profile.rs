@@ -271,9 +271,11 @@ fn normalize_identity(role: &str, identity: &str, kind: &str) -> Result<String, 
 fn providers_from_policies(
     policies: &BTreeMap<String, ProviderPolicy>,
 ) -> BTreeMap<String, String> {
-    policies.iter().filter_map(|(role, policy)| {
-        (policy.required.len() == 1).then(|| (role.clone(), policy.required[0].clone()))
-    }).collect()
+    policies
+        .iter()
+        .filter(|(_, policy)| policy.required.len() == 1)
+        .map(|(role, policy)| (role.clone(), policy.required[0].clone()))
+        .collect()
 }
 
 /// Normalize a provider role like [`Capability::parse`] normalizes a

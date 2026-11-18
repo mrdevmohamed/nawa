@@ -233,6 +233,13 @@ used Rust's reserved word `override`, and the advisory mismatch arm returned
 `Option<Preview>` from a match that must return the observation tuple. Both
 are fixed in the follow-up commit, together with the corresponding preview
 assertion. The original run is a failed compile and does not verify this slice.
+The full CI retry on `bed79b1` compiled the library and binaries, but
+Clippy rejected two new patterns under `-D warnings`: `filter_map_bool_then`
+and `question_mark`. The follow-up replaces the boolean `filter_map` with
+`filter().map()` and uses `?` for optional policy lookup; no lint is
+suppressed. The run [#44396422150](https://github.com/mrdevmohamed/nawa/actions/runs/44396422150)
+therefore remains a failed verification of `bed79b1`, not the final result.
+
 The retry on `b1b8155` exposed two test-only `EffectiveProfile` fixtures
 in `application/features/package/plan_install.rs` that needed the new
 `policy_sources` field, and a legacy `from_doc` adapter used only by tests.

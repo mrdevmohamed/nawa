@@ -67,13 +67,10 @@ fn build_from_observation(
     let (target, profile_source) = match &observed.desired {
         DesiredInit::Declared { identity, source } => (identity.clone(), source.clone()),
         DesiredInit::NotDeclared => {
-            let Some(policy) = observed
+            let policy = observed
                 .effective_profile
                 .as_ref()
-                .and_then(|profile| profile.provider_policy("init-system"))
-            else {
-                return None;
-            };
+                .and_then(|profile| profile.provider_policy("init-system"))?;
             if policy.preferred.is_empty() && policy.forbidden.is_empty() {
                 return None;
             }
