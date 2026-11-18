@@ -115,8 +115,8 @@ use crate::application::ports::user_interaction::UserInteraction;
 use crate::application::context::Ctx;
 use crate::adapters::db::InstallReason;
 use crate::domain::system::migration::{
-    transition, LegacyInitHandoff, MigrationDefinition, MigrationRecord, MigrationState,
-    StepOutcome, StepRecord, Transition,
+    transition, MigrationDefinition, MigrationRecord, MigrationState, StepOutcome, StepRecord,
+    Transition,
 };
 use crate::adapters::lock;
 use crate::adapters::migration_record as store;
