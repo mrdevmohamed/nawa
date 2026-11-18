@@ -168,6 +168,16 @@ supported legacy installations.
   stricter authenticated transition preview. Both indicated/proven rendering
   cases are covered in `commands/system.rs`
   (commit `6ac21c75ff96ec8eec26f25165a629f756c8e431`).
+* Effective profile loading now applies the same target-root boundary:
+  existing distribution/default and administrator-override files are
+  canonicalized and rejected when they or their nearest existing ancestors
+  resolve outside the selected root. In-root directory aliases remain valid.
+  Regression coverage includes external ancestor links, external final-file
+  links and accepted in-root aliases in
+  `application/features/system/profile.rs` (commit
+  `38da9c11b173b968f91665f77a3c846c5942a450`). This remains a containment
+  check, not a race-resistant dirfd/openat implementation.
+
 * Verification boundary: the last completed green CI before these changes is
   run [#44387912047](https://github.com/mrdevmohamed/nawa/actions/runs/44387912047)
   on `fcddf56e6f2b876e8f691cb3c27dddb668eef91d`. Run [#44392392276](https://github.com/mrdevmohamed/nawa/actions/runs/44392392276)
