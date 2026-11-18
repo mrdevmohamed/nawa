@@ -129,7 +129,7 @@ supported legacy installations.
   system facts. This is an inspection command: unavailable or untrusted
   repository metadata must be visible as a blocker, not erase the system
   observation or masquerade as an empty package plan. A regression test covers
-  a malformed local index; this change is awaiting CI.
+  a malformed local index; this change passed the complete CI workflow on commit `d29ea2c2281fa2abf8c77d9782a1bb11d4b196bb` (Actions [#44347001099](https://github.com/mrdevmohamed/nawa/actions/runs/44347001099)).
 
 ## Completed phases
 
