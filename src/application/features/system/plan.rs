@@ -250,7 +250,10 @@ pub(crate) fn verify_approval_pin(
     repository: &str,
     pin: &SystemPlanPin,
 ) -> Result<()> {
-    if !pin.identity.starts_with("sp-") || pin.identity.len() != 67 {
+    let digest = pin.identity.strip_prefix("sp-").unwrap_or_default();
+    if digest.len() != 64
+        || !digest.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
         bail!("migration approval contains an invalid SystemPlan identity");
     }
     if pin.migration_id != crate::domain::system::migration::builtin_faseela_runit_to_systemd().id {
@@ -287,9 +290,27 @@ pub(crate) fn verify_approval_pin(
         bail!("approved repository no longer satisfies the signed schema-v4 migration policy");
     }
 
+    let mut seen_packages = std::collections::BTreeSet::new();
     for artifact in &pin.artifacts {
+        if !seen_packages.insert(artifact.name.as_str()) {
+            bail!("approved SystemPlan contains duplicate package action {}", artifact.name);
+        }
         if artifact.source != PackageActionSource::AuthenticatedRepository {
             bail!("package {} has an unsupported source in the approved plan", artifact.name);
+        }
+        let installed_version = pin.installed_packages.iter()
+            .find(|(name, _)| name == &artifact.name)
+            .map(|(_, version)| version.as_str());
+        match artifact.kind {
+            PackageActionKind::Install if artifact.current.is_some() || installed_version.is_some() => {
+                bail!("install action for {} no longer matches the approved installed state", artifact.name);
+            }
+            PackageActionKind::Upgrade | PackageActionKind::Keep
+                if artifact.current.as_deref() != installed_version =>
+            {
+                bail!("current version for {} no longer matches the approved action", artifact.name);
+            }
+            _ => {}
         }
         let entry = open.index.find(&artifact.name).with_context(|| {
             format!("approved package {} is no longer present in the authenticated index", artifact.name)
@@ -397,6 +418,133 @@ mod tests {
 
     fn root(tag: &str) -> std::path::PathBuf {
         crate::testutil::tmpdir(tag)
+    }
+
+    #[test]
+    fn approval_pin_preserves_ordered_artifacts_and_exact_digests() {
+        use crate::domain::system::identity::InitKind;
+        use crate::domain::system::observation::{
+            Confidence, Context, DesiredInit, InstalledInit, RuntimeInit,
+        };
+        use crate::domain::system::profile::{ProviderPolicy, SystemProfile};
+        use std::collections::BTreeMap;
+
+        let snapshot = SystemSnapshot {
+            observed: crate::domain::system::observation::ObservedSystem {
+                root: std::path::PathBuf::from("/"),
+                context: Context::LiveHost { evidence: Vec::new() },
+                runtime: RuntimeInit::Observed {
+                    kind: InitKind::Runit,
+                    confidence: Confidence::Proven,
+                    evidence: Vec::new(),
+                },
+                installed: InstalledInit::default(),
+                desired: DesiredInit::Declared {
+                    identity: "systemd".to_string(),
+                    source: "/usr/share/nawa/system-profile.toml".to_string(),
+                },
+                policy_sources: BTreeMap::new(),
+                effective_profile: Some(SystemProfile {
+                    schema: 2,
+                    distribution: Some("faseela".to_string()),
+                    profile: Some("desktop".to_string()),
+                    architecture: Some(std::env::consts::ARCH.to_string()),
+                    providers: BTreeMap::from([("init-system".to_string(), "systemd".to_string())]),
+                    policies: BTreeMap::from([(
+                        "init-system".to_string(),
+                        ProviderPolicy {
+                            required: vec!["systemd".to_string()],
+                            preferred: Vec::new(),
+                            forbidden: Vec::new(),
+                        },
+                    )]),
+                }),
+            },
+            packages: PackageInventory::Available(std::collections::HashMap::from([
+                ("runit".to_string(), "2.1-1".to_string()),
+            ])),
+        };
+        let action = |name: &str, digest: &str| crate::upgrade::PackageAction {
+            kind: PackageActionKind::Install,
+            source: PackageActionSource::AuthenticatedRepository,
+            name: name.to_string(),
+            current: None,
+            target: "1.0-1".to_string(),
+            reason: "runtime dependency".to_string(),
+            archive: format!("{name}-1.0-1.nawa.tar.zst"),
+            sha256: digest.to_string(),
+            size: 123,
+            download_url: Some(format!("https://example.test/{name}.tar.zst")),
+        };
+        let plan = SystemPlan {
+            snapshot,
+            repository: RepositoryAssessment::Opened {
+                kind: RepositoryKind::Remote,
+                source_fingerprint: "a".repeat(64),
+                index_schema: Some(4),
+                index_sha256: "b".repeat(64),
+                trusted_signer_sha256: Some("c".repeat(64)),
+                authenticated_by_trusted_key: true,
+                archive_auth: ArchiveAuth::SignedIndexSha256,
+                package_count: 2,
+            },
+            transition: TransitionAssessment::Preview(SystemTransitionPreview::Candidate {
+                id: "faseela-runit-to-systemd-v1".to_string(),
+                version: 1,
+                from: "init-system=runit".to_string(),
+                to: "init-system=systemd".to_string(),
+                profile_source: "/usr/share/nawa/system-profile.toml".to_string(),
+                provider_package: "systemd".to_string(),
+                package_actions: vec![action("libfoo", &"1".repeat(64)), action("systemd", &"2".repeat(64))],
+                requires_reboot: true,
+            }),
+            identity: format!("sp-{}", "d".repeat(64)),
+        };
+
+        let pin = plan.approval_pin("faseela-runit-to-systemd-v1").unwrap();
+        assert_eq!(pin.identity, plan.identity);
+        assert_eq!(pin.installed_packages, vec![("runit".to_string(), "2.1-1".to_string())]);
+        assert_eq!(pin.artifacts.iter().map(|item| item.name.as_str()).collect::<Vec<_>>(), ["libfoo", "systemd"]);
+        assert_eq!(pin.artifacts[0].sha256, "1".repeat(64));
+        assert_eq!(pin.artifacts[1].sha256, "2".repeat(64));
+    }
+
+    #[test]
+    fn approval_pin_rejects_unresolved_or_untrusted_repository_plans() {
+        let root = root("system-plan-pin-negative");
+        let plan = build(&root, Path::new("/proc"), None);
+        assert!(plan.approval_pin("faseela-runit-to-systemd-v1").is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn verification_rejects_changed_observations_before_repository_access() {
+        let root = root("system-plan-pin-stale-observation");
+        let snapshot = observation::observe(&root, Path::new("/proc"));
+        let pin = SystemPlanPin {
+            identity: format!("sp-{}", "a".repeat(64)),
+            migration_id: "faseela-runit-to-systemd-v1".to_string(),
+            source_fingerprint: "b".repeat(64),
+            index_sha256: "c".repeat(64),
+            signer_sha256: "d".repeat(64),
+            observed_sha256: fingerprint(format!("{:?}", snapshot.observed).as_bytes()),
+            installed_packages: installed_packages(&snapshot).unwrap(),
+            artifacts: Vec::new(),
+        };
+        let profile = root.join("usr/share/nawa/system-profile.toml");
+        fs::create_dir_all(profile.parent().unwrap()).unwrap();
+        fs::write(
+            &profile,
+            "schema = 1\n[providers]\ninit-system = \"systemd\"\n",
+        ).unwrap();
+
+        let error = verify_approval_pin(&root, Path::new("/proc"), "unused-repository", &pin)
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("observed system facts changed"),
+            "{error:#}"
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
