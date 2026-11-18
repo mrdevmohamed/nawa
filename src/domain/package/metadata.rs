@@ -1,9 +1,8 @@
 //! The package metadata chain: recipe declaration → archive `.PKGINFO` →
 //! authenticated duplication in the signed repository index (design §6.3).
-//! This is the B3 schema proposal (§16.1–16.2), specified in
-//! docs/design/package-metadata-chain.md and modelled here as a pure domain
-//! type so the solver (§8) can consume normalized values from any stage of
-//! the chain.
+//! The B3 schema is implemented and wired: recipe, archive and signed
+//! index v4 adapters all consume this pure domain model, and provider
+//! explanations consume authenticated metadata from that chain.
 //!
 //! The chain carries exactly one value per package, flowing recipe →
 //! archive → index; no stage edits or re-interprets it (§6.3: recipe,
