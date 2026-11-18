@@ -97,6 +97,16 @@ supported legacy installations.
   `d29ea2c2281fa2abf8c77d9782a1bb11d4b196bb`: build, Clippy, unit tests,
   root/user test matrices on Ubuntu 22.04 and 24.04, CLI smoke tests, static
   musl build, and all isolation modes passed.
+* The boot snapshot adapter now captures the complete runit service tree
+  rooted at `/etc/runit/runsvdir/default`: regular files, symlink leaves,
+  nested and empty directories, and directory permission modes. The walk
+  sorts entries deterministically, never follows directory symlinks, rejects
+  special files and unsafe paths, and enforces a 999-entry cap. Snapshot
+  manifest schema is now v2 to encode directory entries. Regression coverage
+  exercises nested service files, a relative symlink, and restoration of an
+  empty directory's mode. CI for this change is running; do not mark this
+  adapter verified until the latest branch-head workflow passes.
+
 * Do not wire snapshot execution into the boot-changing coordinator until the
   record-store and snapshot path contracts are hardened and their integration
   tests are passing.
