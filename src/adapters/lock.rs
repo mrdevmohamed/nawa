@@ -132,7 +132,6 @@ pub(crate) fn reject_nested_marker(marker_present: bool) -> Result<()> {
     }
     Ok(())
 }
-}
 
 /// The gate-free inner acquisition used only by `acquire_for_migration`.
 /// `acquire` itself keeps its gate check on the ordinary path.
