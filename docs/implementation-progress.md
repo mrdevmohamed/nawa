@@ -13,7 +13,7 @@
 | 0 — Source audit | **DONE** (this session) |
 | 1 — Structural refactor + service removal | **DONE** (1a, 1b, 1c, 1d, 1e — 1e is the deferred apply-transaction extraction) |
 | 2 — Init identity & capability foundation | **DONE** (detection + capability/identity domain model) |
-| 3 — Metadata & capability resolution | **DONE** (B3 proposal; the whole package planner — install, outdated, orphans, removal ordering — in `domain/planning/`, behavior verified byte-identical) |
+| 3 — Metadata & capability resolution | **DONE** (B3 proposal is now wired: recipe `[capabilities]` → `.PKGINFO provides` → signed index v4 → solver, legacy v1–v3 unchanged; the whole package planner — install, outdated, orphans, removal ordering — in `domain/planning/`) |
 | 4 — System profiles & planning | **DONE** (profile model + merge rules + loader §7; profile wired into plan generation §8.1–8.4 — install/update report the init decision, invalid profiles fail closed; byte-identity + probes verified. Stage-3 exit met: dry-run plans explain every init-provider and package decision without managing services. The candidate→provider capability comparison still awaits the B3 index schema — see blockers) |
 | 5 — Migration engine | in progress: the migration domain model (§10.1–§10.3) + the durable record store (top-level `migration_record.rs`) + the persistent mutation-gate check wired into every exclusive acquisition (§10.3, block-only) + the read-only `system migrate` inspection CLI (§12.2, slice 3) + the migration coordinator with the typed in-process permit and the `planned → preparing → awaiting-reboot / failed / needs-recovery` lifecycle (§10.3–§10.4, slice 4) + durable write-ahead/lifecycle hardening (5B) + crash recovery and explicit live-host resume (5C) + adversarial security verification (5D: §13 gates, lock ownership, no-follow/permissions, handler allowlist and plugin boundary, demonstrated by tests); next: metadata v4 wiring, Phase 6 blockers |
 | 6 — Faseela runit→systemd migration | **BLOCKED** (see blockers) |
@@ -1222,6 +1222,33 @@ adversarial integration tests), store/record hardening and negative probes:
   full battery (667 bin tests + all integration targets, 1 pre-existing
   toolchain-under-`/home` env failure), all new/touched files rustfmt-clean.
 
+### B3 wiring — Metadata Index v4 (recipe → archive → signed index → solver)
+
+The proposal in `docs/design/package-metadata-chain.md` is now the shipped
+contract; the pure reference model lost its `dead_code` allowance and every
+item has a production caller.
+
+* **Recipe → archive:** `[capabilities]` is an additive, optionally-present
+  table (`Option<Capabilities>`: absent = unknown, empty = explicit none);
+  entries are normalized once at validation and written verbatim to the main
+  archive's `.PKGINFO`. Sub-packages get `provides = ` (never the main
+  package's capability). Legacy recipes/archives are byte-identical.
+* **Index v4:** opt-in `repo-create --index-version 4`; the signed index
+  duplicates `rundeps`/`provides`, rejects unknown fields (strict entry
+  parse), requires both fields, and refuses publication of an archive with no
+  `provides` line. v1/v2/v3 indexes remain readable and map to `unknown`.
+* **Fetch chain:** the verified snapshot's `.PKGINFO` is compared with the
+  signed index fields after digest verification and before any payload step;
+  a mismatch is a hard error.
+* **Solver:** source candidates carry normalized `provides`; repository
+  metadata is normalized from authenticated index bytes (legacy → unknown);
+  the plan explains which planned package provides the selected init.
+* **Tests:** 4 new repo tests (v4 creation/strictness/no-provides refusal and
+  legacy compatibility), 2 build tests, 2 recipe tests, 1 slim test, 1
+  install chain test, 1 plan explanation test. Full battery: **678 bin tests**
+  (all integration targets green, 1 pre-existing env failure), clippy/layering
+  clean, both smoke suites pass, all touched files rustfmt-clean.
+
 ## Changed files (this phase, updated as work lands)
 
 * `docs/architecture-audit.md` (new, Phase 0)
@@ -1426,6 +1453,20 @@ adversarial integration tests), store/record hardening and negative probes:
     `FailPoint` is `pub(crate)` under `cfg(test)`; production paths
     unchanged)
 
+* B3 wiring:
+  * `src/domain/package/metadata.rs` (central `normalize_list` /
+    `normalize_provides` / `normalize_rundeps` / `metadata_from_options`,
+    `IndexEntryV4::validate` exposed; `dead_code` allowance removed)
+  * `src/recipe/{model,validate,mod}.rs` (additive `[capabilities]` table and
+    validation tests)
+  * `src/build/package.rs` (`pkginfo_header` writes `provides`, 2 tests),
+    `src/slim.rs` (sub-packages clear `provides`, 1 test)
+  * `src/repo/{model,create,validate,mod}.rs` (schema v4, strict entry parse,
+    publication rule, 4 tests)
+  * `src/install/mod.rs` (`IndexProof::metadata` + chain check after digest,
+    1 test), `src/application/features/package/{apply_transaction,plan_install}.rs`
+    (`Source::Repo` boxed, provider note, test), `src/upgrade/{source,mod}.rs`,
+    `src/plan.rs`
 * Phase 5 (5D security, in progress):
   * `tests/migration_security.rs` (new — 8 adversarial integration tests:
     unreadable directory, multiple/corrupt/terminal records, symlink record,
@@ -1556,23 +1597,19 @@ untouched pre-existing red** |
 
 ## Exact next task
 
-**Metadata Index v4 wiring (B3)** — the proposal
-`docs/design/package-metadata-chain.md` is the implementation contract; wire
-the chain Recipe → Archive `.PKGINFO` → Authenticated Signed Repository Index
-v4 → Solver in this repo:
+**Phase 6 — re-inspect external blockers, then the real Faseela runit→systemd
+migration.** The Nawa-side framework (Phases 5A–5D and B3) is implemented and
+tested, but the real boot transition is still blocked by external decisions.
+Re-check the *current* state of `mrdevmohamed/faseela`,
+`mrdevmohamed/faseela-repo` and `mrdevmohamed/saq` (read-only; no changes
+without explicit authorization) for B1 (init selection), B2 (`/usr/bin/init`
+ownership), B4 (profile paths), B5 (bootloader/initramfs + recovery), B6 (VM
+harness) and B7 (hook/trigger trust). For each blocker still open, record the
+responsible repository and file, the exact required change, and the
+acceptance test that proves it. Implement only the Nawa-independent slices
+(live-host apply preflight, explicit authorization, staged artifact
+verification, built-in handler interface) and keep the migration blocked —
+never claim a successful real boot without a VM test using the real `saq`.
 
-1. recipe `[capabilities] provides`, normalized exactly once at build time;
-2. `provides` in the main archive `.PKGINFO` (single comma-joined value),
-   never inherited by sub-packages;
-3. opt-in index schema v4 with required `rundeps`/`provides`, reject unknown
-   fields, duplicates and malformed values; keep v1/v2/v3 compatibility and
-   signature/digest verification;
-4. compare index metadata against archive `.PKGINFO` after digest verification;
-   refuse v4 publication when an archive has no `provides` line;
-5. feed normalized metadata into the domain solver and preserve
-   authentication provenance when constructing candidates; the solver must
-   explain provider selection and planned actions.
-
-Then: Phase 6 blocker re-inspection (faseela/faseela-repo/saq for
-B1/B2/B5/B6/B7 — read-only, no external changes without authorization) and
-Phase 7 final source-tree / layering / quality audit.
+Then: Phase 7 final source-tree / layering / quality audit, with the tracker
+and architecture audit synchronized to the shipped code.

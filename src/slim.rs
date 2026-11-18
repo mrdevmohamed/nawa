@@ -131,6 +131,10 @@ pub(crate) fn derive_pkginfo(main: &str, main_name: &str, sub_name: &str, size: 
             out.push_str(&format!("pkgname = {sub_name}\n"));
         } else if line.starts_with("rundeps = ") {
             out.push_str(&format!("rundeps = {main_name}\n"));
+        } else if line.starts_with("provides = ") {
+            // B3 chain §4: sub-packages never inherit the main package's
+            // capabilities. They declare none explicitly.
+            out.push_str("provides = \n");
         } else if line.starts_with("size = ") {
             out.push_str(&format!("size = {size}\n"));
         } else {
@@ -718,6 +722,19 @@ mod tests {
             subpackage_file("bash", "doc", "5.2", 1),
             "bash-doc-5.2-1.nawa.tar.zst"
         );
+    }
+
+    #[test]
+    fn subpackages_do_not_inherit_the_main_capabilities() {
+        // B3 chain §4: `slim::derive_pkginfo` copies every non-rewritten line
+        // verbatim, so `provides` must be explicitly cleared for sub-packages;
+        // otherwise foo-doc would claim foo's `init-system=runit`.
+        let main = "pkgname = runit\npkgver = 2\npkgrel = 1\narch = x86_64\n\
+                    rundeps = glibc\nsize = 900\nprovides = init-system=runit\n";
+        let sub = derive_pkginfo(main, "runit", "runit-doc", 42);
+        assert!(sub.contains("provides = \n"), "explicit empty declaration: {sub}");
+        assert!(!sub.contains("init-system=runit"), "no inherited capability: {sub}");
+        assert!(sub.contains("rundeps = runit\n"), "still depends on main: {sub}");
     }
 
     #[test]

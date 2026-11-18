@@ -21,6 +21,12 @@ pub(crate) struct Recipe {
     pub fetch: Fetch,
     #[serde(default)]
     pub depends: Depends,
+    /// Declared capabilities (design §6.3, B3 chain §3): additive table,
+    /// absent in legacy recipes. `None` means *unknown* (no `provides` line
+    /// in the archive); `Some` with an empty list is an explicit empty
+    /// declaration. The distinction is part of the chain contract (§7).
+    #[serde(default)]
+    pub capabilities: Option<Capabilities>,
     #[serde(default)]
     pub build: Build,
     #[serde(default)]
@@ -201,6 +207,16 @@ pub(crate) const CA_BUNDLE: &str = "ca-certificates";
 
 fn default_rel() -> u32 {
     1
+}
+
+/// The additive `[capabilities]` table (B3 chain §3). `provides` is a list of
+/// `domain=identity` capabilities; unknown keys are an error, like the index
+/// v4 entry rules, so a future extension cannot be silently misread.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Capabilities {
+    #[serde(default)]
+    pub provides: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

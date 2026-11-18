@@ -198,6 +198,7 @@ fn apply_plan(
                         index_signature: open.index_signature.as_deref(),
                         signer_public: open.signer_public.as_deref(),
                         repo_id: None,
+                        metadata: None,
                     }),
                     file_journal,
                 )
@@ -469,6 +470,8 @@ mod tests {
             download_url: None,
             size: 0,
             installed_size: 0,
+            rundeps: None,
+            provides: None,
         };
         assert!(check_archive_matches_index(&a, &ok, false).is_ok());
         let newer = repo::RepoEntry { version: "2.0".into(), ..ok.clone() };

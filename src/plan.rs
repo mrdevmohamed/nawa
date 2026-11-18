@@ -130,15 +130,24 @@ pub(crate) fn install_plan(
 }
 
 /// The normalized candidate (§8.1) of a source-backed package: build + run
-/// edges in declaration order; no capability declarations yet (the recipe
-/// `[capabilities]` spelling is the unwired B3 proposal).
+/// edges in declaration order, plus the capabilities declared in its
+/// `[capabilities]` table (B3 chain §3). A recipe without the table is
+/// `Provides::Unknown`, never an empty declaration (§7).
 fn candidate_of(rec: &Recipe) -> Candidate {
+    let provides = match &rec.capabilities {
+        None => Provides::Unknown,
+        Some(caps) => {
+            let normalized = crate::domain::package::metadata::normalize_provides(&caps.provides)
+                .expect("recipe capabilities are validated at load time");
+            Provides::parse_all(&normalized).expect("normalized capabilities parse")
+        }
+    };
     Candidate {
         name: rec.package.name.clone(),
         version: rec.package.version.clone(),
         rel: rec.package.rel,
         deps: deps_of(rec).collect(),
-        provides: Provides::Unknown,
+        provides,
     }
 }
 

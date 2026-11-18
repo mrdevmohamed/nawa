@@ -162,6 +162,26 @@ pub(crate) fn install_archive_from_index_proof(
 ) -> Result<Entry> {
     let snapshot_dir = root.join(".nawa");
     let snapshot = crate::fetch::snapshot_file(archive_path, Some(expected_sha256), &snapshot_dir)?;
+    // B3 chain §6 rule 3: after the digest verifies, compare every solved
+    // field the signed v4 index declared with the verified archive's
+    // `.PKGINFO`. A mismatch is refused — never silently prefer one side.
+    // Read from the *snapshot* (the exact verified bytes), not the source path.
+    if let Some(expected) = proof.as_ref().and_then(|p| p.metadata) {
+        let raw = archive::read_pkginfo(snapshot.path())
+            .with_context(|| format!("read .PKGINFO from verified {}", snapshot.path().display()))?;
+        let info = archive::parse_pkginfo(&raw).context("parse archive package metadata")?;
+        let from_archive = crate::domain::package::metadata::PkgMetadata::from_pkginfo_map(&info)
+            .map_err(anyhow::Error::msg)
+            .context("normalize archive .PKGINFO metadata")?;
+        crate::domain::package::metadata::check_chain(expected, &from_archive)
+            .map_err(anyhow::Error::msg)
+            .with_context(|| {
+                format!(
+                    "metadata chain mismatch for {} after digest verification — the signed index and archive disagree",
+                    archive_path.display()
+                )
+            })?;
+    }
     let auth = match proof {
         Some(p) => InstallAuth::SignedIndex {
             index_bytes: p.index_bytes.map(<[u8]>::to_vec),
@@ -185,6 +205,10 @@ pub(crate) struct IndexProof<'a> {
     pub index_signature: Option<&'a [u8]>,
     pub signer_public: Option<&'a [u8]>,
     pub repo_id: Option<&'a str>,
+    /// The signed index entry's normalized solving metadata, when the index
+    /// is schema v4 (B3 chain §6). Compared against the verified archive's
+    /// `.PKGINFO` before any payload is touched.
+    pub metadata: Option<&'a crate::domain::package::metadata::PkgMetadata>,
 }
 
 /// Inspect package identity and archive digest before installation. This state
@@ -270,6 +294,76 @@ mod tests {
         let out = dir.join(format!("{name}-{version}-1.nawa.tar.zst"));
         archive::create(&staging, &pkginfo, &out).unwrap();
         out
+    }
+
+    #[test]
+    fn index_metadata_is_compared_with_the_verified_archive_pkginfo() {
+        use crate::domain::package::metadata::{metadata_from_options, PkgMetadata};
+        use crate::domain::system::capability::Provides;
+
+        let base = tmpdir("chain-compare");
+        let root = base.join("root");
+        let staging = base.join("stage");
+        std::fs::create_dir_all(staging.join("usr/bin")).unwrap();
+        std::fs::write(staging.join("usr/bin/demo"), b"x").unwrap();
+        let archive_path = base.join("demo-1-1.nawa.tar.zst");
+        archive::create(
+            &staging,
+            "pkgname = demo\npkgver = 1\npkgrel = 1\narch = x86_64\nrundeps = glibc\nsize = 1\nprovides = init-system=runit\n",
+            &archive_path,
+        )
+        .unwrap();
+        let digest = crate::fetch::sha256_of_file(&archive_path).unwrap();
+        let matching = metadata_from_options(
+            Some(&vec!["glibc".to_string()]),
+            Some(&vec!["init-system=runit".to_string()]),
+        )
+        .unwrap();
+
+        // The matching index metadata passes after digest verification.
+        install_archive_from_index_proof(
+            &archive_path,
+            &root,
+            false,
+            &digest,
+            crate::db::InstallReason::Explicit,
+            Some(IndexProof {
+                index_bytes: None,
+                index_signature: None,
+                signer_public: None,
+                repo_id: None,
+                metadata: Some(&matching),
+            }),
+            None,
+        )
+        .unwrap();
+        assert!(Db::new(&root).entry("demo").unwrap().is_some());
+
+        // A mismatching index (different provider) is refused before any
+        // payload is touched — no silent "prefer the archive" fallback.
+        let other_root = base.join("other-root");
+        let mismatching = PkgMetadata {
+            provides: Provides::parse_all(&["init-system=systemd".to_string()]).unwrap(),
+            rundeps: matching.rundeps.clone(),
+        };
+        let error = install_archive_from_index_proof(
+            &archive_path,
+            &other_root,
+            false,
+            &digest,
+            crate::db::InstallReason::Explicit,
+            Some(IndexProof {
+                index_bytes: None,
+                index_signature: None,
+                signer_public: None,
+                repo_id: None,
+                metadata: Some(&mismatching),
+            }),
+            None,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("metadata chain mismatch"), "{error:#}");
+        assert!(Db::new(&other_root).entry("demo").unwrap().is_none());
     }
 
     fn history_state(entry: &Entry) -> crate::transaction::history::PackageState {
@@ -1346,6 +1440,7 @@ mod tests {
                 index_signature: sig_bytes.as_deref(),
                 signer_public: Some(&signer_pub),
                 repo_id: Some("local-test"),
+                metadata: None,
             }),
             None,
         )
@@ -1422,6 +1517,7 @@ mod tests {
                 index_signature: sig_bytes.as_deref(),
                 signer_public: Some(&signer_pub),
                 repo_id: Some("local-test"),
+                metadata: None,
             }),
             None,
         ).unwrap();

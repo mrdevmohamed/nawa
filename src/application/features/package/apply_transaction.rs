@@ -413,11 +413,13 @@ fn install_one(
     let file_journal = install::FileJournalId::for_step(recorder.tx(), step_no);
     let installed = match details.index_sha256 {
         Some(expected) if details.signed_index => {
+            let metadata = open_repo.and_then(|open| open.metadata_for(&package));
             let proof = open_repo.map(|open| install::IndexProof {
                 index_bytes: Some(&open.index_bytes),
                 index_signature: open.index_signature.as_deref(),
                 signer_public: open.signer_public.as_deref(),
                 repo_id: open.base_url.as_deref(),
+                metadata: metadata.as_ref(),
             });
             install::install_archive_from_index_proof(
                 archive,
@@ -595,6 +597,8 @@ mod tests {
             download_url: None,
             size: 0,
             installed_size: 0,
+            rundeps: None,
+            provides: None,
         }
     }
 

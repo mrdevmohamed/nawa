@@ -109,6 +109,29 @@ pub(super) fn lint_stage(
     Ok(())
 }
 
+/// The identity section of `.PKGINFO` (B3 chain §4). `provides` is written
+/// only when the recipe declares `[capabilities]`: absent table = legacy /
+/// unknown (no line), present with an empty list = an explicit empty
+/// declaration. The value is normalized once at recipe validation and written
+/// verbatim, so all three spellings of the chain carry the same string.
+fn pkginfo_header(rec: &Recipe, arch: &str, size: u64) -> String {
+    let mut out = format!(
+        "pkgname = {}\npkgver = {}\npkgrel = {}\narch = {}\nrundeps = {}\nsize = {}\n",
+        rec.package.name,
+        rec.package.version,
+        rec.package.rel,
+        arch,
+        rec.depends.run.join(","),
+        size,
+    );
+    if let Some(caps) = &rec.capabilities {
+        let provides = crate::domain::package::metadata::normalize_provides(&caps.provides)
+            .expect("recipe capabilities are validated at load time");
+        out.push_str(&format!("provides = {}\n", provides.join(",")));
+    }
+    out
+}
+
 /// Write `.PKGINFO` and the main archive, then one archive per split-off
 /// sub-package (`-doc`, `-lang`). Returns the main archive path.
 #[allow(clippy::too_many_arguments)]
@@ -128,15 +151,7 @@ pub(super) fn package_archives(
     let name = &rec.package.name;
     let arch = rec.arch();
     let mut cache_id: Option<String> = None;
-    let mut pkginfo = format!(
-        "pkgname = {}\npkgver = {}\npkgrel = {}\narch = {}\nrundeps = {}\nsize = {}\n",
-        name,
-        rec.package.version,
-        rec.package.rel,
-        arch,
-        rec.depends.run.join(","),
-        size,
-    );
+    let mut pkginfo = pkginfo_header(rec, &arch, size);
     if opts.isolation >= Isolation::Env {
         // deterministic inputs instead of a wall clock (§6): install time
         // lives in the database (install_date), not in the archive
@@ -222,4 +237,44 @@ pub(super) fn package_archives(
         );
     }
     Ok(out_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn recipe(provides: Option<&[&str]>) -> Recipe {
+        let extra = provides
+            .map(|values| {
+                let joined = values
+                    .iter()
+                    .map(|v| format!("{v:?}"))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!("[capabilities]\nprovides = [{joined}]\n")
+            })
+            .unwrap_or_default();
+        toml::from_str(&format!(
+            "[package]\nname = \"runit\"\nversion = \"2.1\"\nrel = 2\narch = [\"x86_64\"]\n\
+             [depends]\nrun = [\"glibc\"]\n{extra}"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_main_archive_writes_the_declared_capabilities() {
+        let rec = recipe(Some(&["init-system=runit"]));
+        rec.validate().unwrap();
+        let info = pkginfo_header(&rec, "x86_64", 42);
+        assert!(info.contains("rundeps = glibc\n"), "{info}");
+        assert!(info.contains("provides = init-system=runit\n"), "{info}");
+    }
+
+    #[test]
+    fn a_legacy_recipe_writes_no_provides_line_and_an_empty_table_writes_an_empty_one() {
+        let legacy = recipe(None);
+        assert!(!pkginfo_header(&legacy, "x86_64", 1).contains("provides"), "unknown");
+        let empty = recipe(Some(&[]));
+        assert!(pkginfo_header(&empty, "x86_64", 1).contains("provides = \n"), "declared none");
+    }
 }

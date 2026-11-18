@@ -1,6 +1,6 @@
 # Package Metadata Chain: Recipe → Archive → Signed Index (B3 Proposal)
 
-**Status:** Proposal for review — unwired; reference model in `src/domain/package/metadata.rs`
+**Status:** Implemented (B3 wiring landed on `feature/system-intelligence-migration`); the pure chain model is in `src/domain/package/metadata.rs`.
 **Project:** Nawa
 **Scope:** Capability and runtime-dependency metadata across the recipe, `.PKGINFO`, and the repository index
 **Answers:** Design §16.1 (the recommended metadata chain and its exact spellings) and §16.2 (what binary-only solving needs, and how the index upgrades without breaking v1/v2/v3 readers)
@@ -302,28 +302,34 @@ readers:
   archive) means init-system migration stays unsupported for that package —
   reported as `unknown`, never resolved by guessing (§6.3(4), §8.2).
 
-## 10. What this proposal does not change
+## 10. Wiring status (implemented)
 
-The reference model (`src/domain/package/metadata.rs`) is written in the
-Phase-2 proposal style: pure domain code, `#![allow(dead_code)]` with the
-justification in the module header, no imports outside `std`/`serde`/`toml`
-and the existing `domain/system/capability.rs`. Nothing is wired yet:
+The proposal is wired end to end; the model stays pure (`std`/`serde`/`toml`
+plus `domain/system/capability.rs`) and its `#![allow(dead_code)]` is gone:
 
-- no recipe field, no `.PKGINFO` writer change, no index schema bump, no CLI
-  flag change, no solver behavior change;
-- no existing test or output changes (the module only adds tests).
-
-Wiring, in dependency order, once this proposal is agreed:
-
-1. Recipe: `capabilities` field (default empty) + build-time validation of
-   the entry rules (no commas, no duplicates, parseable identities).
-2. Build: `package_archives` writes `provides`;
-   `slim::derive_pkginfo` clears it for sub-packages (§4).
-3. `repo-create`: `--index-version 4` reads `provides`/`rundeps` from
-   `.PKGINFO`, refuses archives without `provides` (§7), emits v4 entries.
-4. `repo/validate.rs`: accept schema 4, reuse the v2/v3 entry rules plus the
-   v4 metadata rules, and extend the unknown-schema message to name 4.
-5. Fetch/install path: run the chain comparison (§6 rule 3) after the digest
-   check.
-6. Solver: consume `PkgMetadata` normalized from index entries (v4 or
-   legacy→unknown), installed records, and fetched archives.
+1. **Recipe** (`recipe/model.rs`, `recipe/validate.rs`): the additive
+   `[capabilities]` table is `Option<Capabilities>` so an absent table stays
+   *unknown* (§7); entries are normalized once by
+   `domain::package::metadata::normalize_provides` (parseable, no commas, no
+   duplicates). Unknown keys are an error.
+2. **Build** (`build/package.rs`, `slim.rs`): `pkginfo_header` writes
+   `provides` only for a declared table (empty value = explicit empty);
+   `derive_pkginfo` clears `provides` for every sub-package, which keeps it
+   from inheriting the main package's `init-system=runit`.
+3. **`repo-create`** (`repo/create.rs`): `--index-version 4` is accepted,
+   requires the locations manifest, reads/normalizes both fields from
+   `.PKGINFO`, refuses an archive with no `provides` line (§7), and
+   round-trips each entry through the strict reader before signing.
+4. **`repo/validate.rs`**: schema 4 is accepted; entries are parsed through
+   the domain `IndexEntryV4` (`deny_unknown_fields`) so unknown fields and
+   missing/duplicate/malformed solving fields fail closed; the
+   unknown-schema message now names 2, 3 and 4.
+5. **Fetch/install** (`install/mod.rs`, `apply_transaction.rs`):
+   `IndexProof` carries the signed entry's normalized metadata and
+   `check_chain` compares it with the `.PKGINFO` of the *verified snapshot*
+   after the digest check, before any payload is touched.
+6. **Solver** (`plan.rs`, `plan_install.rs`, `upgrade/source.rs`): source
+   candidates carry normalized `provides`; `OpenRepo::metadata_for` builds
+   `PkgMetadata` from authenticated index fields (legacy → unknown); and
+   `provider_note` explains which planned package provides the profile's
+   selected init, preserving the authentication provenance.

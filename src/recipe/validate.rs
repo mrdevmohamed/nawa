@@ -36,6 +36,7 @@ impl Recipe {
         self.validate_assets()?;
         self.validate_fetch_tables()?;
         self.validate_mirrors()?;
+        self.validate_capabilities()?;
         // names/versions become directory and archive file names
         crate::db::check_name(&self.package.name)?;
         if !crate::db::valid_version(&self.package.version) {
@@ -165,6 +166,16 @@ impl Recipe {
                  package.source_date_epoch (fetch-phase.md §6)",
                 self.package.name
             );
+        }
+        Ok(())
+    }
+
+    /// `[capabilities] provides` entries are normalized exactly once, here
+    /// (B3 chain §3): parseable `domain=identity`, no commas, no duplicates.
+    fn validate_capabilities(&self) -> Result<()> {
+        if let Some(caps) = &self.capabilities {
+            crate::domain::package::metadata::normalize_provides(&caps.provides)
+                .map_err(|e| anyhow::anyhow!("recipe {}: {e}", self.package.name))?;
         }
         Ok(())
     }

@@ -49,6 +49,21 @@ pub(crate) struct OpenRepo {
     pub groups: Option<crate::groups::GroupCatalog>,
 }
 
+impl OpenRepo {
+    /// Normalized solving metadata for one entry of this signed index. A v4
+    /// entry declares both fields; a legacy v1–v3 entry maps to *unknown*
+    /// (B3 chain §7), which is why a legacy package cannot drive an init
+    /// migration. The value comes from authenticated index bytes only.
+    pub(crate) fn metadata_for(&self, name: &str) -> Option<crate::domain::package::metadata::PkgMetadata> {
+        let entry = self.index.find(name)?;
+        crate::domain::package::metadata::metadata_from_options(
+            entry.rundeps.as_ref(),
+            entry.provides.as_ref(),
+        )
+        .ok()
+    }
+}
+
 /// Fetch (remote) or locate (local) a repository, then parse and
 /// authenticate its index: trust policy for remote repos, signature check,
 /// rollback/freeze protection. Shared by `nawa upgrade` and `nawa install`.

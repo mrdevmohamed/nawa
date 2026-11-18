@@ -39,8 +39,9 @@ pub(crate) enum Notice {
 pub(crate) enum Source {
     /// build it from its recipe
     Build,
-    /// install this archive from the repository
-    Repo(RepoEntry),
+    /// install this archive from the repository (boxed: index v4 entries
+    /// carry solving metadata, so the entry is larger than the build variant)
+    Repo(Box<RepoEntry>),
 }
 
 /// The repository (when one is usable) plus the policy for using it.
@@ -107,7 +108,7 @@ impl Sourcing {
                     } else {
                         None
                     };
-                    Ok((Source::Repo(re.clone()), note))
+                    Ok((Source::Repo(Box::new(re.clone())), note))
                 }
             }
         }
@@ -191,6 +192,38 @@ pub(crate) fn init_note(profile: &EffectiveProfile, init: &plan::InitSelection) 
          switch the init provider",
         source.display()
     )))
+}
+
+/// Explain which planned packages provide the init capability the effective
+/// target profile selected (design §8.4, B3 chain §8: the solver must explain
+/// provider selection). Only authenticated recipe metadata is consulted; a
+/// package without `[capabilities]` is never guessed into the role. Returns
+/// nothing when no profile decision was declared, so legacy behavior is
+/// byte-identical.
+pub(crate) fn provider_note(plan: &crate::plan::Plan) -> Option<Notice> {
+    let plan::InitSelection::Declared { identity } = &plan.init else {
+        return None;
+    };
+    let wanted = format!("init-system={identity}");
+    let mut providers = Vec::new();
+    for item in &plan.items {
+        let Some(caps) = &item.rec.capabilities else { continue };
+        let declared = crate::domain::package::metadata::normalize_provides(&caps.provides)
+            .unwrap_or_default();
+        if declared.iter().any(|p| p == &wanted) {
+            providers.push(item.rec.package.name.as_str());
+        }
+    }
+    if providers.is_empty() {
+        Some(Notice::Info(format!(
+            "no planned package declares {wanted} — provider selection remains unresolved"
+        )))
+    } else {
+        Some(Notice::Info(format!(
+            "provider of {wanted} in this plan: {} (from authenticated recipe capabilities)",
+            providers.join(", ")
+        )))
+    }
 }
 
 /// Plan the recipe-backed part of an install and split the remaining
@@ -311,6 +344,8 @@ mod tests {
             download_url: None,
             size: 0,
             installed_size: 0,
+            rundeps: None,
+            provides: None,
         }
     }
 
@@ -629,5 +664,33 @@ mod tests {
         .unwrap();
         assert!(sourcing.open.is_none());
         assert!(notes.is_empty());
+    }
+
+    #[test]
+    fn provider_note_explains_which_planned_package_provides_the_selected_init() {
+        use crate::plan::InitSelection;
+
+        let mut plain = crate::plan::Plan::default();
+        assert!(provider_note(&plain).is_none(), "no profile decision — no note");
+
+        plain.init = InitSelection::Declared {
+            identity: "systemd".to_string(),
+        };
+        let no_provider = provider_note(&plain).expect("a declared decision is explained");
+        assert!(format!("{no_provider:?}").contains("no planned package declares"));
+
+        let mut provider = rec("systemd", "255", &[]);
+        provider.capabilities = Some(crate::recipe::model::Capabilities {
+            provides: vec!["init-system=systemd".to_string()],
+        });
+        plain.items.push(crate::plan::Item {
+            rec: provider,
+            why: crate::plan::Why::Explicit,
+            replaces: None,
+        });
+        let explained = provider_note(&plain).expect("the provider is named");
+        let text = format!("{explained:?}");
+        assert!(text.contains("systemd"), "{text}");
+        assert!(text.contains("authenticated recipe capabilities"), "{text}");
     }
 }

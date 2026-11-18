@@ -83,6 +83,8 @@ mod tests {
                 download_url: None,
                 size: 123,
                 installed_size: 456,
+                rundeps: None,
+                provides: None,
             }],
         };
         index.validate().unwrap();
@@ -112,6 +114,8 @@ mod tests {
                 download_url: Some("https://github.com/example/repo/releases/download/packages-0001/sha256-a.nawa.tar.zst".into()),
                 size: 123,
                 installed_size: 456,
+                rundeps: None,
+                provides: None,
             }],
         };
         index.validate().unwrap();
@@ -213,6 +217,8 @@ mod tests {
                 download_url: None,
                 size: 123,
                 installed_size: 456,
+                rundeps: None,
+                provides: None,
             }],
         };
         index.repository.as_mut().unwrap().archive_auth = "detached".into();
@@ -454,6 +460,138 @@ mod tests {
             },
         )
         .is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---- B3 chain: schema-v4 indexes --------------------------------------
+
+    #[test]
+    fn schema_v4_is_opt_in_and_carries_the_normalized_chain_metadata() {
+        let base = crate::testutil::tmpdir("repo-v4-ok");
+        let dir = base.join("archives");
+        std::fs::create_dir_all(&dir).unwrap();
+        let stage = base.join("stage");
+        std::fs::create_dir_all(&stage).unwrap();
+        std::fs::write(stage.join("f"), b"x").unwrap();
+        let pkginfo = "pkgname = demo\npkgver = 2.1\npkgrel = 2\narch = x86_64\nrundeps = glibc,mesa\nsize = 5\nprovides = init-system=runit\n";
+        let file = "demo-2.1-2.nawa.tar.zst";
+        archive::create(&stage, pkginfo, &dir.join(file)).unwrap();
+        let locations = base.join("locations.toml");
+        std::fs::write(
+            &locations,
+            format!("schema = 1\n[package_urls]\n\"{file}\" = \"https://example.com/packages/{file}\"\n"),
+        )
+        .unwrap();
+        let out = base.join("index.toml");
+        let idx = create_index_with_locations_and_groups(&dir, &out, None, 4, Some(&locations), None).unwrap();
+        assert_eq!(idx.repository.as_ref().unwrap().schema, 4);
+        assert_eq!(idx.packages[0].rundeps.as_deref(), Some(&["glibc".to_string(), "mesa".to_string()][..]));
+        assert_eq!(idx.packages[0].provides.as_deref(), Some(&["init-system=runit".to_string()][..]));
+        let raw = std::fs::read(&out).unwrap();
+        let parsed = load_index_bytes(&raw).unwrap();
+        assert_eq!(parsed.packages[0].provides.as_deref(), Some(&["init-system=runit".to_string()][..]));
+        let text = String::from_utf8(raw).unwrap();
+        assert!(text.contains("schema = 4"));
+        assert!(text.contains("provides = [\"init-system=runit\"]"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn schema_v4_publication_refuses_an_archive_without_a_provides_declaration() {
+        let base = crate::testutil::tmpdir("repo-v4-no-provides");
+        let dir = base.join("archives");
+        std::fs::create_dir_all(&dir).unwrap();
+        let stage = base.join("stage");
+        std::fs::create_dir_all(&stage).unwrap();
+        std::fs::write(stage.join("f"), b"x").unwrap();
+        archive::create(
+            &stage,
+            "pkgname = demo\npkgver = 1\npkgrel = 1\narch = x86_64\nrundeps = \nsize = 5\n",
+            &dir.join("demo-1-1.nawa.tar.zst"),
+        )
+        .unwrap();
+        let locations = base.join("locations.toml");
+        std::fs::write(
+            &locations,
+            "schema = 1\n[package_urls]\n\"demo-1-1.nawa.tar.zst\" = \"https://example.com/p.nawa.tar.zst\"\n",
+        )
+        .unwrap();
+        let error = create_index_with_locations_and_groups(
+            &dir,
+            &base.join("index.toml"),
+            None,
+            4,
+            Some(&locations),
+            None,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("no provides field"), "{error:#}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn schema_v4_rejects_unknown_fields_missing_fields_and_duplicates() {
+        let base = crate::testutil::tmpdir("repo-v4-strict");
+        let good = r#"generated = 10
+expires = 20
+
+[repository]
+schema = 4
+archive_auth = "signed-index"
+hash_algorithm = "sha256"
+index_signature = "nawa-sig-v1"
+archive_location = "per-package-url"
+
+[[package]]
+name = "demo"
+version = "1"
+rel = 1
+arch = "x86_64"
+file = "demo-1-1.nawa.tar.zst"
+sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+size = 10
+download_url = "https://example.com/demo.nawa.tar.zst"
+rundeps = ["glibc"]
+provides = ["init-system=runit"]
+"#;
+        load_index_bytes(good.as_bytes()).unwrap();
+
+        let unknown = good.replace("rundeps = [\"glibc\"]", "rundeps = [\"glibc\"]\nsurprise = 1");
+        assert!(format!("{:#}", load_index_bytes(unknown.as_bytes()).unwrap_err()).contains("unknown field"));
+
+        let missing = good.replace("provides = [\"init-system=runit\"]\n", "");
+        assert!(load_index_bytes(missing.as_bytes()).is_err());
+
+        let duplicate = good.replace("rundeps = [\"glibc\"]", "rundeps = [\"glibc\", \"glibc\"]");
+        assert!(format!("{:#}", load_index_bytes(duplicate.as_bytes()).unwrap_err()).contains("twice"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn legacy_indexes_remain_readable_and_keep_unknown_metadata() {
+        // v1 (no [repository]), v2 and v3 indexes carry no solving fields;
+        // they map to "unknown", never to an empty declaration.
+        let base = crate::testutil::tmpdir("repo-legacy");
+        for (schema, location, url) in [
+            (2u32, "base-url", None),
+            (3, "per-package-url", Some("https://example.com/demo.nawa.tar.zst")),
+        ] {
+            let mut doc = format!(
+                "generated = 10\nexpires = 20\n\n[repository]\nschema = {schema}\narchive_auth = \"signed-index\"\nhash_algorithm = \"sha256\"\nindex_signature = \"nawa-sig-v1\"\narchive_location = \"{location}\"\n\n[[package]]\nname = \"demo\"\nversion = \"1\"\nrel = 1\narch = \"x86_64\"\nfile = \"demo-1-1.nawa.tar.zst\"\nsha256 = \"{}\"\nsize = 10\n",
+                "a".repeat(64)
+            );
+            if let Some(url) = url {
+                doc.push_str(&format!("download_url = \"{url}\"\n"));
+            }
+            let idx = load_index_bytes(doc.as_bytes()).unwrap();
+            let meta = crate::domain::package::metadata::metadata_from_options(
+                idx.packages[0].rundeps.as_ref(),
+                idx.packages[0].provides.as_ref(),
+            )
+            .unwrap();
+            assert_eq!(meta.provides, crate::domain::system::capability::Provides::Unknown);
+            assert_eq!(meta.rundeps, crate::domain::package::metadata::RunDeps::Unknown);
+        }
         let _ = std::fs::remove_dir_all(&base);
     }
 }

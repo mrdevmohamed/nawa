@@ -99,7 +99,7 @@ See [Build and fetch](build-and-fetch.md) for offline workflows.
 | nawa trust KEYFILE | Add a public key to the target root's trust store. |
 | nawa clean CATEGORY | Remove selected cache data; categories are metadata, packages, sources, layers, and all. |
 
-Repository creation has schema-specific requirements. Index schema v2 and later must be signed; schema v3 also requires a locations manifest. Read [Repositories and security](repositories-and-security.md) before publishing an index.
+Repository creation has schema-specific requirements. Index schema v2 and later must be signed; schemas v3 and v4 also require a locations manifest. Schema v4 is opt-in (`--index-version 4`) and additionally requires each archive to declare `[capabilities] provides` in its `.PKGINFO` (an empty table is allowed): the signed index duplicates `rundeps`/`provides` so binary-only solving can select providers, and the archive's fields are compared against the index after digest verification. Legacy v1–v3 indexes remain readable (their metadata is *unknown*, never empty). Read [Repositories and security](repositories-and-security.md) before publishing an index.
 
 ## System and maintenance commands
 

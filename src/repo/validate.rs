@@ -16,10 +16,44 @@ pub(crate) fn load_index(path: &Path) -> Result<Index> {
     load_index_bytes(&raw).with_context(|| format!("parse index {}", path.display()))
 }
 
+/// A strict schema-v4 index document. The loose [`Index`] parser stays the
+/// compatibility reader for v1–v3; for v4 the entries are parsed through the
+/// domain model's `IndexEntryV4` so unknown fields are rejected
+/// (`deny_unknown_fields`) and `rundeps`/`provides` are mandatory.
+// The fields exist only so the strict parse accepts everything the loose
+// parser accepts; the values themselves are validated through `Index`.
+#[allow(dead_code)]
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictIndexV4 {
+    #[serde(default)]
+    generated: Option<u64>,
+    #[serde(default)]
+    expires: Option<u64>,
+    repository: RepositoryMeta,
+    #[serde(default)]
+    recipes: Option<RecipesEntry>,
+    #[serde(default)]
+    groups: Option<GroupsEntry>,
+    #[serde(rename = "package")]
+    packages: Vec<crate::domain::package::metadata::IndexEntryV4>,
+}
+
 /// Parse and validate exactly the byte sequence whose signature was checked.
 pub(crate) fn load_index_bytes(raw: &[u8]) -> Result<Index> {
     let text = std::str::from_utf8(raw).context("repository index is not valid UTF-8")?;
     let idx: Index = toml::from_str(text).context("parse repository index TOML")?;
+    if idx.repository.as_ref().is_some_and(|m| m.schema == INDEX_SCHEMA_V4) {
+        let strict: StrictIndexV4 =
+            toml::from_str(text).context("parse schema-v4 repository index TOML")?;
+        for entry in &strict.packages {
+            // Both the entry rules and the normalized metadata must parse:
+            // a v4 reader must be able to solve from these fields alone.
+            entry
+                .metadata()
+                .map_err(|e| anyhow::anyhow!("schema-v4 package {}: {e}", entry.name))?;
+        }
+    }
     idx.validate()?;
     Ok(idx)
 }
@@ -40,10 +74,10 @@ impl Index {
             }
             Some(meta) => meta,
         };
-        if !matches!(meta.schema, INDEX_SCHEMA_V2 | INDEX_SCHEMA_V3) {
-            bail!("unsupported repository index schema {}; this Nawa supports schemas 2 and 3", meta.schema);
+        if !matches!(meta.schema, INDEX_SCHEMA_V2 | INDEX_SCHEMA_V3 | INDEX_SCHEMA_V4) {
+            bail!("unsupported repository index schema {}; this Nawa supports schemas 2, 3 and 4", meta.schema);
         }
-        let per_package_url = meta.schema == INDEX_SCHEMA_V3;
+        let per_package_url = meta.schema >= INDEX_SCHEMA_V3;
         let expected_location = if per_package_url {
             ARCHIVE_LOCATION_PER_PACKAGE_URL
         } else {
@@ -112,6 +146,20 @@ impl Index {
             }
             if !files.insert(p.file.as_str()) {
                 bail!("schema-v2/v3 index contains duplicate archive filename {:?}", p.file);
+            }
+            if meta.schema == INDEX_SCHEMA_V4 {
+                // B3 chain §5: both solving fields are mandatory in v4; a
+                // missing field is a parse error, never "unknown".
+                let rundeps = p.rundeps.as_ref().with_context(|| {
+                    format!("schema-v4 package {} has no rundeps field", p.name)
+                })?;
+                let provides = p.provides.as_ref().with_context(|| {
+                    format!("schema-v4 package {} has no provides field", p.name)
+                })?;
+                crate::domain::package::metadata::normalize_rundeps(rundeps)
+                    .map_err(|e| anyhow::anyhow!("schema-v4 package {}: {e}", p.name))?;
+                crate::domain::package::metadata::normalize_provides(provides)
+                    .map_err(|e| anyhow::anyhow!("schema-v4 package {}: {e}", p.name))?;
             }
         }
         if let Some(r) = &self.recipes {

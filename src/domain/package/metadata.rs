@@ -22,15 +22,60 @@
 //!   in *any* spelling (round-trip rule);
 //! - an entry is declared at most once; duplicates are an error.
 
-// Proposal for the Phase 3/B3 schema decision (§16.1–16.2): unwired until
-// the schema is agreed, so its items are deliberately unused and `dead_code`
-// is allowed at module scope.
-#![allow(dead_code)]
-
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::domain::system::capability::Provides;
+use crate::domain::system::capability::{Capability, Provides};
+
+/// Normalize a list spelling once, at the boundary where a human or archive
+/// declares it (design §6.3, the chain rules in
+/// `docs/design/package-metadata-chain.md` §3–4): trim, reject empty entries,
+/// reject commas (the flat `.PKGINFO` list separator) and reject duplicates.
+/// Returns the entries in declaration order.
+pub(crate) fn normalize_list(entries: &[String], field: &str) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = Vec::new();
+    for entry in entries {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            return Err(format!("{field} has an empty entry"));
+        }
+        if entry.contains(',') {
+            return Err(format!(
+                "{field} entry {entry:?} contains a comma (the .PKGINFO list separator)"
+            ));
+        }
+        if out.iter().any(|e| e == entry) {
+            return Err(format!("{field} declares {entry:?} twice"));
+        }
+        out.push(entry.to_string());
+    }
+    Ok(out)
+}
+
+/// Normalize and validate a `[capabilities] provides` declaration once, at
+/// build time: `Capability::parse` lowercases and enforces `domain=identity`,
+/// and the list rules above reject commas/duplicates/empties. The returned
+/// keys are the exact strings written to `.PKGINFO` and the signed index.
+pub(crate) fn normalize_provides(entries: &[String]) -> Result<Vec<String>, String> {
+    let entries = normalize_list(entries, "provides")?;
+    let mut out = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let cap = Capability::parse(&entry).map_err(|e| e.to_string())?;
+        let key = cap.to_key();
+        if out.contains(&key) {
+            return Err(format!(
+                "provides declares {key:?} twice after normalization"
+            ));
+        }
+        out.push(key);
+    }
+    Ok(out)
+}
+
+/// Normalize a `rundeps` declaration (package names, case-sensitive, trimmed).
+pub(crate) fn normalize_rundeps(entries: &[String]) -> Result<Vec<String>, String> {
+    normalize_list(entries, "rundeps")
+}
 
 /// The runtime-dependency declaration as carried by metadata (§6.3(5)): a
 /// missing field in legacy metadata is [`RunDeps::Unknown`], **not** an
@@ -89,13 +134,35 @@ impl PkgMetadata {
     }
 }
 
+/// Build normalized metadata from the optional index-entry fields. `None`
+/// (legacy v1–v3) maps to *unknown*, never to an empty declaration; `Some`
+/// (schema v4) normalizes the entries exactly once (§7).
+pub(crate) fn metadata_from_options(
+    rundeps: Option<&Vec<String>>,
+    provides: Option<&Vec<String>>,
+) -> Result<PkgMetadata, String> {
+    if rundeps.is_none() && provides.is_none() {
+        return Ok(PkgMetadata::unknown());
+    }
+    Ok(PkgMetadata {
+        provides: match provides {
+            None => Provides::Unknown,
+            Some(values) => Provides::parse_all(&normalize_provides(values)?)?,
+        },
+        rundeps: match rundeps {
+            None => RunDeps::Unknown,
+            Some(values) => RunDeps::Declared(normalize_rundeps(values)?),
+        },
+    })
+}
+
 /// Split one flat-format list value into entries. `.PKGINFO` is a `key =
 /// value` format per line; a list field is one single comma-joined value
 /// (the build writes `depends.run.join(",")`), and repeated keys collapse,
 /// so a list can only be spelled as one line. An empty value is an explicit
 /// empty list. Strict: empty slots and duplicate entries are errors, so the
 /// normalized model never carries them.
-fn split_flat_list(value: &str, field: &'static str) -> Result<Vec<String>, String> {
+pub(crate) fn split_flat_list(value: &str, field: &'static str) -> Result<Vec<String>, String> {
     if value.trim().is_empty() {
         return Ok(Vec::new());
     }
@@ -227,7 +294,7 @@ impl IndexEntryV4 {
 
     /// The entry rules, mirroring the schema-v2/v3 entry validation
     /// (`repo::validate`) plus the v4 metadata rules.
-    fn validate(&self) -> Result<(), String> {
+    pub(crate) fn validate(&self) -> Result<(), String> {
         if self.name.trim().is_empty()
             || self.version.trim().is_empty()
             || self.arch.trim().is_empty()

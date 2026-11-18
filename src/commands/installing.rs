@@ -374,6 +374,9 @@ pub(crate) fn cmd_update(
     if let Some(note) = plan_install::init_note(&effective, &plan.init) {
         note.emit();
     }
+    if let Some(note) = plan_install::provider_note(&plan) {
+        note.emit();
+    }
 
     // In strict repository mode, every update target must be available at
     // least at the version requested by its recipe. Never silently downgrade

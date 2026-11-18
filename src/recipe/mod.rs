@@ -698,4 +698,42 @@ dir = "rust"
         assert!(deps.contains(&"rust".to_string()), "{deps:?}");
         assert!(deps.contains(&"ca-certificates".to_string()), "{deps:?}");
     }
+
+    #[test]
+    fn capabilities_are_additive_and_normalized_once() {
+        let legacy: Recipe = toml::from_str(SAMPLE).unwrap();
+        assert!(legacy.capabilities.is_none(), "absent table means unknown");
+
+        let declared: Recipe = toml::from_str(&SAMPLE.replace(
+            "[depends]",
+            "[capabilities]\nprovides = [\"init-system=runit\"]\n\n[depends]",
+        ))
+        .unwrap();
+        declared.validate().unwrap();
+        let caps = declared.capabilities.as_ref().unwrap();
+        assert_eq!(
+            crate::domain::package::metadata::normalize_provides(&caps.provides).unwrap(),
+            vec!["init-system=runit".to_string()]
+        );
+    }
+
+    #[test]
+    fn capabilities_reject_commas_duplicates_and_unparseable_entries() {
+        for bad in [
+            "provides = [\"init-system=runit,init-system=systemd\"]",
+            "provides = [\"init-system=runit\", \"init-system=runit\"]",
+            "provides = [\"not-a-capability\"]",
+            "provides = [\"\"]",
+            "surprise = true",
+        ] {
+            let raw = SAMPLE.replace(
+                "[depends]",
+                &format!("[capabilities]\n{bad}\n\n[depends]"),
+            );
+            let result = toml::from_str::<Recipe>(&raw)
+                .map_err(anyhow::Error::msg)
+                .and_then(|rec| rec.validate());
+            assert!(result.is_err(), "{bad} must be rejected");
+        }
+    }
 }
