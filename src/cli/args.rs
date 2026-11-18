@@ -636,7 +636,10 @@ impl Cmd {
             // can cross the gate — an outer lock here would deadlock against
             // that non-reentrant flock.
             Cmd::System {
-                action: SystemCmd::Migrate { action: MigrateCmd::Resume },
+                action:
+                    SystemCmd::Migrate {
+                        action: MigrateCmd::Resume | MigrateCmd::Apply { .. },
+                    },
             } => Request::NoDb,
             Cmd::System { .. } => Request::ReadDb,
             Cmd::RepoCreate { .. }
@@ -778,6 +781,30 @@ pub(crate) enum MigrateCmd {
     /// migration gate, and by which migration (informational; always
     /// exits 0)
     Status,
+    /// Show the read-only migration plan for a built-in migration id
+    /// (works on an offline root; nothing is persisted or executed, §12.1–2)
+    Plan {
+        /// the migration id (the built-in definition names one migration)
+        id: String,
+    },
+    /// Apply a migration (live host only, explicit per-migration
+    /// authorization; a generic --yes is never enough, §12.4)
+    Apply {
+        /// the migration id, repeated in the authorization
+        id: String,
+        /// the exact source capability being migrated from
+        #[arg(long)]
+        from: String,
+        /// the exact target capability being migrated to
+        #[arg(long)]
+        to: String,
+        /// acknowledge that the migration needs a reboot boundary
+        #[arg(long)]
+        acknowledge_reboot: bool,
+        /// acknowledge the documented recovery path
+        #[arg(long)]
+        acknowledge_recovery: bool,
+    },
     /// Reconcile an interrupted migration and, after reboot, verify the
     /// target init and finalize the durable record (live host only, explicit
     /// operation — never automatic; design §10.3–§10.5, §12.2)

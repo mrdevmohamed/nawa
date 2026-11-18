@@ -122,11 +122,14 @@ Repository creation has schema-specific requirements. Index schema v2 and later 
 | nawa system migrate list | List system migration records in deterministic order; never mutates anything. |
 | nawa system migrate show ID | Show one migration record in full, including every step's intent and outcome. |
 | nawa system migrate status | Show whether the mutation gate is held and which migrations are in progress. |
+| nawa system migrate plan ID | Show the read-only plan for a built-in migration (works on an offline root; persists nothing). |
+| nawa system migrate apply ID --from CAP --to CAP --acknowledge-reboot --acknowledge-recovery | Apply a migration: live host only, with explicit per-migration authorization (a generic `--yes` is never enough). Currently refuses at the boot-handler boundary until the external Faseela/SAQ blockers are resolved. |
+| nawa system migrate resume | Reconcile an interrupted migration and, after reboot, verify the target init and finalize the record (live host only). |
 | nawa completions SHELL | Print shell completion scripts for bash, zsh, or fish. |
 
 **Group installation status:** the command exists, but currently refuses to install a group until signed group metadata is published by a repository. See the [implementation status](design/IMPLEMENTATION-STATUS.md).
 
-**Migration inspection:** the three `nawa system migrate` inspection commands are strictly read-only. They take a shared database lock, work with `--root` against offline roots, and never create records, change migration state, or run migration handlers.
+**Migration commands:** `list`, `show`, `status` and `plan` are read-only (a shared lock gives one coherent snapshot; offline roots are supported) and never create records, change migration state, or run handlers. `apply` and `resume` are live-host only: they reject offline roots, chroots, containers and unverified hosts. `apply` requires the exact migration id, source/target capabilities and explicit acknowledgements of the reboot and recovery requirements. The real boot transition is still blocked on external Faseela/SAQ dependencies, so `apply` currently performs the preflight and then refuses with the precise blockers — it never claims a successful migration or modifies the machine. `resume` reconciles interrupted records and verifies actual PID 1 and boot postconditions before clearing the gate.
 
 ## Common examples
 

@@ -429,9 +429,9 @@ fn resume_is_documented_in_help_and_all_three_completions() {
     assert!(help.contains("system"), "the namespace is listed: {help}");
 
     for (shell, needle) in [
-        ("bash", "list show status resume"),
-        ("zsh", "list show status resume"),
-        ("fish", "list show status resume"),
+        ("bash", "list show status plan apply resume"),
+        ("zsh", "list show status plan apply resume"),
+        ("fish", "list show status plan apply resume"),
     ] {
         let out = nawa().args(["completions", shell]).output().unwrap();
         let script = String::from_utf8_lossy(&out.stdout);
@@ -457,6 +457,79 @@ fn resume_refuses_an_offline_root_and_changes_nothing() {
         before,
         "no record was changed on the offline root"
     );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn plan_is_read_only_and_works_on_an_offline_root() {
+    let root = scratch("plan-offline");
+    let before = record_snapshot(&root);
+    let (stdout, stderr, ok) = run(
+        &root,
+        &["system", "migrate", "plan", "faseela-runit-to-systemd-v1"],
+    );
+    assert!(ok, "planning an offline root is read-only: {stderr}");
+    for expected in [
+        "Migration plan for faseela-runit-to-systemd-v1",
+        "offline target root",
+        "init-system=runit",
+        "init-system=systemd",
+        "Rollback limits",
+        "no automatic rollback",
+    ] {
+        assert!(stdout.contains(expected), "missing {expected:?} in:\n{stdout}");
+    }
+    assert_eq!(record_snapshot(&root), before, "plan persisted nothing");
+    assert!(!root.join("var/lib/nawa").exists(), "no nawa state created");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn plan_refuses_an_unknown_built_in_id() {
+    let root = scratch("plan-unknown");
+    let (_stdout, stderr, ok) = run(&root, &["system", "migrate", "plan", "not-a-migration"]);
+    assert!(!ok);
+    assert!(stderr.contains("no built-in migration"), "{stderr}");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn apply_refuses_an_offline_root_before_any_mutation() {
+    let root = scratch("apply-offline");
+    let before = record_snapshot(&root);
+    let (stdout, stderr, ok) = run(
+        &root,
+        &[
+            "system",
+            "migrate",
+            "apply",
+            "faseela-runit-to-systemd-v1",
+            "--from",
+            "init-system=runit",
+            "--to",
+            "init-system=systemd",
+            "--acknowledge-reboot",
+            "--acknowledge-recovery",
+        ],
+    );
+    assert!(!ok, "apply is live-host only: {stdout}");
+    let combined = format!("{stdout}{stderr}");
+    assert!(combined.contains("offline root"), "{combined}");
+    assert_eq!(record_snapshot(&root), before, "no record was created");
+    assert!(!root.join("var/lib/nawa").exists(), "no nawa state created");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn apply_requires_explicit_per_migration_authorization() {
+    let root = scratch("apply-no-auth");
+    // a generic auto-confirm style invocation (no exact source/target and no
+    // boundary acknowledgements) must not reach even the preflight.
+    let (_stdout, stderr, ok) = run(
+        &root,
+        &["system", "migrate", "apply", "faseela-runit-to-systemd-v1"],
+    );
+    assert!(!ok, "a generic apply is refused: {stderr}");
     let _ = fs::remove_dir_all(&root);
 }
 

@@ -16,6 +16,7 @@
 use anyhow::{anyhow, Result};
 use std::path::Path;
 
+use crate::application::features::system::migrate_apply as apply_use;
 use crate::application::features::system::migrate_inspect as inspect;
 use crate::application::features::system::migrate_recover as recover;
 use crate::application::ports::user_interaction::UserInteraction;
@@ -36,8 +37,67 @@ fn cmd_migrate(ctx: &Ctx, action: MigrateCmd) -> Result<()> {
         MigrateCmd::List => print_list(&ctx.root),
         MigrateCmd::Show { id } => print_show(&ctx.root, &id),
         MigrateCmd::Status => print_status(&ctx.root),
+        MigrateCmd::Plan { id } => print_plan(&ctx.root, &id),
+        MigrateCmd::Apply {
+            id,
+            from,
+            to,
+            acknowledge_reboot,
+            acknowledge_recovery,
+        } => print_apply(
+            ctx,
+            &id,
+            &from,
+            &to,
+            acknowledge_reboot,
+            acknowledge_recovery,
+        ),
         MigrateCmd::Resume => print_resume(ctx),
     }
+}
+
+fn print_plan(root: &Path, id: &str) -> Result<()> {
+    let definition = apply_use::builtin_definition();
+    if id != definition.id {
+        return Err(anyhow!(
+            "no built-in migration named {id:?} — this Nawa provides {}",
+            definition.id
+        ));
+    }
+    let plan = apply_use::plan(root, Path::new("/proc"));
+    for line in render_plan(&plan) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+fn print_apply(
+    ctx: &Ctx,
+    id: &str,
+    from: &str,
+    to: &str,
+    acknowledge_reboot: bool,
+    acknowledge_recovery: bool,
+) -> Result<()> {
+    let source = crate::domain::system::capability::Capability::parse(from)
+        .map_err(anyhow::Error::msg)?;
+    let target = crate::domain::system::capability::Capability::parse(to)
+        .map_err(anyhow::Error::msg)?;
+    let approval = apply_use::MigrationApproval::explicit(
+        id,
+        &source,
+        &target,
+        acknowledge_reboot,
+        acknowledge_recovery,
+    )?;
+    match apply_use::apply(&ctx.root, Path::new("/proc"), approval)? {
+        apply_use::ApplyRefusal::HandlerBlocked(blockers) => {
+            for line in render_apply_refusal(&blockers) {
+                println!("{line}");
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Presentation adapter for the recovery use case. Recovery never prompts,
@@ -240,6 +300,79 @@ fn yes_no(value: bool) -> &'static str {
     } else {
         "no"
     }
+}
+
+/// The read-only migration plan (§12.1–2), rendered from typed data. It states
+/// whether the facts describe the live host or an offline root and never
+/// claims a boot the built-in handler cannot yet perform.
+fn render_plan(plan: &apply_use::MigrationPlan) -> Vec<String> {
+    let d = &plan.definition;
+    let context = match &plan.observed.context {
+        crate::application::features::system::detect::Context::LiveHost { .. } => "the live host",
+        crate::application::features::system::detect::Context::Container { .. } => "a container",
+        crate::application::features::system::detect::Context::Chroot { .. } => "a chroot",
+        crate::application::features::system::detect::Context::OfflineRoot { .. } => {
+            "an offline target root"
+        }
+        crate::application::features::system::detect::Context::Unknown { .. } => {
+            "an unverified environment"
+        }
+    };
+    let runtime = match &plan.observed.runtime {
+        crate::application::features::system::detect::RuntimeInit::Observed { kind, .. } => {
+            kind.capability_identity()
+        }
+        crate::application::features::system::detect::RuntimeInit::Unknown { .. } => {
+            "unknown".to_string()
+        }
+    };
+    let desired = match &plan.observed.desired {
+        crate::application::features::system::detect::DesiredInit::Declared { identity, .. } => {
+            identity.clone()
+        }
+        crate::application::features::system::detect::DesiredInit::NotDeclared => {
+            "not declared".to_string()
+        }
+        crate::application::features::system::detect::DesiredInit::Invalid { .. } => {
+            "invalid (fails closed)".to_string()
+        }
+    };
+    let mut lines = vec![
+        format!("Migration plan for {} (definition v{})", d.id, d.version),
+        format!("  Describes:            {context}"),
+        format!("  Source capability:    {}", d.from.to_key()),
+        format!("  Target capability:    {}", d.to.to_key()),
+        format!("  Trusted handler:      {} (reboot required: {})", d.handler.as_str(), yes_no(d.requires_reboot)),
+        format!("  Observed PID 1:       {runtime}"),
+        format!("  Desired init:         {desired}"),
+        "  Package actions:      from authenticated repository metadata at apply time".to_string(),
+    ];
+    lines.push("  Boot/init actions:".to_string());
+    for action in &plan.boot_actions {
+        lines.push(format!("    - {action}"));
+    }
+    lines.push("  Rollback limits:".to_string());
+    for limit in &plan.rollback_limits {
+        lines.push(format!("    - {limit}"));
+    }
+    lines
+}
+
+/// A refused apply is reported honestly with the exact external blockers,
+/// not as a success (§12.2, §10.4).
+fn render_apply_refusal(blockers: &[&str]) -> Vec<String> {
+    let mut lines = vec![
+        "nawa: migration apply refused — the built-in boot handler is blocked by external dependencies".to_string(),
+        "  No migration record, mutation gate or package change was created.".to_string(),
+        "  Blockers and owners:".to_string(),
+    ];
+    for blocker in blockers {
+        lines.push(format!("    - {blocker}"));
+    }
+    lines.push(
+        "  Offline planning remains available (`nawa system migrate plan`).".to_string(),
+    );
+    lines
 }
 
 /// One recovery decision, rendered from typed data (no decisions here).

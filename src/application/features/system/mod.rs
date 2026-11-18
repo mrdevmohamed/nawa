@@ -7,6 +7,7 @@
 //! header for the placement rationale.
 
 pub(crate) mod detect;
+pub(crate) mod migrate_apply;
 pub(crate) mod migrate_coordinator;
 pub(crate) mod migrate_inspect;
 pub(crate) mod migrate_recover;
