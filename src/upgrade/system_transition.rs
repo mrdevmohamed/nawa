@@ -5,13 +5,13 @@
 //! init provider and its runtime dependency closure. It is deliberately
 //! separate from the normal upgrade transaction.
 
-use std::collections::{BTreeMap, HashMap};
+use crate::domain::package::metadata::RunDeps;
+use crate::domain::planning::install::{self, Candidate, CandidateOrigin, Why};
 use crate::domain::system::migration::builtin_faseela_runit_to_systemd;
 use crate::domain::system::observation::{
     Confidence, Context, DesiredInit, ObservedSystem, RuntimeInit,
 };
-use crate::domain::package::metadata::RunDeps;
-use crate::domain::planning::install::{self, Candidate, CandidateOrigin, Why};
+use std::collections::{BTreeMap, HashMap};
 
 use super::{ArchiveAuth, OpenRepo};
 
@@ -162,7 +162,7 @@ fn build_from_observation(
                     policy.preferred.join(", ")
                 ),
             });
-        },
+        }
         DesiredInit::Invalid { reason } => {
             return Some(Preview::Unresolved {
                 from: runtime_identity(&observed.runtime),
@@ -175,12 +175,12 @@ fn build_from_observation(
 
     let context_reason = match &observed.context {
         Context::LiveHost { .. } => None,
-        Context::Container { .. } => Some(
-            "the root is a container; its PID 1 is not the verified host init".to_string(),
-        ),
-        Context::Chroot { .. } => Some(
-            "the root is a chroot; /proc/1 belongs to the outer environment".to_string(),
-        ),
+        Context::Container { .. } => {
+            Some("the root is a container; its PID 1 is not the verified host init".to_string())
+        }
+        Context::Chroot { .. } => {
+            Some("the root is a chroot; /proc/1 belongs to the outer environment".to_string())
+        }
         Context::OfflineRoot { .. } => Some(
             "the selected root is offline; the host PID 1 cannot describe its runtime state"
                 .to_string(),
@@ -328,8 +328,9 @@ fn build_from_observation(
             from: Some(from),
             to: target,
             profile_source,
-            reason: "the observed target profile is unavailable; no package candidate can be planned"
-                .to_string(),
+            reason:
+                "the observed target profile is unavailable; no package candidate can be planned"
+                    .to_string(),
         });
     };
 
@@ -396,9 +397,9 @@ fn build_from_observation(
         let target_version = install::version_rel(&candidate.version, candidate.rel);
         let reason = match item.why {
             Why::Explicit => format!("required by target profile ({wanted})"),
-            Why::Dependency => format!(
-                "runtime dependency of the selected {provider_package} provider"
-            ),
+            Why::Dependency => {
+                format!("runtime dependency of the selected {provider_package} provider")
+            }
             Why::Group => "selected by a package group".to_string(),
             Why::Update => "requested package update".to_string(),
         };
@@ -409,7 +410,10 @@ fn build_from_observation(
                         from: Some(from),
                         to: target,
                         profile_source,
-                        reason: format!("the authenticated candidate {} has no matching index entry", item.name),
+                        reason: format!(
+                            "the authenticated candidate {} has no matching index entry",
+                            item.name
+                        ),
                     });
                 };
                 PackageAction {
@@ -424,14 +428,17 @@ fn build_from_observation(
                     size: entry.size,
                     download_url: entry.download_url.clone(),
                 }
-            },
+            }
             None => {
                 let Some(entry) = open.index.find(&item.name) else {
                     return Some(Preview::Unresolved {
                         from: Some(from),
                         to: target,
                         profile_source,
-                        reason: format!("the authenticated candidate {} has no matching index entry", item.name),
+                        reason: format!(
+                            "the authenticated candidate {} has no matching index entry",
+                            item.name
+                        ),
                     });
                 };
                 PackageAction {
@@ -446,7 +453,7 @@ fn build_from_observation(
                     size: entry.size,
                     download_url: entry.download_url.clone(),
                 }
-            },
+            }
         };
         package_actions.push(action);
     }
@@ -457,7 +464,9 @@ fn build_from_observation(
                     from: Some(from),
                     to: target,
                     profile_source,
-                    reason: format!("the retained candidate {name} has no matching authenticated index entry"),
+                    reason: format!(
+                        "the retained candidate {name} has no matching authenticated index entry"
+                    ),
                 });
             };
             package_actions.push(PackageAction {
@@ -496,17 +505,33 @@ fn runtime_identity(runtime: &RuntimeInit) -> Option<String> {
 
 pub(crate) fn render(preview: &Preview) -> Vec<String> {
     match preview {
-        Preview::Unresolved { from, to, profile_source, reason } => vec![
+        Preview::Unresolved {
+            from,
+            to,
+            profile_source,
+            reason,
+        } => vec![
             "System transition check (separate from the ordinary package upgrade)".to_string(),
-            format!("  Running provider:  {}", from.as_deref().unwrap_or("unknown")),
+            format!(
+                "  Running provider:  {}",
+                from.as_deref().unwrap_or("unknown")
+            ),
             format!("  Target provider:   {to}"),
             format!("  Target profile:    {profile_source}"),
             "  Decision:          unresolved — no migration package plan was selected".to_string(),
             format!("  Reason:            {reason}"),
-            "  Safety:            this preview changes no packages, init, boot or service state".to_string(),
+            "  Safety:            this preview changes no packages, init, boot or service state"
+                .to_string(),
         ],
         Preview::Candidate {
-            id, version, from, to, profile_source, provider_package, package_actions, requires_reboot,
+            id,
+            version,
+            from,
+            to,
+            profile_source,
+            provider_package,
+            package_actions,
+            requires_reboot,
         } => {
             let mut lines = vec![
                 "System transition candidate (NOT applied by nawa upgrade)".to_string(),
@@ -527,11 +552,16 @@ pub(crate) fn render(preview: &Preview) -> Vec<String> {
                     PackageActionKind::Keep => "=",
                 };
                 let version_text = match (&action.current, action.kind) {
-                    (Some(current), PackageActionKind::Upgrade) => format!("{current} -> {}", action.target),
+                    (Some(current), PackageActionKind::Upgrade) => {
+                        format!("{current} -> {}", action.target)
+                    }
                     (Some(current), _) => current.clone(),
                     (None, _) => action.target.clone(),
                 };
-                lines.push(format!("    {marker} {} {version_text} — {}", action.name, action.reason));
+                lines.push(format!(
+                    "    {marker} {} {version_text} — {}",
+                    action.name, action.reason
+                ));
                 let source = match action.source {
                     PackageActionSource::AuthenticatedRepository => "authenticated repository",
                 };
@@ -578,7 +608,9 @@ mod tests {
     fn observed(root: &Path, runtime: InitKind) -> ObservedSystem {
         ObservedSystem {
             root: root.to_path_buf(),
-            context: Context::LiveHost { evidence: Vec::new() },
+            context: Context::LiveHost {
+                evidence: Vec::new(),
+            },
             runtime: RuntimeInit::Observed {
                 kind: runtime,
                 confidence: Confidence::Proven,
@@ -595,10 +627,7 @@ mod tests {
                 distribution: Some("faseela".to_string()),
                 profile: Some("desktop".to_string()),
                 architecture: Some(std::env::consts::ARCH.to_string()),
-                providers: BTreeMap::from([(
-                    "init-system".to_string(),
-                    "systemd".to_string(),
-                )]),
+                providers: BTreeMap::from([("init-system".to_string(), "systemd".to_string())]),
                 policies: BTreeMap::from([(
                     "init-system".to_string(),
                     crate::domain::system::profile::ProviderPolicy {
@@ -658,14 +687,24 @@ mod tests {
             entry("libfoo", &[], &[]),
             entry("systemd", &["libfoo"], &["init-system=systemd"]),
         ]);
-        let result = build_from_observation(&observed(&root, InitKind::Runit), &repo, &HashMap::new()).unwrap();
+        let result =
+            build_from_observation(&observed(&root, InitKind::Runit), &repo, &HashMap::new())
+                .unwrap();
         match result {
-            Preview::Candidate { provider_package, package_actions, from, to, .. } => {
+            Preview::Candidate {
+                provider_package,
+                package_actions,
+                from,
+                to,
+                ..
+            } => {
                 assert_eq!(provider_package, "systemd");
                 assert_eq!(from, "init-system=runit");
                 assert_eq!(to, "init-system=systemd");
                 assert_eq!(action_names(&package_actions), ["libfoo", "systemd"]);
-                assert!(package_actions.iter().all(|action| action.kind == PackageActionKind::Install));
+                assert!(package_actions
+                    .iter()
+                    .all(|action| action.kind == PackageActionKind::Install));
                 assert!(package_actions.iter().all(|action| {
                     action.source == PackageActionSource::AuthenticatedRepository
                         && action.archive.ends_with(".nawa.tar.zst")
@@ -685,8 +724,12 @@ mod tests {
         let root = root();
         let mut repo = open_v4(vec![entry("systemd", &[], &["init-system=systemd"])]);
         repo.signer_public = None;
-        let result = build_from_observation(&observed(&root, InitKind::Runit), &repo, &HashMap::new()).unwrap();
-        assert!(matches!(result, Preview::Unresolved { reason, .. } if reason.contains("trusted signing key")));
+        let result =
+            build_from_observation(&observed(&root, InitKind::Runit), &repo, &HashMap::new())
+                .unwrap();
+        assert!(
+            matches!(result, Preview::Unresolved { reason, .. } if reason.contains("trusted signing key"))
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -697,17 +740,29 @@ mod tests {
             entry("systemd", &[], &["init-system=systemd"]),
             entry("systemd-alt", &[], &["init-system=systemd"]),
         ]);
-        let result = build_from_observation(&observed(&root, InitKind::Runit), &repo, &HashMap::new()).unwrap();
-        assert!(matches!(result, Preview::Unresolved { reason, .. } if reason.contains("more than one package")));
+        let result =
+            build_from_observation(&observed(&root, InitKind::Runit), &repo, &HashMap::new())
+                .unwrap();
+        assert!(
+            matches!(result, Preview::Unresolved { reason, .. } if reason.contains("more than one package"))
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
     fn a_package_declaring_two_init_providers_is_reported_as_ambiguous() {
         let root = root();
-        let repo = open_v4(vec![entry("systemd", &[], &["init-system=runit", "init-system=systemd"])]);
-        let result = build_from_observation(&observed(&root, InitKind::Runit), &repo, &HashMap::new()).unwrap();
-        assert!(matches!(result, Preview::Unresolved { reason, .. } if reason.contains("ambiguous")));
+        let repo = open_v4(vec![entry(
+            "systemd",
+            &[],
+            &["init-system=runit", "init-system=systemd"],
+        )]);
+        let result =
+            build_from_observation(&observed(&root, InitKind::Runit), &repo, &HashMap::new())
+                .unwrap();
+        assert!(
+            matches!(result, Preview::Unresolved { reason, .. } if reason.contains("ambiguous"))
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -861,16 +916,29 @@ mod tests {
     fn already_matching_runtime_and_profile_produces_no_migration_candidate() {
         let root = root();
         let repo = open_v4(vec![entry("systemd", &[], &["init-system=systemd"])]);
-        assert!(build_from_observation(&observed(&root, InitKind::Systemd), &repo, &HashMap::new()).is_none());
+        assert!(build_from_observation(
+            &observed(&root, InitKind::Systemd),
+            &repo,
+            &HashMap::new()
+        )
+        .is_none());
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
     fn unresolved_runtime_dependency_prevents_a_package_candidate() {
         let root = root();
-        let repo = open_v4(vec![entry("systemd", &["missing-library"], &["init-system=systemd"])]);
-        let result = build_from_observation(&observed(&root, InitKind::Runit), &repo, &HashMap::new()).unwrap();
-        assert!(matches!(result, Preview::Unresolved { reason, .. } if reason.contains("missing-library")));
+        let repo = open_v4(vec![entry(
+            "systemd",
+            &["missing-library"],
+            &["init-system=systemd"],
+        )]);
+        let result =
+            build_from_observation(&observed(&root, InitKind::Runit), &repo, &HashMap::new())
+                .unwrap();
+        assert!(
+            matches!(result, Preview::Unresolved { reason, .. } if reason.contains("missing-library"))
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }

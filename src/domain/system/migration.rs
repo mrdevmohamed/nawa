@@ -16,7 +16,6 @@
 //! which every Nawa-owned package-mutating command must stop. The check's
 //! wiring into the command entry points is the next slice.
 
-
 use crate::domain::system::capability::Capability;
 
 /// The pinned record/definition schema version. Fail closed on anything

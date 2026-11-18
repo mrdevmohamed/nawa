@@ -48,14 +48,14 @@ use std::path::Path;
 
 use anyhow::{anyhow, bail, Result};
 
+use crate::adapters::lock;
+use crate::adapters::migration_record as store;
 use crate::application::features::system::detect::{self, Context as ExecContext, RuntimeInit};
 use crate::application::ports::user_interaction::UserInteraction;
 use crate::domain::system::identity::InitKind;
 use crate::domain::system::migration::{
     transition, HandlerId, MigrationRecord, MigrationState, StepOutcome, Transition,
 };
-use crate::adapters::lock;
-use crate::adapters::migration_record as store;
 use crate::transaction::history::{self, TxStatus};
 use crate::transaction::recovery as wal;
 
@@ -116,16 +116,25 @@ pub(crate) enum ResumeOutcome {
 ///
 /// A record that cannot be read fails the whole pass closed: recovery must
 /// never guess past a corrupt state and silently clear a gate (§10.3).
-pub(crate) fn recover(ctx: &crate::application::context::Ctx, ui: &UserInteraction) -> Result<RecoveryReport> {
-    let _guard = lock::acquire_for_migration(&ctx.root, lock::migration_authority())?
-        .ok_or_else(|| anyhow!("internal: the exclusive package database lock is required to recover a migration"))?;
+pub(crate) fn recover(
+    ctx: &crate::application::context::Ctx,
+    ui: &UserInteraction,
+) -> Result<RecoveryReport> {
+    let _guard =
+        lock::acquire_for_migration(&ctx.root, lock::migration_authority())?.ok_or_else(|| {
+            anyhow!(
+                "internal: the exclusive package database lock is required to recover a migration"
+            )
+        })?;
     let _interrupt = crate::adapters::interrupt::Guard::new();
 
     let ids = store::record_ids(&ctx.root)?;
     let mut report = RecoveryReport::default();
     for id in ids {
         if crate::adapters::interrupt::check().is_err() {
-            bail!("interrupted while recovering migration records — the durable state is unchanged");
+            bail!(
+                "interrupted while recovering migration records — the durable state is unchanged"
+            );
         }
         let Some(record) = store::load(&ctx.root, &id)? else {
             // the directory listing saw the file; under the lock nothing may
@@ -145,9 +154,9 @@ pub(crate) fn recover(ctx: &crate::application::context::Ctx, ui: &UserInteracti
         }
         let action = match record.state {
             MigrationState::Planned => recover_planned(ctx, &record, ui)?,
-            MigrationState::Preparing | MigrationState::Verifying | MigrationState::RollbackRequired => {
-                recover_gate_active(ctx, &record, ui)?
-            }
+            MigrationState::Preparing
+            | MigrationState::Verifying
+            | MigrationState::RollbackRequired => recover_gate_active(ctx, &record, ui)?,
             MigrationState::AwaitingReboot => finalize_history(ctx, &record, ui)?,
             MigrationState::NeedsRecovery => RecoveryAction::NeedsRecovery(
                 "manual recovery: automatic safe continuation or rollback cannot be proven"
@@ -189,8 +198,8 @@ fn recover_planned(
                 let mut amended = record.clone();
                 amended.state = transition(record.state, Transition::BeginPreparation)
                     .map_err(anyhow::Error::msg)?;
-                amended.state = transition(amended.state, Transition::Ambiguous)
-                    .map_err(anyhow::Error::msg)?;
+                amended.state =
+                    transition(amended.state, Transition::Ambiguous).map_err(anyhow::Error::msg)?;
                 persist(&ctx.root, &amended)?;
                 (ui.warn)(&format!(
                     "migration {}: a killed preparation committed transaction {tx} packages before the gate became durable — declared needs-recovery, gate active",
@@ -311,9 +320,13 @@ fn recover_gate_active(
 
         // Case B: intent with no outcome. Never re-run; classify from the
         // reconciled package transaction and the actual database.
-        let change = reconciled.as_ref().and_then(|r| r.package_changes.get(index));
+        let change = reconciled
+            .as_ref()
+            .and_then(|r| r.package_changes.get(index));
         let outcome = match change {
-            Some(change) if change.status == "committed" || change.status == "committed-hook-failed" => {
+            Some(change)
+                if change.status == "committed" || change.status == "committed-hook-failed" =>
+            {
                 if change_status_matches_db(&ctx.root, change) {
                     StepOutcome::Succeeded
                 } else {
@@ -498,7 +511,10 @@ fn require_live_host(ctx: &crate::application::context::Ctx, proc: &Path) -> Res
 fn has_reboot_pending(root: &Path) -> Result<bool> {
     for id in store::record_ids(root)? {
         if let Some(record) = store::load(root, &id)? {
-            if matches!(record.state, MigrationState::AwaitingReboot | MigrationState::Verifying) {
+            if matches!(
+                record.state,
+                MigrationState::AwaitingReboot | MigrationState::Verifying
+            ) {
                 return Ok(true);
             }
         }
@@ -563,15 +579,22 @@ fn resume_inner(
         bail!("system migrate resume requires root privileges to verify the boot/init state");
     }
 
-    let _guard = lock::acquire_for_migration(&ctx.root, lock::migration_authority())?
-        .ok_or_else(|| anyhow!("internal: the exclusive package database lock is required to resume a migration"))?;
+    let _guard =
+        lock::acquire_for_migration(&ctx.root, lock::migration_authority())?.ok_or_else(|| {
+            anyhow!(
+                "internal: the exclusive package database lock is required to resume a migration"
+            )
+        })?;
 
     let ids = store::record_ids(&ctx.root)?;
     let mut candidates = Vec::new();
     for id in ids {
         let record = store::load(&ctx.root, &id)?
             .ok_or_else(|| anyhow!("migration record {id} disappeared while being read"))?;
-        if matches!(record.state, MigrationState::AwaitingReboot | MigrationState::Verifying) {
+        if matches!(
+            record.state,
+            MigrationState::AwaitingReboot | MigrationState::Verifying
+        ) {
             candidates.push(record);
         }
     }
@@ -601,8 +624,8 @@ fn resume_inner(
     }
 
     if record.state == MigrationState::AwaitingReboot {
-        record.state = transition(record.state, Transition::BeginVerification)
-            .map_err(anyhow::Error::msg)?;
+        record.state =
+            transition(record.state, Transition::BeginVerification).map_err(anyhow::Error::msg)?;
         persist(&ctx.root, &record)?;
     }
 
@@ -620,7 +643,9 @@ fn resume_inner(
             kind.capability_identity(),
             expected_target.capability_identity()
         )),
-        RuntimeInit::Unknown { reason } => failures.push(format!("PID 1 identity is unknown: {reason}")),
+        RuntimeInit::Unknown { reason } => {
+            failures.push(format!("PID 1 identity is unknown: {reason}"))
+        }
     }
 
     for postcondition in verify_boot_postconditions(&ctx.root, &expected_target) {
@@ -636,8 +661,8 @@ fn resume_inner(
         // No verified rollback route exists until B1/B2/B5 are resolved, so
         // verification failure keeps the gate (§10.5: never promise automatic
         // rollback of arbitrary root filesystem changes).
-        record.state = transition(record.state, Transition::Ambiguous)
-            .map_err(anyhow::Error::msg)?;
+        record.state =
+            transition(record.state, Transition::Ambiguous).map_err(anyhow::Error::msg)?;
         persist(&ctx.root, &record)?;
         (ui.warn)(&format!(
             "migration {}: verification failed ({}); the record is needs-recovery and the gate stays active",
@@ -647,8 +672,8 @@ fn resume_inner(
         return Ok(ResumeOutcome::NeedsRecovery(record, failures));
     }
 
-    record.state = transition(record.state, Transition::VerificationSucceeded)
-        .map_err(anyhow::Error::msg)?;
+    record.state =
+        transition(record.state, Transition::VerificationSucceeded).map_err(anyhow::Error::msg)?;
     persist(&ctx.root, &record)?;
     // Finalization does *not* remove the old provider: retiring runit needs
     // its own verified rollback window (B2/B5) and its own package plan.
@@ -682,12 +707,18 @@ pub(crate) fn verify_boot_postconditions(root: &Path, target: &InitKind) -> Vec<
     let mut selected = None;
     for rel in ["sbin/init", "usr/sbin/init", "usr/bin/init"] {
         let path = root.join(rel);
-        let Ok(meta) = std::fs::symlink_metadata(&path) else { continue };
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
         if !meta.file_type().is_symlink() {
             continue;
         }
-        let Ok(link) = std::fs::read_link(&path) else { continue };
-        if crate::domain::system::identity::identify(&link.to_string_lossy()) == Some(target.clone()) {
+        let Ok(link) = std::fs::read_link(&path) else {
+            continue;
+        };
+        if crate::domain::system::identity::identify(&link.to_string_lossy())
+            == Some(target.clone())
+        {
             selected = Some((rel, link.to_string_lossy().into_owned()));
             break;
         }
@@ -768,10 +799,7 @@ fn linked_transaction(root: &Path, id: &str) -> Result<Option<u64>> {
     }
 }
 
-fn change_status_matches_db(
-    root: &Path,
-    change: &history::PackageChange,
-) -> bool {
+fn change_status_matches_db(root: &Path, change: &history::PackageChange) -> bool {
     let current = match crate::adapters::db::Db::new(root).entry(&change.name) {
         Ok(entry) => entry,
         Err(_) => return false, // unreadable database fails closed
@@ -783,10 +811,7 @@ fn change_status_matches_db(
     }
 }
 
-fn before_state_matches_db(
-    root: &Path,
-    change: &history::PackageChange,
-) -> bool {
+fn before_state_matches_db(root: &Path, change: &history::PackageChange) -> bool {
     let current = match crate::adapters::db::Db::new(root).entry(&change.name) {
         Ok(entry) => entry,
         Err(_) => return false,
@@ -942,7 +967,12 @@ mod tests {
         record.id
     }
 
-    fn change(name: &str, status: &str, before: Option<history::PackageState>, after: Option<history::PackageState>) -> history::PackageChange {
+    fn change(
+        name: &str,
+        status: &str,
+        before: Option<history::PackageState>,
+        after: Option<history::PackageState>,
+    ) -> history::PackageChange {
         history::PackageChange {
             name: name.to_string(),
             action: "install".to_string(),
@@ -975,7 +1005,9 @@ mod tests {
         let report = recover(&ctx_with(&root), &recorder.ui()).unwrap();
         assert_eq!(report.notes.len(), 1);
         assert_eq!(report.notes[0].action, RecoveryAction::Discarded);
-        assert!(store::load(&root, "faseela-runit-to-systemd-v1").unwrap().is_none());
+        assert!(store::load(&root, "faseela-runit-to-systemd-v1")
+            .unwrap()
+            .is_none());
         assert!(!gate_active(&root));
     }
 
@@ -996,11 +1028,18 @@ mod tests {
         );
         let recorder = Recorder::default();
         let report = recover(&ctx_with(&root), &recorder.ui()).unwrap();
-        assert!(matches!(report.notes[0].action, RecoveryAction::NeedsRecovery(_)));
+        assert!(matches!(
+            report.notes[0].action,
+            RecoveryAction::NeedsRecovery(_)
+        ));
         // the gate was retroactively closed: package mutations stay blocked
         assert!(gate_active(&root));
         assert_eq!(on_disk(&root).state, MigrationState::NeedsRecovery);
-        assert!(recorder.warns.borrow().iter().any(|w| w.contains("committed")));
+        assert!(recorder
+            .warns
+            .borrow()
+            .iter()
+            .any(|w| w.contains("committed")));
     }
 
     #[test]
@@ -1017,7 +1056,10 @@ mod tests {
         );
         let recorder = Recorder::default();
         let report = recover(&ctx_with(&root), &recorder.ui()).unwrap();
-        assert!(matches!(report.notes[0].action, RecoveryAction::NeedsRecovery(_)));
+        assert!(matches!(
+            report.notes[0].action,
+            RecoveryAction::NeedsRecovery(_)
+        ));
         assert_eq!(on_disk(&root).state, MigrationState::Planned);
     }
 
@@ -1056,7 +1098,10 @@ mod tests {
         assert_eq!(record.steps[0].outcome, Some(StepOutcome::Succeeded));
         assert_eq!(record.state, MigrationState::AwaitingReboot);
         // the package is still there — recovery never removed/reinstalled it
-        assert!(crate::adapters::db::Db::new(&root).entry("sysd").unwrap().is_some());
+        assert!(crate::adapters::db::Db::new(&root)
+            .entry("sysd")
+            .unwrap()
+            .is_some());
     }
 
     #[test]
@@ -1083,7 +1128,10 @@ mod tests {
             RecoveryAction::ReConcluded(MigrationState::Failed)
         );
         let record = on_disk(&root);
-        assert!(matches!(record.steps[0].outcome, Some(StepOutcome::Failed { .. })));
+        assert!(matches!(
+            record.steps[0].outcome,
+            Some(StepOutcome::Failed { .. })
+        ));
         assert_eq!(record.state, MigrationState::Failed);
         assert!(!gate_active(&root), "nothing committed — the gate is clear");
     }
@@ -1114,8 +1162,15 @@ mod tests {
         );
         let recorder = Recorder::default();
         let report = recover(&ctx_with(&root), &recorder.ui()).unwrap();
-        assert!(matches!(report.notes[0].action, RecoveryAction::NeedsRecovery(_)));
-        assert_eq!(on_disk(&root).state, MigrationState::Preparing, "state is preserved");
+        assert!(matches!(
+            report.notes[0].action,
+            RecoveryAction::NeedsRecovery(_)
+        ));
+        assert_eq!(
+            on_disk(&root).state,
+            MigrationState::Preparing,
+            "state is preserved"
+        );
         assert!(gate_active(&root), "the gate stays active");
     }
 
@@ -1167,10 +1222,17 @@ mod tests {
             }],
         );
         // a failed transaction: the success claim is not trusted
-        seed_tx(&root, "preparing", vec![change("sysd", "failed", None, None)]);
+        seed_tx(
+            &root,
+            "preparing",
+            vec![change("sysd", "failed", None, None)],
+        );
         let recorder = Recorder::default();
         let report = recover(&ctx_with(&root), &recorder.ui()).unwrap();
-        assert!(matches!(report.notes[0].action, RecoveryAction::NeedsRecovery(_)));
+        assert!(matches!(
+            report.notes[0].action,
+            RecoveryAction::NeedsRecovery(_)
+        ));
         assert_eq!(on_disk(&root).state, MigrationState::Preparing);
         assert!(gate_active(&root));
     }
@@ -1186,8 +1248,10 @@ mod tests {
         let report = recover(&ctx_with(&root), &recorder.ui()).unwrap();
         // no journal exists, so the transaction cannot be reconciled: the
         // discrepancy is reported, never silently "fixed"
-        assert!(matches!(report.notes[0].action, RecoveryAction::NeedsRecovery(_))
-            || matches!(report.notes[0].action, RecoveryAction::HistoryFinalized(_)));
+        assert!(
+            matches!(report.notes[0].action, RecoveryAction::NeedsRecovery(_))
+                || matches!(report.notes[0].action, RecoveryAction::HistoryFinalized(_))
+        );
         // the authoritative migration outcome is untouched
         assert_eq!(on_disk(&root).state, record.state);
     }
@@ -1207,7 +1271,10 @@ mod tests {
         let report = recover(&ctx_with(&root), &recorder.ui()).unwrap();
         assert_eq!(report.notes.len(), 2);
         assert_eq!(report.notes[0].id, "aaa-done");
-        assert!(matches!(report.notes[0].action, RecoveryAction::Unchanged(_)));
+        assert!(matches!(
+            report.notes[0].action,
+            RecoveryAction::Unchanged(_)
+        ));
         assert_eq!(report.notes[1].id, "bbb-planned");
         assert_eq!(report.notes[1].action, RecoveryAction::Discarded);
     }
@@ -1219,7 +1286,10 @@ mod tests {
             seed_record(&root, state, vec![]);
             let recorder = Recorder::default();
             let report = recover(&ctx_with(&root), &recorder.ui()).unwrap();
-            assert!(matches!(report.notes[0].action, RecoveryAction::NeedsRecovery(_)));
+            assert!(matches!(
+                report.notes[0].action,
+                RecoveryAction::NeedsRecovery(_)
+            ));
             assert_eq!(on_disk(&root).state, state);
             assert!(gate_active(&root), "no invented rollback clears the gate");
         }
@@ -1263,8 +1333,12 @@ mod tests {
         bootable_target_root(&root);
         let checks = verify_boot_postconditions(&root, &InitKind::Systemd);
         assert!(checks.iter().all(|c| c.satisfied), "{checks:?}");
-        assert!(checks.iter().any(|c| c.name == "init-entry-point-selects-target"));
-        assert!(checks.iter().any(|c| c.name == "old-provider-retained-for-recovery"));
+        assert!(checks
+            .iter()
+            .any(|c| c.name == "init-entry-point-selects-target"));
+        assert!(checks
+            .iter()
+            .any(|c| c.name == "old-provider-retained-for-recovery"));
     }
 
     #[test]
@@ -1287,7 +1361,12 @@ mod tests {
         let root = tmpdir("migrate-recover-resume-ok");
         seed_record(&root, MigrationState::AwaitingReboot, vec![]);
         bootable_target_root(&root);
-        let proc = fake_proc(&root, Some("/usr/lib/systemd/systemd"), Some("systemd"), &root);
+        let proc = fake_proc(
+            &root,
+            Some("/usr/lib/systemd/systemd"),
+            Some("systemd"),
+            &root,
+        );
         let recorder = Recorder::default();
         let outcome = resume_with(&ctx_with(&root), &proc, &recorder.ui()).unwrap();
         match outcome {
@@ -1296,7 +1375,11 @@ mod tests {
         }
         assert_eq!(on_disk(&root).state, MigrationState::Completed);
         assert!(!gate_active(&root), "verified completion clears the gate");
-        assert!(recorder.infos.borrow().iter().any(|i| i.contains("PID 1 is verified")));
+        assert!(recorder
+            .infos
+            .borrow()
+            .iter()
+            .any(|i| i.contains("PID 1 is verified")));
     }
 
     #[test]
@@ -1344,8 +1427,8 @@ mod tests {
 
     #[test]
     fn a_forged_lock_marker_cannot_cross_the_migration_gate() {
-        let error = lock::reject_nested_marker(true)
-            .expect_err("a nested process cannot cross the gate");
+        let error =
+            lock::reject_nested_marker(true).expect_err("a nested process cannot cross the gate");
         assert!(format!("{error:#}").contains("nested nawa process"));
     }
 }

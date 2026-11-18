@@ -110,16 +110,16 @@
 use anyhow::{anyhow, bail, Context, Result};
 use std::path::{Path, PathBuf};
 
+use crate::adapters::db::InstallReason;
+use crate::adapters::lock;
+use crate::adapters::migration_record as store;
+use crate::application::context::Ctx;
 use crate::application::features::package::apply_transaction::install_for_migration;
 use crate::application::ports::user_interaction::UserInteraction;
-use crate::application::context::Ctx;
-use crate::adapters::db::InstallReason;
 use crate::domain::system::migration::{
     transition, MigrationDefinition, MigrationRecord, MigrationState, StepOutcome, StepRecord,
     Transition,
 };
-use crate::adapters::lock;
-use crate::adapters::migration_record as store;
 use crate::transaction::{self, context as tx_context};
 
 /// Unforgeable in-process proof that this coordinator run may continue
@@ -1220,7 +1220,11 @@ mod tests {
     /// `path_contains` (record saves live under `migrations/`, history
     /// records under `history/tx-*.toml`; journal step files match
     /// neither, so the counts are independent of install internals).
-    fn arm(point: crate::adapters::atomic::FailPoint, nth: u32, path_contains: &'static str) -> Armed {
+    fn arm(
+        point: crate::adapters::atomic::FailPoint,
+        nth: u32,
+        path_contains: &'static str,
+    ) -> Armed {
         crate::adapters::atomic::failure_injection::arm_at(point, nth, path_contains);
         Armed
     }
@@ -1288,7 +1292,11 @@ mod tests {
         let root = crate::testutil::tmpdir("migrate-coord-publish-gate");
         let ctx = ctx_with(&root);
         // record saves under `migrations/`: 1 planned, 2 the gate
-        let _armed = arm(crate::adapters::atomic::FailPoint::Published, 2, "migrations");
+        let _armed = arm(
+            crate::adapters::atomic::FailPoint::Published,
+            2,
+            "migrations",
+        );
         let outcome =
             prepare_with(&ctx, vec![]).expect("the published-but-unconfirmed gate save stands");
         let record = committed(&outcome);
@@ -1439,7 +1447,10 @@ mod tests {
         let reason = failed_reason(&record.steps[0]);
         assert!(reason.contains("write-ahead intent"), "{reason}");
         assert!(
-            crate::adapters::db::Db::new(&root).entry("sysd").unwrap().is_none(),
+            crate::adapters::db::Db::new(&root)
+                .entry("sysd")
+                .unwrap()
+                .is_none(),
             "the side effect never ran"
         );
         lock::acquire(&root, lock::Mode::Exclusive)
@@ -1466,7 +1477,10 @@ mod tests {
         let on_disk = store::load(&root, record.id.as_str()).unwrap().unwrap();
         assert_eq!(on_disk.state, MigrationState::NeedsRecovery);
         assert!(
-            crate::adapters::db::Db::new(&root).entry("sysd").unwrap().is_some(),
+            crate::adapters::db::Db::new(&root)
+                .entry("sysd")
+                .unwrap()
+                .is_some(),
             "the committed install stays committed"
         );
         let error = lock::acquire(&root, lock::Mode::Exclusive).unwrap_err();
@@ -1503,7 +1517,10 @@ mod tests {
         assert_eq!(record.steps.len(), 1);
         assert!(!failed_reason(&record.steps[0]).is_empty());
         assert!(
-            crate::adapters::db::Db::new(&root).entry("sysd").unwrap().is_some(),
+            crate::adapters::db::Db::new(&root)
+                .entry("sysd")
+                .unwrap()
+                .is_some(),
             "the package was committed before the failure was reported"
         );
         let error = lock::acquire(&root, lock::Mode::Exclusive).unwrap_err();
@@ -1536,7 +1553,10 @@ mod tests {
             record.steps.is_empty(),
             "the interrupt hit before any intent was written"
         );
-        assert!(crate::adapters::db::Db::new(&root).entry("sysd").unwrap().is_none());
+        assert!(crate::adapters::db::Db::new(&root)
+            .entry("sysd")
+            .unwrap()
+            .is_none());
         lock::acquire(&root, lock::Mode::Exclusive)
             .unwrap()
             .expect("nothing was committed, so no gate");

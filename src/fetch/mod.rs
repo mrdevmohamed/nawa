@@ -30,9 +30,9 @@ use sha2::{Digest, Sha256};
 #[cfg(test)]
 use std::io::{Read, Write};
 #[cfg(test)]
-use std::path::{Path, PathBuf};
-#[cfg(test)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(test)]
+use std::path::{Path, PathBuf};
 
 pub(crate) mod cache;
 pub(crate) mod extract;
@@ -41,19 +41,23 @@ pub(crate) mod local;
 pub(crate) mod snapshot;
 
 // ---- public re-exports (preserving the pre-split API) --------------------
-pub(crate) use cache::{
-    digest_cache_dir, download_cached, download_cached_with_mirrors,
-    download_content_addressed, lock_digest_entry, remote_cache_dir, RepoRef,
-};
+pub(crate) use crate::adapters::checksum::{sha256_of_file, verify_sha256};
 #[cfg(test)]
 pub(crate) use cache::{candidate_urls, candidate_urls_with, unique_part_path};
-pub(crate) use crate::adapters::checksum::{sha256_of_file, verify_sha256};
-pub(crate) use extract::{detect_source_format, extract_source_archive, extract_source_archive_stripped};
+pub(crate) use cache::{
+    digest_cache_dir, download_cached, download_cached_with_mirrors, download_content_addressed,
+    lock_digest_entry, remote_cache_dir, RepoRef,
+};
 #[cfg(test)]
 pub(crate) use extract::SourceFormat;
-pub(crate) use http::{download, download_opt, offline, set_offline};
+pub(crate) use extract::{
+    detect_source_format, extract_source_archive, extract_source_archive_stripped,
+};
 #[cfg(test)]
-pub(crate) use http::{check_offline, is_retryable, progress_label, progress_line, redirect_target};
+pub(crate) use http::{
+    check_offline, is_retryable, progress_label, progress_line, redirect_target,
+};
+pub(crate) use http::{download, download_opt, offline, set_offline};
 pub(crate) use local::copy_local;
 pub(crate) use snapshot::snapshot_file;
 
@@ -95,7 +99,10 @@ mod tests {
     #[test]
     fn progress_line_shows_sizes_and_percent() {
         let mib = 1024 * 1024;
-        assert_eq!(progress_line("gtk3-3.24.52-1", 12 * mib, Some(48 * mib)), "  gtk3-3.24.52-1  12.0 MiB / 48.0 MiB   25%");
+        assert_eq!(
+            progress_line("gtk3-3.24.52-1", 12 * mib, Some(48 * mib)),
+            "  gtk3-3.24.52-1  12.0 MiB / 48.0 MiB   25%"
+        );
         assert_eq!(progress_line("x", 3 * mib, None), "  x  3.0 MiB");
         // a server that lies (more bytes than Content-Length) never prints > 100%
         assert!(progress_line("x", 2 * mib, Some(mib)).ends_with("100%"));
@@ -103,9 +110,18 @@ mod tests {
 
     #[test]
     fn progress_label_drops_part_and_archive_suffix() {
-        assert_eq!(progress_label(Path::new("/c/libepoxy-1.5.9-1.nawa.tar.zst.part")), "libepoxy-1.5.9-1");
-        assert_eq!(progress_label(Path::new("/c/.firefox-153.6.0-1.nawa.tar.zst.part")), "firefox-153.6.0-1");
-        assert_eq!(progress_label(Path::new("/c/index.toml.part")), "index.toml");
+        assert_eq!(
+            progress_label(Path::new("/c/libepoxy-1.5.9-1.nawa.tar.zst.part")),
+            "libepoxy-1.5.9-1"
+        );
+        assert_eq!(
+            progress_label(Path::new("/c/.firefox-153.6.0-1.nawa.tar.zst.part")),
+            "firefox-153.6.0-1"
+        );
+        assert_eq!(
+            progress_label(Path::new("/c/index.toml.part")),
+            "index.toml"
+        );
     }
 
     #[test]
@@ -132,7 +148,10 @@ mod tests {
     #[test]
     fn gnu_urls_get_fallbacks() {
         let v = candidate_urls("https://mirrors.kernel.org/gnu/screen/screen-5.0.0.tar.gz");
-        assert_eq!(v[0], "https://mirrors.kernel.org/gnu/screen/screen-5.0.0.tar.gz");
+        assert_eq!(
+            v[0],
+            "https://mirrors.kernel.org/gnu/screen/screen-5.0.0.tar.gz"
+        );
         assert!(v.contains(&"https://ftpmirror.gnu.org/screen/screen-5.0.0.tar.gz".to_string()));
         assert_eq!(candidate_urls("https://example.com/x.tgz").len(), 1);
     }
@@ -187,7 +206,10 @@ mod tests {
             &dest,
             Some(&sha),
         );
-        assert!(res.is_err(), "a mirror serving other bytes must not be accepted");
+        assert!(
+            res.is_err(),
+            "a mirror serving other bytes must not be accepted"
+        );
         assert!(!dest.exists(), "nothing may be left in the cache");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -259,15 +281,20 @@ mod tests {
         let dir = scratch("404");
         let dest = dir.join("file");
         assert!(!download_opt(&format!("{base}/missing"), &dest).unwrap());
-        assert!(download(&format!("{base}/missing"), &dest).is_err(), "curl -f parity");
+        assert!(
+            download(&format!("{base}/missing"), &dest).is_err(),
+            "curl -f parity"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn download_opt_does_not_treat_forbidden_as_absent() {
-        let base = scripted_server(vec![
-            http_response("HTTP/1.1 403 Forbidden", b"forbidden", ""),
-        ]);
+        let base = scripted_server(vec![http_response(
+            "HTTP/1.1 403 Forbidden",
+            b"forbidden",
+            "",
+        )]);
         let dir = scratch("403");
         let dest = dir.join("file");
         assert!(download_opt(&format!("{base}/file"), &dest).is_err());
@@ -277,7 +304,11 @@ mod tests {
     #[test]
     fn transient_5xx_is_retried() {
         let base = scripted_server(vec![
-            http_response("HTTP/1.1 503 Service Unavailable", b"busy", "Retry-After: 0\r\n"),
+            http_response(
+                "HTTP/1.1 503 Service Unavailable",
+                b"busy",
+                "Retry-After: 0\r\n",
+            ),
             http_response("HTTP/1.1 200 OK", b"recovered", ""),
         ]);
         let dir = scratch("503");
@@ -334,7 +365,10 @@ mod tests {
         let msg = e.to_string();
         assert!(msg.contains("offline"), "{msg}");
         assert!(msg.contains("https://mirror.example/x.tar.gz"), "{msg}");
-        assert!(msg.contains("nawa fetch"), "names the populate command: {msg}");
+        assert!(
+            msg.contains("nawa fetch"),
+            "names the populate command: {msg}"
+        );
         // without the flag nothing is refused
         check_offline("https://mirror.example/x.tar.gz", false).unwrap();
     }
@@ -369,7 +403,8 @@ mod tests {
         dh.set_mode(0o755);
         dh.set_cksum();
         b.append_data(&mut dh, "pkg-1.0", std::io::empty()).unwrap();
-        b.append_data(&mut dh, "pkg-1.0/sub", std::io::empty()).unwrap();
+        b.append_data(&mut dh, "pkg-1.0/sub", std::io::empty())
+            .unwrap();
         let data = b"compiled output\n";
         let mut fh = tar::Header::new_gnu();
         fh.set_size(data.len() as u64);
@@ -382,7 +417,8 @@ mod tests {
         sh.set_mode(0o777);
         sh.set_link_name("tool").unwrap();
         sh.set_cksum();
-        b.append_data(&mut sh, "pkg-1.0/tool-link", std::io::empty()).unwrap();
+        b.append_data(&mut sh, "pkg-1.0/tool-link", std::io::empty())
+            .unwrap();
         // hard link stored BEFORE its target: GNU tar tolerates this and so
         // must we
         let mut lh = tar::Header::new_gnu();
@@ -391,12 +427,14 @@ mod tests {
         lh.set_mode(0o644);
         lh.set_link_name("pkg-1.0/later").unwrap();
         lh.set_cksum();
-        b.append_data(&mut lh, "pkg-1.0/alias", std::io::empty()).unwrap();
+        b.append_data(&mut lh, "pkg-1.0/alias", std::io::empty())
+            .unwrap();
         let mut lh2 = tar::Header::new_gnu();
         lh2.set_size(b"later file\n".len() as u64);
         lh2.set_mode(0o644);
         lh2.set_cksum();
-        b.append_data(&mut lh2, "pkg-1.0/later", &b"later file\n"[..]).unwrap();
+        b.append_data(&mut lh2, "pkg-1.0/later", &b"later file\n"[..])
+            .unwrap();
         b.into_inner().unwrap()
     }
 
@@ -422,7 +460,8 @@ mod tests {
             }
             "tar.xz" => {
                 let out = std::fs::File::create(&p).unwrap();
-                let mut w = lzma_rust2::XzWriter::new(out, lzma_rust2::XzOptions::with_preset(6)).unwrap();
+                let mut w =
+                    lzma_rust2::XzWriter::new(out, lzma_rust2::XzOptions::with_preset(6)).unwrap();
                 w.write_all(bytes).unwrap();
                 w.finish().unwrap();
             }
@@ -576,7 +615,10 @@ mod tests {
         copy_local(&src, &dst).unwrap();
 
         assert_eq!(std::fs::read(dst.join("a/f")).unwrap(), b"content\n");
-        let mode = std::fs::metadata(dst.join("a/f")).unwrap().permissions().mode();
+        let mode = std::fs::metadata(dst.join("a/f"))
+            .unwrap()
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o777, 0o600, "permissions preserved");
         let lt = std::fs::read_link(dst.join("a/link")).unwrap();
         assert_eq!(lt.to_str().unwrap(), "f", "symlink preserved");
@@ -586,12 +628,18 @@ mod tests {
             "hard link preserved"
         );
         let got = filetime::FileTime::from_system_time(
-            std::fs::symlink_metadata(dst.join("a/f")).unwrap().modified().unwrap(),
+            std::fs::symlink_metadata(dst.join("a/f"))
+                .unwrap()
+                .modified()
+                .unwrap(),
         );
         assert_eq!(got.unix_seconds(), 1_000_000, "mtime preserved");
         // directory mtime also carried over (children written before)
         let dgot = filetime::FileTime::from_system_time(
-            std::fs::symlink_metadata(dst.join("a")).unwrap().modified().unwrap(),
+            std::fs::symlink_metadata(dst.join("a"))
+                .unwrap()
+                .modified()
+                .unwrap(),
         );
         assert!(dgot.unix_seconds() >= 1_000_000);
         let _ = std::fs::remove_dir_all(&dir);
@@ -620,14 +668,23 @@ mod tests {
         let out = dir.join("out-gz");
         extract_source_archive(&gz, &out).unwrap();
         // codeload names the top-level dir <repo>-<tag>
-        assert!(out.join("pcre2-pcre2-10.46").is_dir(), "codeload tarball extracted");
+        assert!(
+            out.join("pcre2-pcre2-10.46").is_dir(),
+            "codeload tarball extracted"
+        );
         let _ = std::fs::remove_dir_all(&out);
         let _ = std::fs::remove_file(&gz);
 
         // optional: xz / bz2 upstream mirrors — skipped when unreachable
         for (url, want) in [
-            ("https://mirrors.kernel.org/gnu/bison/bison-3.8.2.tar.xz", SourceFormat::TarXz),
-            ("https://busybox.net/downloads/busybox-1.37.0.tar.bz2", SourceFormat::TarBz2),
+            (
+                "https://mirrors.kernel.org/gnu/bison/bison-3.8.2.tar.xz",
+                SourceFormat::TarXz,
+            ),
+            (
+                "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
+                SourceFormat::TarBz2,
+            ),
         ] {
             let p = dir.join(url.rsplit('/').next().unwrap());
             match download(url, &p) {
@@ -635,7 +692,10 @@ mod tests {
                     assert_eq!(detect_source_format(&p), Some(want), "detect {url}");
                     let out = dir.join(format!("out-{}", want_debug_tag(want)));
                     extract_source_archive(&p, &out).unwrap();
-                    assert!(out.read_dir().unwrap().next().is_some(), "empty tree: {url}");
+                    assert!(
+                        out.read_dir().unwrap().next().is_some(),
+                        "empty tree: {url}"
+                    );
                     let _ = std::fs::remove_dir_all(&out);
                     let _ = std::fs::remove_file(&p);
                 }
@@ -705,7 +765,8 @@ mod tests {
         h.set_mtime(1_234_567);
         h.set_link_name("pkg/file").unwrap();
         h.set_cksum();
-        b.append_data(&mut h, "pkg/sub/hardlink", std::io::empty()).unwrap();
+        b.append_data(&mut h, "pkg/sub/hardlink", std::io::empty())
+            .unwrap();
 
         let mut h = tar::Header::new_gnu();
         h.set_entry_type(tar::EntryType::Symlink);
@@ -714,7 +775,8 @@ mod tests {
         h.set_mtime(1_234_567);
         h.set_link_name("../file").unwrap();
         h.set_cksum();
-        b.append_data(&mut h, "pkg/sub/sym", std::io::empty()).unwrap();
+        b.append_data(&mut h, "pkg/sub/sym", std::io::empty())
+            .unwrap();
 
         b.into_inner().unwrap()
     }
@@ -747,11 +809,17 @@ mod tests {
         // symlink target passes through verbatim (GNU does not translate
         // targets either)
         assert_eq!(
-            std::fs::read_link(out.join("sub/sym")).unwrap().to_str().unwrap(),
+            std::fs::read_link(out.join("sub/sym"))
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "../file"
         );
         // the rewrite tar is transient
-        assert!(!dir.join("out.rewrite.tar").exists(), "rewrite tar cleaned up");
+        assert!(
+            !dir.join("out.rewrite.tar").exists(),
+            "rewrite tar cleaned up"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -768,7 +836,10 @@ mod tests {
         // the entry (fail-closed)
         assert_eq!(std::fs::read(out.join("deep")).unwrap(), b"deep\n");
         assert_eq!(
-            std::fs::read_link(out.join("sym")).unwrap().to_str().unwrap(),
+            std::fs::read_link(out.join("sym"))
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "../file"
         );
         for missing in ["file", "hardlink", "symreal", "sub", "pkg"] {
@@ -837,15 +908,13 @@ mod tests {
         lh.set_mode(0o644);
         lh.set_link_name("../outside").unwrap();
         lh.set_cksum();
-        b.append_data(&mut lh, "pkg/hardlink", std::io::empty()).unwrap();
+        b.append_data(&mut lh, "pkg/hardlink", std::io::empty())
+            .unwrap();
         let p = dir.join("evil-link.tar");
         std::fs::write(&p, b.into_inner().unwrap()).unwrap();
 
         let err = extract_source_archive_stripped(&p, &dir.join("out"), 1).unwrap_err();
-        assert!(
-            err.to_string().contains("hard-link target"),
-            "got: {err}"
-        );
+        assert!(err.to_string().contains("hard-link target"), "got: {err}");
         assert!(!dir.join("outside").exists());
         assert!(!dir.join("out").join("outside").exists());
         let _ = std::fs::remove_dir_all(&dir);
@@ -875,16 +944,13 @@ mod tests {
         let dir = scratch("ca");
         let dest = digest_cache_dir(&dir).join(&sha);
 
-        download_content_addressed(
-            &format!("{base}/gzip-1.2.tar.gz"),
-            &[],
-            &sha,
-            &dest,
-        )
-        .unwrap();
+        download_content_addressed(&format!("{base}/gzip-1.2.tar.gz"), &[], &sha, &dest).unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), body);
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::symlink_metadata(&dest).unwrap().permissions().mode();
+        let mode = std::fs::symlink_metadata(&dest)
+            .unwrap()
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o222, 0, "published entries are read-only (§11)");
 
         // the cache sidecar is exactly entry + lock: no `.part` leftovers
@@ -942,7 +1008,10 @@ mod tests {
         assert_eq!(std::fs::read(&dest).unwrap(), body, "copied, not moved");
         assert!(legacy.is_file(), "the legacy entry must stay shareable");
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::symlink_metadata(&dest).unwrap().permissions().mode();
+        let mode = std::fs::symlink_metadata(&dest)
+            .unwrap()
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o222, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -964,14 +1033,19 @@ mod tests {
 
         let dead = dead_addr();
         download_content_addressed(&format!("{dead}/gzip-1.2.tar.gz"), &[], &sha, &dest).unwrap();
-        assert_eq!(std::fs::read(&dest).unwrap(), body, "the corrupt entry was replaced");
+        assert_eq!(
+            std::fs::read(&dest).unwrap(),
+            body,
+            "the corrupt entry was replaced"
+        );
         let got: Vec<String> = digest_cache_dir(&dir)
             .read_dir()
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
         assert!(
-            got.iter().all(|n| *n == sha.as_str() || *n == format!("{sha}.lock")),
+            got.iter()
+                .all(|n| *n == sha.as_str() || *n == format!("{sha}.lock")),
             "no .part debris: {got:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -996,7 +1070,8 @@ mod tests {
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
         assert!(
-            got.iter().all(|n| *n == sha.as_str() || *n == format!("{sha}.lock")),
+            got.iter()
+                .all(|n| *n == sha.as_str() || *n == format!("{sha}.lock")),
             "no .part debris: {got:?}"
         );
 
@@ -1008,7 +1083,10 @@ mod tests {
             res.unwrap_err().to_string().contains("64 lowercase hex"),
             "malformed digest rejected"
         );
-        assert!(!digest_cache_dir(&fresh).exists(), "nothing created for a bad digest");
+        assert!(
+            !digest_cache_dir(&fresh).exists(),
+            "nothing created for a bad digest"
+        );
         drop(fresh);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1019,6 +1097,8 @@ mod tests {
         let b = unique_part_path(Path::new("/c/0123abcd"));
         assert_ne!(a, b, "concurrent transfers must not share a part file");
         assert!(Path::new(&a).extension().unwrap() == "part");
-        assert!(a.to_string_lossy().contains(&format!("{}-", std::process::id())));
+        assert!(a
+            .to_string_lossy()
+            .contains(&format!("{}-", std::process::id())));
     }
 }

@@ -14,17 +14,17 @@
 use anyhow::{bail, Context, Result};
 use std::path::Path;
 
-use crate::adapters::artifact;
 use crate::adapters::archive;
+use crate::adapters::artifact;
 #[cfg(test)]
 use crate::adapters::db::Db;
-#[cfg(test)]
-use std::path::PathBuf;
+use crate::adapters::db::Entry;
 #[cfg(test)]
 use crate::adapters::interrupt;
-use crate::adapters::db::Entry;
 use crate::adapters::sign;
 use crate::domain::system::migration::LegacyInitHandoff;
+#[cfg(test)]
+use std::path::PathBuf;
 
 /// How the bytes of the archive being installed were authenticated. Decides
 /// the provenance record written next to the content-addressed object.
@@ -79,14 +79,18 @@ pub(crate) fn install_archive(
     key: Option<&Path>,
     reason: crate::adapters::db::InstallReason,
 ) -> Result<Entry> {
-    install_archive_pinned(archive_path, root, InstallOpts {
-        force,
-        allow_unsigned,
-        key,
-        reason,
-        pinned_sha: None,
-        file_journal: None,
-    })
+    install_archive_pinned(
+        archive_path,
+        root,
+        InstallOpts {
+            force,
+            allow_unsigned,
+            key,
+            reason,
+            pinned_sha: None,
+            file_journal: None,
+        },
+    )
 }
 
 /// Options for [`install_archive_pinned`]: the install booleans and
@@ -133,7 +137,14 @@ fn install_archive_pinned_inner(
     opts: InstallOpts<'_>,
     legacy_init_handoff: Option<&LegacyInitHandoff>,
 ) -> Result<Entry> {
-    let InstallOpts { force, allow_unsigned, key, reason, pinned_sha, file_journal } = opts;
+    let InstallOpts {
+        force,
+        allow_unsigned,
+        key,
+        reason,
+        pinned_sha,
+        file_journal,
+    } = opts;
     let snapshot_dir = root.join(".nawa");
     let snapshot = crate::fetch::snapshot_file(archive_path, pinned_sha, &snapshot_dir)?;
     let sig = sign::sig_path_for(archive_path);
@@ -190,8 +201,9 @@ pub(crate) fn install_archive_from_index_proof(
     // `.PKGINFO`. A mismatch is refused — never silently prefer one side.
     // Read from the *snapshot* (the exact verified bytes), not the source path.
     if let Some(expected) = proof.as_ref().and_then(|p| p.metadata) {
-        let raw = archive::read_pkginfo(snapshot.path())
-            .with_context(|| format!("read .PKGINFO from verified {}", snapshot.path().display()))?;
+        let raw = archive::read_pkginfo(snapshot.path()).with_context(|| {
+            format!("read .PKGINFO from verified {}", snapshot.path().display())
+        })?;
         let info = archive::parse_pkginfo(&raw).context("parse archive package metadata")?;
         let from_archive = crate::domain::package::metadata::PkgMetadata::from_pkginfo_map(&info)
             .map_err(anyhow::Error::msg)
@@ -219,7 +231,17 @@ pub(crate) fn install_archive_from_index_proof(
             repo_id: None,
         },
     };
-    install_archive_payload(snapshot.path(), archive_path, root, force, reason, false, auth, file_journal, None)
+    install_archive_payload(
+        snapshot.path(),
+        archive_path,
+        root,
+        force,
+        reason,
+        false,
+        auth,
+        file_journal,
+        None,
+    )
 }
 
 /// Borrowed proof bundle for a trusted-index install.
@@ -249,16 +271,26 @@ pub(crate) fn inspect_archive_state(
     let version = info.get("pkgver").cloned().unwrap_or_default();
     crate::adapters::db::check_name(&name)?;
     if !crate::adapters::db::valid_version(&version) {
-        bail!("archive {} has an invalid package version {:?}", archive_path.display(), version);
+        bail!(
+            "archive {} has an invalid package version {:?}",
+            archive_path.display(),
+            version
+        );
     }
-    let rel = info.get("pkgrel").and_then(|value| value.parse::<u32>().ok())
+    let rel = info
+        .get("pkgrel")
+        .and_then(|value| value.parse::<u32>().ok())
         .filter(|value| *value > 0)
-        .ok_or_else(|| anyhow::anyhow!("archive {} has an invalid pkgrel", archive_path.display()))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("archive {} has an invalid pkgrel", archive_path.display())
+        })?;
     let arch = info.get("arch").cloned().unwrap_or_default();
     let digest = crate::fetch::sha256_of_file(archive_path)
         .with_context(|| format!("hash package archive {}", archive_path.display()))?;
     let effective_reason = if reason == crate::adapters::db::InstallReason::Keep {
-        previous.map(|entry| entry.reason.clone()).unwrap_or_else(|| "explicit".to_string())
+        previous
+            .map(|entry| entry.reason.clone())
+            .unwrap_or_else(|| "explicit".to_string())
     } else {
         reason.as_str().to_string()
     };
@@ -270,7 +302,6 @@ pub(crate) fn inspect_archive_state(
         artifact_sha256: digest,
     })
 }
-
 
 pub mod hooks;
 pub mod journal;
@@ -385,7 +416,10 @@ mod tests {
             None,
         )
         .unwrap_err();
-        assert!(format!("{error:#}").contains("metadata chain mismatch"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("metadata chain mismatch"),
+            "{error:#}"
+        );
         assert!(Db::new(&other_root).entry("demo").unwrap().is_none());
     }
 
@@ -446,11 +480,17 @@ mod tests {
             size: 1,
             artifact_sha256: String::new(),
         };
-        db.add(&entry, &[], &std::collections::HashMap::new()).unwrap();
-        save_hooks(&db, "demo", &archive::Hooks {
-            post_install: "true".into(),
-            ..Default::default()
-        }).unwrap();
+        db.add(&entry, &[], &std::collections::HashMap::new())
+            .unwrap();
+        save_hooks(
+            &db,
+            "demo",
+            &archive::Hooks {
+                post_install: "true".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         // Legacy installs have hooks but no status file: retry once.
         assert!(hook_needs_retry(&root, "demo").unwrap());
@@ -502,7 +542,11 @@ mod tests {
             artifact_sha256: String::new(),
         };
         Db::new(root)
-            .add(&entry, &["/bin".into(), "/usr/bin/su".into()], &std::collections::HashMap::new())
+            .add(
+                &entry,
+                &["/bin".into(), "/usr/bin/su".into()],
+                &std::collections::HashMap::new(),
+            )
             .unwrap();
     }
 
@@ -510,12 +554,30 @@ mod tests {
     fn identical_symlink_is_not_a_conflict_with_another_packages_claim() {
         let base = tmpdir("same-symlink");
         let root = base.join("root");
-        install_archive(&make_base_with_bin_symlink(&base, "1"), &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
+        install_archive(
+            &make_base_with_bin_symlink(&base, "1"),
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
         claim_bin_dir(&root, "zshadow");
         // upgrade of the base package re-ships the very same /bin link
-        install_archive(&make_base_with_bin_symlink(&base, "2"), &root, false, true, None, crate::adapters::db::InstallReason::Explicit)
-            .expect("an identical symlink must not be reported as a file conflict");
-        assert_eq!(std::fs::read_link(root.join("bin")).unwrap(), Path::new("usr/bin"));
+        install_archive(
+            &make_base_with_bin_symlink(&base, "2"),
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .expect("an identical symlink must not be reported as a file conflict");
+        assert_eq!(
+            std::fs::read_link(root.join("bin")).unwrap(),
+            Path::new("usr/bin")
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -526,9 +588,19 @@ mod tests {
         claim_bin_dir(&root, "zshadow");
         std::fs::create_dir_all(&root).unwrap();
         std::os::unix::fs::symlink("elsewhere", root.join("bin")).unwrap();
-        let err = install_archive(&make_base_with_bin_symlink(&base, "1"), &root, false, true, None, crate::adapters::db::InstallReason::Explicit)
-            .unwrap_err();
-        assert!(format!("{err:#}").contains("/bin (owned by zshadow)"), "{err:#}");
+        let err = install_archive(
+            &make_base_with_bin_symlink(&base, "1"),
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("/bin (owned by zshadow)"),
+            "{err:#}"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -536,13 +608,32 @@ mod tests {
     fn upgrade_keeps_paths_another_package_still_lists() {
         let base = tmpdir("shared-upgrade");
         let root = base.join("root");
-        install_archive(&make_base_with_bin_symlink(&base, "1"), &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
+        install_archive(
+            &make_base_with_bin_symlink(&base, "1"),
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
         claim_bin_dir(&root, "zshadow");
         // zshadow 2.0 no longer ships /bin: the old entry is obsolete for it,
         // but base's /bin symlink must survive
         let v2 = make_pkg(&base, "zshadow", "2.0", &[("/usr/bin/su", b"su2")]);
-        install_archive(&v2, &root, true, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
-        assert_eq!(std::fs::read_link(root.join("bin")).unwrap(), Path::new("usr/bin"));
+        install_archive(
+            &v2,
+            &root,
+            true,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_link(root.join("bin")).unwrap(),
+            Path::new("usr/bin")
+        );
         assert!(root.join("usr/bin/su").is_file());
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -551,10 +642,21 @@ mod tests {
     fn remove_keeps_paths_another_package_still_lists() {
         let base = tmpdir("shared-remove");
         let root = base.join("root");
-        install_archive(&make_base_with_bin_symlink(&base, "1"), &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
+        install_archive(
+            &make_base_with_bin_symlink(&base, "1"),
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
         claim_bin_dir(&root, "zshadow");
         remove_with("zshadow", &root, true).unwrap();
-        assert_eq!(std::fs::read_link(root.join("bin")).unwrap(), Path::new("usr/bin"));
+        assert_eq!(
+            std::fs::read_link(root.join("bin")).unwrap(),
+            Path::new("usr/bin")
+        );
         assert!(root.join("usr/bin/sh").is_file());
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -563,18 +665,37 @@ mod tests {
     fn upgrade_updates_files_and_removes_obsolete() {
         let base = tmpdir("upgrade");
         let root = base.join("root");
-        let v1 = make_pkg(&base, "demo", "1.0", &[
-            ("/usr/bin/demo", b"v1"),
-            ("/usr/lib/demo/old.so", b"legacy"),
-        ]);
-        let v2 = make_pkg(&base, "demo", "2.0", &[
-            ("/usr/bin/demo", b"v2"),
-        ]);
+        let v1 = make_pkg(
+            &base,
+            "demo",
+            "1.0",
+            &[
+                ("/usr/bin/demo", b"v1"),
+                ("/usr/lib/demo/old.so", b"legacy"),
+            ],
+        );
+        let v2 = make_pkg(&base, "demo", "2.0", &[("/usr/bin/demo", b"v2")]);
 
-        install_archive(&v1, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
+        install_archive(
+            &v1,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
         assert_eq!(std::fs::read(root.join("usr/bin/demo")).unwrap(), b"v1");
 
-        install_archive(&v2, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
+        install_archive(
+            &v2,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
         assert_eq!(std::fs::read(root.join("usr/bin/demo")).unwrap(), b"v2");
         // obsolete file was removed
         assert!(!root.join("usr/lib/demo/old.so").exists());
@@ -589,23 +710,49 @@ mod tests {
     fn upgrade_protects_modified_etc_files() {
         let base = tmpdir("etcnew");
         let root = base.join("root");
-        let v1 = make_pkg(&base, "srv", "1.0", &[
-            ("/etc/srv.conf", b"original\n"),
-            ("/usr/bin/srv", b"bin1"),
-        ]);
-        let v2 = make_pkg(&base, "srv", "2.0", &[
-            ("/etc/srv.conf", b"changed upstream\n"),
-            ("/usr/bin/srv", b"bin2"),
-        ]);
+        let v1 = make_pkg(
+            &base,
+            "srv",
+            "1.0",
+            &[("/etc/srv.conf", b"original\n"), ("/usr/bin/srv", b"bin1")],
+        );
+        let v2 = make_pkg(
+            &base,
+            "srv",
+            "2.0",
+            &[
+                ("/etc/srv.conf", b"changed upstream\n"),
+                ("/usr/bin/srv", b"bin2"),
+            ],
+        );
 
-        install_archive(&v1, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
+        install_archive(
+            &v1,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
         // admin edits the config
         std::fs::write(root.join("etc/srv.conf"), b"locally edited\n").unwrap();
 
-        install_archive(&v2, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
+        install_archive(
+            &v2,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
 
         // local edit preserved, upstream change diverted to .nawa-new
-        assert_eq!(std::fs::read(root.join("etc/srv.conf")).unwrap(), b"locally edited\n");
+        assert_eq!(
+            std::fs::read(root.join("etc/srv.conf")).unwrap(),
+            b"locally edited\n"
+        );
         let diverted = root.join("etc/srv.conf.nawa-new");
         assert!(diverted.exists(), ".nawa-new diversion missing");
         assert_eq!(std::fs::read(&diverted).unwrap(), b"changed upstream\n");
@@ -621,8 +768,24 @@ mod tests {
         let root = base.join("root");
         let v1 = make_pkg(&base, "srv", "1.0", &[("/etc/srv.conf", b"same\n")]);
         let v2 = make_pkg(&base, "srv", "2.0", &[("/etc/srv.conf", b"same\n")]);
-        install_archive(&v1, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
-        install_archive(&v2, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
+        install_archive(
+            &v1,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
+        install_archive(
+            &v2,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
         assert!(root.join("etc/srv.conf").exists());
         assert!(!root.join("etc/srv.conf.nawa-new").exists());
         let _ = std::fs::remove_dir_all(&base);
@@ -636,9 +799,28 @@ mod tests {
         let root = base.join("root");
         let v1 = make_pkg(&base, "srv", "1.0", &[("/etc/srv.conf", b"stock v1\n")]);
         let v2 = make_pkg(&base, "srv", "2.0", &[("/etc/srv.conf", b"stock v2\n")]);
-        install_archive(&v1, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
-        install_archive(&v2, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
-        assert_eq!(std::fs::read(root.join("etc/srv.conf")).unwrap(), b"stock v2\n");
+        install_archive(
+            &v1,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
+        install_archive(
+            &v2,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(root.join("etc/srv.conf")).unwrap(),
+            b"stock v2\n"
+        );
         assert!(!root.join("etc/srv.conf.nawa-new").exists());
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -651,13 +833,32 @@ mod tests {
         let root = base.join("root");
         let v1 = make_pkg(&base, "srv", "1.0", &[("/etc/srv.conf", b"v1\n")]);
         let v2 = make_pkg(&base, "srv", "2.0", &[("/etc/srv.conf", b"v2\n")]);
-        install_archive(&v1, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
+        install_archive(
+            &v1,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
         // wipe the baseline to emulate a pre-v0.5 database
         let db = Db::new(&root);
         std::fs::remove_file(db.local_dir().join("srv/hashes")).unwrap();
-        install_archive(&v2, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
+        install_archive(
+            &v2,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
         assert_eq!(std::fs::read(root.join("etc/srv.conf")).unwrap(), b"v1\n");
-        assert_eq!(std::fs::read(root.join("etc/srv.conf.nawa-new")).unwrap(), b"v2\n");
+        assert_eq!(
+            std::fs::read(root.join("etc/srv.conf.nawa-new")).unwrap(),
+            b"v2\n"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -668,8 +869,24 @@ mod tests {
         let v1 = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1")]);
         let v2 = make_pkg(&base, "demo", "2.0", &[("/usr/bin/demo", b"v2")]);
 
-        install_archive(&v1, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
-        install_archive(&v2, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
+        install_archive(
+            &v1,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
+        install_archive(
+            &v2,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
         assert_eq!(std::fs::read(root.join("usr/bin/demo")).unwrap(), b"v2");
 
         // roll back to 1.0
@@ -693,7 +910,15 @@ mod tests {
         let base = tmpdir("rmrollback");
         let root = base.join("root");
         let v1 = make_pkg(&base, "gone", "1.0", &[("/usr/bin/gone", b"x")]);
-        install_archive(&v1, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
+        install_archive(
+            &v1,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
         remove("gone", &root).unwrap();
         assert!(!root.join("usr/bin/gone").exists());
         rollback("gone", &root).unwrap();
@@ -712,10 +937,26 @@ mod tests {
         let root = base.join("root");
         let v1 = make_pkg(&base, "r", "1.0", &[("/usr/bin/r", b"a")]);
         let v2 = make_pkg(&base, "r", "2.0", &[("/usr/bin/r", b"b")]);
-        install_archive(&v1, &root, false, true, None, crate::adapters::db::InstallReason::Dependency).unwrap();
+        install_archive(
+            &v1,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Dependency,
+        )
+        .unwrap();
         let db = Db::new(&root);
         assert_eq!(db.entry("r").unwrap().unwrap().reason, "dependency");
-        install_archive(&v2, &root, false, true, None, crate::adapters::db::InstallReason::Keep).unwrap();
+        install_archive(
+            &v2,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Keep,
+        )
+        .unwrap();
         assert_eq!(db.entry("r").unwrap().unwrap().reason, "dependency");
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -735,8 +976,24 @@ mod tests {
             &app,
         )
         .unwrap();
-        install_archive(&lib, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
-        install_archive(&app, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
+        install_archive(
+            &lib,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
+        install_archive(
+            &app,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
 
         assert!(remove("libx", &root).is_err());
         assert!(root.join("usr/lib/libx").exists());
@@ -757,8 +1014,10 @@ mod tests {
         std::fs::write(stage.join("fresh"), b"fresh").unwrap();
 
         let mut tx = Tx::new(&root, base.join("bak"));
-        tx.place(&stage.join("new-content"), &root.join("usr/bin/old")).unwrap();
-        tx.place(&stage.join("fresh"), &root.join("usr/bin/fresh")).unwrap();
+        tx.place(&stage.join("new-content"), &root.join("usr/bin/old"))
+            .unwrap();
+        tx.place(&stage.join("fresh"), &root.join("usr/bin/fresh"))
+            .unwrap();
         assert_eq!(std::fs::read(root.join("usr/bin/old")).unwrap(), b"new");
 
         tx.rollback();
@@ -785,8 +1044,10 @@ mod tests {
 
         {
             let mut tx = Tx::new(&root, base.join("bak"));
-            tx.place(&stage.join("new-content"), &root.join("usr/bin/old")).unwrap();
-            tx.place(&stage.join("fresh"), &root.join("usr/bin/fresh")).unwrap();
+            tx.place(&stage.join("new-content"), &root.join("usr/bin/old"))
+                .unwrap();
+            tx.place(&stage.join("fresh"), &root.join("usr/bin/fresh"))
+                .unwrap();
             tx.remove(&root.join("usr/bin/obsolete")).unwrap();
             assert_eq!(std::fs::read(root.join("usr/bin/old")).unwrap(), b"new");
             assert!(!root.join("usr/bin/obsolete").exists());
@@ -794,7 +1055,10 @@ mod tests {
         }
 
         assert_eq!(std::fs::read(root.join("usr/bin/old")).unwrap(), b"orig");
-        assert_eq!(std::fs::read(root.join("usr/bin/obsolete")).unwrap(), b"dropped by upgrade");
+        assert_eq!(
+            std::fs::read(root.join("usr/bin/obsolete")).unwrap(),
+            b"dropped by upgrade"
+        );
         assert!(!root.join("usr/bin/fresh").exists());
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -811,7 +1075,8 @@ mod tests {
         std::fs::write(stage.join("new-content"), b"new").unwrap();
 
         let mut tx = Tx::new(&root, base.join("bak"));
-        tx.place(&stage.join("new-content"), &root.join("usr/bin/old")).unwrap();
+        tx.place(&stage.join("new-content"), &root.join("usr/bin/old"))
+            .unwrap();
         tx.commit(); // consumes the Tx and drops it
 
         assert_eq!(std::fs::read(root.join("usr/bin/old")).unwrap(), b"new");
@@ -846,9 +1111,17 @@ mod tests {
         std::fs::write(stage.join("ld.so"), b"loader").unwrap();
 
         let mut tx = Tx::new(&root, base.join("bak"));
-        let err = tx.place(&stage.join("ld.so"), &root.join("usr/lib64/ld.so")).unwrap_err();
-        assert!(format!("{err:#}").contains("outside the target root"), "{err:#}");
-        assert!(!other.join("ld.so").exists(), "file leaked through the symlink");
+        let err = tx
+            .place(&stage.join("ld.so"), &root.join("usr/lib64/ld.so"))
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("outside the target root"),
+            "{err:#}"
+        );
+        assert!(
+            !other.join("ld.so").exists(),
+            "file leaked through the symlink"
+        );
         assert!(stage.join("ld.so").exists(), "source must stay untouched");
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -864,7 +1137,8 @@ mod tests {
         std::fs::write(stage.join("libx.so"), b"x").unwrap();
 
         let mut tx = Tx::new(&root, base.join("bak"));
-        tx.place(&stage.join("libx.so"), &root.join("lib/libx.so")).unwrap();
+        tx.place(&stage.join("libx.so"), &root.join("lib/libx.so"))
+            .unwrap();
         assert_eq!(std::fs::read(root.join("usr/lib/libx.so")).unwrap(), b"x");
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -894,20 +1168,42 @@ mod tests {
         std::fs::create_dir_all(&other).unwrap();
         std::fs::write(other.join("ld-linux.so.2"), b"REAL LOADER").unwrap();
         std::os::unix::fs::symlink(&other, root.join("usr/lib64")).unwrap();
-        let pkg = make_pkg(&base, "demo", "1.0", &[("/usr/lib64/ld-linux.so.2", b"new")]);
+        let pkg = make_pkg(
+            &base,
+            "demo",
+            "1.0",
+            &[("/usr/lib64/ld-linux.so.2", b"new")],
+        );
 
-        assert!(install_archive(&pkg, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).is_err());
-        assert_eq!(std::fs::read(other.join("ld-linux.so.2")).unwrap(), b"REAL LOADER");
+        assert!(install_archive(
+            &pkg,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit
+        )
+        .is_err());
+        assert_eq!(
+            std::fs::read(other.join("ld-linux.so.2")).unwrap(),
+            b"REAL LOADER"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
     #[test]
     fn verified_snapshot_is_independent_of_the_source_path() {
         let base = tmpdir("verified-snapshot");
-        let archive = make_pkg(&base, "snapshot-demo", "1.0", &[("/usr/share/snapshot-demo", b"original")]);
+        let archive = make_pkg(
+            &base,
+            "snapshot-demo",
+            "1.0",
+            &[("/usr/share/snapshot-demo", b"original")],
+        );
         let original = std::fs::read(&archive).unwrap();
         let digest = crate::fetch::sha256_of_file(&archive).unwrap();
 
-        let snapshot = crate::fetch::snapshot_file(&archive, Some(&digest), &base.join(".nawa")).unwrap();
+        let snapshot =
+            crate::fetch::snapshot_file(&archive, Some(&digest), &base.join(".nawa")).unwrap();
         assert_ne!(snapshot.path(), archive);
         assert_eq!(std::fs::read(snapshot.path()).unwrap(), original);
         std::fs::write(&archive, b"replaced after snapshot creation").unwrap();
@@ -923,17 +1219,44 @@ mod tests {
         let base = tmpdir("pinned-install");
         let root = base.join("root");
         std::fs::create_dir_all(&root).unwrap();
-        let archive = make_pkg(&base, "pinned-demo", "1.0", &[("/usr/share/pinned-demo", b"x")]);
+        let archive = make_pkg(
+            &base,
+            "pinned-demo",
+            "1.0",
+            &[("/usr/share/pinned-demo", b"x")],
+        );
         let digest = crate::fetch::sha256_of_file(&archive).unwrap();
 
         let wrong = "0".repeat(64);
-        let err = install_archive_pinned(&archive, &root, InstallOpts { force: false, allow_unsigned: true, key: None, reason: crate::adapters::db::InstallReason::Explicit, pinned_sha: Some(&wrong), file_journal: None })
-            .unwrap_err();
+        let err = install_archive_pinned(
+            &archive,
+            &root,
+            InstallOpts {
+                force: false,
+                allow_unsigned: true,
+                key: None,
+                reason: crate::adapters::db::InstallReason::Explicit,
+                pinned_sha: Some(&wrong),
+                file_journal: None,
+            },
+        )
+        .unwrap_err();
         assert!(format!("{err:#}").contains("sha256 mismatch"), "{err:#}");
         assert!(!root.join("usr/share/pinned-demo").exists());
 
-        install_archive_pinned(&archive, &root, InstallOpts { force: false, allow_unsigned: true, key: None, reason: crate::adapters::db::InstallReason::Explicit, pinned_sha: Some(&digest.to_uppercase()), file_journal: None })
-            .unwrap();
+        install_archive_pinned(
+            &archive,
+            &root,
+            InstallOpts {
+                force: false,
+                allow_unsigned: true,
+                key: None,
+                reason: crate::adapters::db::InstallReason::Explicit,
+                pinned_sha: Some(&digest.to_uppercase()),
+                file_journal: None,
+            },
+        )
+        .unwrap();
         assert!(root.join("usr/share/pinned-demo").exists());
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -944,7 +1267,12 @@ mod tests {
             return;
         }
         let base = tmpdir("stale-snapshots");
-        let archive = make_pkg(&base, "stale-demo", "1.0", &[("/usr/share/stale-demo", b"x")]);
+        let archive = make_pkg(
+            &base,
+            "stale-demo",
+            "1.0",
+            &[("/usr/share/stale-demo", b"x")],
+        );
         let dir = base.join(".nawa");
         std::fs::create_dir_all(&dir).unwrap();
         // a pid above any kernel pid_max can never be alive
@@ -967,7 +1295,10 @@ mod tests {
     fn leftovers(root: &Path) -> Vec<String> {
         // anything in .nawa other than the (empty or absent) bookkeeping dirs
         match std::fs::read_dir(root.join(".nawa")) {
-            Ok(rd) => rd.flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect(),
+            Ok(rd) => rd
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .collect(),
             Err(_) => Vec::new(),
         }
     }
@@ -984,7 +1315,10 @@ mod tests {
         ] {
             let p = PathBuf::from(std::ffi::OsStr::from_bytes(raw));
             let e = enc(&p);
-            assert!(!e.contains('\t') && !e.contains('\n') && !e.contains(' '), "{e:?}");
+            assert!(
+                !e.contains('\t') && !e.contains('\n') && !e.contains(' '),
+                "{e:?}"
+            );
             assert_eq!(dec(&e).unwrap(), p, "{e}");
         }
     }
@@ -996,10 +1330,21 @@ mod tests {
         let pkg = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1")]);
 
         interrupt::simulate_interrupt();
-        let err = install_archive(&pkg, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap_err();
+        let err = install_archive(
+            &pkg,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap_err();
         interrupt::clear_simulated_interrupt();
 
-        assert!(err.downcast_ref::<interrupt::Interrupted>().is_some(), "{err:#}");
+        assert!(
+            err.downcast_ref::<interrupt::Interrupted>().is_some(),
+            "{err:#}"
+        );
         assert!(!root.join("usr/bin/demo").exists());
         assert!(Db::new(&root).entry("demo").unwrap().is_none());
         assert!(leftovers(&root).is_empty(), "{:?}", leftovers(&root));
@@ -1011,17 +1356,41 @@ mod tests {
         let base = tmpdir("intr-upgrade");
         let root = base.join("root");
         let v1 = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1")]);
-        let v2 = make_pkg(&base, "demo", "2.0", &[("/usr/bin/demo", b"v2"), ("/usr/bin/extra", b"x")]);
-        install_archive(&v1, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
+        let v2 = make_pkg(
+            &base,
+            "demo",
+            "2.0",
+            &[("/usr/bin/demo", b"v2"), ("/usr/bin/extra", b"x")],
+        );
+        install_archive(
+            &v1,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
 
         interrupt::simulate_interrupt();
-        let err = install_archive(&v2, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap_err();
+        let err = install_archive(
+            &v2,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap_err();
         interrupt::clear_simulated_interrupt();
 
         assert!(err.downcast_ref::<interrupt::Interrupted>().is_some());
         assert_eq!(std::fs::read(root.join("usr/bin/demo")).unwrap(), b"v1");
         assert!(!root.join("usr/bin/extra").exists());
-        assert_eq!(Db::new(&root).entry("demo").unwrap().unwrap().version, "1.0");
+        assert_eq!(
+            Db::new(&root).entry("demo").unwrap().unwrap().version,
+            "1.0"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -1029,8 +1398,21 @@ mod tests {
     fn interrupt_stops_a_removal_without_removing_anything() {
         let base = tmpdir("intr-remove");
         let root = base.join("root");
-        let v1 = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1"), ("/usr/bin/two", b"2")]);
-        install_archive(&v1, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
+        let v1 = make_pkg(
+            &base,
+            "demo",
+            "1.0",
+            &[("/usr/bin/demo", b"v1"), ("/usr/bin/two", b"2")],
+        );
+        install_archive(
+            &v1,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
 
         interrupt::simulate_interrupt();
         let err = remove_with("demo", &root, false).unwrap_err();
@@ -1053,7 +1435,8 @@ mod tests {
         std::fs::write(stage.join("n"), b"new").unwrap();
         {
             let mut tx = Tx::new(&root, root.join(".nawa/bak-1"));
-            tx.place(&stage.join("n"), &root.join("usr/bin/old")).unwrap();
+            tx.place(&stage.join("n"), &root.join("usr/bin/old"))
+                .unwrap();
             // early return / panic path: no commit, no explicit rollback
         }
         assert_eq!(std::fs::read(root.join("usr/bin/old")).unwrap(), b"orig");
@@ -1068,8 +1451,21 @@ mod tests {
     fn recover_rolls_back_a_killed_upgrade_files_and_db() {
         let base = tmpdir("recover-kill");
         let root = base.join("root");
-        let v1 = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1"), ("/etc/demo.conf", b"c1")]);
-        install_archive(&v1, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
+        let v1 = make_pkg(
+            &base,
+            "demo",
+            "1.0",
+            &[("/usr/bin/demo", b"v1"), ("/etc/demo.conf", b"c1")],
+        );
+        install_archive(
+            &v1,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
         let db = Db::new(&root);
         let before_desc = std::fs::read(db.entry_dir("demo").unwrap().join("desc")).unwrap();
         let before_files = std::fs::read(db.entry_dir("demo").unwrap().join("files")).unwrap();
@@ -1080,11 +1476,17 @@ mod tests {
         std::fs::write(stage.join("demo"), b"v2").unwrap();
         std::fs::write(stage.join("newfile"), b"n").unwrap();
         let mut tx = Tx::new(&root, root.join(".nawa/bak-777"));
-        tx.place(&stage.join("demo"), &root.join("usr/bin/demo")).unwrap();
-        tx.place(&stage.join("newfile"), &root.join("usr/bin/newfile")).unwrap();
+        tx.place(&stage.join("demo"), &root.join("usr/bin/demo"))
+            .unwrap();
+        tx.place(&stage.join("newfile"), &root.join("usr/bin/newfile"))
+            .unwrap();
         tx.remove(&root.join("etc/demo.conf")).unwrap();
         tx.snapshot_db(&db.entry_dir("demo").unwrap()).unwrap();
-        std::fs::write(db.entry_dir("demo").unwrap().join("desc"), b"garbage = half written").unwrap();
+        std::fs::write(
+            db.entry_dir("demo").unwrap().join("desc"),
+            b"garbage = half written",
+        )
+        .unwrap();
         std::mem::forget(tx); // SIGKILL: no Drop, no rollback
 
         assert_eq!(std::fs::read(root.join("usr/bin/demo")).unwrap(), b"v2");
@@ -1096,8 +1498,14 @@ mod tests {
         assert_eq!(std::fs::read(root.join("usr/bin/demo")).unwrap(), b"v1");
         assert_eq!(std::fs::read(root.join("etc/demo.conf")).unwrap(), b"c1");
         assert!(!root.join("usr/bin/newfile").exists());
-        assert_eq!(std::fs::read(db.entry_dir("demo").unwrap().join("desc")).unwrap(), before_desc);
-        assert_eq!(std::fs::read(db.entry_dir("demo").unwrap().join("files")).unwrap(), before_files);
+        assert_eq!(
+            std::fs::read(db.entry_dir("demo").unwrap().join("desc")).unwrap(),
+            before_desc
+        );
+        assert_eq!(
+            std::fs::read(db.entry_dir("demo").unwrap().join("files")).unwrap(),
+            before_files
+        );
         assert_eq!(db.entry("demo").unwrap().unwrap().version, "1.0");
         assert!(leftovers(&root).is_empty(), "{:?}", leftovers(&root));
         // running it again is a no-op
@@ -1115,7 +1523,8 @@ mod tests {
         std::fs::write(stage.join("chrome"), b"bin").unwrap();
         let mut tx = Tx::new(&root, root.join(".nawa/bak-5"));
         std::fs::create_dir_all(root.join("usr/bin")).unwrap();
-        tx.place(&stage.join("chrome"), &root.join("usr/bin/chrome")).unwrap();
+        tx.place(&stage.join("chrome"), &root.join("usr/bin/chrome"))
+            .unwrap();
         tx.snapshot_db(&db.entry_dir("chrome").unwrap()).unwrap(); // did not exist
         std::fs::create_dir_all(db.entry_dir("chrome").unwrap()).unwrap();
         std::fs::write(db.entry_dir("chrome").unwrap().join("desc"), b"partial").unwrap();
@@ -1138,7 +1547,8 @@ mod tests {
         std::fs::write(root.join("usr/bin/tool"), b"old").unwrap();
         std::fs::write(stage.join("tool"), b"new").unwrap();
         let mut tx = Tx::new(&root, root.join(".nawa/bak-9"));
-        tx.place(&stage.join("tool"), &root.join("usr/bin/tool")).unwrap();
+        tx.place(&stage.join("tool"), &root.join("usr/bin/tool"))
+            .unwrap();
         // killed right after COMMIT became durable, before the cleanup
         tx.journal.as_mut().unwrap().mark_committed().unwrap();
         std::mem::forget(tx);
@@ -1158,10 +1568,14 @@ mod tests {
         std::fs::write(root.join("usr/bin/keep"), b"orig").unwrap();
         let nawa = root.join(".nawa");
         std::fs::create_dir_all(nawa.join("tmp-123/usr")).unwrap(); // dead staging dir
-        // a journal that stops mid-line, as after a power cut
+                                                                    // a journal that stops mid-line, as after a power cut
         let bak = nawa.join("bak-1");
         let bak_enc = enc(&bak);
-        std::fs::write(nawa.join("bak-1.journal"), format!("H\t{bak_enc}\nC\t%2fno/such/file\nR\t%2fusr/bi")).unwrap();
+        std::fs::write(
+            nawa.join("bak-1.journal"),
+            format!("H\t{bak_enc}\nC\t%2fno/such/file\nR\t%2fusr/bi"),
+        )
+        .unwrap();
 
         recover(&root).unwrap();
         assert_eq!(std::fs::read(root.join("usr/bin/keep")).unwrap(), b"orig");
@@ -1189,7 +1603,10 @@ mod tests {
         std::fs::write(nawa.join("bak-3.journal"), line).unwrap();
 
         recover(&root).unwrap();
-        assert_eq!(std::fs::read(root.join("usr/bin/precious")).unwrap(), b"orig");
+        assert_eq!(
+            std::fs::read(root.join("usr/bin/precious")).unwrap(),
+            b"orig"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -1205,20 +1622,36 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        install_archive(&v1, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
+        install_archive(
+            &v1,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
 
         let db = Db::new(&root);
         let e = db.entry("demo").unwrap().unwrap();
-        assert_eq!(e.artifact_sha256, digest, "the exact bytes are referenced by digest");
+        assert_eq!(
+            e.artifact_sha256, digest,
+            "the exact bytes are referenced by digest"
+        );
         // install_date is Unix seconds, within a sane window around "now"
-        assert!(e.install_date >= before && e.install_date <= before + 60,
-            "install_date {} is not seconds (before={before})", e.install_date);
+        assert!(
+            e.install_date >= before && e.install_date <= before + 60,
+            "install_date {} is not seconds (before={before})",
+            e.install_date
+        );
         // the content-addressed object exists and verifies
         let obj = crate::adapters::artifact::object_path(&root, &digest).unwrap();
         assert!(obj.exists(), "object missing at {}", obj.display());
         assert!(crate::adapters::artifact::verify_stored(&root, &digest).is_ok());
         // a provenance record describes the authentication
-        let prov = crate::adapters::artifact::load_provenance(&root, &digest).unwrap().unwrap();
+        let prov = crate::adapters::artifact::load_provenance(&root, &digest)
+            .unwrap()
+            .unwrap();
         assert_eq!(prov.authentication, "unsigned-bootstrap");
         assert_eq!(prov.package.unwrap().name, "demo");
         let _ = std::fs::remove_dir_all(&base);
@@ -1230,13 +1663,32 @@ mod tests {
         let root = base.join("root");
         let v1 = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1")]);
         let v2 = make_pkg(&base, "demo", "2.0", &[("/usr/bin/demo", b"v2")]);
-        install_archive(&v1, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
-        install_archive(&v2, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
+        install_archive(
+            &v1,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
+        install_archive(
+            &v2,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
         // tamper with the stored object of the OLD version
         let old_digest = crate::fetch::sha256_of_file(&v1).unwrap();
         let obj = crate::adapters::artifact::object_path(&root, &old_digest).unwrap();
         std::fs::write(&obj, b"tampered bytes").unwrap();
-        assert!(rollback("demo", &root).is_err(), "a corrupted cached archive must not be restorable");
+        assert!(
+            rollback("demo", &root).is_err(),
+            "a corrupted cached archive must not be restorable"
+        );
         // the system stays at 2.0
         assert_eq!(std::fs::read(root.join("usr/bin/demo")).unwrap(), b"v2");
         let _ = std::fs::remove_dir_all(&base);
@@ -1248,14 +1700,33 @@ mod tests {
         let root = base.join("root");
         let v1 = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1")]);
         let v2 = make_pkg(&base, "demo", "2.0", &[("/usr/bin/demo", b"v2")]);
-        install_archive(&v1, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
-        install_archive(&v2, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
+        install_archive(
+            &v1,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
+        install_archive(
+            &v2,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
         let old_digest = crate::fetch::sha256_of_file(&v1).unwrap();
         let obj = crate::adapters::artifact::object_path(&root, &old_digest).unwrap();
         std::fs::remove_file(&obj).unwrap();
         // and hide the legacy named cache copy so only the object could have served
         let _ = std::fs::remove_file(root.join("var/cache/nawa/demo-1.0-1.nawa.tar.zst"));
-        assert!(rollback("demo", &root).is_err(), "rollback must refuse without the original bytes");
+        assert!(
+            rollback("demo", &root).is_err(),
+            "rollback must refuse without the original bytes"
+        );
         assert_eq!(std::fs::read(root.join("usr/bin/demo")).unwrap(), b"v2");
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -1266,8 +1737,24 @@ mod tests {
         let root = base.join("root");
         let v1 = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1")]);
         let v2 = make_pkg(&base, "demo", "2.0", &[("/usr/bin/demo", b"v2")]);
-        install_archive(&v1, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
-        install_archive(&v2, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
+        install_archive(
+            &v1,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
+        install_archive(
+            &v2,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
         // remove the legacy named caches: the object store is now the only source
         let _ = std::fs::remove_file(root.join("var/cache/nawa/demo-1.0-1.nawa.tar.zst"));
         let _ = std::fs::remove_file(root.join("var/cache/nawa/demo-2.0-1.nawa.tar.zst"));
@@ -1291,8 +1778,24 @@ mod tests {
         let root = base.join("root");
         let v1 = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1")]);
         let v2 = make_pkg(&base, "demo", "2.0", &[("/usr/bin/demo", b"v2")]);
-        install_archive(&v1, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
-        install_archive(&v2, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
+        install_archive(
+            &v1,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
+        install_archive(
+            &v2,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
 
         rollback("demo", &root).unwrap();
         let records = crate::transaction::history::list_records(&root).unwrap();
@@ -1318,23 +1821,45 @@ mod tests {
         let root = base.join("root");
         let v1 = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1")]);
         let v2 = make_pkg(&base, "demo", "2.0", &[("/usr/bin/demo", b"v2")]);
-        install_archive(&v1, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
+        install_archive(
+            &v1,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
         let before = Db::new(&root).entry("demo").unwrap().unwrap();
-        install_archive(&v2, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
+        install_archive(
+            &v2,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
         let after = Db::new(&root).entry("demo").unwrap().unwrap();
         remove_legacy_slot(&root, "demo");
         write_upgrade_record(&root, &before, &after);
 
         rollback("demo", &root).unwrap();
         assert_eq!(std::fs::read(root.join("usr/bin/demo")).unwrap(), b"v1");
-        assert_eq!(Db::new(&root).entry("demo").unwrap().unwrap().version, "1.0");
+        assert_eq!(
+            Db::new(&root).entry("demo").unwrap().unwrap().version,
+            "1.0"
+        );
 
         // Delete the mirror again: the second slot must come from the rollback
         // transaction's recorded before-state, not a legacy file.
         remove_legacy_slot(&root, "demo");
         rollback("demo", &root).unwrap();
         assert_eq!(std::fs::read(root.join("usr/bin/demo")).unwrap(), b"v2");
-        assert_eq!(Db::new(&root).entry("demo").unwrap().unwrap().version, "2.0");
+        assert_eq!(
+            Db::new(&root).entry("demo").unwrap().unwrap().version,
+            "2.0"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -1344,16 +1869,36 @@ mod tests {
         let root = base.join("root");
         let v1 = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1")]);
         let v2 = make_pkg(&base, "demo", "2.0", &[("/usr/bin/demo", b"v2")]);
-        install_archive(&v1, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
+        install_archive(
+            &v1,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
         let mut before = Db::new(&root).entry("demo").unwrap().unwrap();
-        install_archive(&v2, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
+        install_archive(
+            &v2,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
 
         // A legacy root has no artifact digest; rollback must fall back to the
         // named cache archive (and its established unsigned checks).
         before.artifact_sha256.clear();
         let undo_dir = root.join("var/lib/nawa/undo/demo");
         std::fs::create_dir_all(&undo_dir).unwrap();
-        std::fs::write(undo_dir.join("desc"), toml::to_string_pretty(&before).unwrap()).unwrap();
+        std::fs::write(
+            undo_dir.join("desc"),
+            toml::to_string_pretty(&before).unwrap(),
+        )
+        .unwrap();
         let cache = root.join("var/cache/nawa/demo-1.0-1.nawa.tar.zst");
         if !cache.exists() {
             std::fs::copy(&v1, &cache).unwrap();
@@ -1361,7 +1906,10 @@ mod tests {
 
         rollback("demo", &root).unwrap();
         assert_eq!(std::fs::read(root.join("usr/bin/demo")).unwrap(), b"v1");
-        assert_eq!(Db::new(&root).entry("demo").unwrap().unwrap().version, "1.0");
+        assert_eq!(
+            Db::new(&root).entry("demo").unwrap().unwrap().version,
+            "1.0"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -1371,8 +1919,24 @@ mod tests {
         let root = base.join("root");
         let v1 = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1")]);
         let v2 = make_pkg(&base, "demo", "2.0", &[("/usr/bin/demo", b"v2")]);
-        install_archive(&v1, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
-        install_archive(&v2, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
+        install_archive(
+            &v1,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
+        install_archive(
+            &v2,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
 
         rollback("demo", &root).unwrap();
         assert_eq!(std::fs::read(root.join("usr/bin/demo")).unwrap(), b"v1");
@@ -1386,11 +1950,17 @@ mod tests {
         // undone. The compensating record now owns the previous-slot truth.
         crate::undo::history_undo(&root, original, true).unwrap();
         assert_eq!(std::fs::read(root.join("usr/bin/demo")).unwrap(), b"v2");
-        assert_eq!(Db::new(&root).entry("demo").unwrap().unwrap().version, "2.0");
+        assert_eq!(
+            Db::new(&root).entry("demo").unwrap().unwrap().version,
+            "2.0"
+        );
 
         rollback("demo", &root).unwrap();
         assert_eq!(std::fs::read(root.join("usr/bin/demo")).unwrap(), b"v1");
-        assert_eq!(Db::new(&root).entry("demo").unwrap().unwrap().version, "1.0");
+        assert_eq!(
+            Db::new(&root).entry("demo").unwrap().unwrap().version,
+            "1.0"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -1400,12 +1970,34 @@ mod tests {
         let root = base.join("root");
         let v1 = make_pkg(&base, "demo", "1.0", &[("/etc/demo.conf", b"v1\n")]);
         let v2 = make_pkg(&base, "demo", "2.0", &[("/etc/demo.conf", b"v2\n")]);
-        install_archive(&v1, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
+        install_archive(
+            &v1,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
         std::fs::write(root.join("etc/demo.conf"), b"local\n").unwrap();
-        install_archive(&v2, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
+        install_archive(
+            &v2,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
         // The changed local file was not overwritten by the upgrade.
-        assert_eq!(std::fs::read(root.join("etc/demo.conf")).unwrap(), b"local\n");
-        assert_eq!(std::fs::read(root.join("etc/demo.conf.nawa-new")).unwrap(), b"v2\n");
+        assert_eq!(
+            std::fs::read(root.join("etc/demo.conf")).unwrap(),
+            b"local\n"
+        );
+        assert_eq!(
+            std::fs::read(root.join("etc/demo.conf.nawa-new")).unwrap(),
+            b"v2\n"
+        );
 
         rollback("demo", &root).unwrap();
         assert_eq!(
@@ -1413,7 +2005,10 @@ mod tests {
             b"local\n",
             "rollback must keep the local /etc file"
         );
-        assert_eq!(std::fs::read(root.join("etc/demo.conf.nawa-new")).unwrap(), b"v1\n");
+        assert_eq!(
+            std::fs::read(root.join("etc/demo.conf.nawa-new")).unwrap(),
+            b"v1\n"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -1473,7 +2068,15 @@ mod tests {
         // Record the upgrade in history only; the resolver must still route
         // through the retained signed-index proof for the old artifact.
         let v2 = make_pkg(&base, "demo", "2.0", &[("/usr/bin/demo", b"v2")]);
-        install_archive(&v2, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
+        install_archive(
+            &v2,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
         let after = Db::new(&root).entry("demo").unwrap().unwrap();
         remove_legacy_slot(&root, "demo");
         write_upgrade_record(&root, &before, &after);
@@ -1514,7 +2117,13 @@ mod tests {
         let v1 = make_pkg(&base, "demo", "1.0", &[("/usr/bin/demo", b"v1")]);
         std::fs::copy(&v1, repo_dir.join("demo-1.0-1.nawa.tar.zst")).unwrap();
         let index_path = repo_dir.join("index.toml");
-        crate::repo::create_index_with_version(&repo_dir, &index_path, None, crate::repo::INDEX_SCHEMA_V2).unwrap();
+        crate::repo::create_index_with_version(
+            &repo_dir,
+            &index_path,
+            None,
+            crate::repo::INDEX_SCHEMA_V2,
+        )
+        .unwrap();
         let (secret, _public) = crate::adapters::sign::keygen(&base.join("publisher")).unwrap();
         crate::adapters::sign::sign(&index_path, &secret).unwrap();
         // trust the publisher
@@ -1526,7 +2135,13 @@ mod tests {
         std::fs::write(&trust_file, pub_key).unwrap();
         crate::adapters::sign::trust(&trust_file, &root).unwrap();
 
-        let open = crate::upgrade::open_repo(&root, &crate::fetch::RepoRef::Local(repo_dir.clone()), false, false).unwrap();
+        let open = crate::upgrade::open_repo(
+            &root,
+            &crate::fetch::RepoRef::Local(repo_dir.clone()),
+            false,
+            false,
+        )
+        .unwrap();
         let re = open.index.find("demo").unwrap().clone();
         let archive = crate::upgrade::fetch_entry(&root, &open, &re, false).unwrap();
         let index_bytes = std::fs::read(&index_path).unwrap();
@@ -1534,7 +2149,11 @@ mod tests {
         // reconstruct the signer public bytes for the proof bundle
         let signer_pub: Vec<u8> = std::fs::read(secret.with_file_name("nawa.pub")).unwrap();
         install_archive_from_index_proof(
-            &archive, &root, false, &re.sha256, crate::adapters::db::InstallReason::Explicit,
+            &archive,
+            &root,
+            false,
+            &re.sha256,
+            crate::adapters::db::InstallReason::Explicit,
             Some(crate::install::IndexProof {
                 index_bytes: Some(&index_bytes),
                 index_signature: sig_bytes.as_deref(),
@@ -1543,16 +2162,23 @@ mod tests {
                 metadata: None,
             }),
             None,
-        ).unwrap();
+        )
+        .unwrap();
 
         let digest = re.sha256.clone();
-        let prov = crate::adapters::artifact::load_provenance(&root, &digest).unwrap().unwrap();
+        let prov = crate::adapters::artifact::load_provenance(&root, &digest)
+            .unwrap()
+            .unwrap();
         assert_eq!(prov.authentication, "signed-index");
         let repo_proof = prov.repository.unwrap();
         assert_eq!(repo_proof.id, "local-test");
         assert!(repo_proof.trusted_at_install);
         // the proof bundle retains the index, signature and signer key
-        let dir = crate::adapters::artifact::object_path(&root, &digest).unwrap().parent().unwrap().to_path_buf();
+        let dir = crate::adapters::artifact::object_path(&root, &digest)
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
         assert!(dir.join(format!("{digest}.index.toml")).exists());
         assert!(dir.join(format!("{digest}.index.toml.sig")).exists());
         assert!(dir.join(format!("{digest}.signer.pub")).exists());
@@ -1560,5 +2186,4 @@ mod tests {
         assert_eq!(db.entry("demo").unwrap().unwrap().artifact_sha256, digest);
         let _ = std::fs::remove_dir_all(&base);
     }
-
 }

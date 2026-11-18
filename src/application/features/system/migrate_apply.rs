@@ -26,11 +26,11 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 
 use crate::application::features::system::detect::{self, Context as ExecContext, RuntimeInit};
+use crate::application::features::system::plan::{self, SystemPlanPin};
 use crate::domain::system::capability::Capability;
 use crate::domain::system::identity::InitKind;
 use crate::domain::system::migration::MigrationDefinition;
 use crate::domain::system::observation::Confidence;
-use crate::application::features::system::plan::{self, SystemPlanPin};
 
 /// Expose the built-in domain migration definition to the application
 /// coordinator. The value is not read from a repository; its handler binding
@@ -193,7 +193,8 @@ impl MigrationApproval {
         if !acknowledge_reboot || !acknowledge_recovery {
             bail!("migration authorization must acknowledge the reboot boundary and the documented recovery path (§12.4)");
         }
-        if plan.migration_id != id || !plan.identity.starts_with("sp-") || plan.identity.len() != 67 {
+        if plan.migration_id != id || !plan.identity.starts_with("sp-") || plan.identity.len() != 67
+        {
             bail!("migration approval requires the exact reviewed SystemPlan identity (§12.4)");
         }
         Ok(MigrationApproval { _private: (), plan })
@@ -314,7 +315,10 @@ mod tests {
         seed_profile(&root);
         let proc = fake_proc(&base, "/usr/lib/systemd/systemd", "systemd", &root);
         let error = preflight_for_tests(&root, &proc).unwrap_err();
-        assert!(format!("{error:#}").contains("running init is systemd"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("running init is systemd"),
+            "{error:#}"
+        );
     }
 
     #[test]
@@ -327,10 +331,7 @@ mod tests {
         // drop the comm evidence: the exe alone only indicates runit
         std::fs::remove_file(proc.join("1/comm")).unwrap();
         let error = preflight_for_tests(&root, &proc).unwrap_err();
-        assert!(
-            format!("{error:#}").contains("only indicated"),
-            "{error:#}"
-        );
+        assert!(format!("{error:#}").contains("only indicated"), "{error:#}");
     }
 
     #[test]
@@ -340,7 +341,10 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let proc = fake_proc(&base, "/usr/bin/runit", "runit", &root);
         let error = preflight_for_tests(&root, &proc).unwrap_err();
-        assert!(format!("{error:#}").contains("no system profile"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("no system profile"),
+            "{error:#}"
+        );
     }
 
     #[test]
@@ -378,9 +382,33 @@ mod tests {
             test_plan_pin(&d.id)
         )
         .is_ok());
-        assert!(MigrationApproval::explicit("other", &d.from, &d.to, true, true, test_plan_pin("other")).is_err());
-        assert!(MigrationApproval::explicit(&d.id, &d.from, &d.to, false, true, test_plan_pin(&d.id)).is_err());
-        assert!(MigrationApproval::explicit(&d.id, &d.from, &d.to, true, true, test_plan_pin("other")).is_err());
+        assert!(MigrationApproval::explicit(
+            "other",
+            &d.from,
+            &d.to,
+            true,
+            true,
+            test_plan_pin("other")
+        )
+        .is_err());
+        assert!(MigrationApproval::explicit(
+            &d.id,
+            &d.from,
+            &d.to,
+            false,
+            true,
+            test_plan_pin(&d.id)
+        )
+        .is_err());
+        assert!(MigrationApproval::explicit(
+            &d.id,
+            &d.from,
+            &d.to,
+            true,
+            true,
+            test_plan_pin("other")
+        )
+        .is_err());
     }
 
     #[test]
@@ -392,23 +420,26 @@ mod tests {
         let proc = fake_proc(&base, "/usr/bin/runit", "runit", &root);
         let d = builtin_definition();
         let approval =
-            MigrationApproval::explicit(&d.id, &d.from, &d.to, true, true, test_plan_pin(&d.id)).unwrap();
+            MigrationApproval::explicit(&d.id, &d.from, &d.to, true, true, test_plan_pin(&d.id))
+                .unwrap();
         match apply_for_tests(&root, &proc, approval).unwrap() {
             ApplyRefusal::HandlerBlocked(blockers) => {
                 assert!(blockers.iter().any(|b| {
-                    b.contains("B1") && b.contains("BIOS+UEFI") && b.contains("/proc/1/comm=systemd")
+                    b.contains("B1")
+                        && b.contains("BIOS+UEFI")
+                        && b.contains("/proc/1/comm=systemd")
                 }));
                 assert!(blockers.iter().any(|b| {
                     b.contains("B2") && b.contains("/usr/bin/init") && b.contains("co-ownership")
                 }));
-                assert!(blockers.iter().any(|b| {
-                    b.contains("B4") && b.contains("administrator override")
-                }));
+                assert!(blockers
+                    .iter()
+                    .any(|b| { b.contains("B4") && b.contains("administrator override") }));
                 assert!(blockers.iter().any(|b| b.contains("B5")));
                 assert!(blockers.iter().any(|b| b.contains("B6")));
-                assert!(blockers.iter().any(|b| {
-                    b.contains("B7") && b.contains("not a shell sandbox")
-                }));
+                assert!(blockers
+                    .iter()
+                    .any(|b| { b.contains("B7") && b.contains("not a shell sandbox") }));
             }
         }
         assert!(
@@ -422,7 +453,13 @@ mod tests {
         let root = ctx_root("migrate-plan-readonly");
         let migration = plan(&root, Path::new("/proc"));
         assert_eq!(migration.definition.id, "faseela-runit-to-systemd-v1");
-        assert!(migration.rollback_limits.iter().any(|r| r.contains("no automatic rollback")));
-        assert!(!root.join("var/lib/nawa").exists(), "planning persists nothing");
+        assert!(migration
+            .rollback_limits
+            .iter()
+            .any(|r| r.contains("no automatic rollback")));
+        assert!(
+            !root.join("var/lib/nawa").exists(),
+            "planning persists nothing"
+        );
     }
 }

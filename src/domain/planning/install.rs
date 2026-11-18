@@ -31,10 +31,10 @@
 use anyhow::{bail, Result};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use crate::domain::package::version::vercmp;
 use crate::domain::system::capability::Provides;
 use crate::domain::system::profile::SystemProfile;
 use crate::suggest;
-use crate::domain::package::version::vercmp;
 
 /// Why a package is part of a plan (the `reason` recorded in the database).
 /// The database mapping lives with the application layer (`plan.rs`).
@@ -415,23 +415,40 @@ mod tests {
 
     #[test]
     fn provider_lookup_is_domain_generic_and_keeps_unknown_separate() {
-        let requested = crate::domain::system::capability::Capability::parse("network-stack=networkd").unwrap();
+        let requested =
+            crate::domain::system::capability::Capability::parse("network-stack=networkd").unwrap();
         let candidates = tree(vec![
             Candidate {
-                name: "networkd".to_string(), version: "1".to_string(), rel: 1,
-                deps: vec![], dependencies_known: true, origin: CandidateOrigin::Recipe, provides: Provides::parse_all(&["network-stack=networkd".to_string()]).unwrap(),
+                name: "networkd".to_string(),
+                version: "1".to_string(),
+                rel: 1,
+                deps: vec![],
+                dependencies_known: true,
+                origin: CandidateOrigin::Recipe,
+                provides: Provides::parse_all(&["network-stack=networkd".to_string()]).unwrap(),
             },
             Candidate {
-                name: "dual-network".to_string(), version: "1".to_string(), rel: 1,
-                deps: vec![], dependencies_known: true, origin: CandidateOrigin::Recipe, provides: Provides::parse_all(&[
+                name: "dual-network".to_string(),
+                version: "1".to_string(),
+                rel: 1,
+                deps: vec![],
+                dependencies_known: true,
+                origin: CandidateOrigin::Recipe,
+                provides: Provides::parse_all(&[
                     "network-stack=networkd".to_string(),
                     "network-stack=netifd".to_string(),
-                ]).unwrap(),
+                ])
+                .unwrap(),
             },
             cand("legacy-provider", "1", 1, &[]),
             Candidate {
-                name: "other-domain".to_string(), version: "1".to_string(), rel: 1,
-                deps: vec![], dependencies_known: true, origin: CandidateOrigin::Recipe, provides: Provides::parse_all(&["init-system=systemd".to_string()]).unwrap(),
+                name: "other-domain".to_string(),
+                version: "1".to_string(),
+                rel: 1,
+                deps: vec![],
+                dependencies_known: true,
+                origin: CandidateOrigin::Recipe,
+                provides: Provides::parse_all(&["init-system=systemd".to_string()]).unwrap(),
             },
         ]);
         let result = providers_for(&candidates, &requested);
@@ -456,11 +473,21 @@ mod tests {
             binary_cand("leaf", "4", &[], true),
         ]);
         let result = install_plan(
-            &["app".to_string()], &HashMap::new(), &known, None, Why::Explicit, true,
-        ).unwrap();
+            &["app".to_string()],
+            &HashMap::new(),
+            &known,
+            None,
+            Why::Explicit,
+            true,
+        )
+        .unwrap();
         assert_eq!(names(&result), ["runtime-lib", "leaf", "middle", "app"]);
         assert_eq!(
-            result.items.iter().map(|item| item.origin).collect::<Vec<_>>(),
+            result
+                .items
+                .iter()
+                .map(|item| item.origin)
+                .collect::<Vec<_>>(),
             [
                 CandidateOrigin::Recipe,
                 CandidateOrigin::Repository,
@@ -476,14 +503,26 @@ mod tests {
     fn unknown_binary_runtime_dependencies_are_reported_not_treated_as_empty() {
         let known = tree(vec![binary_cand("legacy-bin", "1", &[], false)]);
         let planned = install_plan(
-            &["legacy-bin".to_string()], &HashMap::new(), &known, None, Why::Explicit, true,
-        ).unwrap();
+            &["legacy-bin".to_string()],
+            &HashMap::new(),
+            &known,
+            None,
+            Why::Explicit,
+            true,
+        )
+        .unwrap();
         assert_eq!(names(&planned), ["legacy-bin"]);
         assert_eq!(planned.unknown_dependencies, ["legacy-bin"]);
 
         let skipped = install_plan(
-            &["legacy-bin".to_string()], &HashMap::new(), &known, None, Why::Explicit, false,
-        ).unwrap();
+            &["legacy-bin".to_string()],
+            &HashMap::new(),
+            &known,
+            None,
+            Why::Explicit,
+            false,
+        )
+        .unwrap();
         assert_eq!(names(&skipped), ["legacy-bin"]);
         assert!(skipped.unknown_dependencies.is_empty());
     }

@@ -14,23 +14,25 @@
 use anyhow::{anyhow, Context, Result};
 use std::path::Path;
 
+use crate::adapters::migration_record::ActiveGate;
+use crate::application::context::Ctx;
 use crate::application::features::system::detect;
 use crate::application::features::system::migrate_apply as apply_use;
 use crate::application::features::system::migrate_inspect as inspect;
 use crate::application::features::system::migrate_recover as recover;
-use crate::application::features::system::profile as system_profile;
 use crate::application::features::system::plan as system_plan;
+use crate::application::features::system::profile as system_profile;
 use crate::application::ports::user_interaction::UserInteraction;
 use crate::cli::{MigrateCmd, SystemCmd, SystemProfileCmd};
-use crate::application::context::Ctx;
 use crate::domain::system::migration::{MigrationRecord, StepOutcome, StepRecord};
-use crate::adapters::migration_record::ActiveGate;
 
 /// `nawa system migrate [list|show|status|resume]`
 pub(crate) fn cmd_system(ctx: &Ctx, action: SystemCmd) -> Result<()> {
     match action {
         SystemCmd::Status => print_system_status(&ctx.root),
-        SystemCmd::Profile { action: SystemProfileCmd::Show } => print_system_profile(&ctx.root),
+        SystemCmd::Profile {
+            action: SystemProfileCmd::Show,
+        } => print_system_profile(&ctx.root),
         SystemCmd::Plan => print_system_plan(ctx),
         SystemCmd::Explain { topic } => print_system_explanation(&ctx.root, &topic),
         SystemCmd::Migrate { action } => cmd_migrate(ctx, action),
@@ -39,13 +41,17 @@ pub(crate) fn cmd_system(ctx: &Ctx, action: SystemCmd) -> Result<()> {
 
 fn print_system_status(root: &Path) -> Result<()> {
     let observed = detect::observe(root, Path::new("/proc"));
-    for line in render_system_status(&observed) { println!("{line}"); }
+    for line in render_system_status(&observed) {
+        println!("{line}");
+    }
     Ok(())
 }
 
 fn print_system_profile(root: &Path) -> Result<()> {
     let effective = system_profile::load_effective(root)?;
-    for line in render_system_profile(&effective) { println!("{line}"); }
+    for line in render_system_profile(&effective) {
+        println!("{line}");
+    }
     Ok(())
 }
 
@@ -114,7 +120,9 @@ fn render_unified_system_plan(plan: &system_plan::SystemPlan) -> Vec<String> {
             ));
             lines.push(format!(
                 "    trusted signer: {}",
-                trusted_signer_sha256.as_deref().unwrap_or("not established")
+                trusted_signer_sha256
+                    .as_deref()
+                    .unwrap_or("not established")
             ));
             lines.push(format!(
                 "    trust: {}; archive authentication: {archive_auth:?}",
@@ -143,10 +151,14 @@ fn render_unified_system_plan(plan: &system_plan::SystemPlan) -> Vec<String> {
 
 fn print_system_explanation(root: &Path, topic: &str) -> Result<()> {
     if topic != "init-system" {
-        return Err(anyhow!("unsupported system topic {topic:?}; the supported topic is `init-system`"));
+        return Err(anyhow!(
+            "unsupported system topic {topic:?}; the supported topic is `init-system`"
+        ));
     }
     let observed = detect::observe(root, Path::new("/proc"));
-    for line in render_system_explanation(&observed) { println!("{line}"); }
+    for line in render_system_explanation(&observed) {
+        println!("{line}");
+    }
     Ok(())
 }
 
@@ -184,7 +196,10 @@ fn describe_provider_policy(policy: &crate::domain::system::profile::ProviderPol
 }
 
 fn render_system_status(observed: &detect::ObservedSystem) -> Vec<String> {
-    let mut lines = vec!["System status".to_string(), format!("  Target root: {}", observed.root.display())];
+    let mut lines = vec![
+        "System status".to_string(),
+        format!("  Target root: {}", observed.root.display()),
+    ];
     let (context, evidence) = match &observed.context {
         detect::Context::LiveHost { evidence } => ("live host", evidence.as_slice()),
         detect::Context::Container { evidence } => ("container", evidence.as_slice()),
@@ -193,34 +208,64 @@ fn render_system_status(observed: &detect::ObservedSystem) -> Vec<String> {
         detect::Context::Unknown { .. } => ("unknown environment", &[][..]),
     };
     lines.push(format!("  Execution context: {context}"));
-    if let detect::Context::Unknown { reason } = &observed.context { lines.push(format!("    reason: {reason}")); }
-    for item in evidence { lines.push(format!("    evidence: {} = {}", item.source, item.value)); }
+    if let detect::Context::Unknown { reason } = &observed.context {
+        lines.push(format!("    reason: {reason}"));
+    }
+    for item in evidence {
+        lines.push(format!("    evidence: {} = {}", item.source, item.value));
+    }
     match &observed.runtime {
-        detect::RuntimeInit::Observed { kind, confidence, evidence } => {
-            lines.push(format!("  Runtime PID 1:     {} ({confidence:?} evidence)", kind.capability_identity()));
-            for item in evidence { lines.push(format!("    evidence: {} = {}", item.source, item.value)); }
+        detect::RuntimeInit::Observed {
+            kind,
+            confidence,
+            evidence,
+        } => {
+            lines.push(format!(
+                "  Runtime PID 1:     {} ({confidence:?} evidence)",
+                kind.capability_identity()
+            ));
+            for item in evidence {
+                lines.push(format!("    evidence: {} = {}", item.source, item.value));
+            }
         }
-        detect::RuntimeInit::Unknown { reason } => lines.push(format!("  Runtime PID 1:     unknown ({reason})")),
+        detect::RuntimeInit::Unknown { reason } => {
+            lines.push(format!("  Runtime PID 1:     unknown ({reason})"))
+        }
     }
     if observed.installed.candidates.is_empty() {
-        lines.push("  Installed init:    no candidate identified (absence is not proof of absence)".to_string());
+        lines.push(
+            "  Installed init:    no candidate identified (absence is not proof of absence)"
+                .to_string(),
+        );
     } else {
         lines.push("  Installed init candidates:".to_string());
         for candidate in &observed.installed.candidates {
-            lines.push(format!("    - {}: {} ({})", candidate.kind.capability_identity(), candidate.path.display(), candidate.evidence));
+            lines.push(format!(
+                "    - {}: {} ({})",
+                candidate.kind.capability_identity(),
+                candidate.path.display(),
+                candidate.evidence
+            ));
         }
     }
     match &observed.desired {
-        detect::DesiredInit::Declared { identity, source } => lines.push(format!("  Desired init:      {identity} (required; from {source})")),
-        detect::DesiredInit::NotDeclared => lines.push("  Desired init:      no required init provider is selected".to_string()),
-        detect::DesiredInit::Invalid { reason } => lines.push(format!("  Desired init:      invalid profile (fails closed): {reason}")),
+        detect::DesiredInit::Declared { identity, source } => lines.push(format!(
+            "  Desired init:      {identity} (required; from {source})"
+        )),
+        detect::DesiredInit::NotDeclared => {
+            lines.push("  Desired init:      no required init provider is selected".to_string())
+        }
+        detect::DesiredInit::Invalid { reason } => lines.push(format!(
+            "  Desired init:      invalid profile (fails closed): {reason}"
+        )),
     }
     if let Some(policy) = observed
         .effective_profile
         .as_ref()
         .and_then(|profile| profile.provider_policy("init-system"))
     {
-        let source = observed.policy_sources
+        let source = observed
+            .policy_sources
             .get("init-system")
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "source unavailable".to_string());
@@ -234,22 +279,38 @@ fn render_system_status(observed: &detect::ObservedSystem) -> Vec<String> {
 
 fn render_system_profile(effective: &system_profile::EffectiveProfile) -> Vec<String> {
     let Some(profile) = &effective.profile else {
-        return vec!["System profile".to_string(),
+        return vec![
+            "System profile".to_string(),
             "  No distribution default or administrator override is declared.".to_string(),
-            "  No target init provider will be inferred.".to_string()];
+            "  No target init provider will be inferred.".to_string(),
+        ];
     };
     let mut lines = vec![
         "Effective system profile".to_string(),
         format!("  Schema:        {}", profile.schema),
-        format!("  Distribution:  {}", profile.distribution.as_deref().unwrap_or("not declared")),
-        format!("  Profile:       {}", profile.profile.as_deref().unwrap_or("not declared")),
-        format!("  Architecture:  {}", profile.architecture.as_deref().unwrap_or("not declared")),
+        format!(
+            "  Distribution:  {}",
+            profile.distribution.as_deref().unwrap_or("not declared")
+        ),
+        format!(
+            "  Profile:       {}",
+            profile.profile.as_deref().unwrap_or("not declared")
+        ),
+        format!(
+            "  Architecture:  {}",
+            profile.architecture.as_deref().unwrap_or("not declared")
+        ),
     ];
-    if profile.providers.is_empty() { lines.push("  Required providers: none declared".to_string()); }
-    else {
+    if profile.providers.is_empty() {
+        lines.push("  Required providers: none declared".to_string());
+    } else {
         lines.push("  Required providers:".to_string());
         for (role, identity) in &profile.providers {
-            let source = effective.role_sources.get(role).map(|p| p.display().to_string()).unwrap_or_else(|| "source unavailable".to_string());
+            let source = effective
+                .role_sources
+                .get(role)
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "source unavailable".to_string());
             lines.push(format!("    {role} = {identity} (from {source})"));
         }
     }
@@ -258,23 +319,36 @@ fn render_system_profile(effective: &system_profile::EffectiveProfile) -> Vec<St
     } else {
         lines.push("  Provider policies:".to_string());
         for (role, policy) in &profile.policies {
-            let source = effective.policy_sources.get(role)
+            let source = effective
+                .policy_sources
+                .get(role)
                 .map(|path| path.display().to_string())
                 .unwrap_or_else(|| "source unavailable".to_string());
-            lines.push(format!("    {role}: {} (from {source})", describe_provider_policy(policy)));
+            lines.push(format!(
+                "    {role}: {} (from {source})",
+                describe_provider_policy(policy)
+            ));
         }
     }
     lines
 }
 
 fn render_system_plan(observed: &detect::ObservedSystem) -> Vec<String> {
-    let mut lines = vec!["System plan (read-only; no package, boot or profile changes)".to_string(),
-        format!("  Root: {}", observed.root.display())];
+    let mut lines = vec![
+        "System plan (read-only; no package, boot or profile changes)".to_string(),
+        format!("  Root: {}", observed.root.display()),
+    ];
     match &observed.context {
         detect::Context::LiveHost { .. } => lines.push("  Context: live host".to_string()),
-        detect::Context::Container { .. } => lines.push("  Context: container (migration apply is refused)".to_string()),
-        detect::Context::Chroot { .. } => lines.push("  Context: chroot (migration apply is refused)".to_string()),
-        detect::Context::OfflineRoot { .. } => lines.push("  Context: offline target root".to_string()),
+        detect::Context::Container { .. } => {
+            lines.push("  Context: container (migration apply is refused)".to_string())
+        }
+        detect::Context::Chroot { .. } => {
+            lines.push("  Context: chroot (migration apply is refused)".to_string())
+        }
+        detect::Context::OfflineRoot { .. } => {
+            lines.push("  Context: offline target root".to_string())
+        }
         detect::Context::Unknown { reason } => lines.push(format!("  Context: unknown ({reason})")),
     }
     let runtime = match &observed.runtime {
@@ -284,15 +358,28 @@ fn render_system_plan(observed: &detect::ObservedSystem) -> Vec<String> {
         detect::RuntimeInit::Unknown { .. } => None,
     };
     let desired = match &observed.desired {
-        detect::DesiredInit::Declared { identity, source } => { lines.push(format!("  Desired init: {identity} (required; from {source})")); Some(identity.as_str()) }
-        detect::DesiredInit::NotDeclared => { lines.push("  Desired init: no required provider selected".to_string()); None }
-        detect::DesiredInit::Invalid { reason } => { lines.push(format!("  Desired init: invalid ({reason})")); None }
+        detect::DesiredInit::Declared { identity, source } => {
+            lines.push(format!(
+                "  Desired init: {identity} (required; from {source})"
+            ));
+            Some(identity.as_str())
+        }
+        detect::DesiredInit::NotDeclared => {
+            lines.push("  Desired init: no required provider selected".to_string());
+            None
+        }
+        detect::DesiredInit::Invalid { reason } => {
+            lines.push(format!("  Desired init: invalid ({reason})"));
+            None
+        }
     };
-    let init_policy = observed.effective_profile
+    let init_policy = observed
+        .effective_profile
         .as_ref()
         .and_then(|profile| profile.provider_policy("init-system"));
     if let Some(policy) = init_policy {
-        let source = observed.policy_sources
+        let source = observed
+            .policy_sources
             .get("init-system")
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "source unavailable".to_string());
@@ -364,11 +451,18 @@ fn render_system_plan(observed: &detect::ObservedSystem) -> Vec<String> {
             }
         },
     }
-    if observed.installed.candidates.is_empty() { lines.push("  Installed candidates: none identified from target-root evidence.".to_string()); }
-    else {
+    if observed.installed.candidates.is_empty() {
+        lines
+            .push("  Installed candidates: none identified from target-root evidence.".to_string());
+    } else {
         lines.push("  Installed candidates:".to_string());
         for candidate in &observed.installed.candidates {
-            lines.push(format!("    - {} at {} ({})", candidate.kind.capability_identity(), candidate.path.display(), candidate.evidence));
+            lines.push(format!(
+                "    - {} at {} ({})",
+                candidate.kind.capability_identity(),
+                candidate.path.display(),
+                candidate.evidence
+            ));
         }
     }
     lines.push("  Exact repository provenance, transition decision and artifact pins are shown in the Unified SystemPlan section.".to_string());
@@ -416,9 +510,10 @@ fn print_apply(
 ) -> Result<()> {
     // Refuse offline/chroot/container and unprivileged invocations before
     // looking up a repository or accepting any plan identity.
-    apply_use::preflight(&ctx.root, Path::new("/proc"))
-        .context("migration apply preflight")?;
-    let repository = ctx.repo.as_deref()
+    apply_use::preflight(&ctx.root, Path::new("/proc")).context("migration apply preflight")?;
+    let repository = ctx
+        .repo
+        .as_deref()
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| anyhow!("migration apply requires a configured trusted repository"))?;
     let reviewed = system_plan::build(&ctx.root, Path::new("/proc"), Some(repository));
@@ -429,10 +524,10 @@ fn print_apply(
         ));
     }
     let pin = reviewed.approval_pin(id)?;
-    let source = crate::domain::system::capability::Capability::parse(from)
-        .map_err(anyhow::Error::msg)?;
-    let target = crate::domain::system::capability::Capability::parse(to)
-        .map_err(anyhow::Error::msg)?;
+    let source =
+        crate::domain::system::capability::Capability::parse(from).map_err(anyhow::Error::msg)?;
+    let target =
+        crate::domain::system::capability::Capability::parse(to).map_err(anyhow::Error::msg)?;
     let approval = apply_use::MigrationApproval::explicit(
         id,
         &source,
@@ -460,7 +555,9 @@ fn recovery_ui() -> UserInteraction {
         info: Box::new(|line| crate::nawa_info!("{}", line)),
         warn: Box::new(|line| crate::nawa_warn!("{}", line)),
         show_plan: Box::new(|_| {}),
-        choose: Box::new(|_prompt, _default, _allowed| anyhow::bail!("migration recovery does not prompt")),
+        choose: Box::new(|_prompt, _default, _allowed| {
+            anyhow::bail!("migration recovery does not prompt")
+        }),
         confirm: Box::new(|_prompt| anyhow::bail!("migration recovery does not confirm")),
     }
 }
@@ -678,9 +775,9 @@ fn render_plan(plan: &apply_use::MigrationPlan) -> Vec<String> {
         }
     };
     let desired = match &plan.observed.desired {
-        crate::application::features::system::detect::DesiredInit::Declared { identity, .. } => {
-            identity.clone()
-        }
+        crate::application::features::system::detect::DesiredInit::Declared {
+            identity, ..
+        } => identity.clone(),
         crate::application::features::system::detect::DesiredInit::NotDeclared => {
             "not declared".to_string()
         }
@@ -693,12 +790,17 @@ fn render_plan(plan: &apply_use::MigrationPlan) -> Vec<String> {
         format!("  Describes:            {context}"),
         format!("  Source capability:    {}", d.from.to_key()),
         format!("  Target capability:    {}", d.to.to_key()),
-        format!("  Trusted handler:      {} (reboot required: {})", d.handler.as_str(), yes_no(d.requires_reboot)),
+        format!(
+            "  Trusted handler:      {} (reboot required: {})",
+            d.handler.as_str(),
+            yes_no(d.requires_reboot)
+        ),
         format!("  Observed PID 1:       {runtime}"),
         format!("  Desired init:         {desired}"),
         format!(
             "  Init-system policy:   {}",
-            plan.observed.effective_profile
+            plan.observed
+                .effective_profile
                 .as_ref()
                 .and_then(|profile| profile.provider_policy("init-system"))
                 .map(describe_provider_policy)
@@ -728,9 +830,7 @@ fn render_apply_refusal(blockers: &[&str]) -> Vec<String> {
     for blocker in blockers {
         lines.push(format!("    - {blocker}"));
     }
-    lines.push(
-        "  Offline planning remains available (`nawa system migrate plan`).".to_string(),
-    );
+    lines.push("  Offline planning remains available (`nawa system migrate plan`).".to_string());
     lines
 }
 
@@ -814,7 +914,9 @@ mod tests {
     fn system_plan_does_not_claim_a_transition_from_indicated_pid1_evidence() {
         let observed = detect::ObservedSystem {
             root: Path::new("/").to_path_buf(),
-            context: detect::Context::LiveHost { evidence: Vec::new() },
+            context: detect::Context::LiveHost {
+                evidence: Vec::new(),
+            },
             runtime: detect::RuntimeInit::Observed {
                 kind: crate::domain::system::identity::InitKind::Runit,
                 confidence: detect::Confidence::Indicated,
@@ -851,7 +953,9 @@ mod tests {
     fn system_plan_shows_a_candidate_only_for_proven_pid1_evidence() {
         let observed = detect::ObservedSystem {
             root: Path::new("/").to_path_buf(),
-            context: detect::Context::LiveHost { evidence: Vec::new() },
+            context: detect::Context::LiveHost {
+                evidence: Vec::new(),
+            },
             runtime: detect::RuntimeInit::Observed {
                 kind: crate::domain::system::identity::InitKind::Runit,
                 confidence: detect::Confidence::Proven,
@@ -876,15 +980,23 @@ mod tests {
         };
 
         let text = joined(&render_system_plan(&observed));
-        assert!(text.contains("transition required from init-system=runit to init-system=systemd"), "{text}");
-        assert!(text.contains("Built-in candidate: faseela-runit-to-systemd-v1"), "{text}");
+        assert!(
+            text.contains("transition required from init-system=runit to init-system=systemd"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Built-in candidate: faseela-runit-to-systemd-v1"),
+            "{text}"
+        );
     }
 
     #[test]
     fn system_plan_reports_a_forbidden_active_init_without_choosing_a_replacement() {
         let observed = detect::ObservedSystem {
             root: Path::new("/").to_path_buf(),
-            context: detect::Context::LiveHost { evidence: Vec::new() },
+            context: detect::Context::LiveHost {
+                evidence: Vec::new(),
+            },
             runtime: detect::RuntimeInit::Observed {
                 kind: crate::domain::system::identity::InitKind::Runit,
                 confidence: detect::Confidence::Proven,
@@ -932,7 +1044,9 @@ mod tests {
     fn system_plan_treats_preferred_init_as_advisory_not_a_migration_target() {
         let observed = detect::ObservedSystem {
             root: Path::new("/").to_path_buf(),
-            context: detect::Context::LiveHost { evidence: Vec::new() },
+            context: detect::Context::LiveHost {
+                evidence: Vec::new(),
+            },
             runtime: detect::RuntimeInit::Observed {
                 kind: crate::domain::system::identity::InitKind::Runit,
                 confidence: detect::Confidence::Proven,
@@ -1263,9 +1377,18 @@ mod tests {
         use recover::RecoveryAction as A;
         let cases = [
             (A::Discarded, "discarded the abandoned planned record"),
-            (A::ReConcluded(MigrationState::AwaitingReboot), "re-concluded as awaiting-reboot"),
-            (A::HistoryFinalized("transaction 1 reconciled as partial".into()), "finalized transaction history"),
-            (A::NeedsRecovery("ambiguous".into()), "needs recovery: ambiguous"),
+            (
+                A::ReConcluded(MigrationState::AwaitingReboot),
+                "re-concluded as awaiting-reboot",
+            ),
+            (
+                A::HistoryFinalized("transaction 1 reconciled as partial".into()),
+                "finalized transaction history",
+            ),
+            (
+                A::NeedsRecovery("ambiguous".into()),
+                "needs recovery: ambiguous",
+            ),
             (A::Unchanged("terminal".into()), "unchanged: terminal"),
         ];
         for (action, expected) in cases {
@@ -1287,19 +1410,28 @@ mod tests {
         let text = joined(&render_resume_outcome(&outcome));
         assert!(text.contains("target init verified"), "{text}");
         assert!(text.contains("mutation gate clear"), "{text}");
-        assert!(text.contains("Old-provider cleanup remains a separate"), "{text}");
+        assert!(
+            text.contains("Old-provider cleanup remains a separate"),
+            "{text}"
+        );
     }
 
     #[test]
     fn a_failed_resume_renders_every_failure_and_the_gate_warning() {
         let outcome = recover::ResumeOutcome::NeedsRecovery(
             record("mig", MigrationState::NeedsRecovery),
-            vec!["PID 1 is runit".to_string(), "boot entry missing".to_string()],
+            vec![
+                "PID 1 is runit".to_string(),
+                "boot entry missing".to_string(),
+            ],
         );
         let text = joined(&render_resume_outcome(&outcome));
         assert!(text.contains("mutation gate stays active"), "{text}");
         assert!(text.contains("PID 1 is runit"), "{text}");
         assert!(text.contains("boot entry missing"), "{text}");
-        assert!(text.contains("run `nawa system migrate resume` again"), "{text}");
+        assert!(
+            text.contains("run `nawa system migrate resume` again"),
+            "{text}"
+        );
     }
 }

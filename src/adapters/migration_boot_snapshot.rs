@@ -115,9 +115,8 @@ pub(crate) fn capture(root: &Path, migration_id: &str) -> Result<SnapshotInfo> {
         ),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
-            return Err(error).with_context(|| {
-                format!("inspect boot recovery snapshot {}", directory.display())
-            })
+            return Err(error)
+                .with_context(|| format!("inspect boot recovery snapshot {}", directory.display()))
         }
     }
     fs::create_dir(&directory)
@@ -165,12 +164,8 @@ pub(crate) fn capture(root: &Path, migration_id: &str) -> Result<SnapshotInfo> {
             let (entry, bytes) = capture_entry(&root, relative, &blob_name)?;
             if let Some(bytes) = bytes {
                 total_bytes = total_bytes.saturating_add(bytes.len() as u64);
-                atomic::write_atomic(
-                    &directory.join("objects").join(&blob_name),
-                    &bytes,
-                    0o600,
-                )
-                .with_context(|| format!("save boot recovery data for {relative}"))?;
+                atomic::write_atomic(&directory.join("objects").join(&blob_name), &bytes, 0o600)
+                    .with_context(|| format!("save boot recovery data for {relative}"))?;
             }
             entries.push(entry);
         }
@@ -278,7 +273,9 @@ pub(crate) fn restore(root: &Path, migration_id: &str) -> Result<SnapshotInfo> {
                             destination.display()
                         )
                     })?;
-                    atomic::sync_directory(destination.parent().expect("validated path has parent"))?;
+                    atomic::sync_directory(
+                        destination.parent().expect("validated path has parent"),
+                    )?;
                 }
             }
             Restorable::File { bytes, mode } => {
@@ -306,9 +303,11 @@ pub(crate) fn restore(root: &Path, migration_id: &str) -> Result<SnapshotInfo> {
                             format!("restore runit service directory {}", destination.display())
                         })?;
                     }
-                    Err(error) => return Err(error).with_context(|| {
-                        format!("inspect runit service directory {}", destination.display())
-                    }),
+                    Err(error) => {
+                        return Err(error).with_context(|| {
+                            format!("inspect runit service directory {}", destination.display())
+                        })
+                    }
                 }
                 fs::set_permissions(&destination, fs::Permissions::from_mode(*mode))?;
                 atomic::sync_directory(destination.parent().expect("validated path has parent"))?;
@@ -343,9 +342,8 @@ pub(crate) fn discard(root: &Path, migration_id: &str) -> Result<()> {
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => {
-            return Err(error).with_context(|| {
-                format!("inspect boot recovery snapshot {}", directory.display())
-            })
+            return Err(error)
+                .with_context(|| format!("inspect boot recovery snapshot {}", directory.display()))
         }
     }
     fs::remove_dir_all(&directory)
@@ -356,11 +354,7 @@ pub(crate) fn discard(root: &Path, migration_id: &str) -> Result<()> {
     Ok(())
 }
 
-fn capture_entry(
-    root: &Path,
-    relative: &str,
-    blob_name: &str,
-) -> Result<(Entry, Option<Vec<u8>>)> {
+fn capture_entry(root: &Path, relative: &str, blob_name: &str) -> Result<(Entry, Option<Vec<u8>>)> {
     let relative_path = Path::new(relative);
     if !allowed_path(relative_path) {
         bail!("boot recovery path {relative:?} is outside the migration allowlist");
@@ -464,7 +458,8 @@ fn versioned_boot_target(
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
-            return Err(error).with_context(|| format!("inspect stable boot alias {}", path.display()))
+            return Err(error)
+                .with_context(|| format!("inspect stable boot alias {}", path.display()))
         }
     };
     if !metadata.file_type().is_symlink() {
@@ -527,13 +522,16 @@ fn load_validated(
     let object_meta = fs::symlink_metadata(&objects)
         .with_context(|| format!("inspect boot recovery objects {}", objects.display()))?;
     if object_meta.file_type().is_symlink() || !object_meta.is_dir() {
-        bail!("boot recovery objects {} is not a real directory", objects.display());
+        bail!(
+            "boot recovery objects {} is not a real directory",
+            objects.display()
+        );
     }
 
     let manifest_path = directory.join("manifest.toml");
     let (manifest_bytes, _) = read_regular_file_nofollow(&manifest_path)?;
-    let manifest_text = std::str::from_utf8(&manifest_bytes)
-        .context("boot recovery manifest is not UTF-8")?;
+    let manifest_text =
+        std::str::from_utf8(&manifest_bytes).context("boot recovery manifest is not UTF-8")?;
     let manifest: Manifest =
         toml::from_str(manifest_text).context("boot recovery manifest is not valid TOML")?;
     if manifest.schema != SNAPSHOT_SCHEMA {
@@ -573,92 +571,91 @@ fn load_validated(
                 entry.path
             );
         }
-        let state = match entry.kind.as_str() {
-            "absent" => {
-                if entry.mode.is_some()
-                    || entry.blob.is_some()
-                    || entry.target.is_some()
-                    || entry.sha256.is_some()
-                {
-                    bail!(
-                        "absent boot recovery entry {} has unexpected payload fields",
-                        entry.path
-                    );
+        let state =
+            match entry.kind.as_str() {
+                "absent" => {
+                    if entry.mode.is_some()
+                        || entry.blob.is_some()
+                        || entry.target.is_some()
+                        || entry.sha256.is_some()
+                    {
+                        bail!(
+                            "absent boot recovery entry {} has unexpected payload fields",
+                            entry.path
+                        );
+                    }
+                    Restorable::Absent
                 }
-                Restorable::Absent
-            }
-            "file" => {
-                let mode = entry.mode.ok_or_else(|| {
-                    anyhow::anyhow!("file entry {} has no mode", entry.path)
-                })?;
-                if mode > 0o7777 || entry.target.is_some() {
-                    bail!(
-                        "file boot recovery entry {} has invalid metadata",
-                        entry.path
-                    );
+                "file" => {
+                    let mode = entry
+                        .mode
+                        .ok_or_else(|| anyhow::anyhow!("file entry {} has no mode", entry.path))?;
+                    if mode > 0o7777 || entry.target.is_some() {
+                        bail!(
+                            "file boot recovery entry {} has invalid metadata",
+                            entry.path
+                        );
+                    }
+                    let blob = entry
+                        .blob
+                        .as_deref()
+                        .ok_or_else(|| anyhow::anyhow!("file entry {} has no blob", entry.path))?;
+                    if !valid_blob_name(blob) {
+                        bail!("boot recovery entry {} has an unsafe blob name", entry.path);
+                    }
+                    let expected = entry.sha256.as_deref().ok_or_else(|| {
+                        anyhow::anyhow!("file entry {} has no sha256", entry.path)
+                    })?;
+                    let blob_path = objects.join(blob);
+                    let (bytes, _) = read_regular_file_nofollow(&blob_path)?;
+                    verify_hash(&bytes, expected, &entry.path)?;
+                    Restorable::File { bytes, mode }
                 }
-                let blob = entry.blob.as_deref().ok_or_else(|| {
-                    anyhow::anyhow!("file entry {} has no blob", entry.path)
-                })?;
-                if !valid_blob_name(blob) {
-                    bail!(
-                        "boot recovery entry {} has an unsafe blob name",
-                        entry.path
-                    );
+                "directory" => {
+                    let mode = entry.mode.ok_or_else(|| {
+                        anyhow::anyhow!("directory entry {} has no mode", entry.path)
+                    })?;
+                    if mode > 0o7777
+                        || entry.blob.is_some()
+                        || entry.target.is_some()
+                        || entry.sha256.is_some()
+                    {
+                        bail!(
+                            "directory boot recovery entry {} has invalid metadata",
+                            entry.path
+                        );
+                    }
+                    if entry.path == "etc/runit/runsvdir/default"
+                        || entry.path.starts_with("etc/runit/runsvdir/default/")
+                    {
+                        service_directories.insert(entry.path.clone());
+                    }
+                    Restorable::Directory { mode }
                 }
-                let expected = entry.sha256.as_deref().ok_or_else(|| {
-                    anyhow::anyhow!("file entry {} has no sha256", entry.path)
-                })?;
-                let blob_path = objects.join(blob);
-                let (bytes, _) = read_regular_file_nofollow(&blob_path)?;
-                verify_hash(&bytes, expected, &entry.path)?;
-                Restorable::File { bytes, mode }
-            }
-            "directory" => {
-                let mode = entry.mode.ok_or_else(|| {
-                    anyhow::anyhow!("directory entry {} has no mode", entry.path)
-                })?;
-                if mode > 0o7777
-                    || entry.blob.is_some()
-                    || entry.target.is_some()
-                    || entry.sha256.is_some()
-                {
-                    bail!(
-                        "directory boot recovery entry {} has invalid metadata",
-                        entry.path
-                    );
+                "symlink" => {
+                    if entry.mode.is_some() || entry.blob.is_some() {
+                        bail!(
+                            "symlink boot recovery entry {} has invalid metadata",
+                            entry.path
+                        );
+                    }
+                    let target = entry.target.as_deref().ok_or_else(|| {
+                        anyhow::anyhow!("symlink entry {} has no target", entry.path)
+                    })?;
+                    validate_link_target(&relative, target)?;
+                    let expected = entry.sha256.as_deref().ok_or_else(|| {
+                        anyhow::anyhow!("symlink entry {} has no sha256", entry.path)
+                    })?;
+                    verify_hash(target.as_bytes(), expected, &entry.path)?;
+                    Restorable::Symlink {
+                        target: target.to_string(),
+                    }
                 }
-                if entry.path == "etc/runit/runsvdir/default"
-                    || entry.path.starts_with("etc/runit/runsvdir/default/")
-                {
-                    service_directories.insert(entry.path.clone());
-                }
-                Restorable::Directory { mode }
-            }
-            "symlink" => {
-                if entry.mode.is_some() || entry.blob.is_some() {
-                    bail!(
-                        "symlink boot recovery entry {} has invalid metadata",
-                        entry.path
-                    );
-                }
-                let target = entry.target.as_deref().ok_or_else(|| {
-                    anyhow::anyhow!("symlink entry {} has no target", entry.path)
-                })?;
-                validate_link_target(&relative, target)?;
-                let expected = entry.sha256.as_deref().ok_or_else(|| {
-                    anyhow::anyhow!("symlink entry {} has no sha256", entry.path)
-                })?;
-                verify_hash(target.as_bytes(), expected, &entry.path)?;
-                Restorable::Symlink {
-                    target: target.to_string(),
-                }
-            }
-            other => bail!(
-                "boot recovery entry {} has unknown kind {other:?}",
-                entry.path
-            ),
-        };
+                other => bail!(
+                    "boot recovery entry {} has unknown kind {other:?}",
+                    entry.path
+                ),
+            };
         validated.push(ValidatedEntry {
             path: relative,
             state,
@@ -675,8 +672,7 @@ fn load_validated(
     }
     for entry in &validated {
         let value = entry.path.to_string_lossy();
-        if value.starts_with("etc/runit/runsvdir/default/")
-        {
+        if value.starts_with("etc/runit/runsvdir/default/") {
             let mut parent = entry.path.parent();
             while let Some(path) = parent {
                 let parent_name = path.to_string_lossy();
@@ -724,7 +720,10 @@ fn preflight_runit_reconciliation(root: &Path) -> Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
             return Err(error).with_context(|| {
-                format!("inspect required runit service directory {}", service_root.display())
+                format!(
+                    "inspect required runit service directory {}",
+                    service_root.display()
+                )
             })
         }
     }
@@ -752,15 +751,25 @@ fn remove_untracked_runit_entries(root: &Path, validated: &[ValidatedEntry]) -> 
 
     for relative in extras {
         let destination = root.join(&relative);
-        let metadata = fs::symlink_metadata(&destination)
-            .with_context(|| format!("inspect untracked runit service entry {}", destination.display()))?;
+        let metadata = fs::symlink_metadata(&destination).with_context(|| {
+            format!(
+                "inspect untracked runit service entry {}",
+                destination.display()
+            )
+        })?;
         if metadata.file_type().is_symlink() || metadata.is_file() {
             fs::remove_file(&destination).with_context(|| {
-                format!("remove untracked runit service entry {}", destination.display())
+                format!(
+                    "remove untracked runit service entry {}",
+                    destination.display()
+                )
             })?;
         } else if metadata.is_dir() {
             fs::remove_dir(&destination).with_context(|| {
-                format!("remove untracked runit service directory {}", destination.display())
+                format!(
+                    "remove untracked runit service directory {}",
+                    destination.display()
+                )
             })?;
         } else {
             bail!(
@@ -838,7 +847,10 @@ fn collect_runit_service_paths(root: &Path) -> Result<Vec<String>> {
     let relative = Path::new("etc/runit/runsvdir/default");
     let directory = root.join(relative);
     let metadata = fs::symlink_metadata(&directory).with_context(|| {
-        format!("inspect required runit service directory {}", directory.display())
+        format!(
+            "inspect required runit service directory {}",
+            directory.display()
+        )
     })?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         bail!(
@@ -896,14 +908,16 @@ fn ensure_target_parent(root: &Path, relative: &Path, create_missing: bool) -> R
                 )
             }
             Ok(metadata) if !metadata.is_dir() => {
-                bail!("boot recovery parent {} is not a directory", current.display())
+                bail!(
+                    "boot recovery parent {} is not a directory",
+                    current.display()
+                )
             }
             Ok(_) => {}
-            Err(error)
-                if error.kind() == std::io::ErrorKind::NotFound && create_missing =>
-            {
-                fs::create_dir(&current)
-                    .with_context(|| format!("create boot recovery parent {}", current.display()))?;
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && create_missing => {
+                fs::create_dir(&current).with_context(|| {
+                    format!("create boot recovery parent {}", current.display())
+                })?;
                 fs::set_permissions(&current, fs::Permissions::from_mode(0o755))?;
                 if let Some(parent) = current.parent() {
                     atomic::sync_directory(parent)?;
@@ -911,9 +925,8 @@ fn ensure_target_parent(root: &Path, relative: &Path, create_missing: bool) -> R
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(error) => {
-                return Err(error).with_context(|| {
-                    format!("inspect boot recovery parent {}", current.display())
-                })
+                return Err(error)
+                    .with_context(|| format!("inspect boot recovery parent {}", current.display()))
             }
         }
     }
@@ -933,7 +946,10 @@ fn ensure_real_dir_chain(root: &Path, relative: &Path, final_mode: u32) -> Resul
         current.push(name);
         match fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-                bail!("state directory {} is not a real directory", current.display())
+                bail!(
+                    "state directory {} is not a real directory",
+                    current.display()
+                )
             }
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -971,7 +987,10 @@ fn check_real_dir_chain(root: &Path, relative: &Path) -> Result<()> {
         let metadata = fs::symlink_metadata(&current)
             .with_context(|| format!("inspect migration state directory {}", current.display()))?;
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            bail!("migration state directory {} is not a real directory", current.display());
+            bail!(
+                "migration state directory {} is not a real directory",
+                current.display()
+            );
         }
     }
     Ok(())
@@ -980,7 +999,10 @@ fn check_real_dir_chain(root: &Path, relative: &Path) -> Result<()> {
 fn reject_directory_leaf(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
-            bail!("refusing to replace boot recovery directory {}", path.display())
+            bail!(
+                "refusing to replace boot recovery directory {}",
+                path.display()
+            )
         }
         Ok(_) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -1002,7 +1024,10 @@ fn read_regular_file_nofollow(path: &Path) -> Result<(Vec<u8>, u32)> {
     })?;
     let metadata = file.metadata()?;
     if !metadata.is_file() {
-        bail!("boot recovery payload {} is not a regular file", path.display());
+        bail!(
+            "boot recovery payload {} is not a regular file",
+            path.display()
+        );
     }
     let mode = metadata.permissions().mode() & 0o7777;
     let mut bytes = Vec::new();
@@ -1074,9 +1099,8 @@ fn replace_symlink(destination: &Path, target: &str) -> Result<()> {
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => {
-                return Err(error).with_context(|| {
-                    format!("create temporary symlink {}", temporary.display())
-                })
+                return Err(error)
+                    .with_context(|| format!("create temporary symlink {}", temporary.display()))
             }
         }
     }
@@ -1092,15 +1116,11 @@ fn hash_bytes(bytes: &[u8]) -> String {
 
 fn verify_hash(bytes: &[u8], expected: &str, path: &str) -> Result<()> {
     if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        bail!(
-            "boot recovery entry {path} has an invalid sha256 digest"
-        );
+        bail!("boot recovery entry {path} has an invalid sha256 digest");
     }
     let actual = hash_bytes(bytes);
     if actual != expected.to_ascii_lowercase() {
-        bail!(
-            "boot recovery payload hash mismatch for {path}: expected {expected}, got {actual}"
-        );
+        bail!("boot recovery payload hash mismatch for {path}: expected {expected}, got {actual}");
     }
     Ok(())
 }
@@ -1150,11 +1170,7 @@ mod tests {
         .unwrap();
         symlink("vmlinuz-6.10.5", root.join("boot/vmlinuz")).unwrap();
         symlink("initramfs-6.10.5.img", root.join("boot/initramfs.img")).unwrap();
-        fs::write(
-            root.join("etc/fstab"),
-            b"UUID=old / ext4 defaults 0 1\n",
-        )
-        .unwrap();
+        fs::write(root.join("etc/fstab"), b"UUID=old / ext4 defaults 0 1\n").unwrap();
         symlink("/usr/bin/runit", root.join("usr/bin/init")).unwrap();
         fs::write(root.join("usr/bin/runit"), b"old runit executable").unwrap();
         fs::write(
@@ -1171,7 +1187,12 @@ mod tests {
 
     #[test]
     fn blob_name_validation_rejects_non_ascii_without_panicking() {
-        for name in ["entry-000.bin", "entry-💥.bin", "entry-00é.bin", "entry-999.txt"] {
+        for name in [
+            "entry-000.bin",
+            "entry-💥.bin",
+            "entry-00é.bin",
+            "entry-999.txt",
+        ] {
             let result = std::panic::catch_unwind(|| valid_blob_name(name));
             assert!(result.is_ok(), "validator panicked for {name:?}");
             assert_eq!(result.unwrap(), name == "entry-000.bin");
@@ -1186,11 +1207,7 @@ mod tests {
         assert!(info.bytes > 0);
         assert!(info.directory.join("manifest.toml").is_file());
         assert!(info.directory.join("objects").is_dir());
-        let permissions = fs::metadata(&info.directory)
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
+        let permissions = fs::metadata(&info.directory).unwrap().permissions().mode() & 0o777;
         assert_eq!(permissions, 0o700);
     }
 
@@ -1204,10 +1221,7 @@ mod tests {
         fs::remove_file(&service_run).unwrap();
         fs::write(&agetty_run, b"changed service definition\n").unwrap();
         fs::remove_dir(root.join("etc/runit/runsvdir/default/empty-service")).unwrap();
-        fs::remove_file(
-            root.join("etc/runit/runsvdir/default/networking/agetty-link"),
-        )
-        .unwrap();
+        fs::remove_file(root.join("etc/runit/runsvdir/default/networking/agetty-link")).unwrap();
         fs::create_dir_all(root.join("etc/runit/runsvdir/default/new-service")).unwrap();
         fs::write(
             root.join("etc/runit/runsvdir/default/new-service/run"),
@@ -1216,10 +1230,7 @@ mod tests {
         .unwrap();
 
         restore(&root, "faseela-runit-to-systemd-v1").unwrap();
-        assert_eq!(
-            fs::read(&service_run).unwrap(),
-            b"#!/bin/sh\nexec dhcpcd\n"
-        );
+        assert_eq!(fs::read(&service_run).unwrap(), b"#!/bin/sh\nexec dhcpcd\n");
         assert_eq!(
             fs::read(&agetty_run).unwrap(),
             b"#!/bin/sh\nexec getty 38400 tty1\n"
@@ -1236,16 +1247,19 @@ mod tests {
         );
         assert!(!root.join("etc/runit/runsvdir/default/new-service").exists());
         assert!(info.entries >= FIXED_PATHS.len() + 8);
-        let manifest: Manifest = toml::from_str(
-            &fs::read_to_string(info.directory.join("manifest.toml")).unwrap(),
-        )
-        .unwrap();
+        let manifest: Manifest =
+            toml::from_str(&fs::read_to_string(info.directory.join("manifest.toml")).unwrap())
+                .unwrap();
         assert!(manifest.entries.iter().any(|entry| {
             entry.path == "etc/runit/runsvdir/default" && entry.kind == "directory"
         }));
-        assert!(!manifest.entries.iter().any(|entry| {
-            entry.path.contains("agetty-link/")
-        }), "the snapshot walk must not follow service symlink directories");
+        assert!(
+            !manifest
+                .entries
+                .iter()
+                .any(|entry| { entry.path.contains("agetty-link/") }),
+            "the snapshot walk must not follow service symlink directories"
+        );
     }
 
     #[test]
@@ -1268,11 +1282,7 @@ mod tests {
         symlink("vmlinuz-6.11.0", root.join("boot/vmlinuz")).unwrap();
         fs::remove_file(root.join("usr/bin/init")).unwrap();
         symlink("../lib/systemd/systemd", root.join("usr/bin/init")).unwrap();
-        fs::write(
-            root.join("etc/fstab"),
-            b"UUID=new / ext4 defaults 0 1\n",
-        )
-        .unwrap();
+        fs::write(root.join("etc/fstab"), b"UUID=new / ext4 defaults 0 1\n").unwrap();
 
         restore(&root, "faseela-runit-to-systemd-v1").unwrap();
         assert_eq!(
@@ -1320,9 +1330,7 @@ mod tests {
         .unwrap();
         assert!(info.entries >= FIXED_PATHS.len());
         restore(&root, "faseela-runit-to-systemd-v1").unwrap();
-        assert!(!root
-            .join("boot/efi/EFI/BOOT/BOOTX64.EFI")
-            .exists());
+        assert!(!root.join("boot/efi/EFI/BOOT/BOOTX64.EFI").exists());
     }
 
     #[test]

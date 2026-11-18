@@ -35,7 +35,6 @@
 //! caller until the coordinator slice, so `dead_code` stays allowed at
 //! module scope with that one outstanding consumer named.
 
-
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -58,7 +57,10 @@ fn validate_state_directory(path: &Path, meta: &std::fs::Metadata) -> Result<()>
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
-        bail!("migration state path {} is not a real directory", path.display());
+        bail!(
+            "migration state path {} is not a real directory",
+            path.display()
+        );
     }
     let uid = crate::adapters::sys::geteuid();
     if meta.uid() != 0 && meta.uid() != uid {
@@ -96,7 +98,10 @@ fn checked_records_dir(root: &Path, create: bool) -> Result<Option<PathBuf>> {
     let root_meta = std::fs::symlink_metadata(&canonical_root)
         .with_context(|| format!("inspect migration target root {}", canonical_root.display()))?;
     if !root_meta.file_type().is_dir() {
-        bail!("migration target root {} is not a real directory", canonical_root.display());
+        bail!(
+            "migration target root {} is not a real directory",
+            canonical_root.display()
+        );
     }
 
     let mut current = canonical_root;
@@ -106,17 +111,23 @@ fn checked_records_dir(root: &Path, create: bool) -> Result<Option<PathBuf>> {
             Ok(meta) => {
                 validate_state_directory(&next, &meta)?;
                 current = next;
-            },
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound && !create => {
                 return Ok(None);
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let mode = if component == "migrations" { 0o700 } else { 0o755 };
+                let mode = if component == "migrations" {
+                    0o700
+                } else {
+                    0o755
+                };
                 let mut builder = std::fs::DirBuilder::new();
                 builder.mode(mode);
                 match builder.create(&next) {
                     Ok(()) => current = next,
-                    Err(create_error) if create_error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    Err(create_error)
+                        if create_error.kind() == std::io::ErrorKind::AlreadyExists =>
+                    {
                         // A concurrent creator is acceptable only if the
                         // next no-follow inspection proves it is a directory.
                         let meta = std::fs::symlink_metadata(&next).with_context(|| {
@@ -135,9 +146,8 @@ fn checked_records_dir(root: &Path, create: bool) -> Result<Option<PathBuf>> {
                 }
             }
             Err(error) => {
-                return Err(error).with_context(|| {
-                    format!("inspect migration state path {}", next.display())
-                });
+                return Err(error)
+                    .with_context(|| format!("inspect migration state path {}", next.display()));
             }
         }
     }
@@ -176,10 +186,9 @@ fn check_no_follow(path: &Path) -> Result<()> {
             "migration record {} is a symlink — refusing to follow it (§13)",
             path.display()
         ),
-        Ok(meta) if !meta.file_type().is_file() => bail!(
-            "migration record {} is not a regular file",
-            path.display()
-        ),
+        Ok(meta) if !meta.file_type().is_file() => {
+            bail!("migration record {} is not a regular file", path.display())
+        }
         Ok(meta) => {
             let uid = crate::adapters::sys::geteuid();
             if meta.uid() != 0 && meta.uid() != uid {
@@ -567,7 +576,11 @@ mod tests {
         save(&root, &MigrationRecord::new(&definition())).unwrap();
         let dir = migrations_dir(&root);
         let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o700, "the record directory is root-only (0700)");
+        assert_eq!(
+            mode & 0o777,
+            0o700,
+            "the record directory is root-only (0700)"
+        );
     }
 
     #[test]
@@ -698,7 +711,8 @@ mod tests {
     fn symlinked_state_directory_ancestors_are_refused_by_all_store_operations() {
         for component in ["var", "lib", "nawa"] {
             let root = crate::testutil::tmpdir(&format!("migrate-store-parent-link-{component}"));
-            let outside = crate::testutil::tmpdir(&format!("migrate-store-parent-outside-{component}"));
+            let outside =
+                crate::testutil::tmpdir(&format!("migrate-store-parent-outside-{component}"));
             let record = MigrationRecord::new(&definition());
 
             let link = match component {
@@ -716,9 +730,18 @@ mod tests {
             std::os::unix::fs::symlink(&outside, &link).unwrap();
 
             assert!(save(&root, &record).is_err(), "save followed {component}");
-            assert!(load(&root, &record.id).is_err(), "load followed {component}");
-            assert!(record_ids(&root).is_err(), "record_ids followed {component}");
-            assert!(remove(&root, &record.id).is_err(), "remove followed {component}");
+            assert!(
+                load(&root, &record.id).is_err(),
+                "load followed {component}"
+            );
+            assert!(
+                record_ids(&root).is_err(),
+                "record_ids followed {component}"
+            );
+            assert!(
+                remove(&root, &record.id).is_err(),
+                "remove followed {component}"
+            );
             assert!(
                 !outside.join("migrations").exists(),
                 "no state was created outside the selected root through {component}"
@@ -734,7 +757,10 @@ mod tests {
         std::fs::set_permissions(&writable, std::fs::Permissions::from_mode(0o777)).unwrap();
         let metadata = std::fs::symlink_metadata(&writable).unwrap();
         let error = validate_state_directory(&writable, &metadata).unwrap_err();
-        assert!(format!("{error:#}").contains("group- or world-writable"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("group- or world-writable"),
+            "{error:#}"
+        );
 
         let real = root.join("real");
         std::fs::create_dir(&real).unwrap();
@@ -742,7 +768,10 @@ mod tests {
         std::os::unix::fs::symlink(&real, &link).unwrap();
         let metadata = std::fs::symlink_metadata(&link).unwrap();
         let error = validate_state_directory(&link, &metadata).unwrap_err();
-        assert!(format!("{error:#}").contains("not a real directory"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("not a real directory"),
+            "{error:#}"
+        );
     }
 
     #[test]
@@ -765,8 +794,14 @@ mod tests {
         save(&root, &record).unwrap();
         let path = migrations_dir(&root).join(format!("{}.toml", record.id));
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
-        assert!(load(&root, &record.id).is_err(), "world-writable records are untrusted");
-        assert!(remove(&root, &record.id).is_err(), "removal must validate record ownership too");
+        assert!(
+            load(&root, &record.id).is_err(),
+            "world-writable records are untrusted"
+        );
+        assert!(
+            remove(&root, &record.id).is_err(),
+            "removal must validate record ownership too"
+        );
     }
 
     #[test]

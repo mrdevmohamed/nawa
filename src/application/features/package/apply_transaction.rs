@@ -12,16 +12,16 @@
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
+use crate::adapters::config::InstallMode;
+use crate::adapters::db;
+use crate::adapters::lock;
+use crate::application::context::Ctx;
+use crate::application::features::package::plan;
 use crate::application::features::package::plan_install::{Source, Sourcing};
 use crate::application::features::system::migrate_coordinator::MigrationPermit;
-use crate::domain::system::migration::LegacyInitHandoff;
 use crate::application::ports::user_interaction::{PlanRow, PlanView, UserInteraction};
-use crate::adapters::config::InstallMode;
-use crate::application::context::Ctx;
-use crate::adapters::db;
+use crate::domain::system::migration::LegacyInitHandoff;
 use crate::install;
-use crate::adapters::lock;
-use crate::application::features::package::plan;
 use crate::repo;
 use crate::transaction;
 use crate::upgrade;
@@ -199,8 +199,13 @@ pub(crate) fn apply_transaction(
         let n = position + 1;
         let step_result = match action {
             plan::PlanStep::Recipe(index) => (|| -> Result<()> {
-                let it = plan.items.get(*index).context("internal: recipe step outside plan")?;
-                let source_choice = sources.get(*index).context("internal: recipe source missing from plan")?;
+                let it = plan
+                    .items
+                    .get(*index)
+                    .context("internal: recipe step outside plan")?;
+                let source_choice = sources
+                    .get(*index)
+                    .context("internal: recipe source missing from plan")?;
                 let id = it.rec.id();
                 let (archive, index_sha256, signed_index) =
                     acquire(ctx, it, request, sourcing, source_choice, ui, n, total)?;
@@ -209,36 +214,66 @@ pub(crate) fn apply_transaction(
                     Source::Build => "local-build",
                 };
                 install_one(
-                    ctx, &archive,
+                    ctx,
+                    &archive,
                     InstallRequest {
-                        reason: it.why.db_reason(), what: &id, number: n, total,
-                        force: request.force, allow_unsigned: request.allow_unsigned,
-                        index_sha256: index_sha256.as_deref(), signed_index, source,
+                        reason: it.why.db_reason(),
+                        what: &id,
+                        number: n,
+                        total,
+                        force: request.force,
+                        allow_unsigned: request.allow_unsigned,
+                        index_sha256: index_sha256.as_deref(),
+                        signed_index,
+                        source,
                         legacy_init_handoff: None,
                     },
-                    sourcing.open.as_ref(), op, ui, LockOwnership::PerStep,
+                    sourcing.open.as_ref(),
+                    op,
+                    ui,
+                    LockOwnership::PerStep,
                 )
             })(),
             plan::PlanStep::Binary(index) => (|| -> Result<()> {
-                let re = extras.get(*index).context("internal: binary step outside repository actions")?;
+                let re = extras
+                    .get(*index)
+                    .context("internal: binary step outside repository actions")?;
                 let what = format!("{}-{}-{}", re.name, re.version, re.rel);
-                (ui.info)(&format!("[{n}/{total}] fetching {what} from the repository"));
-                let open = sourcing.open.as_ref()
+                (ui.info)(&format!(
+                    "[{n}/{total}] fetching {what} from the repository"
+                ));
+                let open = sourcing
+                    .open
+                    .as_ref()
                     .context("internal: repository package without an open repository")?;
                 let archive = upgrade::fetch_entry(&ctx.root, open, re, request.allow_unsigned)
                     .with_context(|| format!("[{n}/{total}] repository fetch of {what} failed"))?;
                 let signed_index = open.archive_auth == upgrade::ArchiveAuth::SignedIndexSha256;
-                let reason = plan.binary_whys.get(*index).copied()
-                    .unwrap_or(request.extras_why).db_reason();
+                let reason = plan
+                    .binary_whys
+                    .get(*index)
+                    .copied()
+                    .unwrap_or(request.extras_why)
+                    .db_reason();
                 install_one(
-                    ctx, &archive,
+                    ctx,
+                    &archive,
                     InstallRequest {
-                        reason, what: &what, number: n, total,
-                        force: request.force, allow_unsigned: request.allow_unsigned,
-                        index_sha256: Some(re.sha256.as_str()), signed_index,
-                        source: "repository", legacy_init_handoff: None,
+                        reason,
+                        what: &what,
+                        number: n,
+                        total,
+                        force: request.force,
+                        allow_unsigned: request.allow_unsigned,
+                        index_sha256: Some(re.sha256.as_str()),
+                        signed_index,
+                        source: "repository",
+                        legacy_init_handoff: None,
                     },
-                    sourcing.open.as_ref(), op, ui, LockOwnership::PerStep,
+                    sourcing.open.as_ref(),
+                    op,
+                    ui,
+                    LockOwnership::PerStep,
                 )
             })(),
         };
@@ -253,11 +288,17 @@ pub(crate) fn apply_transaction(
         }
     }
 
-    let changed = order.iter().map(|step| match step {
-        plan::PlanStep::Recipe(index) => plan.items[*index].rec.package.name.clone(),
-        plan::PlanStep::Binary(index) => extras[*index].name.clone(),
-    }).collect();
-    Ok(Applied::Done { changed, seconds: started.elapsed().as_secs() })
+    let changed = order
+        .iter()
+        .map(|step| match step {
+            plan::PlanStep::Recipe(index) => plan.items[*index].rec.package.name.clone(),
+            plan::PlanStep::Binary(index) => extras[*index].name.clone(),
+        })
+        .collect();
+    Ok(Applied::Done {
+        changed,
+        seconds: started.elapsed().as_secs(),
+    })
 }
 
 /// Get the archive for one plan item: fetch it from the repository or build
@@ -344,10 +385,9 @@ fn install_one(
     // A package that was explicitly requested must stay explicit even when
     // a group later upgrades it. "keep" preserves the existing DB reason.
     let effective_reason = if details.reason == crate::adapters::db::InstallReason::Group
-        && before
-            .as_ref()
-            .is_some_and(|entry| entry.reason == crate::adapters::db::InstallReason::Explicit.as_str())
-    {
+        && before.as_ref().is_some_and(|entry| {
+            entry.reason == crate::adapters::db::InstallReason::Explicit.as_str()
+        }) {
         crate::adapters::db::InstallReason::Keep
     } else {
         details.reason
@@ -538,8 +578,7 @@ fn plan_view(
                     ),
                 };
                 let mut note = it.why.label().to_string();
-                if matches!(&sources[index], Source::Repo(_))
-                    && sourcing.mode == InstallMode::Auto
+                if matches!(&sources[index], Source::Repo(_)) && sourcing.mode == InstallMode::Auto
                 {
                     note.push_str(" (build fallback if fetch fails)");
                 }
@@ -549,12 +588,20 @@ fn plan_view(
                 rows.push(PlanRow {
                     name: it.rec.package.name.clone(),
                     ver: version,
-                    tag, dl, inst, note, sha256,
+                    tag,
+                    dl,
+                    inst,
+                    note,
+                    sha256,
                 });
             }
             plan::PlanStep::Binary(index) => {
                 let re = &extras[index];
-                let why = plan.binary_whys.get(index).copied().unwrap_or(plan::Why::Explicit);
+                let why = plan
+                    .binary_whys
+                    .get(index)
+                    .copied()
+                    .unwrap_or(plan::Why::Explicit);
                 let mut note = why.label().to_string();
                 if let Some(old) = plan.binary_replaces.get(index).and_then(Option::as_ref) {
                     note.push_str(&format!(" (replaces {old})"));
@@ -562,14 +609,20 @@ fn plan_view(
                 rows.push(PlanRow {
                     name: re.name.clone(),
                     ver: format!("{}-{}", re.version, re.rel),
-                    tag: "repo", dl: re.size, inst: re.installed_size, note,
+                    tag: "repo",
+                    dl: re.size,
+                    inst: re.installed_size,
+                    note,
                     sha256: Some(re.sha256.clone()),
                 });
             }
         }
     }
     PlanView {
-        repository: sourcing.open.as_ref().and_then(|open| open.base_url.clone()),
+        repository: sourcing
+            .open
+            .as_ref()
+            .and_then(|open| open.base_url.clone()),
         rows,
     }
 }
@@ -701,7 +754,12 @@ mod tests {
                     .map(|r| {
                         format!(
                             "{}|{}|{}|{}|{}|{}|{}",
-                            r.name, r.ver, r.tag, r.dl, r.inst, r.note,
+                            r.name,
+                            r.ver,
+                            r.tag,
+                            r.dl,
+                            r.inst,
+                            r.note,
                             r.sha256.as_deref().unwrap_or("-")
                         )
                     })
@@ -788,9 +846,17 @@ mod tests {
             ..Default::default()
         };
         let binary = repo_entry("runtime-lib", "1.0", 1);
-        let view = plan_view(&planned, &[binary], &[Source::Build], &Sourcing::build_only());
+        let view = plan_view(
+            &planned,
+            &[binary],
+            &[Source::Build],
+            &Sourcing::build_only(),
+        );
         assert_eq!(
-            view.rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(),
+            view.rows
+                .iter()
+                .map(|row| row.name.as_str())
+                .collect::<Vec<_>>(),
             ["runtime-lib", "app"]
         );
         assert_eq!(view.rows[0].note, "dependency");

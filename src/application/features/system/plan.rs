@@ -10,9 +10,7 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 
-use crate::application::features::system::observation::{
-    self, PackageInventory, SystemSnapshot,
-};
+use crate::application::features::system::observation::{self, PackageInventory, SystemSnapshot};
 use crate::fetch::RepoRef;
 use crate::upgrade::{
     ArchiveAuth, OpenRepo, PackageActionKind, PackageActionSource, SystemTransitionPreview,
@@ -56,9 +54,7 @@ pub(crate) enum RepositoryAssessment {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TransitionAssessment {
-    NotEvaluated {
-        reason: String,
-    },
+    NotEvaluated { reason: String },
     NoChange,
     Preview(SystemTransitionPreview),
 }
@@ -114,7 +110,11 @@ impl SystemPlan {
                 authenticated_by_trusted_key: true,
                 archive_auth: ArchiveAuth::SignedIndexSha256,
                 ..
-            } => (source_fingerprint.clone(), index_sha256.clone(), signer.clone()),
+            } => (
+                source_fingerprint.clone(),
+                index_sha256.clone(),
+                signer.clone(),
+            ),
             _ => bail!("migration approval requires a trusted signed schema-v4 repository index"),
         };
 
@@ -127,7 +127,9 @@ impl SystemPlan {
             TransitionAssessment::Preview(SystemTransitionPreview::Candidate { id, .. }) => {
                 bail!("the reviewed plan selects migration {id}, not {expected_migration_id}")
             }
-            TransitionAssessment::Preview(SystemTransitionPreview::Unresolved { reason, .. }) => {
+            TransitionAssessment::Preview(SystemTransitionPreview::Unresolved {
+                reason, ..
+            }) => {
                 bail!("an unresolved system plan cannot be approved: {reason}")
             }
             TransitionAssessment::NotEvaluated { reason } => {
@@ -139,17 +141,20 @@ impl SystemPlan {
         };
 
         let installed_packages = installed_packages(&self.snapshot)?;
-        let artifacts = actions.iter().map(|action| ArtifactPin {
-            kind: action.kind,
-            source: action.source,
-            name: action.name.clone(),
-            current: action.current.clone(),
-            target: action.target.clone(),
-            archive: action.archive.clone(),
-            sha256: action.sha256.clone(),
-            size: action.size,
-            download_url: action.download_url.clone(),
-        }).collect();
+        let artifacts = actions
+            .iter()
+            .map(|action| ArtifactPin {
+                kind: action.kind,
+                source: action.source,
+                name: action.name.clone(),
+                current: action.current.clone(),
+                target: action.target.clone(),
+                archive: action.archive.clone(),
+                sha256: action.sha256.clone(),
+                size: action.size,
+                download_url: action.download_url.clone(),
+            })
+            .collect();
 
         Ok(SystemPlanPin {
             identity: self.identity.clone(),
@@ -252,7 +257,9 @@ pub(crate) fn verify_approval_pin(
 ) -> Result<()> {
     let digest = pin.identity.strip_prefix("sp-").unwrap_or_default();
     if digest.len() != 64
-        || !digest.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
         bail!("migration approval contains an invalid SystemPlan identity");
     }
@@ -278,7 +285,9 @@ pub(crate) fn verify_approval_pin(
     let open = crate::upgrade::open_repo(root, &repo_ref, false, false)
         .context("re-open and authenticate approved repository")?;
     if fingerprint(&open.index_bytes) != pin.index_sha256 {
-        bail!("authenticated repository index changed after approval; refusing stale migration plan");
+        bail!(
+            "authenticated repository index changed after approval; refusing stale migration plan"
+        );
     }
     let signer = open.signer_public.as_deref().map(fingerprint);
     if signer.as_deref() != Some(pin.signer_sha256.as_str()) {
@@ -293,27 +302,46 @@ pub(crate) fn verify_approval_pin(
     let mut seen_packages = std::collections::BTreeSet::new();
     for artifact in &pin.artifacts {
         if !seen_packages.insert(artifact.name.as_str()) {
-            bail!("approved SystemPlan contains duplicate package action {}", artifact.name);
+            bail!(
+                "approved SystemPlan contains duplicate package action {}",
+                artifact.name
+            );
         }
         if artifact.source != PackageActionSource::AuthenticatedRepository {
-            bail!("package {} has an unsupported source in the approved plan", artifact.name);
+            bail!(
+                "package {} has an unsupported source in the approved plan",
+                artifact.name
+            );
         }
-        let installed_version = pin.installed_packages.iter()
+        let installed_version = pin
+            .installed_packages
+            .iter()
             .find(|(name, _)| name == &artifact.name)
             .map(|(_, version)| version.as_str());
         match artifact.kind {
-            PackageActionKind::Install if artifact.current.is_some() || installed_version.is_some() => {
-                bail!("install action for {} no longer matches the approved installed state", artifact.name);
+            PackageActionKind::Install
+                if artifact.current.is_some() || installed_version.is_some() =>
+            {
+                bail!(
+                    "install action for {} no longer matches the approved installed state",
+                    artifact.name
+                );
             }
             PackageActionKind::Upgrade | PackageActionKind::Keep
                 if artifact.current.as_deref() != installed_version =>
             {
-                bail!("current version for {} no longer matches the approved action", artifact.name);
+                bail!(
+                    "current version for {} no longer matches the approved action",
+                    artifact.name
+                );
             }
             _ => {}
         }
         let entry = open.index.find(&artifact.name).with_context(|| {
-            format!("approved package {} is no longer present in the authenticated index", artifact.name)
+            format!(
+                "approved package {} is no longer present in the authenticated index",
+                artifact.name
+            )
         })?;
         let version = crate::domain::planning::install::version_rel(&entry.version, entry.rel);
         if version != artifact.target
@@ -324,7 +352,9 @@ pub(crate) fn verify_approval_pin(
         {
             bail!(
                 "authenticated artifact for {} changed after approval; expected {} with sha256 {}",
-                artifact.name, artifact.archive, artifact.sha256
+                artifact.name,
+                artifact.archive,
+                artifact.sha256
             );
         }
     }
@@ -338,7 +368,8 @@ fn installed_packages(snapshot: &SystemSnapshot) -> Result<Vec<(String, String)>
             bail!("installed package inventory is unavailable: {reason}");
         }
     };
-    let mut installed: Vec<_> = packages.iter()
+    let mut installed: Vec<_> = packages
+        .iter()
         .map(|(name, version)| (name.clone(), version.clone()))
         .collect();
     installed.sort_by(|left, right| left.0.cmp(&right.0));
@@ -358,10 +389,7 @@ fn assess_repository(
     source_fingerprint: String,
     open: &OpenRepo,
 ) -> RepositoryAssessment {
-    let trusted_signer_sha256 = open
-        .signer_public
-        .as_deref()
-        .map(fingerprint);
+    let trusted_signer_sha256 = open.signer_public.as_deref().map(fingerprint);
     RepositoryAssessment::Opened {
         kind,
         source_fingerprint,
@@ -432,7 +460,9 @@ mod tests {
         let snapshot = SystemSnapshot {
             observed: crate::domain::system::observation::ObservedSystem {
                 root: std::path::PathBuf::from("/"),
-                context: Context::LiveHost { evidence: Vec::new() },
+                context: Context::LiveHost {
+                    evidence: Vec::new(),
+                },
                 runtime: RuntimeInit::Observed {
                     kind: InitKind::Runit,
                     confidence: Confidence::Proven,
@@ -460,9 +490,10 @@ mod tests {
                     )]),
                 }),
             },
-            packages: PackageInventory::Available(std::collections::HashMap::from([
-                ("runit".to_string(), "2.1-1".to_string()),
-            ])),
+            packages: PackageInventory::Available(std::collections::HashMap::from([(
+                "runit".to_string(),
+                "2.1-1".to_string(),
+            )])),
         };
         let action = |name: &str, digest: &str| crate::upgrade::system_transition::PackageAction {
             kind: PackageActionKind::Install,
@@ -495,7 +526,10 @@ mod tests {
                 to: "init-system=systemd".to_string(),
                 profile_source: "/usr/share/nawa/system-profile.toml".to_string(),
                 provider_package: "systemd".to_string(),
-                package_actions: vec![action("libfoo", &"1".repeat(64)), action("systemd", &"2".repeat(64))],
+                package_actions: vec![
+                    action("libfoo", &"1".repeat(64)),
+                    action("systemd", &"2".repeat(64)),
+                ],
                 requires_reboot: true,
             }),
             identity: format!("sp-{}", "d".repeat(64)),
@@ -503,8 +537,17 @@ mod tests {
 
         let pin = plan.approval_pin("faseela-runit-to-systemd-v1").unwrap();
         assert_eq!(pin.identity, plan.identity);
-        assert_eq!(pin.installed_packages, vec![("runit".to_string(), "2.1-1".to_string())]);
-        assert_eq!(pin.artifacts.iter().map(|item| item.name.as_str()).collect::<Vec<_>>(), ["libfoo", "systemd"]);
+        assert_eq!(
+            pin.installed_packages,
+            vec![("runit".to_string(), "2.1-1".to_string())]
+        );
+        assert_eq!(
+            pin.artifacts
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            ["libfoo", "systemd"]
+        );
         assert_eq!(pin.artifacts[0].sha256, "1".repeat(64));
         assert_eq!(pin.artifacts[1].sha256, "2".repeat(64));
     }
@@ -536,10 +579,11 @@ mod tests {
         fs::write(
             &profile,
             "schema = 1\n[providers]\ninit-system = \"systemd\"\n",
-        ).unwrap();
+        )
+        .unwrap();
 
-        let error = verify_approval_pin(&root, Path::new("/proc"), "unused-repository", &pin)
-            .unwrap_err();
+        let error =
+            verify_approval_pin(&root, Path::new("/proc"), "unused-repository", &pin).unwrap_err();
         assert!(
             format!("{error:#}").contains("observed system facts changed"),
             "{error:#}"
