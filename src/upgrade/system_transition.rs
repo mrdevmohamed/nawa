@@ -62,7 +62,7 @@ pub(super) fn plan(
 fn build_from_observation(
     observed: &ObservedSystem,
     open: &OpenRepo,
-    installed: &HashMap<String, Entry>,
+    installed: &HashMap<String, String>,
 ) -> Option<Preview> {
     let (target, profile_source) = match &observed.desired {
         DesiredInit::Declared { identity, source } => (identity.clone(), source.clone()),
