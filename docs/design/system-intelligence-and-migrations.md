@@ -109,9 +109,53 @@ Administrator overrides live in:
 
 `/etc/nawa/system-profile.toml`
 
-Administrator values override only the fields they declare. Effective profile output must report the source of each effective value. Invalid or unsupported schemas fail closed; no fallback to guessed defaults.
+Profile schema 1 remains readable. Its legacy `[providers]` entries are
+interpreted as required-provider shorthand; for example,
+`init-system = "systemd"` means that the profile requires that exact provider.
+The shorthand is retained for compatibility with existing Faseela images.
 
-Future policy may express required, preferred, or forbidden providers, but only after conflict resolution, trust boundaries, and override precedence are specified and tested.
+Schema 2 adds explicit provider constraints grouped by capability domain:
+
+```toml
+schema = 2
+
+[policy.init-system]
+required = ["systemd"]
+preferred = []
+forbidden = ["runit"]
+```
+
+The three policy classes have intentionally different semantics:
+
+- **Required:** the exact provider must be selected. For the exclusive
+  `init-system` role, at most one identity may be required. Missing,
+  ambiguous, untrusted or unsatisfiable required providers leave the plan
+  unresolved; Nawa must not substitute a different provider.
+- **Preferred:** an ordered, advisory list. The order expresses preference,
+  but it does not authorize an automatic package or init transition. If the
+  preference is unavailable or not active, the plan explains the mismatch
+  and leaves the decision to the administrator.
+- **Forbidden:** provider identities that must not be selected. A forbidden
+  active provider is reported as a policy violation. A prohibition by itself
+  never chooses a replacement; a separate required target is needed before
+  a migration can be planned.
+
+Policy validation is strict. An identity cannot appear in more than one
+classification for the same role; duplicates are rejected; and the exclusive
+`init-system` role cannot require multiple providers. A role cannot combine
+required and preferred constraints. Preferred order is preserved. Unknown
+capability domains may be parsed and displayed, but remain non-actionable
+until their own solver and compatibility semantics are specified.
+
+Merge precedence is per capability domain. If an administrator override
+declares `[policy.init-system]`, that complete policy replaces the
+distribution's `init-system` policy; policies for other domains remain.
+An explicitly empty domain table clears that domain's inherited policy.
+A role omitted from the override inherits the distribution value. The
+effective profile reports the source file for each policy domain and each
+required provider. Invalid or unsupported schemas fail closed; there is no
+fallback to guessed defaults.
+
 
 ## 6. Execution and reconciliation
 
@@ -190,6 +234,7 @@ The sequence is dependency-driven; a later stage must not be marked complete mer
 Implemented or substantially present:
 - Feature-Oriented Hexagonal Architecture and Functional Core / Imperative Shell baseline;
 - init-system observation, profile loading, capability metadata and provider explanation;
+- schema-1 profile compatibility plus schema-2 required/preferred/forbidden provider policy parsing, validation, domain-level merge precedence and source provenance;
 - source-aware package resolution for recipe and authenticated binary candidates on install/update, with a single mixed topological action order and cross-source dependency tests;
 - explicit reporting for legacy repository metadata whose runtime dependency closure is unknown, while migration candidate selection remains fail-closed;
 - read-only system status/profile/plan/explain CLI;
@@ -201,8 +246,9 @@ Implemented or substantially present:
 Still incomplete:
 - a fully generic capability model beyond the init-system vertical slice;
 - complete dependency solver semantics (version ranges, conflicts, replacements);
-- exact artifact/source pinning for approval and execution; auto/ask currently use a conservative union of recipe and repository dependency closures when either source may be selected;
-- a single fully connected observation-to-policy-to-solver-to-plan application flow;
+- exact artifact/source pinning across system-plan approval and execution; normal package auto/ask source pinning has landed, but system-plan identity must be carried through approval;
+- a single fully connected observation-to-policy-to-solver-to-typed-SystemPlan application flow;
+- actionable policy semantics for capability domains beyond the init-system vertical slice;
 - migration record store ancestor path hardening and race-resistant filesystem access;
 - snapshot integration with coordinator and recovery;
 - safe runit service-tree capture and restore;

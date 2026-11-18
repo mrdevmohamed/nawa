@@ -13,10 +13,10 @@
 | 1 — Structural refactor + service removal | **DONE** (1a, 1b, 1c, 1d, 1e — 1e is the deferred apply-transaction extraction) |
 | 2 — Init identity & capability foundation | **GENERIC DECLARATION LOOKUP + INIT-SYSTEM POLICY** (the pure planner now finds providers by arbitrary normalized capability domain and preserves ambiguous/unknown candidates; only init-system has actionable policy and migration semantics) |
 | 3 — Metadata & capability resolution | **SOURCE-AWARE PACKAGE RESOLUTION CORE IMPLEMENTED; GENERIC SOLVER INCOMPLETE** (recipe and authenticated binary candidates now share one dependency graph for install/update planning; v4 runtime dependencies and capabilities are consumed; version ranges, conflicts, replacements and broader capability constraints remain open) |
-| 4 — System profiles & planning | **PARTIAL PLATFORM** (system plan consumes one immutable observation and installed inventory; package install/update now use source-aware recipe/binary planning with one mixed topological action order; generic policy semantics, full artifact pinning and broader system constraints remain open) |
+| 4 — System profiles & planning | **PARTIAL PLATFORM** (schema-2 required/preferred/forbidden provider policies now have strict parsing, validation, per-domain admin precedence and provenance; init-system status/plan/upgrade preview explain these policies. A single typed end-to-end SystemPlan and actionable semantics beyond init-system remain open) |
 | 5 — Migration engine | **PREPARATION FRAMEWORK PRESENT; RECOVERY/BOOT EXECUTION BLOCKED**: typed state machine, durable journal, mutation gate, preparation coordinator and recovery inspection exist; snapshot is not wired to coordinator/recovery and post-boot finalization is absent. |
 | 6 — Faseela runit→systemd migration | **BLOCKED** (current Faseela HEAD already uses systemd; the legacy runit migration is for older installations. Real BIOS/UEFI boot acceptance and rescue/recovery contracts remain open.) |
-| 7 — Platform verification | **IN PROGRESS**: read-only observation and migration preview exist; source-aware unified package planning is wired into install/update and CI-verified; policy semantics, complete solver constraints, snapshot/recovery integration and real BIOS/UEFI acceptance remain open. |
+| 7 — Platform verification | **IN PROGRESS**: observation hardening is CI-verified; schema-2 policy and rendering work is staged for CI; source-aware package planning is CI-verified; full typed SystemPlan, generic solver constraints, snapshot/recovery integration and real BIOS/UEFI acceptance remain open. |
 | System Intelligence platform | **IN PROGRESS** — accepted direction: System Intelligence is the umbrella; migration is one high-risk feature within it. |
 
 ## Accepted platform direction (2026-11-18)
@@ -199,6 +199,39 @@ supported legacy installations.
   `c1234d2ac396aea3b5ec979b67419266fd413fc1`. This is a test-harness fix;
   a fresh CI run on the current branch head is required before calling the
   review fixes green.
+
+## Provider policy model — schema 2 (2026-11-18)
+
+The profile model now has a backward-compatible schema-2 policy design and
+implementation slice:
+
+* Schema 1 stays readable. Its legacy `[providers]` declarations normalize
+  into a `required` policy, preserving existing Faseela profile files.
+* Schema 2 accepts `[policy.<domain>]` with ordered `required`,
+  `preferred` and `forbidden` identity lists. Lists must contain strings;
+  unknown fields, duplicate identities, contradictory classifications and
+  multiple required init providers fail closed.
+* Distribution/admin merge replaces one complete policy domain at a time.
+  Domains omitted by the override survive; an explicitly empty domain table
+  clears inherited constraints. The effective profile and immutable system
+  observation retain the declaring file for every policy domain.
+* The init-system CLI and upgrade preview distinguish required targets from
+  advisory preference and prohibition. A preference alone never authorizes
+  an automatic init switch. A forbidden active provider without a required
+  replacement is unresolved, not silently replaced. Preference satisfaction
+  is accepted only for a proven PID 1 on the verified live host.
+* Policy for capability domains other than `init-system` is parsed and
+  displayed but is not yet actionable. This is not a generic capability
+  solver and does not close the single typed SystemPlan work.
+* Regression tests cover schema-1 compatibility, schema-2 parsing, conflict
+  validation, domain-level override/clear behavior, source provenance,
+  forbidden active init, advisory preference, and untrusted runtime evidence.
+
+The policy slice is prepared in the current working change set but has **not
+yet been pushed or CI-verified**. The latest green full CI run is
+[#44393781539](https://github.com/mrdevmohamed/nawa/actions/runs/44393781539)
+on commit `cfcabfd14a758a54cfd9b56453a92645d34707f9`; that run verifies the
+preceding observation/profile path-hardening commits only.
 
 ## Completed phases
 
@@ -1899,28 +1932,35 @@ The last preview integration was repaired without weakening the module-layering 
 
 ## Exact next task
 
-**Complete System Intelligence as one explainable, policy-aware planning and
-reconciliation platform.** The source-aware package resolver is now present in
-`install` and `update`; do not recreate that work or add another solver. Continue
-in this order:
+**Connect the current capabilities into one coherent, explainable SystemPlan.**
+The source-aware package resolver and schema-2 provider policy model now exist;
+do not build another solver or reimplement either feature. Continue in this
+dependency order:
 
-1. Add immutable candidate/artifact identity to approved plan output and ensure
-   the executor consumes the exact source/version selected before confirmation.
-2. Define profile policy types and precedence (required, preferred, forbidden)
-   with distribution/admin provenance, explicit conflict behavior and strict
-   schema evolution. Do not infer policy from provider presence.
-3. Connect the system observation, installed inventory, profile policy and
-   package/provider resolver into one read-only system plan with per-action
-   explanations, trust status and unresolved facts.
-4. Strengthen migration record and snapshot filesystem access with race-resistant
+1. Introduce one typed, immutable, read-only system plan that consumes a single
+   `SystemSnapshot`, effective profile/policy and authenticated repository
+   candidates, while retaining package action order, source, version, digest,
+   metadata trust, provenance, blockers and per-action explanations.
+2. Make the init-system resolver consume the policy model directly: required
+   selects the exact target, preferred remains advisory, forbidden rejects a
+   provider, and ambiguous/unknown/untrusted candidates remain unresolved.
+   Keep non-init policy domains descriptive until their own compatibility and
+   solver contracts are tested.
+3. Pin the resulting system plan to exact repository/index/artifact identities
+   across explicit approval and execution through the existing transaction
+   executor. Do not allow a fresh resolve to substitute a different artifact
+   after approval.
+4. Complete missing general solver semantics (version constraints, conflicts,
+   replacements) only as explicit metadata and deterministic resolution rules.
+5. Strengthen migration record and snapshot filesystem access with race-resistant
    dirfd/openat operations where supported; keep no-follow and ownership checks.
-5. Bind the boot snapshot manifest and root identity to the migration record,
-   then wire capture/restore into coordinator and recovery with explicit
-   lifecycle cleanup and tamper handling.
-6. Implement post-boot verification/finalization only after the restore path is
-   proven; retain the old provider until all runtime and boot postconditions pass.
-7. Run interrupted-install, failed-boot, restore and successful migration
-   scenarios in disposable BIOS and UEFI VMs with external-rescue evidence.
+6. Bind boot snapshot manifests and root identity to migration records, then wire
+   capture/restore into coordinator and recovery with lifecycle cleanup and
+   tamper handling.
+7. Implement post-boot verification/finalization only after the restore path is
+   proven, then run interrupted-install, failed-boot, rescue and rollback cases
+   in disposable BIOS/UEFI VMs with retained external-rescue evidence.
+
 
 The real runit-to-systemd handler must remain fail-closed until the
 distribution-owned boot and recovery contracts are resolved:

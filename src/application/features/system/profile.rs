@@ -28,7 +28,7 @@ use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::domain::system::profile::{ProvidersDoc, SystemProfile};
+use crate::domain::system::profile::{ProviderPoliciesDoc, ProviderPolicyDoc, ProvidersDoc, SystemProfile};
 
 /// The effective target profile together with the file that supplied each
 /// declared provider role (§5.1: an observation must include its source —
@@ -37,7 +37,10 @@ use crate::domain::system::profile::{ProvidersDoc, SystemProfile};
 #[derive(Debug)]
 pub(crate) struct EffectiveProfile {
     pub(crate) profile: Option<SystemProfile>,
+    /// Source of each required provider shorthand/selection.
     pub(crate) role_sources: BTreeMap<String, std::path::PathBuf>,
+    /// Source of the complete policy declared for each capability domain.
+    pub(crate) policy_sources: BTreeMap<String, std::path::PathBuf>,
 }
 
 /// The effective target profile for `root`: merge the recommended
@@ -123,22 +126,27 @@ pub(crate) fn load_effective_at(defaults: &Path, overrides: &Path) -> Result<Eff
     let overrides_profile = read_one(overrides)?;
     let profile = SystemProfile::merge(defaults_profile.as_ref(), overrides_profile.as_ref());
     let mut role_sources = BTreeMap::new();
+    let mut policy_sources = BTreeMap::new();
     if let Some(p) = &profile {
-        for role in p.providers.keys() {
+        for role in p.policies.keys() {
             let source = if overrides_profile
                 .as_ref()
-                .is_some_and(|o| o.providers.contains_key(role))
+                .is_some_and(|o| o.policies.contains_key(role))
             {
                 overrides
             } else {
                 defaults
             };
-            role_sources.insert(role.clone(), source.to_path_buf());
+            policy_sources.insert(role.clone(), source.to_path_buf());
+            if p.provider(role).is_some() {
+                role_sources.insert(role.clone(), source.to_path_buf());
+            }
         }
     }
     Ok(EffectiveProfile {
         profile,
         role_sources,
+        policy_sources,
     })
 }
 
@@ -153,9 +161,9 @@ fn read_one(path: &Path) -> Result<Option<SystemProfile>> {
             return Err(e).with_context(|| format!("system profile {}", path.display()));
         }
     };
-    let (scalars, providers) =
+    let (scalars, providers, policies) =
         parse_doc(&text).with_context(|| format!("system profile {}", path.display()))?;
-    SystemProfile::from_doc(&scalars, &providers)
+    SystemProfile::from_doc_with_policies(&scalars, &providers, &policies)
         .map_err(anyhow::Error::msg)
         .map(Some)
         .with_context(|| format!("system profile {}", path.display()))
@@ -166,30 +174,80 @@ fn read_one(path: &Path) -> Result<Option<SystemProfile>> {
 /// `[providers]` section is the only table), and the domain rejects keys
 /// it does not know — so a newer profile document fails loudly instead of
 /// being silently misread.
-fn parse_doc(text: &str) -> Result<(BTreeMap<String, String>, ProvidersDoc)> {
+fn parse_doc(
+    text: &str,
+) -> Result<(BTreeMap<String, String>, ProvidersDoc, ProviderPoliciesDoc)> {
     let value: toml::Value = toml::from_str(text).context("profile is not valid TOML")?;
     let table = value
         .as_table()
         .ok_or_else(|| anyhow::anyhow!("profile is not a TOML table"))?;
     let mut scalars = BTreeMap::new();
     let mut providers: ProvidersDoc = None;
+    let mut policies: ProviderPoliciesDoc = None;
+
     for (key, value) in table {
         if key == "providers" {
             let section = value
                 .as_table()
-                .ok_or_else(|| anyhow::anyhow!("profile key `providers` must be a table"))?;
+                .ok_or_else(|| anyhow::anyhow!("profile key providers must be a table"))?;
             let mut map = BTreeMap::new();
             for (role, identity) in section {
-                let identity = scalar_str(identity, &format!("provider `{role}`"))?;
+                let identity = scalar_str(identity, &format!("provider {role:?}"))?;
                 map.insert(role.clone(), identity);
             }
             providers = Some(map);
             continue;
         }
-        let s = scalar_str(value, &format!("profile key `{key}`"))?;
-        scalars.insert(key.clone(), s);
+
+        if key == "policy" {
+            let section = value
+                .as_table()
+                .ok_or_else(|| anyhow::anyhow!("profile key policy must be a table"))?;
+            let mut domains = BTreeMap::new();
+            for (role, value) in section {
+                let table = value.as_table().ok_or_else(|| {
+                    anyhow::anyhow!("policy for {role:?} must be a table")
+                })?;
+                let mut policy = ProviderPolicyDoc::default();
+                for (field, value) in table {
+                    let values = string_array(value, &format!("policy {role:?}.{field}"))?;
+                    match field.as_str() {
+                        "required" => policy.required = values,
+                        "preferred" => policy.preferred = values,
+                        "forbidden" => policy.forbidden = values,
+                        _ => anyhow::bail!(
+                            "unknown provider policy field {field:?} for domain {role:?}"
+                        ),
+                    }
+                }
+                domains.insert(role.clone(), policy);
+            }
+            policies = Some(domains);
+            continue;
+        }
+
+        let scalar = scalar_str(value, &format!("profile key {key:?}"))?;
+        scalars.insert(key.clone(), scalar);
     }
-    Ok((scalars, providers))
+    Ok((scalars, providers, policies))
+}
+
+/// Parse a policy identity list. Every element must be a TOML string; silently
+/// skipping a malformed constraint would weaken the administrator's policy.
+fn string_array(value: &toml::Value, what: &str) -> Result<Vec<String>> {
+    let array = value
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("{what} must be an array of strings"))?;
+    array
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| anyhow::anyhow!("{what}[{index}] must be a string"))
+        })
+        .collect()
 }
 
 /// One scalar as a string: strings pass, integers are stringified
@@ -313,6 +371,97 @@ init-system = \"systemd\"
         assert!(
             effective.role_sources["init-system"].starts_with(&f.dir),
             "reported provenance must remain inside the selected root"
+        );
+    }
+
+    #[test]
+    fn schema_two_policy_tables_load_with_domain_source_provenance() {
+        let f = Fixture::new("schema-two-policy");
+        write(
+            &f.defaults,
+            "schema = 2\n\n[policy.init-system]\nrequired = [\"systemd\"]\nforbidden = [\"runit\"]\n\n[policy.network-stack]\npreferred = [\"networkmanager\", \"connman\"]\n",
+        );
+        write(
+            &f.overrides,
+            "schema = 2\n\n[policy.init-system]\npreferred = [\"runit\"]\n",
+        );
+
+        let effective = load_effective_at(&f.defaults, &f.overrides).unwrap();
+        let profile = effective.profile.as_ref().unwrap();
+        assert_eq!(profile.provider("init-system"), None);
+        assert_eq!(
+            profile.provider_policy("init-system").unwrap().preferred,
+            ["runit"]
+        );
+        assert_eq!(
+            profile.provider_policy("network-stack").unwrap().preferred,
+            ["networkmanager", "connman"]
+        );
+        assert_eq!(
+            effective.policy_sources.get("init-system").map(|p| p.as_path()),
+            Some(f.overrides.as_path())
+        );
+        assert_eq!(
+            effective.policy_sources.get("network-stack").map(|p| p.as_path()),
+            Some(f.defaults.as_path())
+        );
+    }
+
+    #[test]
+    fn an_empty_admin_policy_table_clears_distribution_constraints() {
+        let f = Fixture::new("clear-policy");
+        write(
+            &f.defaults,
+            "schema = 2\n\n[policy.init-system]\nrequired = [\"systemd\"]\n",
+        );
+        write(
+            &f.overrides,
+            "schema = 2\n\n[policy.init-system]\n",
+        );
+        let effective = load_effective_at(&f.defaults, &f.overrides).unwrap();
+        let policy = effective
+            .profile
+            .as_ref()
+            .unwrap()
+            .provider_policy("init-system")
+            .unwrap();
+        assert!(policy.required.is_empty());
+        assert_eq!(effective.policy_sources["init-system"], f.overrides);
+    }
+
+    #[test]
+    fn policy_lists_reject_non_string_values_and_unknown_fields() {
+        let f = Fixture::new("bad-policy-fields");
+        write(
+            &f.defaults,
+            "schema = 2\n\n[policy.init-system]\npreferred = [1, \"runit\"]\n",
+        );
+        let error = load_effective_at(&f.defaults, &f.overrides).unwrap_err();
+        assert!(format!("{error:#}").contains("must be a string"));
+
+        write(
+            &f.defaults,
+            "schema = 2\n\n[policy.init-system]\nchoose = [\"systemd\"]\n",
+        );
+        let error = load_effective_at(&f.defaults, &f.overrides).unwrap_err();
+        assert!(format!("{error:#}").contains("unknown provider policy field"));
+    }
+
+    #[test]
+    fn schema_one_rejects_policy_tables_and_old_provider_profiles_still_load() {
+        let f = Fixture::new("schema-one-policy");
+        write(
+            &f.defaults,
+            "schema = 1\n\n[policy.init-system]\nrequired = [\"systemd\"]\n",
+        );
+        let error = load_effective_at(&f.defaults, &f.overrides).unwrap_err();
+        assert!(format!("{error:#}").contains("does not support provider policy tables"));
+
+        write(&f.defaults, DESKTOP);
+        let effective = load_effective_at(&f.defaults, &f.overrides).unwrap();
+        assert_eq!(
+            effective.profile.as_ref().and_then(|p| p.provider("init-system")),
+            Some("systemd")
         );
     }
 

@@ -38,7 +38,13 @@ pub(crate) use crate::domain::system::observation::{
 
 /// Read the desired init and retain the validated profile from the same
 /// filesystem snapshot. Missing policy is not interpreted as an empty one.
-fn desired_state(root: &Path) -> (DesiredInit, Option<crate::domain::system::profile::SystemProfile>) {
+fn desired_state(
+    root: &Path,
+) -> (
+    DesiredInit,
+    Option<crate::domain::system::profile::SystemProfile>,
+    std::collections::BTreeMap<String, std::path::PathBuf>,
+) {
     match super::profile::load_effective(root) {
         Ok(effective) => {
             let desired = match effective
@@ -56,13 +62,14 @@ fn desired_state(root: &Path) -> (DesiredInit, Option<crate::domain::system::pro
                 },
                 None => DesiredInit::NotDeclared,
             };
-            (desired, effective.profile)
+            (desired, effective.profile, effective.policy_sources)
         }
         Err(error) => (
             DesiredInit::Invalid {
                 reason: format!("{error:#}"),
             },
             None,
+            std::collections::BTreeMap::new(),
         ),
     }
 }
@@ -75,7 +82,7 @@ pub(crate) fn observe(root: &Path, proc: &Path) -> ObservedSystem {
     if !is_canonical(root) {
         // §5.5 target-root/offline rows: report installed/configured
         // candidates only; host /proc is not the target's runtime state
-        let (desired, effective_profile) = desired_state(root);
+        let (desired, effective_profile, policy_sources) = desired_state(root);
         return ObservedSystem {
             root: root.to_path_buf(),
             context: Context::OfflineRoot {
@@ -87,6 +94,7 @@ pub(crate) fn observe(root: &Path, proc: &Path) -> ObservedSystem {
             },
             installed: installed_init(root),
             desired,
+            policy_sources,
             effective_profile,
         };
     }
@@ -116,13 +124,14 @@ pub(crate) fn observe_canonical(managed_root: &Path, proc: &Path) -> ObservedSys
         // being managed; the context field is what a migration gate checks
         _ => runtime_init(proc),
     };
-    let (desired, effective_profile) = desired_state(managed_root);
+    let (desired, effective_profile, policy_sources) = desired_state(managed_root);
     ObservedSystem {
         root: managed_root.to_path_buf(),
         context,
         runtime,
         installed: installed_init(managed_root),
         desired,
+        policy_sources,
         effective_profile,
     }
 }
@@ -859,7 +868,7 @@ mod tests {
             "rootdir/etc/nawa/system-profile.toml",
             "schema = 1\n\nfuture-key = true\n",
         );
-        let (desired, effective_profile) = desired_state(&root);
+        let (desired, effective_profile, _) = desired_state(&root);
         assert!(effective_profile.is_none());
         match &desired {
             DesiredInit::Invalid { reason } => {
@@ -883,7 +892,7 @@ mod tests {
             "rootdir/usr/share/nawa/system-profile.toml",
             "schema = 1\n\n[providers]\nsession-manager = \"elogind\"\n",
         );
-        let (desired, effective_profile) = desired_state(&root);
+        let (desired, effective_profile, _) = desired_state(&root);
         assert_eq!(desired, DesiredInit::NotDeclared);
         assert!(effective_profile.is_some());
     }

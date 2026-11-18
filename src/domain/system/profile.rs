@@ -41,8 +41,9 @@ use std::collections::BTreeMap;
 
 use crate::domain::system::capability::Capability;
 
-/// The one schema version this nawa understands (§7's example).
-pub(crate) const SCHEMA: u32 = 1;
+/// Current profile schema. Schema 1 remains readable for compatibility.
+pub(crate) const SCHEMA: u32 = 2;
+const LEGACY_SCHEMA: u32 = 1;
 
 /// A validated system profile (§7). `providers` maps a capability role to
 /// the provider identity the profile selects (e.g. `init-system` →
@@ -53,80 +54,122 @@ pub(crate) struct SystemProfile {
     pub(crate) distribution: Option<String>,
     pub(crate) profile: Option<String>,
     pub(crate) architecture: Option<String>,
+    /// Projection of exactly-one required provider policies.
     pub(crate) providers: BTreeMap<String, String>,
+    /// Full constraints, grouped by normalized capability domain.
+    pub(crate) policies: BTreeMap<String, ProviderPolicy>,
 }
 
-/// The `[providers]` section as the loader saw it: absent, or present
-/// (possibly empty). The distinction matters for the merge — an empty
-/// section overrides nothing, an absent section contributes nothing.
+/// A normalized provider policy. Preferred identities retain declaration
+/// order; forbidden identities never imply a replacement provider.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct ProviderPolicy {
+    pub(crate) required: Vec<String>,
+    pub(crate) preferred: Vec<String>,
+    pub(crate) forbidden: Vec<String>,
+}
+
+/// Raw values from one [policy.<role>] profile table.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct ProviderPolicyDoc {
+    pub(crate) required: Vec<String>,
+    pub(crate) preferred: Vec<String>,
+    pub(crate) forbidden: Vec<String>,
+}
+
+/// A present role table replaces that role's complete distribution policy.
+/// An empty table explicitly clears inherited constraints.
+pub(crate) type ProviderPoliciesDoc = Option<BTreeMap<String, ProviderPolicyDoc>>;
+
+/// Legacy [providers] values are interpreted as required-provider shorthand.
 pub(crate) type ProvidersDoc = Option<BTreeMap<String, String>>;
 
 impl SystemProfile {
-    /// Validate and normalize one profile document. `scalars` holds every
-    /// top-level scalar key of the document (`schema`, `distribution`,
-    /// `profile`, `architecture` — anything else is rejected), `providers`
-    /// the optional `[providers]` section.
-    ///
-    /// Normalization: scalar values and provider roles/identities are
-    /// trimmed; roles and identities are lowercased (§6.1 normalization, as
-    /// [`Capability::parse`] applies). An optional scalar left empty
-    /// becomes absent. Provider values (identities) must be non-empty and
-    /// whitespace-free.
+
+    /// Validate a legacy schema-1 profile or schema-2 policy profile.
+    /// Kept as a shorthand for callers that only supply [providers].
     pub(crate) fn from_doc(
         scalars: &BTreeMap<String, String>,
         providers: &ProvidersDoc,
     ) -> Result<SystemProfile, String> {
+        Self::from_doc_with_policies(scalars, providers, &None)
+    }
+
+    pub(crate) fn from_doc_with_policies(
+        scalars: &BTreeMap<String, String>,
+        providers: &ProvidersDoc,
+        policies: &ProviderPoliciesDoc,
+    ) -> Result<SystemProfile, String> {
         for key in scalars.keys() {
-            if !matches!(
-                key.as_str(),
-                "schema" | "distribution" | "profile" | "architecture"
-            ) {
-                return Err(format!("unknown profile key `{key}`"));
+            if !matches!(key.as_str(), "schema" | "distribution" | "profile" | "architecture") {
+                return Err(format!("unknown profile key {key:?}"));
             }
         }
         let schema_raw = scalars
             .get("schema")
-            .ok_or("profile has no `schema` key: the schema version must be declared")?;
-        let schema: u32 = schema_raw
-            .trim()
-            .parse()
-            .map_err(|_| format!("profile `schema` is not a number: {schema_raw:?}"))?;
-        if schema != SCHEMA {
+            .ok_or("profile has no schema key: the schema version must be declared")?;
+        let schema: u32 = schema_raw.trim().parse()
+            .map_err(|_| format!("profile schema is not a number: {schema_raw:?}"))?;
+        if schema != LEGACY_SCHEMA && schema != SCHEMA {
             return Err(format!(
-                "unknown profile schema {schema}: this nawa understands schema {SCHEMA}"
+                "unknown profile schema {schema}: this nawa understands schemas {LEGACY_SCHEMA} and {SCHEMA}"
+            ));
+        }
+        if schema == LEGACY_SCHEMA && policies.is_some() {
+            return Err(format!(
+                "profile schema {LEGACY_SCHEMA} does not support provider policy tables; use schema {SCHEMA}"
             ));
         }
         let optional = |key: &str| -> Option<String> {
-            scalars
-                .get(key)
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty())
+            scalars.get(key).map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
         };
-        let mut provider_map = BTreeMap::new();
-        if let Some(section) = providers {
-            for (role, identity) in section {
-                let role = normalize_role(role)?;
-                let identity = identity.trim().to_lowercase();
-                if identity.is_empty() || identity.split_whitespace().count() > 1 {
-                    return Err(format!(
-                        "profile provider `{role}` has an empty or whitespace identity"
-                    ));
+
+        let mut normalized = BTreeMap::new();
+        if let Some(section) = policies {
+            for (raw_role, raw_policy) in section {
+                let role = normalize_role(raw_role)?;
+                let policy = normalize_policy(&role, raw_policy)?;
+                if normalized.insert(role.clone(), policy).is_some() {
+                    return Err(format!("provider policy domain {role:?} is declared more than once after normalization"));
                 }
-                provider_map.insert(role, identity);
             }
         }
+        if let Some(section) = providers {
+            for (raw_role, raw_identity) in section {
+                let role = normalize_role(raw_role)?;
+                if normalized.contains_key(&role) {
+                    return Err(format!(
+                        "profile domain {role:?} is declared in both providers and policy"
+                    ));
+                }
+                let identity = normalize_identity(&role, raw_identity, "required")?;
+                normalized.insert(role, ProviderPolicy {
+                    required: vec![identity],
+                    preferred: Vec::new(),
+                    forbidden: Vec::new(),
+                });
+            }
+        }
+
+        let provider_map = providers_from_policies(&normalized);
         Ok(SystemProfile {
             schema,
             distribution: optional("distribution"),
             profile: optional("profile"),
             architecture: optional("architecture"),
             providers: provider_map,
+            policies: normalized,
         })
     }
 
     /// The identity the profile selects for a capability role, if any.
     pub(crate) fn provider(&self, role: &str) -> Option<&str> {
         self.providers.get(role).map(|s| s.as_str())
+    }
+
+    /// Policy for a capability domain, when declared.
+    pub(crate) fn provider_policy(&self, role: &str) -> Option<&ProviderPolicy> {
+        self.policies.get(role)
     }
 
     /// The selected init provider as a normalized capability (§6.1), the
@@ -156,19 +199,80 @@ impl SystemProfile {
             (Some(d), None) => Some(d.clone()),
             (None, Some(o)) => Some(o.clone()),
             (Some(d), Some(o)) => Some(SystemProfile {
-                // both sides were validated against the same schema version
-                schema: d.schema,
+                schema: d.schema.max(o.schema),
                 distribution: o.distribution.clone().or_else(|| d.distribution.clone()),
                 profile: o.profile.clone().or_else(|| d.profile.clone()),
                 architecture: o.architecture.clone().or_else(|| d.architecture.clone()),
-                providers: {
-                    let mut merged = d.providers.clone();
-                    merged.extend(o.providers.iter().map(|(r, i)| (r.clone(), i.clone())));
+                policies: {
+                    let mut merged = d.policies.clone();
+                    // Administrator policy replaces the whole domain. An
+                    // empty table intentionally clears distribution rules.
+                    merged.extend(o.policies.iter().map(|(r, p)| (r.clone(), p.clone())));
                     merged
                 },
+                providers: providers_from_policies(&{
+                    let mut merged = d.policies.clone();
+                    merged.extend(o.policies.iter().map(|(r, p)| (r.clone(), p.clone())));
+                    merged
+                }),
             }),
         }
     }
+}
+
+
+fn normalize_policy(role: &str, raw: &ProviderPolicyDoc) -> Result<ProviderPolicy, String> {
+    let required = normalize_identities(role, &raw.required, "required")?;
+    let preferred = normalize_identities(role, &raw.preferred, "preferred")?;
+    let forbidden = normalize_identities(role, &raw.forbidden, "forbidden")?;
+    let mut classes = BTreeMap::<String, &'static str>::new();
+    for (kind, identities) in [
+        ("required", &required),
+        ("preferred", &preferred),
+        ("forbidden", &forbidden),
+    ] {
+        for identity in identities {
+            if let Some(previous) = classes.insert(identity.clone(), kind) {
+                return Err(format!(
+                    "provider policy for {role}={identity} is contradictory: both {previous} and {kind}"
+                ));
+            }
+        }
+    }
+    if role == "init-system" && required.len() > 1 {
+        return Err("the exclusive init-system role may have at most one required provider".to_string());
+    }
+    if !required.is_empty() && !preferred.is_empty() {
+        return Err(format!("provider policy for {role} cannot combine required and preferred providers"));
+    }
+    Ok(ProviderPolicy { required, preferred, forbidden })
+}
+
+fn normalize_identities(role: &str, raw: &[String], kind: &str) -> Result<Vec<String>, String> {
+    let mut values = Vec::with_capacity(raw.len());
+    let mut seen = std::collections::BTreeSet::new();
+    for identity in raw {
+        let normalized = normalize_identity(role, identity, kind)?;
+        if !seen.insert(normalized.clone()) {
+            return Err(format!("provider policy for {role} repeats {kind} identity {normalized}"));
+        }
+        values.push(normalized);
+    }
+    Ok(values)
+}
+
+fn normalize_identity(role: &str, identity: &str, kind: &str) -> Result<String, String> {
+    Capability::parse(&format!("{role}={identity}"))
+        .map(|capability| capability.identity)
+        .map_err(|error| format!("invalid {kind} provider for {role}: {error}"))
+}
+
+fn providers_from_policies(
+    policies: &BTreeMap<String, ProviderPolicy>,
+) -> BTreeMap<String, String> {
+    policies.iter().filter_map(|(role, policy)| {
+        (policy.required.len() == 1).then(|| (role.clone(), policy.required[0].clone()))
+    }).collect()
 }
 
 /// Normalize a provider role like [`Capability::parse`] normalizes a
@@ -240,12 +344,14 @@ mod tests {
         assert!(SystemProfile::from_doc(&doc(&[]), &None)
             .unwrap_err()
             .contains("no `schema` key"));
-        for bad in ["2", "0", "x"] {
+        for bad in ["0", "3", "x"] {
             let e = SystemProfile::from_doc(&doc(&[("schema", bad)]), &None).unwrap_err();
             assert!(e.contains("schema"), "schema {bad:?}: {e}");
         }
-        let ok = SystemProfile::from_doc(&doc(&[("schema", "1")]), &None).unwrap();
-        assert_eq!(ok.schema, 1);
+        let legacy = SystemProfile::from_doc(&doc(&[("schema", "1")]), &None).unwrap();
+        assert_eq!(legacy.schema, 1);
+        let current = SystemProfile::from_doc(&doc(&[("schema", "2")]), &None).unwrap();
+        assert_eq!(current.schema, SCHEMA);
     }
 
     #[test]
@@ -292,6 +398,132 @@ mod tests {
         let p = SystemProfile::from_doc(&doc(&[("schema", "1")]), &Some(BTreeMap::new())).unwrap();
         assert!(p.providers.is_empty());
         assert!(p.init_capability().is_none());
+    }
+
+
+    #[test]
+    fn schema_two_accepts_ordered_preferred_and_forbidden_provider_policy() {
+        let policy = ProviderPolicyDoc {
+            required: Vec::new(),
+            preferred: vec!["systemd".into(), "runit".into()],
+            forbidden: vec!["busybox".into()],
+        };
+        let document = BTreeMap::from([("init-system".to_string(), policy)]);
+        let profile = SystemProfile::from_doc_with_policies(
+            &doc(&[("schema", "2")]), &None, &Some(document)
+        ).unwrap();
+        assert_eq!(profile.provider("init-system"), None);
+        let policy = profile.provider_policy("init-system").unwrap();
+        assert_eq!(policy.preferred, ["systemd", "runit"]);
+        assert_eq!(policy.forbidden, ["busybox"]);
+        assert!(profile.init_capability().is_none());
+    }
+
+    #[test]
+    fn legacy_provider_shorthand_becomes_a_required_policy() {
+        let profile = SystemProfile::from_doc(
+            &doc(&[("schema", "1")]),
+            &providers(&[("INIT-System", "SystemD")]),
+        ).unwrap();
+        assert_eq!(profile.provider("init-system"), Some("systemd"));
+        assert_eq!(profile.provider_policy("init-system").unwrap().required, ["systemd"]);
+    }
+
+    #[test]
+    fn provider_policy_rejects_duplicates_and_contradictory_rules() {
+        let bad = [
+            ProviderPolicyDoc {
+                required: vec!["systemd".into(), "SYSTEMD".into()],
+                ..ProviderPolicyDoc::default()
+            },
+            ProviderPolicyDoc {
+                required: vec!["systemd".into()],
+                forbidden: vec!["SYSTEMD".into()],
+                ..ProviderPolicyDoc::default()
+            },
+            ProviderPolicyDoc {
+                preferred: vec!["runit".into()],
+                forbidden: vec!["runit".into()],
+                ..ProviderPolicyDoc::default()
+            },
+            ProviderPolicyDoc {
+                required: vec!["systemd".into()],
+                preferred: vec!["runit".into()],
+                ..ProviderPolicyDoc::default()
+            },
+            ProviderPolicyDoc {
+                required: vec!["systemd".into(), "runit".into()],
+                ..ProviderPolicyDoc::default()
+            },
+        ];
+        for policy in bad {
+            let document = BTreeMap::from([("init-system".to_string(), policy)]);
+            let error = SystemProfile::from_doc_with_policies(
+                &doc(&[("schema", "2")]), &None, &Some(document)
+            ).unwrap_err();
+            assert!(!error.is_empty());
+        }
+    }
+
+    #[test]
+    fn schema_one_rejects_policy_tables_but_remains_backward_compatible() {
+        let document = BTreeMap::from([(
+            "init-system".to_string(),
+            ProviderPolicyDoc {
+                required: vec!["systemd".into()],
+                ..ProviderPolicyDoc::default()
+            },
+        )]);
+        let error = SystemProfile::from_doc_with_policies(
+            &doc(&[("schema", "1")]), &None, &Some(document)
+        ).unwrap_err();
+        assert!(error.contains("does not support provider policy tables"));
+        let legacy = SystemProfile::from_doc(
+            &doc(&[("schema", "1")]),
+            &providers(&[("init-system", "systemd")]),
+        ).unwrap();
+        assert_eq!(legacy.provider("init-system"), Some("systemd"));
+    }
+
+    #[test]
+    fn administrator_policy_replaces_one_domain_and_empty_tables_clear_it() {
+        let defaults = SystemProfile::from_doc_with_policies(
+            &doc(&[("schema", "2")]),
+            &None,
+            &Some(BTreeMap::from([
+                ("init-system".to_string(), ProviderPolicyDoc {
+                    required: vec!["systemd".into()],
+                    forbidden: vec!["runit".into()],
+                    ..ProviderPolicyDoc::default()
+                }),
+                ("network-stack".to_string(), ProviderPolicyDoc {
+                    preferred: vec!["networkmanager".into()],
+                    ..ProviderPolicyDoc::default()
+                }),
+            ])),
+        ).unwrap();
+        let override = SystemProfile::from_doc_with_policies(
+            &doc(&[("schema", "2")]),
+            &None,
+            &Some(BTreeMap::from([("init-system".to_string(), ProviderPolicyDoc {
+                preferred: vec!["runit".into()],
+                ..ProviderPolicyDoc::default()
+            })])),
+        ).unwrap();
+        let effective = SystemProfile::merge(Some(&defaults), Some(&override)).unwrap();
+        assert_eq!(effective.provider("init-system"), None);
+        assert_eq!(effective.provider_policy("init-system").unwrap().preferred, ["runit"]);
+        assert_eq!(effective.provider_policy("network-stack").unwrap().preferred, ["networkmanager"]);
+
+        let clear = SystemProfile::from_doc_with_policies(
+            &doc(&[("schema", "2")]),
+            &None,
+            &Some(BTreeMap::from([("init-system".to_string(), ProviderPolicyDoc::default())])),
+        ).unwrap();
+        let cleared = SystemProfile::merge(Some(&defaults), Some(&clear)).unwrap();
+        let policy = cleared.provider_policy("init-system").unwrap();
+        assert!(policy.required.is_empty() && policy.preferred.is_empty() && policy.forbidden.is_empty());
+        assert_eq!(cleared.provider("init-system"), None);
     }
 
     #[test]

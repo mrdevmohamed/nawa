@@ -74,7 +74,7 @@ pub(crate) struct InitCandidate {
 pub(crate) enum DesiredInit {
     /// Normalized identity and the file that declared it.
     Declared { identity: String, source: String },
-    /// No profile declares an init provider.
+    /// No required provider is selected; advisory policy may still exist.
     NotDeclared,
     /// A profile exists but is invalid; callers must fail closed.
     Invalid { reason: String },
@@ -91,6 +91,8 @@ pub(crate) struct ObservedSystem {
     pub(crate) runtime: RuntimeInit,
     pub(crate) installed: InstalledInit,
     pub(crate) desired: DesiredInit,
+    /// Source file for each effective provider policy domain.
+    pub(crate) policy_sources: std::collections::BTreeMap<String, PathBuf>,
     /// Validated effective profile from the same read that produced desired.
     pub(crate) effective_profile: Option<SystemProfile>,
 }

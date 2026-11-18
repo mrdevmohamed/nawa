@@ -66,7 +66,95 @@ fn build_from_observation(
 ) -> Option<Preview> {
     let (target, profile_source) = match &observed.desired {
         DesiredInit::Declared { identity, source } => (identity.clone(), source.clone()),
-        DesiredInit::NotDeclared => return None,
+        DesiredInit::NotDeclared => {
+            let Some(policy) = observed
+                .effective_profile
+                .as_ref()
+                .and_then(|profile| profile.provider_policy("init-system"))
+            else {
+                return None;
+            };
+            if policy.preferred.is_empty() && policy.forbidden.is_empty() {
+                return None;
+            }
+
+            let profile_source = observed
+                .policy_sources
+                .get("init-system")
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "system profile policy".to_string());
+            let proven_live_identity = match (&observed.context, &observed.runtime) {
+                (
+                    Context::LiveHost { .. },
+                    RuntimeInit::Observed {
+                        kind,
+                        confidence: Confidence::Proven,
+                        ..
+                    },
+                ) => Some(kind.capability_identity()),
+                _ => None,
+            };
+            let from = runtime_identity(&observed.runtime);
+
+            let Some(active) = proven_live_identity else {
+                let reason = match &observed.runtime {
+                    RuntimeInit::Observed {
+                        kind,
+                        confidence: Confidence::Indicated,
+                        ..
+                    } => format!(
+                        "PID 1 is only indicated as {}; the active provider cannot be trusted for policy evaluation",
+                        kind.capability_identity()
+                    ),
+                    RuntimeInit::Unknown { reason } => format!(
+                        "the running init cannot be established ({reason}); provider policy cannot be evaluated"
+                    ),
+                    RuntimeInit::Observed { .. } => {
+                        "the selected root is not a verified live host; runtime provider policy cannot be evaluated".to_string()
+                    }
+                };
+                return Some(Preview::Unresolved {
+                    from,
+                    to: if policy.preferred.is_empty() {
+                        "no required replacement".to_string()
+                    } else {
+                        format!("preferred: {}", policy.preferred.join(", "))
+                    },
+                    profile_source,
+                    reason: format!(
+                        "{reason}; preferred [{}] and forbidden [{}] policy do not select a replacement",
+                        policy.preferred.join(", "),
+                        policy.forbidden.join(", ")
+                    ),
+                });
+            };
+
+            if policy.preferred.contains(&active) {
+                return None;
+            }
+            if policy.forbidden.contains(&active) {
+                return Some(Preview::Unresolved {
+                    from: Some(active.clone()),
+                    to: "no required replacement".to_string(),
+                    profile_source,
+                    reason: format!(
+                        "the active init provider {active} is forbidden, but the profile does not require a replacement; no automatic migration is selected"
+                    ),
+                });
+            }
+            if policy.preferred.is_empty() {
+                return None;
+            }
+            Some(Preview::Unresolved {
+                from: Some(active),
+                to: format!("preferred: {}", policy.preferred.join(", ")),
+                profile_source,
+                reason: format!(
+                    "the active init does not match the advisory preference [{}]; preferences do not authorize an automatic init transition",
+                    policy.preferred.join(", ")
+                ),
+            })
+        },
         DesiredInit::Invalid { reason } => {
             return Some(Preview::Unresolved {
                 from: runtime_identity(&observed.runtime),
@@ -434,6 +522,7 @@ mod tests {
                 evidence: Vec::new(),
             },
             installed: InstalledInit::default(),
+            policy_sources: BTreeMap::new(),
             desired: DesiredInit::Declared {
                 identity: "systemd".to_string(),
                 source: "/usr/share/nawa/system-profile.toml".to_string(),
@@ -446,6 +535,14 @@ mod tests {
                 providers: BTreeMap::from([(
                     "init-system".to_string(),
                     "systemd".to_string(),
+                )]),
+                policies: BTreeMap::from([(
+                    "init-system".to_string(),
+                    crate::domain::system::profile::ProviderPolicy {
+                        required: vec!["systemd".to_string()],
+                        preferred: Vec::new(),
+                        forbidden: Vec::new(),
+                    },
                 )]),
             }),
         }
@@ -552,6 +649,141 @@ mod tests {
         observation.context = Context::OfflineRoot { root: root.clone() };
         let result = build_from_observation(&observation, &repo, &HashMap::new()).unwrap();
         assert!(matches!(result, Preview::Unresolved { reason, .. } if reason.contains("offline")));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn indicated_runtime_does_not_hide_an_unresolved_preference_policy() {
+        let root = root();
+        let repo = open_v4(vec![entry("systemd", &[], &["init-system=systemd"])]);
+        let mut observation = observed(&root, InitKind::Runit);
+        observation.desired = DesiredInit::NotDeclared;
+        observation.runtime = RuntimeInit::Observed {
+            kind: InitKind::Runit,
+            confidence: Confidence::Indicated,
+            evidence: Vec::new(),
+        };
+        observation.effective_profile = Some(SystemProfile {
+            schema: 2,
+            distribution: Some("faseela".to_string()),
+            profile: Some("desktop".to_string()),
+            architecture: Some(std::env::consts::ARCH.to_string()),
+            providers: BTreeMap::new(),
+            policies: BTreeMap::from([(
+                "init-system".to_string(),
+                crate::domain::system::profile::ProviderPolicy {
+                    required: Vec::new(),
+                    preferred: vec!["runit".to_string()],
+                    forbidden: Vec::new(),
+                },
+            )]),
+        });
+
+        let result = build_from_observation(&observation, &repo, &HashMap::new()).unwrap();
+        assert!(matches!(
+            result,
+            Preview::Unresolved { reason, .. }
+                if reason.contains("only indicated")
+                    && reason.contains("cannot be trusted for policy evaluation")
+        ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_active_preferred_provider_satisfies_advisory_policy_without_preview_noise() {
+        let root = root();
+        let repo = open_v4(vec![entry("systemd", &[], &["init-system=systemd"])]);
+        let mut observation = observed(&root, InitKind::Systemd);
+        observation.desired = DesiredInit::NotDeclared;
+        observation.effective_profile = Some(SystemProfile {
+            schema: 2,
+            distribution: Some("faseela".to_string()),
+            profile: Some("desktop".to_string()),
+            architecture: Some(std::env::consts::ARCH.to_string()),
+            providers: BTreeMap::new(),
+            policies: BTreeMap::from([(
+                "init-system".to_string(),
+                crate::domain::system::profile::ProviderPolicy {
+                    required: Vec::new(),
+                    preferred: vec!["systemd".to_string(), "runit".to_string()],
+                    forbidden: Vec::new(),
+                },
+            )]),
+        });
+
+        assert!(
+            build_from_observation(&observation, &repo, &HashMap::new()).is_none(),
+            "the active provider satisfies the first advisory preference; no transition preview is needed"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_forbidden_active_provider_is_reported_without_inventing_a_replacement() {
+        let root = root();
+        let repo = open_v4(vec![entry("systemd", &[], &["init-system=systemd"])]);
+        let mut observation = observed(&root, InitKind::Runit);
+        observation.desired = DesiredInit::NotDeclared;
+        observation.effective_profile = Some(SystemProfile {
+            schema: 2,
+            distribution: Some("faseela".to_string()),
+            profile: Some("desktop".to_string()),
+            architecture: Some(std::env::consts::ARCH.to_string()),
+            providers: BTreeMap::new(),
+            policies: BTreeMap::from([(
+                "init-system".to_string(),
+                crate::domain::system::profile::ProviderPolicy {
+                    required: Vec::new(),
+                    preferred: Vec::new(),
+                    forbidden: vec!["runit".to_string()],
+                },
+            )]),
+        });
+        observation.policy_sources = BTreeMap::from([(
+            "init-system".to_string(),
+            PathBuf::from("/etc/nawa/system-profile.toml"),
+        )]);
+
+        let result = build_from_observation(&observation, &repo, &HashMap::new()).unwrap();
+        assert!(matches!(
+            result,
+            Preview::Unresolved { reason, profile_source, .. }
+                if reason.contains("is forbidden")
+                    && reason.contains("does not require a replacement")
+                    && profile_source == "/etc/nawa/system-profile.toml"
+        ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn preferred_provider_policy_is_advisory_not_an_automatic_migration_target() {
+        let root = root();
+        let repo = open_v4(vec![entry("systemd", &[], &["init-system=systemd"])]);
+        let mut observation = observed(&root, InitKind::Runit);
+        observation.desired = DesiredInit::NotDeclared;
+        observation.effective_profile = Some(SystemProfile {
+            schema: 2,
+            distribution: Some("faseela".to_string()),
+            profile: Some("desktop".to_string()),
+            architecture: Some(std::env::consts::ARCH.to_string()),
+            providers: BTreeMap::new(),
+            policies: BTreeMap::from([(
+                "init-system".to_string(),
+                crate::domain::system::profile::ProviderPolicy {
+                    required: Vec::new(),
+                    preferred: vec!["systemd".to_string()],
+                    forbidden: Vec::new(),
+                },
+            )]),
+        });
+
+        let result = build_from_observation(&observation, &repo, &HashMap::new()).unwrap();
+        assert!(matches!(
+            result,
+            Preview::Unresolved { reason, to, .. }
+                if reason.contains("advisory init-system policy")
+                    && to == "preferred: systemd"
+        ));
         let _ = std::fs::remove_dir_all(root);
     }
 

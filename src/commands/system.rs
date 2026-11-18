@@ -139,6 +139,13 @@ fn cmd_migrate(ctx: &Ctx, action: MigrateCmd) -> Result<()> {
     }
 }
 
+fn describe_provider_policy(policy: &crate::domain::system::profile::ProviderPolicy) -> String {
+    let required = policy.required.join(", ");
+    let preferred = policy.preferred.join(", ");
+    let forbidden = policy.forbidden.join(", ");
+    format!("required=[{required}], preferred=[{preferred}], forbidden=[{forbidden}]")
+}
+
 fn render_system_status(observed: &detect::ObservedSystem) -> Vec<String> {
     let mut lines = vec!["System status".to_string(), format!("  Target root: {}", observed.root.display())];
     let (context, evidence) = match &observed.context {
@@ -167,9 +174,23 @@ fn render_system_status(observed: &detect::ObservedSystem) -> Vec<String> {
         }
     }
     match &observed.desired {
-        detect::DesiredInit::Declared { identity, source } => lines.push(format!("  Desired init:      {identity} (from {source})")),
-        detect::DesiredInit::NotDeclared => lines.push("  Desired init:      not declared by a system profile".to_string()),
+        detect::DesiredInit::Declared { identity, source } => lines.push(format!("  Desired init:      {identity} (required; from {source})")),
+        detect::DesiredInit::NotDeclared => lines.push("  Desired init:      no required init provider is selected".to_string()),
         detect::DesiredInit::Invalid { reason } => lines.push(format!("  Desired init:      invalid profile (fails closed): {reason}")),
+    }
+    if let Some(policy) = observed
+        .effective_profile
+        .as_ref()
+        .and_then(|profile| profile.provider_policy("init-system"))
+    {
+        let source = observed.policy_sources
+            .get("init-system")
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "source unavailable".to_string());
+        lines.push(format!(
+            "  Init-system policy: {} (from {source})",
+            describe_provider_policy(policy)
+        ));
     }
     lines
 }
@@ -187,12 +208,23 @@ fn render_system_profile(effective: &system_profile::EffectiveProfile) -> Vec<St
         format!("  Profile:       {}", profile.profile.as_deref().unwrap_or("not declared")),
         format!("  Architecture:  {}", profile.architecture.as_deref().unwrap_or("not declared")),
     ];
-    if profile.providers.is_empty() { lines.push("  Providers:     none declared".to_string()); }
+    if profile.providers.is_empty() { lines.push("  Required providers: none declared".to_string()); }
     else {
-        lines.push("  Providers:".to_string());
+        lines.push("  Required providers:".to_string());
         for (role, identity) in &profile.providers {
             let source = effective.role_sources.get(role).map(|p| p.display().to_string()).unwrap_or_else(|| "source unavailable".to_string());
             lines.push(format!("    {role} = {identity} (from {source})"));
+        }
+    }
+    if profile.policies.is_empty() {
+        lines.push("  Provider policies:  none declared".to_string());
+    } else {
+        lines.push("  Provider policies:".to_string());
+        for (role, policy) in &profile.policies {
+            let source = effective.policy_sources.get(role)
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "source unavailable".to_string());
+            lines.push(format!("    {role}: {} (from {source})", describe_provider_policy(policy)));
         }
     }
     lines
@@ -215,10 +247,23 @@ fn render_system_plan(observed: &detect::ObservedSystem) -> Vec<String> {
         detect::RuntimeInit::Unknown { .. } => None,
     };
     let desired = match &observed.desired {
-        detect::DesiredInit::Declared { identity, source } => { lines.push(format!("  Desired init: {identity} (from {source})")); Some(identity.as_str()) }
-        detect::DesiredInit::NotDeclared => { lines.push("  Desired init: not declared".to_string()); None }
+        detect::DesiredInit::Declared { identity, source } => { lines.push(format!("  Desired init: {identity} (required; from {source})")); Some(identity.as_str()) }
+        detect::DesiredInit::NotDeclared => { lines.push("  Desired init: no required provider selected".to_string()); None }
         detect::DesiredInit::Invalid { reason } => { lines.push(format!("  Desired init: invalid ({reason})")); None }
     };
+    let init_policy = observed.effective_profile
+        .as_ref()
+        .and_then(|profile| profile.provider_policy("init-system"));
+    if let Some(policy) = init_policy {
+        let source = observed.policy_sources
+            .get("init-system")
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "source unavailable".to_string());
+        lines.push(format!(
+            "  Init-system policy: {} (from {source})",
+            describe_provider_policy(policy)
+        ));
+    }
     match (runtime, desired) {
         (Some((running, detect::Confidence::Proven)), Some(target)) if running == target => {
             lines.push(format!("  Decision: runtime already matches init-system={target}."));
@@ -237,7 +282,50 @@ fn render_system_plan(observed: &detect::ObservedSystem) -> Vec<String> {
             ));
         }
         (None, Some(_)) => lines.push("  Decision: unresolved — runtime PID 1 is unknown; the target profile is not proof of the running init.".to_string()),
-        (_, None) => lines.push("  Decision: unresolved — a valid target init provider is not declared; no provider will be guessed.".to_string()),
+        (runtime_state, None) => {
+            match (runtime_state.as_ref(), init_policy) {
+                (Some((_, detect::Confidence::Indicated)), _) => {
+                    lines.push("  Decision: unresolved — PID 1 evidence is only indicated; a proven identity is required.".to_string());
+                }
+                (None, _) => {
+                    lines.push("  Decision: unresolved — runtime PID 1 is unknown; provider policy cannot be evaluated.".to_string());
+                }
+                (Some((running, detect::Confidence::Proven)), Some(policy))
+                    if policy.forbidden.iter().any(|identity| identity == running) =>
+                {
+                    lines.push(format!(
+                        "  Decision: unresolved — the active init-system={running} is forbidden, but no required replacement provider is declared."
+                    ));
+                }
+                (Some((running, detect::Confidence::Proven)), Some(policy))
+                    if policy.preferred.iter().any(|identity| identity == running) =>
+                {
+                    lines.push(format!(
+                        "  Decision: current init-system={running} satisfies an advisory preference; no transition is required by this policy."
+                    ));
+                }
+                (Some((running, detect::Confidence::Proven)), Some(policy))
+                    if !policy.preferred.is_empty() =>
+                {
+                    lines.push(format!(
+                        "  Decision: advisory preference not currently satisfied (preferred: {}); no automatic provider switch is authorized.",
+                        policy.preferred.join(", ")
+                    ));
+                }
+                (Some((running, detect::Confidence::Proven)), Some(policy))
+                    if !policy.forbidden.is_empty() =>
+                {
+                    lines.push(format!(
+                        "  Decision: init-system={running} is not forbidden; no required replacement provider is selected."
+                    ));
+                }
+                (Some((running, detect::Confidence::Proven)), _) => {
+                    lines.push(format!(
+                        "  Decision: init-system={running} is observed, but the profile selects no required provider."
+                    ));
+                }
+            }
+        },
     }
     if observed.installed.candidates.is_empty() { lines.push("  Installed candidates: none identified from target-root evidence.".to_string()); }
     else {
@@ -256,7 +344,8 @@ fn render_system_explanation(observed: &detect::ObservedSystem) -> Vec<String> {
         "  Role: exclusive system init provider; supported migration identities are runit and systemd.".to_string(),
         "  Runtime: derived only from attributable PID 1 evidence (/proc/1/exe and /proc/1/comm); unknown or contradictory evidence is never guessed.".to_string(),
         "  Installed: target-root symlinks and package-state evidence are candidates, not proof of the running PID 1.".to_string(),
-        "  Desired: read from the effective system profile; administrator overrides take precedence over distribution defaults.".to_string(),
+        "  Desired: required providers select a target; preferred providers are advisory and forbidden providers never select a replacement by themselves.".to_string(),
+        "  Precedence: an administrator policy table replaces the complete distribution policy for that capability domain; an empty table clears it.".to_string(),
         "  Package metadata: recipe capabilities are carried into .PKGINFO and authenticated signed repository index v4; legacy v1-v3 metadata remains unknown, not empty.".to_string(),
         "  Selection: install/update planning explains the provider declared by the target profile and verified candidate metadata; it does not switch the running init.".to_string(),
         "  Boundary: Nawa does not query or manage service state, start services, or reboot the machine.".to_string(),
@@ -553,6 +642,14 @@ fn render_plan(plan: &apply_use::MigrationPlan) -> Vec<String> {
         format!("  Trusted handler:      {} (reboot required: {})", d.handler.as_str(), yes_no(d.requires_reboot)),
         format!("  Observed PID 1:       {runtime}"),
         format!("  Desired init:         {desired}"),
+        format!(
+            "  Init-system policy:   {}",
+            plan.observed.effective_profile
+                .as_ref()
+                .and_then(|profile| profile.provider_policy("init-system"))
+                .map(describe_provider_policy)
+                .unwrap_or_else(|| "none declared".to_string())
+        ),
         "  Package actions:      from authenticated repository metadata at apply time".to_string(),
     ];
     lines.push("  Boot/init actions:".to_string());
@@ -673,6 +770,7 @@ mod tests {
                 }],
             },
             installed: detect::InstalledInit::default(),
+            policy_sources: std::collections::BTreeMap::new(),
             desired: detect::DesiredInit::Declared {
                 identity: "systemd".to_string(),
                 source: "/usr/share/nawa/system-profile.toml".to_string(),
@@ -715,6 +813,7 @@ mod tests {
                 ],
             },
             installed: detect::InstalledInit::default(),
+            policy_sources: std::collections::BTreeMap::new(),
             desired: detect::DesiredInit::Declared {
                 identity: "systemd".to_string(),
                 source: "/usr/share/nawa/system-profile.toml".to_string(),
@@ -725,6 +824,99 @@ mod tests {
         let text = joined(&render_system_plan(&observed));
         assert!(text.contains("transition required from init-system=runit to init-system=systemd"), "{text}");
         assert!(text.contains("Built-in candidate: faseela-runit-to-systemd-v1"), "{text}");
+    }
+
+    #[test]
+    fn system_plan_reports_a_forbidden_active_init_without_choosing_a_replacement() {
+        let observed = detect::ObservedSystem {
+            root: Path::new("/").to_path_buf(),
+            context: detect::Context::LiveHost { evidence: Vec::new() },
+            runtime: detect::RuntimeInit::Observed {
+                kind: crate::domain::system::identity::InitKind::Runit,
+                confidence: detect::Confidence::Proven,
+                evidence: Vec::new(),
+            },
+            installed: detect::InstalledInit::default(),
+            desired: detect::DesiredInit::NotDeclared,
+            policy_sources: std::collections::BTreeMap::from([(
+                "init-system".to_string(),
+                Path::new("/etc/nawa/system-profile.toml").to_path_buf(),
+            )]),
+            effective_profile: Some(crate::domain::system::profile::SystemProfile {
+                schema: 2,
+                distribution: Some("faseela".to_string()),
+                profile: Some("desktop".to_string()),
+                architecture: Some(std::env::consts::ARCH.to_string()),
+                providers: std::collections::BTreeMap::new(),
+                policies: std::collections::BTreeMap::from([(
+                    "init-system".to_string(),
+                    crate::domain::system::profile::ProviderPolicy {
+                        required: Vec::new(),
+                        preferred: Vec::new(),
+                        forbidden: vec!["runit".to_string()],
+                    },
+                )]),
+            }),
+        };
+
+        let text = joined(&render_system_plan(&observed));
+        assert!(
+            text.contains("active init-system=runit is forbidden"),
+            "the policy violation must be explicit: {text}"
+        );
+        assert!(
+            text.contains("no required replacement provider is declared"),
+            "a prohibition must not invent a replacement: {text}"
+        );
+        assert!(
+            !text.contains("Built-in candidate"),
+            "no migration candidate is authorized by a prohibition alone: {text}"
+        );
+    }
+
+    #[test]
+    fn system_plan_treats_preferred_init_as_advisory_not_a_migration_target() {
+        let observed = detect::ObservedSystem {
+            root: Path::new("/").to_path_buf(),
+            context: detect::Context::LiveHost { evidence: Vec::new() },
+            runtime: detect::RuntimeInit::Observed {
+                kind: crate::domain::system::identity::InitKind::Runit,
+                confidence: detect::Confidence::Proven,
+                evidence: Vec::new(),
+            },
+            installed: detect::InstalledInit::default(),
+            desired: detect::DesiredInit::NotDeclared,
+            policy_sources: std::collections::BTreeMap::from([(
+                "init-system".to_string(),
+                Path::new("/usr/share/nawa/system-profile.toml").to_path_buf(),
+            )]),
+            effective_profile: Some(crate::domain::system::profile::SystemProfile {
+                schema: 2,
+                distribution: Some("faseela".to_string()),
+                profile: Some("desktop".to_string()),
+                architecture: Some(std::env::consts::ARCH.to_string()),
+                providers: std::collections::BTreeMap::new(),
+                policies: std::collections::BTreeMap::from([(
+                    "init-system".to_string(),
+                    crate::domain::system::profile::ProviderPolicy {
+                        required: Vec::new(),
+                        preferred: vec!["systemd".to_string()],
+                        forbidden: Vec::new(),
+                    },
+                )]),
+            }),
+        };
+
+        let text = joined(&render_system_plan(&observed));
+        assert!(
+            text.contains("advisory preference not currently satisfied"),
+            "the profile preference must be explained: {text}"
+        );
+        assert!(
+            text.contains("no automatic provider switch is authorized"),
+            "preference alone cannot authorize an init transition: {text}"
+        );
+        assert!(!text.contains("Built-in candidate"), "{text}");
     }
 
     #[test]
