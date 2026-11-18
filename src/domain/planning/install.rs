@@ -106,14 +106,12 @@ impl Candidate {
     }
 }
 
-/// The init-provider decision carried by a resolution (§8.2: "the exact
-/// selected init provider for the target profile, or an explicit unresolved
-/// result"). `Declared` is the *desired* selection the effective target
-/// profile makes (§7) — whether any candidate can fulfill it is a separate
-/// question that cannot be answered while candidate metadata is unknown
-/// (the unwired B3 chain), and no install/update transaction acts on it:
-/// installing does not switch the provider (§7 — that is an explicitly
-/// authorized migration, the Phase 5/6 engine).
+/// The init-provider decision carried by a resolution (§8.2). `Declared`
+/// is the desired selection made by the effective target profile (§7).
+/// Candidate-provider explanation is computed separately from normalized
+/// recipe metadata and authenticated index-v4 metadata by the application
+/// adapter. A package transaction never switches the running init: that
+/// remains a separately authorized migration (§7).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) enum InitSelection {
     /// the effective target profile declares the `init-system` role with
@@ -336,8 +334,8 @@ mod tests {
     }
 
     #[test]
-    fn candidates_declare_no_capabilities_until_the_schema_is_agreed() {
-        // the B3 chain is unwired: the adapter stamps Unknown, never empty
+    fn candidates_without_declared_metadata_remain_unknown() {
+        // this fixture supplies no capabilities, so Unknown is not an empty declaration
         let c = cand("runit", "2.1.2", 2, &[]);
         assert_eq!(c.provides, Provides::Unknown);
     }
