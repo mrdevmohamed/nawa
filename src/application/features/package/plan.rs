@@ -115,23 +115,48 @@ pub(crate) fn install_plan(
     with_deps: bool,
 ) -> Result<Plan> {
     let (plan, _) = install_plan_with_binaries(
-        targets, installed, known, &BTreeMap::new(), InstallMode::Build, profile, target_why, with_deps,
+        InstallPlanInput {
+            targets,
+            installed,
+            known,
+            binaries: &BTreeMap::new(),
+            mode: InstallMode::Build,
+            profile,
+            target_why,
+            with_deps,
+        },
     )?;
     Ok(plan)
+}
+
+/// Inputs to the source-aware package plan. Grouping them keeps the
+/// application boundary explicit without growing a positional argument list.
+pub(crate) struct InstallPlanInput<'a> {
+    pub targets: &'a [String],
+    pub installed: &'a HashMap<String, Entry>,
+    pub known: &'a BTreeMap<String, Recipe>,
+    pub binaries: &'a BTreeMap<String, RepoEntry>,
+    pub mode: InstallMode,
+    pub profile: Option<&'a SystemProfile>,
+    pub target_why: Why,
+    pub with_deps: bool,
 }
 
 /// Resolve recipe and authenticated binary candidates through the same
 /// domain graph. Repository candidates fill names that have no recipe.
 pub(crate) fn install_plan_with_binaries(
-    targets: &[String],
-    installed: &HashMap<String, Entry>,
-    known: &BTreeMap<String, Recipe>,
-    binaries: &BTreeMap<String, RepoEntry>,
-    mode: InstallMode,
-    profile: Option<&SystemProfile>,
-    target_why: Why,
-    with_deps: bool,
+    input: InstallPlanInput<'_>,
 ) -> Result<(Plan, Vec<RepoEntry>)> {
+    let InstallPlanInput {
+        targets,
+        installed,
+        known,
+        binaries,
+        mode,
+        profile,
+        target_why,
+        with_deps,
+    } = input;
     let installed_full: HashMap<String, String> = installed
         .iter()
         .map(|(name, e)| (name.clone(), full(&e.version, e.rel)))

@@ -282,9 +282,16 @@ pub(crate) fn plan(
         }
     }
 
-    let (plan, extras) = match plan::install_plan_with_binaries(
-        targets, installed, known, &binaries, sourcing.mode, profile.profile.as_ref(), why, with_deps,
-    ) {
+    let (plan, extras) = match plan::install_plan_with_binaries(plan::InstallPlanInput {
+        targets,
+        installed,
+        known,
+        binaries: &binaries,
+        mode: sourcing.mode,
+        profile: profile.profile.as_ref(),
+        target_why: why,
+        with_deps,
+    }) {
         Ok(result) => result,
         Err(error) => {
             // A later unknown target must not erase facts established for
