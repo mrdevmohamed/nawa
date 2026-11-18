@@ -29,6 +29,7 @@ use crate::application::features::system::detect::{self, Context as ExecContext,
 use crate::domain::system::capability::Capability;
 use crate::domain::system::identity::InitKind;
 use crate::domain::system::migration::MigrationDefinition;
+use crate::domain::system::observation::Confidence;
 
 /// Expose the built-in domain migration definition to the application
 /// coordinator. The value is not read from a repository; its handler binding
@@ -120,6 +121,18 @@ fn preflight_inner(root: &Path, proc: &Path, require_root: bool) -> Result<detec
     let source = InitKind::from_capability(&definition.from)
         .expect("the built-in definition selects a known init");
     match &observed.runtime {
+        // Same bar as the upgrade preview (`upgrade/system_transition.rs`):
+        // a PID 1 identity backed by a single evidence source is only
+        // indicated, never proven, and must not authorize a live-host change.
+        RuntimeInit::Observed {
+            kind,
+            confidence: Confidence::Indicated,
+            ..
+        } => bail!(
+            "the running init looks like {} but is only indicated by one evidence source; \
+             a proven PID 1 identity is required before applying a migration",
+            kind.capability_identity()
+        ),
         RuntimeInit::Observed { kind, .. } if *kind == source => {}
         RuntimeInit::Observed { kind, .. } => bail!(
             "the running init is {} but this migration requires {} — refusing to apply a stale plan (§10.4 stage 5)",
@@ -291,6 +304,22 @@ mod tests {
         let proc = fake_proc(&base, "/usr/lib/systemd/systemd", "systemd", &root);
         let error = preflight_for_tests(&root, &proc).unwrap_err();
         assert!(format!("{error:#}").contains("running init is systemd"), "{error:#}");
+    }
+
+    #[test]
+    fn preflight_refuses_a_pid1_identity_that_is_only_indicated() {
+        let base = ctx_root("migrate-apply-indicated");
+        let root = base.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        seed_profile(&root);
+        let proc = fake_proc(&base, "/usr/bin/runit", "runit", &root);
+        // drop the comm evidence: the exe alone only indicates runit
+        std::fs::remove_file(proc.join("1/comm")).unwrap();
+        let error = preflight_for_tests(&root, &proc).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("only indicated"),
+            "{error:#}"
+        );
     }
 
     #[test]

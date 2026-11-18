@@ -325,11 +325,19 @@ pub(crate) fn record_ids(root: &Path) -> Result<Vec<String>> {
             return Err(e).with_context(|| format!("read migration records {}", dir.display()))
         }
     };
-    let mut ids: Vec<String> = rd
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.file_name().to_string_lossy().to_string())
-        .filter_map(|name| name.strip_suffix(".toml").map(|id| id.to_string()))
-        .collect();
+    // A directory entry that cannot be read is an error, not a skipped file:
+    // `active_gates` builds the mutation gate on this listing, and a record
+    // that silently drops out of it could hide a pending migration (§10.3
+    // fail closed).
+    let mut ids: Vec<String> = Vec::new();
+    for entry in rd {
+        let entry = entry
+            .with_context(|| format!("read an entry of migration records {}", dir.display()))?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if let Some(id) = name.strip_suffix(".toml") {
+            ids.push(id.to_string());
+        }
+    }
     ids.sort();
     Ok(ids)
 }
