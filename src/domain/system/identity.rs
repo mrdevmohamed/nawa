@@ -106,19 +106,20 @@ pub(crate) fn identify(observed: &str) -> Option<InitKind> {
     if observed.trim().is_empty() {
         return None;
     }
-    let lower = observed.to_lowercase();
-    if lower.contains("systemd") {
+    // Identify only the executable basename. Substring matching against
+    // the full path can mistake an unrelated PID 1 such as
+    // /opt/systemd-tools/supervisor for systemd, or a path containing
+    // "runit" for runit. A generic init basename remains unknown even when
+    // its parent directory happens to contain a provider name.
+    let base = observed.rsplit('/').next().unwrap_or(observed);
+    if base.is_empty() || base.eq_ignore_ascii_case("init") {
+        return None;
+    }
+    if base.eq_ignore_ascii_case("systemd") {
         return Some(InitKind::Systemd);
     }
-    if lower.contains("runit") {
+    if base.eq_ignore_ascii_case("runit") || base.eq_ignore_ascii_case("runit-init") {
         return Some(InitKind::Runit);
-    }
-    // the bare `init` entry point is generic: /sbin/init may be a symlink
-    // to systemd, runit, busybox or sysvinit, so the name alone must not
-    // identify any of them
-    let base = observed.rsplit('/').next().unwrap_or(observed);
-    if base.eq_ignore_ascii_case("init") {
-        return None;
     }
     Some(InitKind::Other(base.to_string()))
 }
@@ -208,6 +209,29 @@ mod tests {
         assert_eq!(identify("/usr/sbin/init"), None);
         assert_eq!(identify(""), None);
         assert_eq!(identify("   "), None);
+    }
+
+    #[test]
+    fn identify_uses_exact_executable_names_not_path_substrings() {
+        // Provider words in parent directories do not identify the process.
+        assert_eq!(
+            identify("/opt/systemd-tools/supervisor"),
+            Some(InitKind::Other("supervisor".to_string()))
+        );
+        assert_eq!(
+            identify("/opt/runit/sbin/init"),
+            None,
+            "a generic init basename stays unknown"
+        );
+
+        // Similar executable names are not aliases for the supported inits.
+        for name in ["not-systemd", "systemd-compat", "runit-wrapper"] {
+            assert_eq!(
+                identify(&format!("/usr/bin/{name}")),
+                Some(InitKind::Other(name.to_string())),
+                "{name} must not be guessed into a supported init"
+            );
+        }
     }
 
     #[test]
