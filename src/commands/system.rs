@@ -30,7 +30,7 @@ pub(crate) fn cmd_system(ctx: &Ctx, action: SystemCmd) -> Result<()> {
     match action {
         SystemCmd::Status => print_system_status(&ctx.root),
         SystemCmd::Profile { action: SystemProfileCmd::Show } => print_system_profile(&ctx.root),
-        SystemCmd::Plan => print_system_plan(&ctx.root),
+        SystemCmd::Plan => print_system_plan(ctx),
         SystemCmd::Explain { topic } => print_system_explanation(&ctx.root, &topic),
         SystemCmd::Migrate { action } => cmd_migrate(ctx, action),
     }
@@ -48,9 +48,29 @@ fn print_system_profile(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn print_system_plan(root: &Path) -> Result<()> {
-    let observed = detect::observe(root, Path::new("/proc"));
-    for line in render_system_plan(&observed) { println!("{line}"); }
+fn print_system_plan(ctx: &Ctx) -> Result<()> {
+    let observed = detect::observe(&ctx.root, Path::new("/proc"));
+    for line in render_system_plan(&observed) {
+        println!("{line}");
+    }
+
+    // The system planner reuses the authenticated transition resolver used by
+    // ordinary upgrade previews. It never has a separate provider-selection
+    // implementation and it never applies the resulting migration.
+    let Some(repository) = ctx.repo.as_deref() else {
+        println!("  Repository plan: unresolved — no repository is configured; no package provider was selected.");
+        return Ok(());
+    };
+    let repo_ref = crate::fetch::RepoRef::parse(repository)?;
+    match crate::upgrade::preview_system_transition(&ctx.root, &repo_ref, &observed)? {
+        Some(lines) => {
+            println!();
+            for line in lines {
+                println!("{line}");
+            }
+        }
+        None => println!("  Repository plan: no separate init-system transition is required by the observed runtime and target profile."),
+    }
     Ok(())
 }
 
@@ -183,7 +203,7 @@ fn render_system_plan(observed: &detect::ObservedSystem) -> Vec<String> {
             lines.push(format!("    - {} at {} ({})", candidate.kind.capability_identity(), candidate.path.display(), candidate.evidence));
         }
     }
-    lines.push("  Package actions: not calculated by this inspection-only command; install/update plans remain package-operation scoped.".to_string());
+    lines.push("  Package actions: resolved separately from authenticated repository metadata; this inspection does not apply them.".to_string());
     lines
 }
 
