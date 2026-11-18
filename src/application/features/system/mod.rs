@@ -11,4 +11,5 @@ pub(crate) mod migrate_apply;
 pub(crate) mod migrate_coordinator;
 pub(crate) mod migrate_inspect;
 pub(crate) mod migrate_recover;
+pub(crate) mod observation;
 pub(crate) mod profile;
