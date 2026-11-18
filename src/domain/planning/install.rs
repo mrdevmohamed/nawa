@@ -71,8 +71,9 @@ pub(crate) struct Candidate {
     /// Recipe candidates include build + run edges; binary candidates include
     /// runtime dependencies only.
     pub(crate) deps: Vec<String>,
-    /// False means a legacy repository entry did not declare rundeps.
-    /// Unknown is not an empty dependency list and cannot be solved safely.
+    /// False means repository metadata did not declare runtime dependencies.
+    /// The package may be a direct action, but its dependency closure must
+    /// remain visibly incomplete rather than being called empty.
     pub(crate) dependencies_known: bool,
     /// Source provenance is retained through resolution and explanation.
     pub(crate) origin: CandidateOrigin,
@@ -196,6 +197,9 @@ pub(crate) struct Resolution {
     pub(crate) items: Vec<ResolvedItem>,
     /// requested targets that need no work — reported, not rebuilt
     pub(crate) up_to_date: Vec<String>,
+    /// package candidates whose dependency closure is incomplete because
+    /// runtime dependency metadata was not declared by their source.
+    pub(crate) unknown_dependencies: Vec<String>,
     /// the init-provider decision the target profile makes (§8.2)
     pub(crate) init: InitSelection,
 }
@@ -302,11 +306,10 @@ fn visit(
     }
 
     if with_deps && !cand.dependencies_known {
-        bail!(
-            "runtime dependency metadata for repository package {name:?} is unknown; \
-             cannot safely resolve its dependency closure (use --no-deps to skip \
-             dependency resolution explicitly)"
-        );
+        // Keep legacy binary installation possible without claiming an empty
+        // dependency list. Callers requiring a complete closure (notably
+        // system migration) filter unknown candidates before resolving.
+        resolution.unknown_dependencies.push(name.to_string());
     }
 
     if visiting.iter().any(|v| v == name) {
@@ -470,16 +473,19 @@ mod tests {
     }
 
     #[test]
-    fn unknown_binary_runtime_dependencies_fail_closed_unless_explicitly_skipped() {
+    fn unknown_binary_runtime_dependencies_are_reported_not_treated_as_empty() {
         let known = tree(vec![binary_cand("legacy-bin", "1", &[], false)]);
-        let error = install_plan(
+        let planned = install_plan(
             &["legacy-bin".to_string()], &HashMap::new(), &known, None, Why::Explicit, true,
-        ).unwrap_err();
-        assert!(error.to_string().contains("runtime dependency metadata"));
+        ).unwrap();
+        assert_eq!(names(&planned), ["legacy-bin"]);
+        assert_eq!(planned.unknown_dependencies, ["legacy-bin"]);
+
         let skipped = install_plan(
             &["legacy-bin".to_string()], &HashMap::new(), &known, None, Why::Explicit, false,
         ).unwrap();
         assert_eq!(names(&skipped), ["legacy-bin"]);
+        assert!(skipped.unknown_dependencies.is_empty());
     }
 
     #[test]

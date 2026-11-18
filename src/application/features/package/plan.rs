@@ -74,6 +74,8 @@ pub(crate) struct Plan {
     /// Install reason and replaced version for each binary action.
     pub binary_whys: Vec<Why>,
     pub binary_replaces: Vec<Option<String>>,
+    /// repository packages whose runtime dependency closure is unknown.
+    pub unknown_dependencies: Vec<String>,
     /// requested targets that need nothing (already at the recipe's version
     /// or newer) — reported, not rebuilt
     pub up_to_date: Vec<String>,
@@ -175,6 +177,7 @@ pub(crate) fn install_plan_with_binaries(
     Ok((
         Plan {
             items, order, binary_whys, binary_replaces,
+            unknown_dependencies: resolved.unknown_dependencies,
             up_to_date: resolved.up_to_date,
             init: resolved.init,
             init_providers,

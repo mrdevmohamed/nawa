@@ -196,7 +196,7 @@ pub(crate) fn init_note(profile: &EffectiveProfile, init: &plan::InitSelection) 
 
 /// Explain which planned packages provide the init capability the effective
 /// target profile selected (design §8.4, B3 chain §8: the solver must explain
-/// provider selection). Only authenticated recipe metadata is consulted; a
+/// provider selection). Authenticated candidate metadata drives provider selection; a
 /// package without `[capabilities]` is never guessed into the role. Returns
 /// nothing when no profile decision was declared, so legacy behavior is
 /// byte-identical.
@@ -282,9 +282,41 @@ pub(crate) fn plan(
         }
     }
 
-    let (plan, extras) = plan::install_plan_with_binaries(
+    let (plan, extras) = match plan::install_plan_with_binaries(
         targets, installed, known, &binaries, profile.profile.as_ref(), why, with_deps,
-    )?;
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            // A later unknown target must not erase facts established for
+            // earlier targets. The domain solve has no partial-result value,
+            // so reconstruct only independent up-to-date target notices.
+            for target in targets {
+                let candidate = known
+                    .get(target)
+                    .map(|recipe| (recipe.package.version.as_str(), recipe.package.rel))
+                    .or_else(|| binaries.get(target).map(|entry| (entry.version.as_str(), entry.rel)));
+                let Some((version, rel)) = candidate else { continue };
+                let Some(current) = installed.get(target) else { continue };
+                let wanted = crate::domain::planning::install::version_rel(version, rel);
+                let have = crate::domain::planning::install::version_rel(&current.version, current.rel);
+                if crate::domain::package::version::vercmp(&wanted, &have)
+                    != std::cmp::Ordering::Greater
+                {
+                    notices.push(Notice::Info(format!(
+                        "{target} is already installed and up to date"
+                    )));
+                }
+            }
+            return Err(error);
+        }
+    };
+    if with_deps {
+        for name in &plan.unknown_dependencies {
+            notices.push(Notice::Info(format!(
+                "dependency closure for repository package {name} is unknown because its metadata does not declare runtime dependencies"
+            )));
+        }
+    }
     if let Some(note) = init_note(profile, &plan.init) {
         notices.push(note);
     }
@@ -560,13 +592,14 @@ mod tests {
         let sourcing = Sourcing {
             mode: InstallMode::Auto, ask: false, open: Some(open_repo(vec![legacy])),
         };
-        let error = plan(
+        let mut notices = Vec::new();
+        let outcome = plan(
             &["legacy-bin".to_string()], &BTreeMap::new(), &inst(vec![]), &sourcing,
-            &no_profile(), Why::Explicit, true, &mut Vec::new(),
-        )
-        .err()
-        .expect("unknown runtime dependency metadata must fail planning");
-        assert!(error.to_string().contains("runtime dependency metadata"));
+            &no_profile(), Why::Explicit, true, &mut notices,
+        ).unwrap();
+        assert_eq!(outcome.extras[0].name, "legacy-bin");
+        assert_eq!(outcome.plan.unknown_dependencies, ["legacy-bin"]);
+        assert!(infos(&notices).iter().any(|notice| notice.contains("dependency closure")));
     }
 
     #[test]
@@ -758,6 +791,6 @@ mod tests {
         let explained = provider_note(&plain).expect("the provider is named");
         let text = format!("{explained:?}");
         assert!(text.contains("systemd"), "{text}");
-        assert!(text.contains("authenticated recipe capabilities"), "{text}");
+        assert!(text.contains("authenticated candidate metadata"), "{text}");
     }
 }

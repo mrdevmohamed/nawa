@@ -88,15 +88,15 @@ fn an_unreadable_record_directory_fails_the_gate_closed_for_mutations() {
     let root = scratch("unreadable-dir");
     let state = root.join("var/lib/nawa");
     fs::create_dir_all(&state).unwrap();
-    // a *file* where the record directory should be: read_dir fails with
-    // ENOTDIR, which is exactly the "state cannot be verified" case.
+    // a *file* where the record directory should be: no-follow validation
+    // rejects it before enumerating or trusting its contents.
     fs::write(records_dir(&root), "not a directory").unwrap();
 
     let (_stdout, stderr, ok) = run(&root, &["remove", "anything", "--yes"], false);
     assert!(!ok, "a mutation must fail when gate state cannot be read: {stderr}");
     assert!(
         stderr.contains("cannot check the persistent migration mutation gate")
-            && stderr.contains("Not a directory"),
+            && (stderr.contains("Not a directory") || stderr.contains("not a real directory")),
         "the refusal names the unreadable state: {stderr}"
     );
 
