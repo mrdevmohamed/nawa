@@ -49,10 +49,26 @@ fn print_system_profile(root: &Path) -> Result<()> {
 }
 
 fn print_system_plan(ctx: &Ctx) -> Result<()> {
-    let observed = detect::observe(&ctx.root, Path::new("/proc"));
-    for line in render_system_plan(&observed) {
+    // Compose runtime/profile/filesystem evidence and installed package
+    // versions once. Repository planning consumes this same snapshot rather
+    // than re-reading the local package database in a second use case.
+    let snapshot = crate::application::features::system::observation::observe(
+        &ctx.root,
+        Path::new("/proc"),
+    );
+    for line in render_system_plan(&snapshot.observed) {
         println!("{line}");
     }
+
+    let installed_versions = match &snapshot.packages {
+        crate::application::features::system::observation::PackageInventory::Available(packages) => packages,
+        crate::application::features::system::observation::PackageInventory::Unavailable { reason } => {
+            println!(
+                "  Repository plan: unresolved — installed package inventory could not be read: {reason}"
+            );
+            return Ok(());
+        }
+    };
 
     // The system planner reuses the authenticated transition resolver used by
     // ordinary upgrade previews. It never has a separate provider-selection
@@ -62,7 +78,12 @@ fn print_system_plan(ctx: &Ctx) -> Result<()> {
         return Ok(());
     };
     let repo_ref = crate::fetch::RepoRef::parse(repository)?;
-    match crate::upgrade::preview_system_transition(&ctx.root, &repo_ref, &observed) {
+    match crate::upgrade::preview_system_transition(
+        &ctx.root,
+        &repo_ref,
+        &snapshot.observed,
+        installed_versions,
+    ) {
         Ok(Some(lines)) => {
             println!();
             for line in lines {
