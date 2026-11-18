@@ -563,7 +563,9 @@ mod tests {
         let error = plan(
             &["legacy-bin".to_string()], &BTreeMap::new(), &inst(vec![]), &sourcing,
             &no_profile(), Why::Explicit, true, &mut Vec::new(),
-        ).unwrap_err();
+        )
+        .err()
+        .expect("unknown runtime dependency metadata must fail planning");
         assert!(error.to_string().contains("runtime dependency metadata"));
     }
 
