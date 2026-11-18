@@ -17,7 +17,7 @@
 | 4 — System profiles & planning | **DONE** (profile model + merge rules + loader §7; profile wired into plan generation §8.1–8.4 — install/update report the init decision, invalid profiles fail closed; byte-identity + probes verified. B3 signed-index v4 provider metadata is wired into candidate explanations; legacy v1–v3 remains explicitly unknown) |
 | 5 — Migration engine | **FRAMEWORK IMPLEMENTED**: typed migration model, durable record store, persistent exclusive-lock mutation gate, read-only inspection, coordinator/permit, write-ahead lifecycle, crash recovery, explicit live-host resume and adversarial security tests. The real distribution boot handler remains blocked by Phase 6 contracts; `apply` refuses before creating a record or changing packages. |
 | 6 — Faseela runit→systemd migration | **BLOCKED** (external re-inspection 2026-11-18: current Faseela has *already* moved to systemd — runit recipes removed, `init = "systemd"` profile — so the migration premise no longer matches current HEAD; B1/B4/B5/B6/B7 still open. Nawa-side preflight, explicit authorization, read-only plan and resume are implemented; real boot transition is not) |
-| 7 — Final verification | **IN PROGRESS**: Phase 7a/7b source ownership reorganization and audit are landed; the read-only system inspection CLI and integration coverage are now added. Feature-branch CI has been enabled; final post-change verification is pending. |
+| 7 — Final verification | **DONE (Nawa-side)**: source ownership reorganization, system inspection, read-only transition preview and final CI verification are complete. Real Faseela boot acceptance remains Phase 6 and is not implied. |
 
 ## Completed phases
 
@@ -399,9 +399,9 @@ the handlers own only parsing, rendering and prompts.
   clean inside the new files; `render_plan` carries the old `print_plan`
   body verbatim — the same pre-existing violation relocated, none new).
 
-## Current task
+## Current state
 
-**Phase 7 — system inspection UX, package-transition preview and final quality gate.** Phase 7a/7b reorganized the source tree and synchronized the architecture audit. The branch includes read-only `system status`, `system profile show`, `system plan` and `system explain init-system` commands, plus a separate `upgrade` migration-candidate preview using trusted index-v4 provider metadata and the existing dependency resolver. The preview is not an executable migration transaction: the current metadata lacks version ranges, conflicts and replacements. The Nawa-side migration framework is implemented; the real Faseela boot transition remains blocked by the external contracts listed below.
+**Nawa-side implementation and Phase 7 verification are complete; Phase 6 boot acceptance remains blocked.** The branch includes read-only `system status`, `system profile show`, `system plan` and `system explain init-system` commands, plus a separate `upgrade` migration-candidate preview using trusted index-v4 provider metadata and the existing dependency resolver. The preview is not an executable migration transaction: the current metadata lacks version ranges, conflicts and replacements. The Nawa-side migration framework and safe preflight are implemented; the real Faseela boot transition remains fail-closed until the external contracts below are merged and accepted.
 Historical Phase 3–6 notes are retained as an implementation log; later
 entries and the blocker table record the current state.
 
@@ -1737,10 +1737,18 @@ Do not invoke the migration coordinator, remove runit, edit boot configuration
 or claim a successful transition while these conditions are unresolved.
 Continue read-only inspection and package-planning work independently. The
 feature-branch CI workflow passed on 2026-11-18 at commit
-`f79f82181f8581594e1bed08d3fc6198107bc492` (Actions run
-[44248582860](https://github.com/mrdevmohamed/nawa/actions/runs/44248582860)).
+`c433c38dfc5a13efc7f9d11fc34877ed93b8d1fe` (Actions run
+[44312508908](https://github.com/mrdevmohamed/nawa/actions/runs/44312508908)).
 The source-layering failure and schema-v4 facade export are fixed; the
 upgrade preview now receives a single immutable `ObservedSystem` snapshot
 from command composition, and its effective target profile is not reread
 inside `upgrade`. This verifies Nawa preview code only; it does not resolve
 Faseela/SAQ boot blockers.
+
+
+## Phase 7 closeout — final verification (2026-11-18)
+
+* The source ownership reorganization and read-only system-inspection/upgrade-preview integration are complete on the Nawa side. The final source tree has 149 Rust files, with seven files directly under `src/`; the 24-module layering gate passes with no dependency cycles.
+* CI run [#44312508908](https://github.com/mrdevmohamed/nawa/actions/runs/44312508908) passed on commit `c433c38dfc5a13efc7f9d11fc34877ed93b8d1fe`: build, Clippy, tests, Ubuntu 22.04/24.04 root/user coverage, CLI smoke, all four build-isolation levels, and static musl.
+* The preceding root-only test failure was an inherited hook-marker issue in the CI launcher. The root test runner now removes `NAWA_LOCK_HELD` and `NAWA_POST_TRANSACTION_HOOKS_RUNNING` from its own environment; real hook children still receive `NAWA_LOCK_HELD` explicitly from `run_hook`. The adversarial integration test `a_forged_held_marker_cannot_resume_a_migration_or_cross_the_gate` remains enabled and passed.
+* This closes Phase 7 for Nawa's source and preview work only. It does **not** close Phase 6: the real runit-to-systemd handler remains blocked by B1/B2/B4/B5/B6/B7, and no real BIOS/UEFI migration is claimed.
