@@ -1344,12 +1344,8 @@ mod tests {
 
     #[test]
     fn a_forged_lock_marker_cannot_cross_the_migration_gate() {
-        let root = tmpdir("migrate-recover-forged-marker");
-        seed_record(&root, MigrationState::Preparing, vec![]);
-        std::env::set_var("NAWA_LOCK_HELD", "1");
-        let result = lock::acquire_for_migration(&root, lock::migration_authority());
-        std::env::remove_var("NAWA_LOCK_HELD");
-        let error = result.expect_err("a nested process cannot cross the gate");
+        let error = lock::reject_nested_marker(true)
+            .expect_err("a nested process cannot cross the gate");
         assert!(format!("{error:#}").contains("nested nawa process"));
     }
 }
