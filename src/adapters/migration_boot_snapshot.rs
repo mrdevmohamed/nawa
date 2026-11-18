@@ -245,8 +245,9 @@ pub(crate) fn restore(root: &Path, migration_id: &str) -> Result<SnapshotInfo> {
     // symlinked directory such as /boot or /usr/bin must never redirect restore
     // outside the selected root.
     for entry in &validated {
-        let create = !matches!(&entry.state, Restorable::Absent);
-        let _ = ensure_target_parent(&root, &entry.path, create)?;
+        // Preflight is read-only: missing parents are created only after every
+        // destination has passed validation.
+        let _ = ensure_target_parent(&root, &entry.path, false)?;
         if !matches!(&entry.state, Restorable::Directory { .. }) {
             reject_directory_leaf(&root.join(&entry.path))?;
         } else if let Ok(metadata) = fs::symlink_metadata(root.join(&entry.path)) {
@@ -260,6 +261,8 @@ pub(crate) fn restore(root: &Path, migration_id: &str) -> Result<SnapshotInfo> {
     }
 
     for entry in &validated {
+        let create_parent = !matches!(&entry.state, Restorable::Absent);
+        let _ = ensure_target_parent(&root, &entry.path, create_parent)?;
         let destination = root.join(&entry.path);
         match &entry.state {
             Restorable::Absent => {
@@ -1199,6 +1202,24 @@ mod tests {
         assert!(!root
             .join("boot/efi/EFI/BOOT/BOOTX64.EFI")
             .exists());
+    }
+
+    #[test]
+    fn failed_destination_preflight_does_not_create_missing_parent_directories() {
+        let root = fixture("preflight-no-mutation");
+        make_snapshot(&root);
+
+        fs::remove_dir(root.join("boot/grub")).unwrap();
+        let outside = root.with_extension("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::remove_dir_all(root.join("usr/bin")).unwrap();
+        symlink(&outside, root.join("usr/bin")).unwrap();
+
+        assert!(restore(&root, "faseela-runit-to-systemd-v1").is_err());
+        assert!(!root.join("boot/grub").exists());
+
+        let _ = fs::remove_file(root.join("usr/bin"));
+        let _ = fs::remove_dir_all(outside);
     }
 
     #[test]
