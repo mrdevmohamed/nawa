@@ -147,7 +147,7 @@ A snapshot must:
 - retain the old boot configuration, init aliases, kernel/initramfs targets, fstab and required legacy-provider artifacts;
 - validate a manifest and every payload hash before changing any target;
 - refuse path traversal, symlinked ancestors and out-of-allowlist paths;
-- preserve the required runit service tree, including `/etc/runit/runsvdir/default`, with safe relative symlink handling;
+- preserve the required runit service tree, including `/etc/runit/runsvdir/default`, recursively recording regular files, symlinks and directory modes; never traverse symlinked directories, reject special files and out-of-root symlink targets, and cap the manifest at 999 entries;
 - be idempotently restorable;
 - be integrated into coordinator and recovery, not merely exist as an isolated adapter.
 
