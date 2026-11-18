@@ -101,6 +101,18 @@ supported legacy installations.
   record-store and snapshot path contracts are hardened and their integration
   tests are passing.
 
+* The latest completed CI run before the next planning change passed on
+  commit `4ea357c30a0f216c91b74c75b40ba9107fad35be` (Actions
+  [#44343755065](https://github.com/mrdevmohamed/nawa/actions/runs/44343755065)):
+  all build, Clippy, unit/integration, root/user, CLI smoke, isolation and
+  static-musl jobs succeeded.
+* `nawa system plan` now treats repository open/parse/authentication failures
+  as an explicit unresolved planning result while preserving the observed
+  system facts. This is an inspection command: unavailable or untrusted
+  repository metadata must be visible as a blocker, not erase the system
+  observation or masquerade as an empty package plan. A regression test covers
+  a malformed local index; this change is awaiting CI.
+
 ## Completed phases
 
 ### Phase 0 — Complete source audit (2026-11-17)
