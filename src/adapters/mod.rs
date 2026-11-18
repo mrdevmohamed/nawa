@@ -17,6 +17,7 @@ pub(crate) mod db;
 pub(crate) mod fswalk;
 pub(crate) mod interrupt;
 pub(crate) mod lock;
+pub(crate) mod migration_boot_snapshot;
 pub(crate) mod migration_record;
 pub(crate) mod pathutil;
 pub(crate) mod sign;
