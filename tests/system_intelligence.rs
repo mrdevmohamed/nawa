@@ -93,6 +93,36 @@ fn system_plan_keeps_an_offline_runtime_unresolved_and_is_explicitly_read_only()
 }
 
 #[test]
+fn system_plan_preserves_observation_when_installed_package_database_is_corrupt() {
+    let root = scratch("plan-corrupt-package-db");
+    write_profile(
+        &root,
+        "usr/share/nawa/system-profile.toml",
+        r#"schema = 1
+[providers]
+init-system = "systemd"
+"#,
+    );
+    let package = root.join("var/lib/nawa/local/example");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("desc"), "not valid package metadata").unwrap();
+
+    let output = nawa()
+        .args(["--root", root.to_str().unwrap(), "system", "plan"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "system plan is an inspection report: {stdout}");
+    assert!(stdout.contains("System plan (read-only"), "{stdout}");
+    assert!(
+        stdout.contains("installed package inventory could not be read"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("corrupt db entry"), "{stdout}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn system_plan_reports_unavailable_repository_metadata_as_unresolved() {
     let root = scratch("plan-repository-unavailable");
     write_profile(
