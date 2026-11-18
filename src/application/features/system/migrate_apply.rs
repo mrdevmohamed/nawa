@@ -198,12 +198,12 @@ impl MigrationApproval {
 /// are merged; installed-root and real disk-boot acceptance remain separate
 /// requirements and are not inferred from successful CI.
 const HANDLER_BLOCKERS: &[&str] = &[
-    "B1: Faseela PR #59 and SAQ PR #4 are merged; installed GRUB passes init=/usr/lib/systemd/systemd, but a disposable BIOS+UEFI disk boot through real SAQ must still verify /proc/1/comm=systemd",
-    "B2: exact /usr/bin/init co-ownership is migration-scoped and tested; sequencing (retain runit-services through reboot, remove only after verification) still depends on the B5 finalizer/recovery path and is not wired to the production handler",
-    "B4: Faseela Repo PR #203 is merged and base-files ships /usr/share/nawa/system-profile.toml; installed-root acceptance must verify Nawa's distribution default and administrator override",
-    "B5: no migration-specific boot artifact retention, old-entry restoration, or tested external rescue contract exists",
-    "B6: no disposable BIOS+UEFI installed-disk migration harness with snapshots and real SAQ/PID 1 verification exists",
-    "B7: Faseela Repo PR #203 is merged; recipe CI rejects direct service-state mutations in privileged hooks and transaction-trigger sources, and Faseela applies vendor presets during image provisioning; installed-package acceptance remains required and the static guard is not a shell sandbox",
+    "B1: Faseela PR #59 and SAQ PR #4 are merged; PR #60 adds the installed-disk BIOS+UEFI harness and release-workflow integration, but a real release-ISO run with both firmware logs proving PID 1=systemd is still required",
+    "B2: exact /usr/bin/init co-ownership is migration-scoped and tested; retain runit-services through reboot and remove it only after verified completion. The post-boot finalizer and package-removal step are not wired",
+    "B4: Faseela Repo PR #203 is merged and base-files ships /usr/share/nawa/system-profile.toml; loader/default/administrator-override tests pass, but installed BIOS/UEFI image acceptance remains pending",
+    "B5: the migration-specific boot snapshot adapter exists with manifest-last publication, SHA-256 validation, an explicit file allowlist and idempotent restore tests. It is not wired into coordinator/recovery; BIOS sectors, EFI NVRAM and the external Live-ISO rescue contract remain unresolved",
+    "B6: Faseela PR #60 adds the BIOS+UEFI installed-disk harness and release-workflow integration, with dry-run/installer-guard CI tests. Real release-ISO execution and snapshot-driven interrupted-install, failed-boot and restore acceptance remain pending",
+    "B7: Faseela Repo PR #203 is merged; recipe CI rejects direct service-state mutations in privileged hooks and transaction-trigger sources, and Faseela applies vendor presets during image provisioning. Installed-package runtime acceptance remains required; the static guard is not a shell sandbox",
 ];
 
 /// How an apply attempt ended before any package mutation.
