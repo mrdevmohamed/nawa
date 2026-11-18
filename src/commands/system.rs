@@ -62,14 +62,17 @@ fn print_system_plan(ctx: &Ctx) -> Result<()> {
         return Ok(());
     };
     let repo_ref = crate::fetch::RepoRef::parse(repository)?;
-    match crate::upgrade::preview_system_transition(&ctx.root, &repo_ref, &observed)? {
-        Some(lines) => {
+    match crate::upgrade::preview_system_transition(&ctx.root, &repo_ref, &observed) {
+        Ok(Some(lines)) => {
             println!();
             for line in lines {
                 println!("{line}");
             }
         }
-        None => println!("  Repository plan: no separate init-system transition is required by the observed runtime and target profile."),
+        Ok(None) => println!("  Repository plan: no separate init-system transition is required by the observed runtime and target profile."),
+        Err(error) => println!(
+            "  Repository plan: unresolved — authenticated repository metadata could not be loaded or verified: {error:#}"
+        ),
     }
     Ok(())
 }
