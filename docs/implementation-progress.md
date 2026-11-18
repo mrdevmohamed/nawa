@@ -15,7 +15,7 @@
 | 2 — Init identity & capability foundation | **DONE** (detection + capability/identity domain model) |
 | 3 — Metadata & capability resolution | **DONE** (B3 proposal; the whole package planner — install, outdated, orphans, removal ordering — in `domain/planning/`, behavior verified byte-identical) |
 | 4 — System profiles & planning | **DONE** (profile model + merge rules + loader §7; profile wired into plan generation §8.1–8.4 — install/update report the init decision, invalid profiles fail closed; byte-identity + probes verified. Stage-3 exit met: dry-run plans explain every init-provider and package decision without managing services. The candidate→provider capability comparison still awaits the B3 index schema — see blockers) |
-| 5 — Migration engine | in progress: the migration domain model (§10.1–§10.3) + the durable record store (top-level `migration_record.rs`) + the persistent mutation-gate check wired into every exclusive acquisition (§10.3, block-only) + the read-only `system migrate` inspection CLI (§12.2, slice 3) + the migration coordinator with the typed in-process permit and the `planned → preparing → awaiting-reboot / failed / needs-recovery` lifecycle (§10.3–§10.4, slice 4) + durable write-ahead/lifecycle hardening (5B) + crash recovery and explicit live-host resume (5C: cases A–F in `migrate_recover.rs`, the lock-defined migration authority, the `system migrate resume` command); next: security verification (5D) |
+| 5 — Migration engine | in progress: the migration domain model (§10.1–§10.3) + the durable record store (top-level `migration_record.rs`) + the persistent mutation-gate check wired into every exclusive acquisition (§10.3, block-only) + the read-only `system migrate` inspection CLI (§12.2, slice 3) + the migration coordinator with the typed in-process permit and the `planned → preparing → awaiting-reboot / failed / needs-recovery` lifecycle (§10.3–§10.4, slice 4) + durable write-ahead/lifecycle hardening (5B) + crash recovery and explicit live-host resume (5C) + adversarial security verification (5D: §13 gates, lock ownership, no-follow/permissions, handler allowlist and plugin boundary, demonstrated by tests); next: metadata v4 wiring, Phase 6 blockers |
 | 6 — Faseela runit→systemd migration | **BLOCKED** (see blockers) |
 | 7 — Final verification | not started |
 
@@ -1185,6 +1185,43 @@ namespace); `list`/`show`/`status` stay read-only.
   (the pre-existing toolchain-under-`/home` sandbox test); release build +
   both smoke suites pass; every new/touched file is rustfmt-clean.
 
+### Done within Phase 5 so far (7): adversarial security verification (5D) (§13, §14.1–14.2)
+
+5D demonstrates the §13 invariants with real processes and durable state
+instead of inspecting the source. New `tests/migration_security.rs` (8
+adversarial integration tests), store/record hardening and negative probes:
+
+* **Mutation gate:** an unreadable record directory (a file at the path) makes
+  a mutating command fail closed naming the cause; `status` reports the same
+  fail-closed answer with exit 0; multiple gate records are named in sorted
+  id order; a corrupt-but-parseable record (unknown state) fails closed naming
+  the exact file and cause; terminal records keep no gate (an ordinary
+  "not installed" error, not a gate refusal). Process-restart/reboot survival
+  is inherent: every test spawns a fresh `nawa` process reading only the
+  durable record on disk.
+* **Lock ownership:** a forged `NAWA_LOCK_HELD` marker cannot resume a
+  migration (offline-root preflight refuses, no record change, no lock created)
+  and cannot authorize a nested mutating command even with no gate present.
+  The migration authority's mint is restricted to the migration feature
+  subtree by `check-layering.py`; a negative probe appending a mint call to
+  `src/color.rs` was rejected (`only migration feature code may mint ...`)
+  and the file restored.
+* **Filesystem:** the record store now creates its directory with mode 0700
+  (previously the process umask decided), refuses symlinked record *files* on
+  both read and write, refuses a symlinked record *directory*, and fails the
+  gate closed on all of them. `migration_record.rs` gains 2 unit tests for the
+  restrictive directory mode and the no-follow rules; the gate scan shares
+  the same refusal.
+* **Privileged execution:** the typed `HandlerId` allowlist test now includes
+  repository/plugin/shell/`.HOOKS` attack strings; a CLI probe proves an
+  arbitrary handler path cannot be submitted through the migration namespace.
+  `RESERVED_COMMANDS` gains `migrate` (no second top-level namespace) and a
+  plugin-manifest test proves no `migration.handler` capability can be
+  requested and `system`/`migrate` cannot be shadowed.
+* **Verification:** `cargo check`, `clippy -D warnings`, layering (56 modules),
+  full battery (667 bin tests + all integration targets, 1 pre-existing
+  toolchain-under-`/home` env failure), all new/touched files rustfmt-clean.
+
 ## Changed files (this phase, updated as work lands)
 
 * `docs/architecture-audit.md` (new, Phase 0)
@@ -1389,6 +1426,14 @@ namespace); `list`/`show`/`status` stay read-only.
     `FailPoint` is `pub(crate)` under `cfg(test)`; production paths
     unchanged)
 
+* Phase 5 (5D security, in progress):
+  * `tests/migration_security.rs` (new — 8 adversarial integration tests:
+    unreadable directory, multiple/corrupt/terminal records, symlink record,
+    forged marker on resume/mutation, handler-path CLI probe)
+  * `src/migration_record.rs` (`ensure_records_dir` 0700, `check_no_follow` on
+    load/save/scan, 2 new unit tests)
+  * `src/plugins/manifest.rs` (`migrate` reserved; plugin-boundary test)
+  * `src/domain/system/migration.rs` (expanded handler allowlist attack corpus)
 * Phase 5 (5C recovery, in progress):
   * `src/application/features/system/migrate_recover.rs` (new — cases A–F:
     `recover`, `recover_planned`, `recover_gate_active`, `finalize_history`,
@@ -1511,31 +1556,23 @@ untouched pre-existing red** |
 
 ## Exact next task
 
-**Phase 5D — adversarial security verification (§13)** — 5C landed the
-recovery/resume path and the lock-defined gate-crossing capability; the
-next slice demonstrates the §13 invariants with tests rather than by
-inspection:
+**Metadata Index v4 wiring (B3)** — the proposal
+`docs/design/package-metadata-chain.md` is the implementation contract; wire
+the chain Recipe → Archive `.PKGINFO` → Authenticated Signed Repository Index
+v4 → Solver in this repo:
 
-* Mutation gate: every package-mutating entry point checked; the gate
-  survives process restart and reboot; corrupt/missing/unreadable record
-  directories fail closed; multiple records handled deterministically;
-  terminal states follow the domain machine; read-only commands stay
-  available only where snapshot consistency is proven.
-* Lock ownership: `NAWA_LOCK_HELD` never grants mutation authority; a
-  hook cannot spawn a nested mutating command past the parent lock; a
-  child cannot inherit migration authority; the permit cannot be forged,
-  serialized or minted outside the migration subtree (the layering rule
-  now enforces the last point); ordinary package commands cannot obtain
-  it; lock ownership and migration authority remain connected.
-* Filesystem: migration-id validation, path traversal, symlink/no-follow
-  handling, record ownership/permissions, atomic publication, directory
-  and file sync, malicious TOML, target-root path handling, the read/mutate
-  race. Trust boundary: built-in allowlisted handlers only; repository
-  metadata never supplies executables; plugins cannot register handlers;
-  `.HOOKS`/triggers are not handlers; no nested `nawa` executor.
+1. recipe `[capabilities] provides`, normalized exactly once at build time;
+2. `provides` in the main archive `.PKGINFO` (single comma-joined value),
+   never inherited by sub-packages;
+3. opt-in index schema v4 with required `rundeps`/`provides`, reject unknown
+   fields, duplicates and malformed values; keep v1/v2/v3 compatibility and
+   signature/digest verification;
+4. compare index metadata against archive `.PKGINFO` after digest verification;
+   refuse v4 publication when an archive has no `provides` line;
+5. feed normalized metadata into the domain solver and preserve
+   authentication provenance when constructing candidates; the solver must
+   explain provider selection and planned actions.
 
-Then: the `docs/design/package-metadata-chain.md` wiring (B3) across
-recipe → archive `.PKGINFO` → signed index v4 → solver, Phase 6 blocker
-re-inspection (faseela/faseela-repo/saq for B1/B2/B5/B6/B7 — read-only,
-no external changes without authorization), Phase 7 final source-tree
-and quality audit.
+Then: Phase 6 blocker re-inspection (faseela/faseela-repo/saq for
+B1/B2/B5/B6/B7 — read-only, no external changes without authorization) and
+Phase 7 final source-tree / layering / quality audit.

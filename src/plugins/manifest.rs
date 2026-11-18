@@ -151,7 +151,7 @@ pub(crate) const RESERVED_COMMANDS: &[&str] = &[
     "why", "deps", "deps-all", "remove", "query", "list", "files", "owner",
     "revdep", "repo-create", "repo-update", "sync", "keygen", "sign", "verify", "trust",
     "upgrade", "rollback", "repolist", "makecache", "repoquery", "clean",
-    "fetch", "recipe", "group", "history", "plugin", "config", "system", "init",
+    "fetch", "recipe", "group", "history", "plugin", "config", "system", "migrate", "init",
     "completions", "sandbox-init", "sandbox-probe", "__complete_pkgs", "help",
 ];
 
@@ -568,5 +568,36 @@ subscribe = ["transaction.completed"]
             assert!(format!("{err:#}").contains("world-writable"), "{err:#}");
         }
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn plugins_cannot_request_a_migration_handler_or_shadow_the_namespace() {
+        // §13: plugins stay outside the privileged migration core. There is
+        // no handler capability, and both the `system` namespace and the
+        // `migrate` name (a second top-level namespace) are reserved.
+        assert!(Capability::parse("migration.handler").is_none());
+        assert!(Capability::parse("migration.execute").is_none());
+        assert!(RESERVED_COMMANDS.contains(&"system"));
+        assert!(RESERVED_COMMANDS.contains(&"migrate"));
+
+        let (_base, plugins) = dir("migration-boundary");
+        let raw = manifest(&plugins, "demo").replace(
+            "requested = [\"history.read\", \"transaction.observe\"]",
+            "requested = [\"migration.handler\"]",
+        );
+        let error = PluginManifest::parse(&raw, &plugins).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("migration.handler"),
+            "{error:#}"
+        );
+
+        let raw = manifest(&plugins, "demo")
+            .replace("names = [\"demo-test\"]", "names = [\"system\"]");
+        let error = PluginManifest::parse(&raw, &plugins).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("shadows a built-in"),
+            "{error:#}"
+        );
+        let _ = std::fs::remove_dir_all(&_base);
     }
 }

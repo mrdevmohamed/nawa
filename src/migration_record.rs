@@ -52,11 +52,52 @@ pub(crate) fn migrations_dir(root: &Path) -> PathBuf {
     root.join("var/lib/nawa/migrations")
 }
 
+/// Create the record directory (and its state-dir parents) with restrictive
+/// 0700 permissions before publication. `atomic::write_atomic` creates missing
+/// parents with the process umask, which may be permissive; the migration
+/// journal must be root-only like the transaction journal (§10.3, §13).
+fn ensure_records_dir(root: &Path) -> Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    let dir = migrations_dir(root);
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true).mode(0o700);
+    builder
+        .create(&dir)
+        .with_context(|| format!("create migration records directory {}", dir.display()))?;
+    // A symlinked record directory would move authoritative state outside the
+    // selected root; refuse it (no-follow, §13).
+    let meta = std::fs::symlink_metadata(&dir)
+        .with_context(|| format!("inspect migration records directory {}", dir.display()))?;
+    if !meta.file_type().is_dir() {
+        bail!(
+            "migration records directory {} is not a real directory (symlinks are refused)",
+            dir.display()
+        );
+    }
+    Ok(())
+}
+
 /// The (validated) record file of `id`. The id is validated through the
 /// domain model, so it can never traverse out of the record directory.
 fn record_path(root: &Path, id: &str) -> Result<PathBuf> {
     check_id(id).map_err(anyhow::Error::msg)?;
     Ok(migrations_dir(root).join(format!("{id}.toml")))
+}
+
+/// Refuse a symlinked record file: a symlink under the state directory could
+/// redirect authoritative reads to a file outside the selected root (§13:
+/// no-follow handling). Atomic publication already replaces the symlink
+/// itself on write; reads must not follow it either.
+fn check_no_follow(path: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => bail!(
+            "migration record {} is a symlink — refusing to follow it (§13)",
+            path.display()
+        ),
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("inspect {}", path.display())),
+    }
 }
 
 /// The record as persisted: the text-format twin of the domain model. The
@@ -213,6 +254,7 @@ impl CapabilityDoc {
 /// once, so the rendered chain is `<file context>: <cause>`.
 pub(crate) fn load(root: &Path, id: &str) -> Result<Option<MigrationRecord>> {
     let path = record_path(root, id)?;
+    check_no_follow(&path)?;
     let raw = match std::fs::read_to_string(&path) {
         Ok(raw) => raw,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -237,6 +279,8 @@ pub(crate) fn load(root: &Path, id: &str) -> Result<Option<MigrationRecord>> {
 /// through the domain state machine before calling this.
 pub(crate) fn save(root: &Path, record: &MigrationRecord) -> Result<()> {
     let path = record_path(root, &record.id)?;
+    check_no_follow(&path)?;
+    ensure_records_dir(root)?;
     let doc = RecordDoc::from_record(record);
     atomic::write_atomic(&path, toml::to_string_pretty(&doc)?.as_bytes(), 0o600)
         .with_context(|| format!("publish migration record {}", path.display()))
@@ -264,6 +308,17 @@ pub(crate) fn remove(root: &Path, id: &str) -> Result<()> {
 /// that fails validation.
 pub(crate) fn record_ids(root: &Path) -> Result<Vec<String>> {
     let dir = migrations_dir(root);
+    match std::fs::symlink_metadata(&dir) {
+        Ok(meta) if meta.file_type().is_symlink() => bail!(
+            "migration records directory {} is a symlink — refusing to follow it (§13)",
+            dir.display()
+        ),
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(e).with_context(|| format!("inspect migration records {}", dir.display()))
+        }
+    }
     let rd = match std::fs::read_dir(&dir) {
         Ok(rd) => rd,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -392,6 +447,54 @@ mod tests {
         assert_eq!(load(&root, "faseela-runit-to-systemd-v1").unwrap(), None);
         // no migrations directory at all: no gates either
         assert!(active_gates(&root).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_record_directory_is_created_restrictively() {
+        let root = crate::testutil::tmpdir("migrate-store-dir-perms");
+        save(&root, &MigrationRecord::new(&definition())).unwrap();
+        let dir = migrations_dir(&root);
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700, "the record directory is root-only (0700)");
+    }
+
+    #[test]
+    fn symlinked_records_and_directories_are_refused_without_following() {
+        let root = crate::testutil::tmpdir("migrate-store-symlink");
+        let outside = crate::testutil::tmpdir("migrate-store-symlink-outside");
+        let target = outside.join("outside.toml");
+        let record = MigrationRecord::new(&definition());
+        save(&outside, &record).unwrap();
+        std::fs::rename(
+            outside.join("var/lib/nawa/migrations/faseela-runit-to-systemd-v1.toml"),
+            &target,
+        )
+        .unwrap();
+
+        let dir = migrations_dir(&root);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink(&target, dir.join("faseela-runit-to-systemd-v1.toml")).unwrap();
+        let error = load(&root, "faseela-runit-to-systemd-v1").unwrap_err();
+        assert!(format!("{error:#}").contains("symlink"), "{error:#}");
+        assert!(
+            active_gates(&root).is_err(),
+            "the gate scan fails closed instead of following the link"
+        );
+        assert!(
+            save(&root, &record).is_err(),
+            "publication never writes through a symlink"
+        );
+
+        // a symlinked record directory is refused too
+        let other = crate::testutil::tmpdir("migrate-store-real-dir");
+        let real = migrations_dir(&other);
+        std::fs::create_dir_all(&real).unwrap();
+        let swapped = crate::testutil::tmpdir("migrate-store-swapped");
+        let swapped_dir = migrations_dir(&swapped);
+        let _ = std::fs::remove_dir_all(&swapped_dir);
+        std::fs::create_dir_all(swapped_dir.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&real, &swapped_dir).unwrap();
+        assert!(record_ids(&swapped).is_err(), "no-follow on the directory");
     }
 
     #[test]

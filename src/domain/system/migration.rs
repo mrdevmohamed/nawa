@@ -597,6 +597,15 @@ mod tests {
             "faseela.init.runit_to_systemd ",
             "",
             "future.handler",
+            // §13 adversarial shapes: repository metadata, archive hooks,
+            // plugin ids and shell text must never name a handler.
+            "/usr/bin/systemctl",
+            "../bin/sh -c 'reboot'",
+            "sh:echo pwned",
+            "faseela.init.runit_to_systemd; rm -rf /",
+            ".HOOKS",
+            "plugin:evil-handler",
+            "Faseela.Init.Runit_To_Systemd",
         ] {
             let e = HandlerId::parse(raw).unwrap_err();
             assert!(
