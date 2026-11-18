@@ -369,12 +369,20 @@ mod tests {
             MigrationApproval::explicit(&d.id, &d.from, &d.to, true, true).unwrap();
         match apply_for_tests(&root, &proc, approval).unwrap() {
             ApplyRefusal::HandlerBlocked(blockers) => {
-                assert!(blockers.iter().any(|b| b.contains("B1") && b.contains("PR #59")));
-                assert!(blockers.iter().any(|b| b.contains("B2") && b.contains("/usr/bin/init") && b.contains("--force")));
-                assert!(blockers.iter().any(|b| b.contains("B4") && b.contains("PR #203")));
+                assert!(blockers.iter().any(|b| {
+                    b.contains("B1") && b.contains("BIOS+UEFI") && b.contains("/proc/1/comm=systemd")
+                }));
+                assert!(blockers.iter().any(|b| {
+                    b.contains("B2") && b.contains("/usr/bin/init") && b.contains("co-ownership")
+                }));
+                assert!(blockers.iter().any(|b| {
+                    b.contains("B4") && b.contains("administrator override")
+                }));
                 assert!(blockers.iter().any(|b| b.contains("B5")));
                 assert!(blockers.iter().any(|b| b.contains("B6")));
-                assert!(blockers.iter().any(|b| b.contains("B7") && b.contains("PR #203")));
+                assert!(blockers.iter().any(|b| {
+                    b.contains("B7") && b.contains("not a shell sandbox")
+                }));
             }
         }
         assert!(
