@@ -758,13 +758,31 @@ pub(crate) enum ConfigCmd {
 
 #[derive(Subcommand)]
 pub(crate) enum SystemCmd {
-    /// Migration records under the selected root (read-only inspection,
-    /// design §12.2 — the single migration namespace; there is no
-    /// top-level `nawa migrate`)
+    /// Inspect the observed runtime, installed init candidates and desired system profile
+    Status,
+    /// Inspect the effective distribution and administrator system profile
+    Profile {
+        #[command(subcommand)]
+        action: SystemProfileCmd,
+    },
+    /// Build a read-only reconciliation plan for the selected root
+    Plan,
+    /// Explain one supported system capability
+    Explain {
+        /// The capability to explain (currently: init-system)
+        topic: String,
+    },
+    /// Manage the built-in system migration lifecycle
     Migrate {
         #[command(subcommand)]
         action: MigrateCmd,
     },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum SystemProfileCmd {
+    /// Show the effective profile and the source of each provider declaration
+    Show,
 }
 
 #[derive(Subcommand)]
@@ -838,6 +856,23 @@ mod tests {
             assert!(
                 crate::plugins::manifest::RESERVED_COMMANDS.contains(&name),
                 "built-in command {name:?} is missing from RESERVED_COMMANDS"
+            );
+        }
+    }
+
+    #[test]
+    fn system_inspection_commands_take_a_shared_lock() {
+        for args in [
+            &["system", "status"][..],
+            &["system", "profile", "show"][..],
+            &["system", "plan"][..],
+            &["system", "explain", "init-system"][..],
+            &["system", "migrate", "list"][..],
+        ] {
+            assert_eq!(
+                lock_need(&parsed_request(args)),
+                Some(crate::application::lifecycle::LockNeed::Shared),
+                "{args:?} is a read-only system inspection",
             );
         }
     }

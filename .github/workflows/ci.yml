@@ -7,7 +7,7 @@ name: CI
 #                sandbox tests behave differently per uid and kernel)
 #   isolation    the real `nawa build` CLI at EACH isolation level
 #   smoke        end-to-end CLI smoke tests (signing, upgrade, rollback,
-#                remote repos, services)
+#                and remote repositories)
 #   static       the musl release build: must produce a fully static binary
 #
 # A sandbox test that SKIPS because the runner refused a kernel feature is a
@@ -15,7 +15,7 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, "feature/**"]
   pull_request:
   workflow_dispatch:
   schedule:

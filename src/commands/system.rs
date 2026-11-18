@@ -1,26 +1,26 @@
-//! `nawa system migrate` presentation (design §12.2): the read-only
-//! migration-record inspection commands plus the explicit `resume` recovery
-//! command. The use cases (`application::features::system::migrate_inspect`
-//! and `migrate_recover`) decide what exists, what failed and what was
-//! reconciled; this module decides how it is printed, over typed values so
-//! every rendering rule is unit-testable.
+//! `nawa system` inspection and `nawa system migrate` presentation
+//! (design §5, §7, §8 and §12): read-only host/profile inspection, init-system
+//! explanation and reconciliation planning, plus migration-record commands
+//! and explicit recovery. Application use cases own detection, profile
+//! loading and migration state; this module renders their typed results and
+//! never infers missing system facts.
 //!
-//! `list`/`show`/`status` are strictly read-only (§10.3): they never create
-//! or modify a record, never transition a state and never execute a handler.
-//! The shared lock is already held (the dispatch whole-command lock), so a
-//! listing is one coherent snapshot of the record store. `resume` is the
-//! explicit live-host recovery path and takes its own exclusive lock through
-//! the migration capability; it rejects offline roots, chroots and containers
-//! before touching any record (§12.2).
+//! System status, profile display, plan and explanation are read-only.
+//! Migration `list`/`show`/`status` are read-only record inspections; the
+//! shared lock gives a coherent snapshot. `apply` and `resume` are separate
+//! live-host operations and remain fail-closed at the external boot-handler
+//! boundary.
 
 use anyhow::{anyhow, Result};
 use std::path::Path;
 
+use crate::application::features::system::detect;
 use crate::application::features::system::migrate_apply as apply_use;
 use crate::application::features::system::migrate_inspect as inspect;
 use crate::application::features::system::migrate_recover as recover;
+use crate::application::features::system::profile as system_profile;
 use crate::application::ports::user_interaction::UserInteraction;
-use crate::cli::{MigrateCmd, SystemCmd};
+use crate::cli::{MigrateCmd, SystemCmd, SystemProfileCmd};
 use crate::application::context::Ctx;
 use crate::domain::system::migration::{MigrationRecord, StepOutcome, StepRecord};
 use crate::adapters::migration_record::ActiveGate;
@@ -28,8 +28,39 @@ use crate::adapters::migration_record::ActiveGate;
 /// `nawa system migrate [list|show|status|resume]`
 pub(crate) fn cmd_system(ctx: &Ctx, action: SystemCmd) -> Result<()> {
     match action {
+        SystemCmd::Status => print_system_status(&ctx.root),
+        SystemCmd::Profile { action: SystemProfileCmd::Show } => print_system_profile(&ctx.root),
+        SystemCmd::Plan => print_system_plan(&ctx.root),
+        SystemCmd::Explain { topic } => print_system_explanation(&ctx.root, &topic),
         SystemCmd::Migrate { action } => cmd_migrate(ctx, action),
     }
+}
+
+fn print_system_status(root: &Path) -> Result<()> {
+    let observed = detect::observe(root, Path::new("/proc"));
+    for line in render_system_status(&observed) { println!("{line}"); }
+    Ok(())
+}
+
+fn print_system_profile(root: &Path) -> Result<()> {
+    let effective = system_profile::load_effective(root)?;
+    for line in render_system_profile(&effective) { println!("{line}"); }
+    Ok(())
+}
+
+fn print_system_plan(root: &Path) -> Result<()> {
+    let observed = detect::observe(root, Path::new("/proc"));
+    for line in render_system_plan(&observed) { println!("{line}"); }
+    Ok(())
+}
+
+fn print_system_explanation(root: &Path, topic: &str) -> Result<()> {
+    if topic != "init-system" {
+        return Err(anyhow!("unsupported system topic {topic:?}; the supported topic is `init-system`"));
+    }
+    let observed = detect::observe(root, Path::new("/proc"));
+    for line in render_system_explanation(&observed) { println!("{line}"); }
+    Ok(())
 }
 
 fn cmd_migrate(ctx: &Ctx, action: MigrateCmd) -> Result<()> {
@@ -56,6 +87,120 @@ fn cmd_migrate(ctx: &Ctx, action: MigrateCmd) -> Result<()> {
     }
 }
 
+fn render_system_status(observed: &detect::ObservedSystem) -> Vec<String> {
+    let mut lines = vec!["System status".to_string(), format!("  Target root: {}", observed.root.display())];
+    let (context, evidence) = match &observed.context {
+        detect::Context::LiveHost { evidence } => ("live host", evidence.as_slice()),
+        detect::Context::Container { evidence } => ("container", evidence.as_slice()),
+        detect::Context::Chroot { evidence } => ("chroot", evidence.as_slice()),
+        detect::Context::OfflineRoot { .. } => ("offline target root", &[][..]),
+        detect::Context::Unknown { .. } => ("unknown environment", &[][..]),
+    };
+    lines.push(format!("  Execution context: {context}"));
+    if let detect::Context::Unknown { reason } = &observed.context { lines.push(format!("    reason: {reason}")); }
+    for item in evidence { lines.push(format!("    evidence: {} = {}", item.source, item.value)); }
+    match &observed.runtime {
+        detect::RuntimeInit::Observed { kind, confidence, evidence } => {
+            lines.push(format!("  Runtime PID 1:     {} ({confidence:?} evidence)", kind.capability_identity()));
+            for item in evidence { lines.push(format!("    evidence: {} = {}", item.source, item.value)); }
+        }
+        detect::RuntimeInit::Unknown { reason } => lines.push(format!("  Runtime PID 1:     unknown ({reason})")),
+    }
+    if observed.installed.candidates.is_empty() {
+        lines.push("  Installed init:    no candidate identified (absence is not proof of absence)".to_string());
+    } else {
+        lines.push("  Installed init candidates:".to_string());
+        for candidate in &observed.installed.candidates {
+            lines.push(format!("    - {}: {} ({})", candidate.kind.capability_identity(), candidate.path.display(), candidate.evidence));
+        }
+    }
+    match &observed.desired {
+        detect::DesiredInit::Declared { identity, source } => lines.push(format!("  Desired init:      {identity} (from {source})")),
+        detect::DesiredInit::NotDeclared => lines.push("  Desired init:      not declared by a system profile".to_string()),
+        detect::DesiredInit::Invalid { reason } => lines.push(format!("  Desired init:      invalid profile (fails closed): {reason}")),
+    }
+    lines
+}
+
+fn render_system_profile(effective: &system_profile::EffectiveProfile) -> Vec<String> {
+    let Some(profile) = &effective.profile else {
+        return vec!["System profile".to_string(),
+            "  No distribution default or administrator override is declared.".to_string(),
+            "  No target init provider will be inferred.".to_string()];
+    };
+    let mut lines = vec![
+        "Effective system profile".to_string(),
+        format!("  Schema:        {}", profile.schema),
+        format!("  Distribution:  {}", profile.distribution.as_deref().unwrap_or("not declared")),
+        format!("  Profile:       {}", profile.profile.as_deref().unwrap_or("not declared")),
+        format!("  Architecture:  {}", profile.architecture.as_deref().unwrap_or("not declared")),
+    ];
+    if profile.providers.is_empty() { lines.push("  Providers:     none declared".to_string()); }
+    else {
+        lines.push("  Providers:".to_string());
+        for (role, identity) in &profile.providers {
+            let source = effective.role_sources.get(role).map(|p| p.display().to_string()).unwrap_or_else(|| "source unavailable".to_string());
+            lines.push(format!("    {role} = {identity} (from {source})"));
+        }
+    }
+    lines
+}
+
+fn render_system_plan(observed: &detect::ObservedSystem) -> Vec<String> {
+    let mut lines = vec!["System plan (read-only; no package, boot or profile changes)".to_string(),
+        format!("  Root: {}", observed.root.display())];
+    match &observed.context {
+        detect::Context::LiveHost { .. } => lines.push("  Context: live host".to_string()),
+        detect::Context::Container { .. } => lines.push("  Context: container (migration apply is refused)".to_string()),
+        detect::Context::Chroot { .. } => lines.push("  Context: chroot (migration apply is refused)".to_string()),
+        detect::Context::OfflineRoot { .. } => lines.push("  Context: offline target root".to_string()),
+        detect::Context::Unknown { reason } => lines.push(format!("  Context: unknown ({reason})")),
+    }
+    let runtime = match &observed.runtime {
+        detect::RuntimeInit::Observed { kind, .. } => Some(kind.capability_identity()),
+        detect::RuntimeInit::Unknown { .. } => None,
+    };
+    let desired = match &observed.desired {
+        detect::DesiredInit::Declared { identity, source } => { lines.push(format!("  Desired init: {identity} (from {source})")); Some(identity.as_str()) }
+        detect::DesiredInit::NotDeclared => { lines.push("  Desired init: not declared".to_string()); None }
+        detect::DesiredInit::Invalid { reason } => { lines.push(format!("  Desired init: invalid ({reason})")); None }
+    };
+    match (runtime.as_deref(), desired) {
+        (Some(running), Some(target)) if running == target => lines.push(format!("  Decision: runtime already matches init-system={target}.")),
+        (Some(running), Some(target)) => {
+            lines.push(format!("  Decision: transition required from init-system={running} to init-system={target}."));
+            if running == "runit" && target == "systemd" {
+                lines.push("  Built-in candidate: faseela-runit-to-systemd-v1 (not executable yet; inspect with nawa system migrate plan).".to_string());
+            } else { lines.push("  No built-in migration handler supports this transition; no action is proposed.".to_string()); }
+        }
+        (None, Some(_)) => lines.push("  Decision: unresolved — runtime PID 1 is unknown; the target profile is not proof of the running init.".to_string()),
+        (_, None) => lines.push("  Decision: unresolved — a valid target init provider is not declared; no provider will be guessed.".to_string()),
+    }
+    if observed.installed.candidates.is_empty() { lines.push("  Installed candidates: none identified from target-root evidence.".to_string()); }
+    else {
+        lines.push("  Installed candidates:".to_string());
+        for candidate in &observed.installed.candidates {
+            lines.push(format!("    - {} at {} ({})", candidate.kind.capability_identity(), candidate.path.display(), candidate.evidence));
+        }
+    }
+    lines.push("  Package actions: not calculated by this inspection-only command; install/update plans remain package-operation scoped.".to_string());
+    lines
+}
+
+fn render_system_explanation(observed: &detect::ObservedSystem) -> Vec<String> {
+    let mut lines = vec![
+        "Capability: init-system".to_string(),
+        "  Role: exclusive system init provider; supported migration identities are runit and systemd.".to_string(),
+        "  Runtime: derived only from attributable PID 1 evidence (/proc/1/exe and /proc/1/comm); unknown or contradictory evidence is never guessed.".to_string(),
+        "  Installed: target-root symlinks and package-state evidence are candidates, not proof of the running PID 1.".to_string(),
+        "  Desired: read from the effective system profile; administrator overrides take precedence over distribution defaults.".to_string(),
+        "  Package metadata: recipe capabilities are carried into .PKGINFO and authenticated signed repository index v4; legacy v1-v3 metadata remains unknown, not empty.".to_string(),
+        "  Selection: install/update planning explains the provider declared by the target profile and verified candidate metadata; it does not switch the running init.".to_string(),
+        "  Boundary: Nawa does not query or manage service state, start services, or reboot the machine.".to_string(),
+    ];
+    lines.extend(render_system_status(observed).into_iter().skip(1));
+    lines
+}
 fn print_plan(root: &Path, id: &str) -> Result<()> {
     let definition = apply_use::builtin_definition();
     if id != definition.id {

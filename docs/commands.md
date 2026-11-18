@@ -119,6 +119,10 @@ Repository creation has schema-specific requirements. Index schema v2 and later 
 | nawa config show | Show effective configuration and where each value came from. |
 | nawa init | Write a project configuration template. |
 | nawa init --system | Write the system-wide configuration template. |
+| nawa system status | Show observed runtime PID 1, installed init candidates and desired init profile as separate facts. |
+| nawa system profile show | Show the merged system profile and the source file for each provider declaration. |
+| nawa system plan | Compare the observed init with the desired provider; read-only and explicitly unresolved when evidence is missing. |
+| nawa system explain init-system | Explain runtime, installed, desired and authenticated package-metadata sources for the init-system role. |
 | nawa system migrate list | List system migration records in deterministic order; never mutates anything. |
 | nawa system migrate show ID | Show one migration record in full, including every step's intent and outcome. |
 | nawa system migrate status | Show whether the mutation gate is held and which migrations are in progress. |
@@ -128,6 +132,8 @@ Repository creation has schema-specific requirements. Index schema v2 and later 
 | nawa completions SHELL | Print shell completion scripts for bash, zsh, or fish. |
 
 **Group installation status:** the command exists, but currently refuses to install a group until signed group metadata is published by a repository. See the [implementation status](design/IMPLEMENTATION-STATUS.md).
+
+**System inspection commands:** `system status`, `system profile show`, `system plan` and `system explain init-system` are read-only. They keep runtime PID 1, installed target-root candidates and the desired profile separate. Offline roots never inherit the host's PID 1; a missing or invalid profile is reported rather than guessed. `system plan` is an inspection/reconciliation preview, not a package transaction plan.
 
 **Migration commands:** `list`, `show`, `status` and `plan` are read-only (a shared lock gives one coherent snapshot; offline roots are supported) and never create records, change migration state, or run handlers. `apply` and `resume` are live-host only: they reject offline roots, chroots, containers and unverified hosts. `apply` requires the exact migration id, source/target capabilities and explicit acknowledgements of the reboot and recovery requirements. The real boot transition is still blocked on external Faseela/SAQ dependencies, so `apply` currently performs the preflight and then refuses with the precise blockers — it never claims a successful migration or modifies the machine. `resume` reconciles interrupted records and verifies actual PID 1 and boot postconditions before clearing the gate.
 
