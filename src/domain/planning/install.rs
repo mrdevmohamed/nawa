@@ -72,6 +72,51 @@ pub(crate) struct Candidate {
     pub(crate) provides: Provides,
 }
 
+/// Result of looking for packages that provide one exact capability.
+///
+/// Unknown metadata is kept separate from a known-empty declaration: an
+/// unknown candidate is never selected, but its existence is reported so
+/// the caller cannot mistake missing evidence for proof that no provider
+/// exists.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ProviderCandidates {
+    /// Candidates declaring exactly one identity in the requested domain,
+    /// equal to the requested capability.
+    pub(crate) matching: Vec<String>,
+    /// Candidates declaring multiple identities in the requested domain.
+    /// Exclusive-provider callers must refuse these instead of guessing.
+    pub(crate) ambiguous: Vec<String>,
+    /// Candidates whose capability metadata is absent/legacy.
+    pub(crate) unknown: Vec<String>,
+}
+
+/// Find providers for any normalized capability without performing I/O or
+/// applying domain-specific policy. The caller decides whether the domain is
+/// supported and whether multiple providers are permitted.
+pub(crate) fn providers_for(
+    candidates: &BTreeMap<String, Candidate>,
+    requested: &crate::domain::system::capability::Capability,
+) -> ProviderCandidates {
+    let mut result = ProviderCandidates::default();
+    for (name, candidate) in candidates {
+        match &candidate.provides {
+            Provides::Unknown => result.unknown.push(name.clone()),
+            Provides::Declared(declarations) => {
+                let domain: Vec<_> = declarations
+                    .iter()
+                    .filter(|capability| capability.domain == requested.domain)
+                    .collect();
+                match domain.as_slice() {
+                    [only] if *only == requested => result.matching.push(name.clone()),
+                    [_, _, ..] => result.ambiguous.push(name.clone()),
+                    _ => {}
+                }
+            }
+        }
+    }
+    result
+}
+
 /// Candidate names that declare `identity` as their single init-system
 /// provider (§6.2/§8.4). Candidates with unknown or ambiguous metadata are
 /// never chosen by preference — they are simply not reported as providers.
@@ -331,6 +376,33 @@ mod tests {
     #[test]
     fn version_rel_is_the_installed_state_format() {
         assert_eq!(version_rel("1.2.3", 4), "1.2.3-4");
+    }
+
+    #[test]
+    fn provider_lookup_is_domain_generic_and_keeps_unknown_separate() {
+        let requested = crate::domain::system::capability::Capability::parse("network-stack=networkd").unwrap();
+        let candidates = tree(vec![
+            Candidate {
+                name: "networkd".to_string(), version: "1".to_string(), rel: 1,
+                deps: vec![], provides: Provides::parse_all(&["network-stack=networkd".to_string()]).unwrap(),
+            },
+            Candidate {
+                name: "dual-network".to_string(), version: "1".to_string(), rel: 1,
+                deps: vec![], provides: Provides::parse_all(&[
+                    "network-stack=networkd".to_string(),
+                    "network-stack=netifd".to_string(),
+                ]).unwrap(),
+            },
+            cand("legacy-provider", "1", 1, &[]),
+            Candidate {
+                name: "other-domain".to_string(), version: "1".to_string(), rel: 1,
+                deps: vec![], provides: Provides::parse_all(&["init-system=systemd".to_string()]).unwrap(),
+            },
+        ]);
+        let result = providers_for(&candidates, &requested);
+        assert_eq!(result.matching, ["networkd"]);
+        assert_eq!(result.ambiguous, ["dual-network"]);
+        assert_eq!(result.unknown, ["legacy-provider"]);
     }
 
     #[test]
