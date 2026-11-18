@@ -13,7 +13,6 @@ use crate::domain::system::observation::{
 };
 use crate::domain::package::metadata::RunDeps;
 use crate::domain::planning::install::{self, Candidate, Why};
-use crate::domain::system::capability::InitProvider;
 
 use super::{ArchiveAuth, OpenRepo};
 
@@ -162,8 +161,7 @@ fn build_from_observation(
     }
 
     let wanted = definition.to.to_key();
-    let mut providers = Vec::new();
-    let mut ambiguous = Vec::new();
+    let mut provider_candidates = BTreeMap::new();
     for entry in &open.index.packages {
         if !crate::adapters::sys::arch_fits(&entry.arch) {
             continue;
@@ -171,18 +169,23 @@ fn build_from_observation(
         let Some(metadata) = open.metadata_for(&entry.name) else {
             continue;
         };
-        match metadata.provides.init_provider() {
-            InitProvider::Single(cap) if cap.to_key() == wanted => {
-                providers.push(entry.name.clone());
-            }
-            InitProvider::Ambiguous(caps) if caps.iter().any(|cap| cap.to_key() == wanted) => {
-                ambiguous.push(entry.name.clone());
-            }
-            _ => {}
-        }
+        provider_candidates.insert(
+            entry.name.clone(),
+            Candidate {
+                name: entry.name.clone(),
+                version: entry.version.clone(),
+                rel: entry.rel,
+                // Provider discovery needs only capability declarations.
+                // The actual install candidates below require known runtime
+                // dependencies before they can enter the package solver.
+                deps: Vec::new(),
+                provides: metadata.provides,
+            },
+        );
     }
-    providers.sort();
-    ambiguous.sort();
+    let provider_selection = install::providers_for(&provider_candidates, &definition.to);
+    let mut providers = provider_selection.matching;
+    let ambiguous = provider_selection.ambiguous;
     if !ambiguous.is_empty() {
         return Some(Preview::Unresolved {
             from: Some(from),
@@ -196,7 +199,18 @@ fn build_from_observation(
     }
     if providers.len() != 1 {
         let reason = if providers.is_empty() {
-            "no architecture-compatible package in the trusted v4 index declares the target init capability".to_string()
+            let unknown = if provider_selection.unknown.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "; {} architecture-compatible candidate(s) have unknown capability metadata ({})",
+                    provider_selection.unknown.len(),
+                    provider_selection.unknown.join(", ")
+                )
+            };
+            format!(
+                "no architecture-compatible package in the trusted v4 index declares the target init capability{unknown}"
+            )
         } else {
             format!(
                 "more than one package declares the exclusive target provider ({}); package selection is ambiguous",
