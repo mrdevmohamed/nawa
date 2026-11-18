@@ -13,10 +13,10 @@
 | 1 — Structural refactor + service removal | **DONE** (1a, 1b, 1c, 1d, 1e — 1e is the deferred apply-transaction extraction) |
 | 2 — Init identity & capability foundation | **GENERIC DECLARATION LOOKUP + INIT-SYSTEM POLICY** (the pure planner now finds providers by arbitrary normalized capability domain and preserves ambiguous/unknown candidates; only init-system has actionable policy and migration semantics) |
 | 3 — Metadata & capability resolution | **SOURCE-AWARE PACKAGE RESOLUTION CORE IMPLEMENTED; GENERIC SOLVER INCOMPLETE** (recipe and authenticated binary candidates now share one dependency graph for install/update planning; v4 runtime dependencies and capabilities are consumed; version ranges, conflicts, replacements and broader capability constraints remain open) |
-| 4 — System profiles & planning | **TYPED READ-ONLY SYSTEMPLAN VERTICAL SLICE** (schema-2 policies, one immutable snapshot, typed repository/trust evidence, a typed transition result, deterministic plan identity and exact archive pins are connected; approval-to-execution pinning and non-init policy semantics remain open) |
+| 4 — System profiles & planning | **SYSTEMPLAN + MIGRATION APPROVAL PIN VERIFICATION** (typed immutable plan, deterministic identity, exact ordered artifact pins, required `--plan-id`, and fresh snapshot/inventory/index/signer/artifact revalidation without a second solve; pinned transaction execution and non-init policy semantics remain open) |
 | 5 — Migration engine | **PREPARATION FRAMEWORK PRESENT; RECOVERY/BOOT EXECUTION BLOCKED**: typed state machine, durable journal, mutation gate, preparation coordinator and recovery inspection exist; snapshot is not wired to coordinator/recovery and post-boot finalization is absent. |
 | 6 — Faseela runit→systemd migration | **BLOCKED** (current Faseela HEAD already uses systemd; the legacy runit migration is for older installations. Real BIOS/UEFI boot acceptance and rescue/recovery contracts remain open.) |
-| 7 — Platform verification | **IN PROGRESS**: observation hardening, schema-2 policy, source-aware package planning and their integrated baseline are CI-verified; typed SystemPlan and artifact-pin work is the current slice; approval/transaction binding, generic solver constraints, snapshot/recovery integration and real BIOS/UEFI acceptance remain open. |
+| 7 — Platform verification | **IN PROGRESS**: observation hardening, schema-2 policy, source-aware package planning and the initial SystemPlan slice are CI-verified; migration approval pinning and stale-evidence verification are implemented in the current slice and await CI; pinned transaction execution, generic solver constraints, snapshot/recovery integration and real BIOS/UEFI acceptance remain open. |
 | System Intelligence platform | **IN PROGRESS** — accepted direction: System Intelligence is the umbrella; migration is one high-risk feature within it. |
 
 ## Accepted platform direction (2026-11-18)
@@ -1959,15 +1959,18 @@ The last preview integration was repaired without weakening the module-layering 
 
 ## Exact next task
 
-**Bind the typed SystemPlan to approval and execution without re-resolving.**
-The first read-only integration slice is implemented. Continue in this order:
+**Feed the approved artifact pins into the existing transaction executor.**
+The migration-specific approval now carries the reviewed plan identity, exact
+repository/index/signer fingerprints, observed facts, installed inventory and
+ordered archive pins. Apply revalidates those values without running the solver.
+Continue in this order:
 
-1. Carry the plan identity, repository/index identity and each package archive
-   SHA-256 into a migration-specific approval object; reject stale or changed
-   metadata/artifacts before opening the transaction.
-2. Reuse the existing package transaction executor, lock and WAL for approved
-   package actions. A fresh solver pass must never substitute an artifact after
-   approval; the approved action order and exact digests are authoritative.
+1. Route the immutable approved action sequence through Nawa's existing
+   transaction executor, write-ahead journal and lock; fetch each archive only
+   by its pinned index entry and SHA-256. Never re-solve or silently replace an
+   approved artifact.
+2. Persist the approved SystemPlan identity and artifact manifest in the
+   migration record so recovery can prove exactly which package set was staged.
 3. Complete generic solver semantics (version constraints, conflicts and
    replacements) only with explicit metadata and deterministic rules.
 4. Strengthen migration record and snapshot filesystem access with
@@ -2080,3 +2083,28 @@ BIOS/UEFI rescue acceptance remain open.
   [#44397318056](https://github.com/mrdevmohamed/nawa/actions/runs/44397318056).
   The SystemPlan slice in this section is a new change and must not be marked
   verified until a branch-head workflow passes.
+
+
+## Migration approval pinning — verification slice (2026-11-18)
+
+* `system migrate apply` now requires `--plan-id` copied from the reviewed
+  `nawa system plan` output. A mismatch refuses approval and reports the
+  current plan identity so the user can review the new plan.
+* The migration-specific approval retains the exact plan identity, repository
+  source fingerprint, signed-index SHA-256, trusted signer SHA-256, observed
+  system facts, installed package inventory and ordered package archive pins.
+* Before live-host preflight, the application re-observes the target root,
+  compares the installed inventory, re-opens and authenticates the repository,
+  and checks every approved package version/archive/size/download URL/SHA-256.
+  This verification does not invoke the dependency solver.
+* Unknown, unresolved, unsigned, legacy and untrusted plans cannot create a
+  migration approval. Stale observations, installed state, repository indexes,
+  signing keys, action/current-version relationships or archive records reject
+  the approval.
+* This is approval verification only. The transaction executor does not yet
+  consume the approved action list, and the boot-changing handler remains
+  blocked. No migration record, package transaction or boot change is created.
+* The preceding fully successful CI run is
+  [#44401478331](https://github.com/mrdevmohamed/nawa/actions/runs/44401478331)
+  on commit `8762f07507e17b9436cbcc33b4e329c31ad38b33`. The current approval
+  pinning implementation is awaiting its branch-head checks.

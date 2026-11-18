@@ -464,7 +464,7 @@ mod tests {
                 ("runit".to_string(), "2.1-1".to_string()),
             ])),
         };
-        let action = |name: &str, digest: &str| crate::upgrade::PackageAction {
+        let action = |name: &str, digest: &str| crate::upgrade::system_transition::PackageAction {
             kind: PackageActionKind::Install,
             source: PackageActionSource::AuthenticatedRepository,
             name: name.to_string(),

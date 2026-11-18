@@ -105,9 +105,17 @@ untrusted metadata and unresolved provider selection remain explicit typed
 states; they are never represented as an empty candidate set.
 
 A plan identity is a content-derived identifier over the observed facts,
-installed inventory, repository evidence and ordered artifact pins. It is an
-inspection identity only at this stage: approval-to-execution validation must
-still bind and re-check that identity before any mutation.
+installed inventory, repository evidence and ordered artifact pins. Migration
+apply requires the user to pass this exact identity as `--plan-id`. The
+migration-specific approval retains the ordered action list, repository-source
+fingerprint, signed-index SHA-256, trusted-signer fingerprint, observed-facts
+digest and installed inventory. Immediately before live-host preflight, Nawa
+rechecks those facts and every selected archive entry against a freshly
+authenticated index without invoking the solver. A stale snapshot, package
+database, repository, signer or archive record rejects the approval.
+
+The transaction executor is not yet wired to consume these pinned actions;
+until that integration lands, the built-in handler remains fail-closed.
 
 The planner is read-only. It must not create migration records, change profiles, modify boot artifacts, or install packages.
 
