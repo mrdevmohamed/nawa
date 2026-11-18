@@ -70,7 +70,7 @@ pub(crate) fn preview_system_transition(
     observed: &ObservedSystem,
 ) -> Result<Option<Vec<String>>> {
     let open = open_repo(root, repo_ref, false, false)?;
-    let installed: HashMap<String, crate::adapters::db::Entry> = Db::new(root)?
+    let installed: HashMap<String, crate::adapters::db::Entry> = Db::new(root)
         .installed()?
         .into_iter()
         .map(|entry| (entry.name.clone(), entry))
