@@ -31,13 +31,9 @@ SRC = "src"
 PRESENTATION = frozenset({
     "bootstrap",
     "cli",
-    "color",
     "commands",
-    "confirm",
-    "diag",
-    "humanize",
     "main",
-    "output",
+    "presentation",
 })
 
 # Legacy adapter -> presentation edges that predate the feature-oriented
@@ -47,20 +43,17 @@ PRESENTATION = frozenset({
 LEGACY_PRESENTATION_IMPORTS = {
     # undo prompts inside the compensation flow; moves behind the user
     # interaction port with the history use cases
-    ("undo", "confirm"),
+    ("undo", "presentation"),
     # fetch/fetchrun/install/plugins/repositories/slim/upgrade print progress
     # notes and format sizes inline; those notes move out with the build,
     # repository and plugin use-case extractions
-    ("fetch", "diag"),
-    ("fetch", "humanize"),
-    ("fetchrun", "diag"),
-    ("install", "diag"),
-    ("plugins", "diag"),
-    ("repositories", "humanize"),
-    ("slim", "humanize"),
-    ("upgrade", "color"),
-    ("upgrade", "confirm"),
-    ("upgrade", "diag"),
+    ("fetch", "presentation"),
+    ("fetchrun", "presentation"),
+    ("install", "presentation"),
+    ("plugins", "presentation"),
+    ("repositories", "presentation"),
+    ("slim", "presentation"),
+    ("upgrade", "presentation"),
 }
 
 

@@ -5,12 +5,12 @@ use std::collections::BTreeSet;
 use crate::application::features::package::query;
 use crate::ctx::Ctx;
 use std::collections::HashSet;
-use crate::color::Palette;
-use crate::color::Stream;
+use crate::presentation::color::Palette;
+use crate::presentation::color::Stream;
 use crate::db;
 use crate::deps;
-use crate::humanize::format_date;
-use crate::humanize::format_size;
+use crate::presentation::humanize::format_date;
+use crate::presentation::humanize::format_size;
 use crate::recipe;
 use crate::revdep;
 

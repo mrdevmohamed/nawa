@@ -183,8 +183,8 @@ pub(crate) fn cmd_repoquery(cfg: &Config, root: &Path, name: &str, repo_id: Opti
                 println!("Package   : {}-{}-{}", e.name, e.version, e.rel);
                 println!("Repository: {}", r.id);
                 println!("Arch      : {}", e.arch);
-                println!("Size      : {}", crate::humanize::format_size(e.size));
-                println!("Installed : {}", crate::humanize::format_size(e.installed_size));
+                println!("Size      : {}", crate::presentation::humanize::format_size(e.size));
+                println!("Installed : {}", crate::presentation::humanize::format_size(e.installed_size));
                 println!("SHA-256   : {}", e.sha256);
                 println!("File      : {}", e.file);
             } else {
@@ -289,9 +289,9 @@ pub(crate) fn cmd_clean(ctx: &crate::Ctx, category: &str, dry_run: bool) -> Resu
         }
     }
     if dry_run {
-        crate::nawa_info!("dry run — would free {}, retaining {}", crate::humanize::format_size(removed), crate::humanize::format_size(retained));
+        crate::nawa_info!("dry run — would free {}, retaining {}", crate::presentation::humanize::format_size(removed), crate::presentation::humanize::format_size(retained));
     } else {
-        crate::nawa_info!("cleaned {} (retained {} of referenced data)", crate::humanize::format_size(removed), crate::humanize::format_size(retained));
+        crate::nawa_info!("cleaned {} (retained {} of referenced data)", crate::presentation::humanize::format_size(removed), crate::presentation::humanize::format_size(retained));
     }
     Ok(())
 }

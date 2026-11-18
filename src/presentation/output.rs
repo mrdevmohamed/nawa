@@ -45,7 +45,7 @@ impl Level {
 }
 
 fn color_choice<S: anstream::stream::RawStream>(raw: &S) -> ColorChoice {
-    if crate::color::colors_enabled(raw.is_terminal()) {
+    if crate::presentation::color::colors_enabled(raw.is_terminal()) {
         ColorChoice::Always
     } else {
         ColorChoice::Never
@@ -58,10 +58,10 @@ fn write_line<W: Write>(
     args: fmt::Arguments<'_>,
     stderr: bool,
 ) {
-    let brand = crate::color::Palette::auto(if stderr {
-        crate::color::Stream::Stderr
+    let brand = crate::presentation::color::Palette::auto(if stderr {
+        crate::presentation::color::Stream::Stderr
     } else {
-        crate::color::Stream::Stdout
+        crate::presentation::color::Stream::Stdout
     })
     .brand("nawa:");
     let label = level.label();
@@ -111,63 +111,56 @@ pub(crate) fn write_stderr(text: &str) {
 #[macro_export]
 macro_rules! nawa_info {
     ($($arg:tt)*) => {
-        $crate::output::emit($crate::output::Level::Info, format_args!($($arg)*))
+        $crate::presentation::output::emit($crate::presentation::output::Level::Info, format_args!($($arg)*))
     };
 }
 
 #[macro_export]
 macro_rules! nawa_info_stderr {
     ($($arg:tt)*) => {
-        $crate::output::emit_stderr($crate::output::Level::Info, format_args!($($arg)*))
+        $crate::presentation::output::emit_stderr($crate::presentation::output::Level::Info, format_args!($($arg)*))
     };
 }
 
 #[macro_export]
 macro_rules! nawa_success {
     ($($arg:tt)*) => {
-        $crate::output::emit($crate::output::Level::Success, format_args!($($arg)*))
+        $crate::presentation::output::emit($crate::presentation::output::Level::Success, format_args!($($arg)*))
     };
 }
 
 #[macro_export]
 macro_rules! nawa_note {
     ($($arg:tt)*) => {
-        $crate::output::emit($crate::output::Level::Note, format_args!($($arg)*))
+        $crate::presentation::output::emit($crate::presentation::output::Level::Note, format_args!($($arg)*))
     };
 }
 
 #[macro_export]
 macro_rules! nawa_note_stderr {
     ($($arg:tt)*) => {
-        $crate::output::emit_stderr($crate::output::Level::Note, format_args!($($arg)*))
+        $crate::presentation::output::emit_stderr($crate::presentation::output::Level::Note, format_args!($($arg)*))
     };
 }
 
 #[macro_export]
 macro_rules! nawa_warn {
     ($($arg:tt)*) => {
-        $crate::output::emit($crate::output::Level::Warning, format_args!($($arg)*))
+        $crate::presentation::output::emit($crate::presentation::output::Level::Warning, format_args!($($arg)*))
     };
 }
 
 #[macro_export]
 macro_rules! nawa_error {
     ($($arg:tt)*) => {
-        $crate::output::emit($crate::output::Level::Error, format_args!($($arg)*))
+        $crate::presentation::output::emit($crate::presentation::output::Level::Error, format_args!($($arg)*))
     };
 }
 
-/// Render a use-case notice through the standard status macros. The method
-/// lives in the presentation layer on purpose: the application layer
-/// *returns* notices, it never prints them.
-impl crate::application::features::package::plan_install::Notice {
-    pub(crate) fn emit(&self) {
-        match self {
-            Self::Note(text) => crate::nawa_note!("{}", text),
-            Self::Info(text) => crate::nawa_info!("{}", text),
-        }
-    }
-}
+// `Notice::emit` lives in `commands` (presentation): keeping it here would
+// create presentation -> application -> presentation through the application
+// use cases that import this module, and the layering gate forbids cycles.
+// The application layer *returns* notices; the shell prints them.
 
 #[cfg(test)]
 mod tests {

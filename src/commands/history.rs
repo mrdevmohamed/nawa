@@ -26,7 +26,7 @@ pub(crate) fn print_history(root: &Path, limit: usize) -> Result<()> {
         println!(
             "{:<6}  {:<16}  {:<13}  {:<9}  {}",
             r.id,
-            crate::humanize::format_datetime(r.started_at),
+            crate::presentation::humanize::format_datetime(r.started_at),
             r.command,
             r.package_changes.len(),
             r.status,
@@ -41,12 +41,12 @@ pub(crate) fn print_info(root: &Path, id: u64) -> Result<()> {
     println!("Transaction {}", r.id);
     println!("  Command:   {} {}", r.command, r.requested_packages.join(" "));
     println!("  Status:    {}", r.status);
-    println!("  Started:   {}", crate::humanize::format_datetime(r.started_at));
+    println!("  Started:   {}", crate::presentation::humanize::format_datetime(r.started_at));
     if let Some(f) = r.finished_at {
-        println!("  Finished:  {}", crate::humanize::format_datetime(f));
+        println!("  Finished:  {}", crate::presentation::humanize::format_datetime(f));
     }
     if let Some(d) = r.duration_seconds {
-        println!("  Duration:  {}", crate::humanize::format_duration(d));
+        println!("  Duration:  {}", crate::presentation::humanize::format_duration(d));
     }
     if !r.initiated_by.is_empty() {
         println!("  Initiated: {}", r.initiated_by);

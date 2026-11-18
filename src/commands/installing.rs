@@ -10,17 +10,17 @@ use crate::application::features::package::apply_transaction::{
 use crate::application::features::package::plan_install;
 use crate::application::features::system::profile as sys_profile;
 use crate::application::ports::user_interaction::{PlanView, UserInteraction};
-use crate::color::Palette;
+use crate::presentation::color::Palette;
 use std::path::Path;
 use std::path::PathBuf;
 use crate::cli::PlanFlags;
-use crate::color::Stream;
+use crate::presentation::color::Stream;
 use crate::commands::build_one;
-use crate::confirm;
+use crate::presentation::confirm;
 use crate::db;
-use crate::humanize::format_date;
-use crate::humanize::format_duration;
-use crate::humanize::format_size;
+use crate::presentation::humanize::format_date;
+use crate::presentation::humanize::format_duration;
+use crate::presentation::humanize::format_size;
 use crate::groups;
 use crate::install;
 use crate::pathutil::is_archive_arg;
@@ -226,6 +226,18 @@ pub(crate) fn cmd_install_with_why(
             Applied::NothingToDo => {}
         }
         Ok(())
+    }
+}
+
+/// Render a use-case notice through the standard status macros. The method
+/// lives in the presentation layer (`commands`) on purpose: the application
+/// layer *returns* notices, it never prints them.
+impl crate::application::features::package::plan_install::Notice {
+    pub(crate) fn emit(&self) {
+        match self {
+            Self::Note(text) => crate::nawa_note!("{}", text),
+            Self::Info(text) => crate::nawa_info!("{}", text),
+        }
     }
 }
 

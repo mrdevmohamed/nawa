@@ -335,7 +335,7 @@ pub(crate) fn run_hook(label: &str, script: &str, root: &Path) -> Result<()> {
             .into_iter()
             .find(|sh| exists_in_root(root, sh));
         match shell {
-            Some(sh) if crate::diag::is_root() => {
+            Some(sh) if crate::presentation::diag::is_root() => {
                 crate::nawa_info!("running {label} hook in chroot {}", root.display());
                 let status = chroot_command(root, sh, script)?;
                 if !status.success() {

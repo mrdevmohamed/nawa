@@ -2,9 +2,9 @@
 
 use anyhow::{Result};
 use crate::ctx::Ctx;
-use crate::color::Palette;
+use crate::presentation::color::Palette;
 use std::path::PathBuf;
-use crate::color::Stream;
+use crate::presentation::color::Stream;
 use crate::config;
 use crate::plugins;
 
@@ -33,7 +33,7 @@ fn protected_paths(ctx: &Ctx) -> Vec<PathBuf> {
 /// List every discovered plugin without executing it.
 pub(crate) fn cmd_plugin_list(ctx: &Ctx) -> Result<()> {
     let state = effective_state(ctx);
-    let found = plugins::discovery::discover(crate::diag::is_root())?;
+    let found = plugins::discovery::discover(crate::presentation::diag::is_root())?;
     if found.is_empty() {
         crate::nawa_info!("no plugins discovered");
         return Ok(());
@@ -74,7 +74,7 @@ pub(crate) fn cmd_plugin_list(ctx: &Ctx) -> Result<()> {
 /// Show a plugin manifest and the effective administrator grants.
 pub(crate) fn cmd_plugin_info(ctx: &Ctx, id: &str) -> Result<()> {
     let state = effective_state(ctx);
-    let found = plugins::discovery::discover(crate::diag::is_root())?
+    let found = plugins::discovery::discover(crate::presentation::diag::is_root())?
         .into_iter()
         .find(|plugin| plugin.manifest.id == id)
         .ok_or_else(|| anyhow::anyhow!("no plugin {id:?} discovered"))?;
@@ -105,7 +105,7 @@ pub(crate) fn cmd_plugin_info(ctx: &Ctx, id: &str) -> Result<()> {
 
 /// Enable/disable is a project preference. A system-wide disable wins.
 pub(crate) fn cmd_plugin_enable(ctx: &Ctx, id: &str, enable: bool) -> Result<()> {
-    let found = plugins::discovery::discover(crate::diag::is_root())?
+    let found = plugins::discovery::discover(crate::presentation::diag::is_root())?
         .into_iter()
         .find(|plugin| plugin.manifest.id == id && plugin.error.is_none())
         .ok_or_else(|| anyhow::anyhow!("no usable plugin {id:?} discovered"))?;
@@ -140,7 +140,7 @@ pub(crate) fn cmd_plugin_grant(
     capability_name: &str,
     grant: bool,
 ) -> Result<()> {
-    if !crate::diag::is_root() {
+    if !crate::presentation::diag::is_root() {
         bail!("plugin capabilities are administrator policy; run this command as root");
     }
     let capability = plugins::manifest::Capability::parse(capability_name)
@@ -182,7 +182,7 @@ pub(crate) fn cmd_plugin_grant(
 /// selected the plugin and command. The plugin still gets only granted APIs.
 pub(crate) fn cmd_plugin_run(ctx: &Ctx, id: &str, command: &str, args: &[String]) -> Result<()> {
     let state = effective_state(ctx);
-    let found = plugins::discovery::discover(crate::diag::is_root())?
+    let found = plugins::discovery::discover(crate::presentation::diag::is_root())?
         .into_iter()
         .find(|plugin| plugin.manifest.id == id)
         .ok_or_else(|| anyhow::anyhow!("no plugin {id:?} discovered"))?;
@@ -211,7 +211,7 @@ pub(crate) fn cmd_plugin_run(ctx: &Ctx, id: &str, command: &str, args: &[String]
 /// registered it and the administrator granted command.register.
 pub(crate) fn cmd_plugin_dispatch(ctx: &Ctx, command: &str, args: &[String]) -> Result<()> {
     let state = effective_state(ctx);
-    let found = plugins::discovery::discover(crate::diag::is_root())?;
+    let found = plugins::discovery::discover(crate::presentation::diag::is_root())?;
     let mut candidates: Vec<_> = found.into_iter().filter(|plugin| {
         plugin.error.is_none()
             && state.is_enabled(&plugin.manifest.id)

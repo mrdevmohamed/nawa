@@ -170,7 +170,7 @@ fn plugin_spec(
     // A privileged Nawa maps inside uid 65534 to the subordinate uid range.
     // An unprivileged Nawa has only its own uid mapped as namespace uid 0;
     // it is already unprivileged outside the namespace and loses all caps.
-    let privileged = crate::diag::is_root();
+    let privileged = crate::presentation::diag::is_root();
     // /tmp is replaced with a private tmpfs by overlay_scratch before
     // build_inside is created. Keeping the plugin staging base there avoids
     // requiring write access to a host-level /build directory.

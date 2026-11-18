@@ -16,11 +16,6 @@
 //! which every Nawa-owned package-mutating command must stop. The check's
 //! wiring into the command entry points is the next slice.
 
-// The migration engine lands stage by stage (§10.4): the definition, state
-// machine and record model are ready now, while the coordinator, stages and
-// CLI commands are later Phase 5 slices — so `dead_code` stays allowed at
-// module scope until those consumers exist.
-#![allow(dead_code)]
 
 use crate::domain::system::capability::Capability;
 
@@ -302,11 +297,14 @@ pub(crate) enum Transition {
     /// is queried, §10) — `verifying → completed`
     VerificationSucceeded,
     /// verification failed and a documented rollback action is available —
-    /// `verifying → rollback-required`
+    /// `verifying → rollback-required`. Not constructed yet: no verified boot
+    /// rollback exists (B5), so recovery uses `Ambiguous` and keeps the gate.
+    #[allow(dead_code)]
     VerificationNeedsRollback,
     /// the rollback ran and the old init/boot state was verified again
     /// (§10.3: verify before recording failure and clearing the gate) —
-    /// `rollback-required → failed`
+    /// `rollback-required → failed`. Same blocker as above.
+    #[allow(dead_code)]
     RollbackVerified,
     /// an outcome is ambiguous and automatic safe continuation/rollback is
     /// impossible — from any gate-active state to `needs-recovery`

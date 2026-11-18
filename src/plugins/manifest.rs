@@ -197,7 +197,7 @@ impl PluginManifest {
         // executable unless every lexical parent is root-owned, non-symlinked,
         // and not writable by group/other users. Checking only the file mode
         // would allow replacement through a writable parent directory.
-        if crate::diag::is_root() && !plugin_directory_is_root_safe(approved_dir) {
+        if crate::presentation::diag::is_root() && !plugin_directory_is_root_safe(approved_dir) {
             bail!(
                 "plugin {} directory {} is not root-owned and protected from unprivileged writes",
                 p.id,
@@ -325,7 +325,7 @@ fn validate_plugin_file(path: &Path, plugin_id: &str, kind: &str) -> Result<()> 
     if !meta.is_file() {
         bail!("plugin {plugin_id} {kind} {} is not a regular file", path.display());
     }
-    if crate::diag::is_root() {
+    if crate::presentation::diag::is_root() {
         if meta.uid() != 0 {
             bail!(
                 "plugin {plugin_id} {kind} {} is not owned by root (uid {}) — refusing",
@@ -349,7 +349,7 @@ mod tests {
     use super::*;
 
     fn dir(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
-        let parent = if crate::diag::is_root() {
+        let parent = if crate::presentation::diag::is_root() {
             PathBuf::from("/root")
         } else {
             std::env::temp_dir()
@@ -484,7 +484,7 @@ subscribe = ["transaction.completed"]
     fn root_rejects_non_root_owned_plugin_executables_and_manifests() {
         use std::os::unix::ffi::OsStrExt;
 
-        if !crate::diag::is_root() {
+        if !crate::presentation::diag::is_root() {
             return;
         }
 
@@ -547,7 +547,7 @@ subscribe = ["transaction.completed"]
     fn writable_plugin_directory_is_refused_when_root() {
         let (base, plugins) = dir("writable-dir");
         let raw = manifest(&plugins, "demo");
-        if crate::diag::is_root() {
+        if crate::presentation::diag::is_root() {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&plugins, std::fs::Permissions::from_mode(0o777)).unwrap();
             let error = PluginManifest::parse(&raw, &plugins).unwrap_err();
@@ -560,7 +560,7 @@ subscribe = ["transaction.completed"]
     fn world_writable_executable_is_refused_when_root() {
         let (base, plugins) = dir("ww");
         let raw = manifest(&plugins, "demo");
-        if crate::diag::is_root() {
+        if crate::presentation::diag::is_root() {
             use std::os::unix::fs::PermissionsExt;
             let exe = plugins.join("nawa-plugin-demo");
             std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o777)).unwrap();

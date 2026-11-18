@@ -81,8 +81,8 @@ pub(crate) fn dispatch_pending(
             // queries) cannot lock it and has nothing to deliver anyway: the
             // pending events go out with the next privileged command, so
             // this is not worth a warning.
-            if crate::diag::has_io_kind(&error, std::io::ErrorKind::PermissionDenied)
-                && !crate::diag::is_root()
+            if crate::presentation::diag::has_io_kind(&error, std::io::ErrorKind::PermissionDenied)
+                && !crate::presentation::diag::is_root()
             {
                 return;
             }
@@ -142,7 +142,7 @@ fn dispatch_record(
     record: &TransactionRecord,
 ) -> Vec<ObserverFailure> {
     let state = PluginState::load_effective(project_config, system_config);
-    let discovered = match discovery::discover(crate::diag::is_root()) {
+    let discovered = match discovery::discover(crate::presentation::diag::is_root()) {
         Ok(plugins) => plugins,
         Err(error) => {
             return vec![failure(record.id, "discovery", "transaction.observe", format!("{error:#}"))];

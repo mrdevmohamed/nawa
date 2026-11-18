@@ -65,12 +65,33 @@ pub(crate) struct Candidate {
     /// build + run for a source-backed candidate (§8.1). Duplicates are
     /// allowed and harmless (a repeated edge is a satisfied no-op).
     pub(crate) deps: Vec<String>,
-    /// capability declarations (the B3 chain, §6.3). No recipe, archive or
-    /// index spelling is wired yet, so every candidate is
-    /// [`Provides::Unknown`] today; provider selection consumes this with
-    /// the Phase 4 system profile (§6.2, §7).
-    #[allow(dead_code)] // read by provider selection once the profile lands
+    /// capability declarations (the B3 chain, §6.3): normalized from the
+    /// recipe at candidate assembly, or `Unknown` for a legacy source. The
+    /// profile-driven init decision is carried on [`Resolution::init`], and
+    /// the package-side explanation is rendered by the application adapter.
     pub(crate) provides: Provides,
+}
+
+/// Candidate names that declare `identity` as their single init-system
+/// provider (§6.2/§8.4). Candidates with unknown or ambiguous metadata are
+/// never chosen by preference — they are simply not reported as providers.
+pub(crate) fn init_provider_names(
+    candidates: &std::collections::BTreeMap<String, Candidate>,
+    identity: &str,
+) -> Vec<String> {
+    use crate::domain::system::capability::InitProvider;
+    let mut names: Vec<String> = candidates
+        .iter()
+        .filter(|(_, candidate)| {
+            matches!(
+                candidate.provides.init_provider(),
+                InitProvider::Single(cap) if cap.identity == identity
+            )
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+    names.sort();
+    names
 }
 
 /// The installed-state value format the planner compares: `version-rel`.
@@ -106,9 +127,11 @@ pub(crate) enum InitSelection {
 
 /// The init decision of one solve: what the target profile declares.
 fn init_selection(profile: Option<&SystemProfile>) -> InitSelection {
-    match profile.and_then(|p| p.provider("init-system")) {
-        Some(identity) => InitSelection::Declared {
-            identity: identity.to_string(),
+    // The profile's normalized init capability (§6.1) is the single source of
+    // the declared decision; only the two in-scope identities select one.
+    match profile.and_then(SystemProfile::init_capability) {
+        Some(cap) => InitSelection::Declared {
+            identity: cap.identity.clone(),
         },
         None => InitSelection::Unresolved,
     }

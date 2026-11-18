@@ -350,7 +350,7 @@ pub(crate) fn resolver_binds(r: &FetchRun) -> Result<Vec<ExtraBind>> {
 
 
 pub(crate) fn privileged() -> bool {
-    crate::diag::is_root()
+    crate::presentation::diag::is_root()
 }
 
 

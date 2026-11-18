@@ -36,13 +36,6 @@
 //! layer converts the file text); this module validates and normalizes. No
 //! I/O, no adapter types.
 
-// Wireable to the planner today (§8.1: `install_plan` takes the effective
-// profile); `merge`/`providers` are exercised by the loader, while
-// `init_capability` and parts of the model (distribution/profile/
-// architecture) are read by later consumers — the §8.4 explanation and the
-// Phase 5/6 migration checks — so `dead_code` stays allowed at module
-// scope until they land.
-#![allow(dead_code)]
 
 use std::collections::BTreeMap;
 

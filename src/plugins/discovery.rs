@@ -354,7 +354,7 @@ mod tests {
         // Root discovery correctly rejects fixtures under world-writable
         // /tmp. Put root-run tests under /root so they exercise the privileged
         // path without weakening the production directory policy.
-        let base = if crate::diag::is_root() {
+        let base = if crate::presentation::diag::is_root() {
             PathBuf::from("/root")
         } else {
             std::env::temp_dir()

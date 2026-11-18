@@ -66,6 +66,9 @@ pub(crate) struct Plan {
     pub up_to_date: Vec<String>,
     /// the init-provider decision the target profile makes (§8.2)
     pub init: InitSelection,
+    /// candidates whose authenticated metadata declares that init provider
+    /// (§8.4: the solver explains provider selection)
+    pub init_providers: Vec<String>,
 }
 
 fn full(version: &str, rel: u32) -> String {
@@ -100,6 +103,10 @@ pub(crate) fn install_plan(
         .map(|(name, e)| (name.clone(), full(&e.version, e.rel)))
         .collect();
     let candidates = candidates_of(known);
+    let init_providers = match profile.and_then(|p| p.init_capability()) {
+        Some(cap) => install::init_provider_names(&candidates, &cap.identity),
+        None => Vec::new(),
+    };
     let resolved = install::install_plan(
         targets,
         &installed_full,
@@ -126,6 +133,7 @@ pub(crate) fn install_plan(
         items,
         up_to_date: resolved.up_to_date,
         init: resolved.init,
+        init_providers,
     })
 }
 

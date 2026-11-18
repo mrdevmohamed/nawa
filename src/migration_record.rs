@@ -35,7 +35,6 @@
 //! caller until the coordinator slice, so `dead_code` stays allowed at
 //! module scope with that one outstanding consumer named.
 
-#![allow(dead_code)]
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};

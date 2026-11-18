@@ -25,11 +25,6 @@
 //! Every source is an injectable path, so each rule is unit-testable
 //! without booting anything and without touching the host.
 
-// Foundation use case for the system-intelligence migration. `Invalid`'s
-// `reason` and parts of the installed-state model are for the §8.4
-// explanation and the Phase 5/6 dry-run report (rendered by later
-// consumers), so `dead_code` stays allowed at module scope until then.
-#![allow(dead_code)]
 
 use std::fs;
 use std::path::{Path, PathBuf};

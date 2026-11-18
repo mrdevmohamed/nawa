@@ -4,10 +4,6 @@
 //! service enablement or runtime service state, and it never infers
 //! `init-system` from package names or file presence (§6.3(4)).
 
-// Foundation module for the system-intelligence migration: consumed by the
-// profile (Phase 4) and migration (Phase 5) work. Until then its items are
-// deliberately unused, so `dead_code` is allowed at module scope.
-#![allow(dead_code)]
 
 /// The init-system identities in scope. The migration design limits provider
 /// selection to the exact `init-system=runit` and `init-system=systemd`

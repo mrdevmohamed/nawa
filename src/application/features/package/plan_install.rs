@@ -204,15 +204,41 @@ pub(crate) fn provider_note(plan: &crate::plan::Plan) -> Option<Notice> {
     let plan::InitSelection::Declared { identity } = &plan.init else {
         return None;
     };
+    use crate::domain::system::capability::{InitProvider, Provides};
     let wanted = format!("init-system={identity}");
-    let mut providers = Vec::new();
+    // The solver's candidate-based provider set, computed from authenticated
+    // candidate metadata (§8.4). Recipe declarations are also inspected below
+    // only to *report* ambiguous candidates, never to choose one.
+    let mut providers: Vec<String> = plan.init_providers.to_vec();
+    let mut ambiguous = Vec::new();
     for item in &plan.items {
-        let Some(caps) = &item.rec.capabilities else { continue };
-        let declared = crate::domain::package::metadata::normalize_provides(&caps.provides)
-            .unwrap_or_default();
-        if declared.iter().any(|p| p == &wanted) {
-            providers.push(item.rec.package.name.as_str());
+        let declared = match &item.rec.capabilities {
+            None => Provides::Unknown,
+            Some(caps) => match crate::domain::package::metadata::normalize_provides(&caps.provides) {
+                Ok(values) => Provides::parse_all(&values).unwrap_or(Provides::Unknown),
+                Err(_) => Provides::Unknown,
+            },
+        };
+        match declared.init_provider() {
+            // §6.2: the exclusive init role selects exactly one declared
+            // identity; several declarations are reported, never chosen.
+            InitProvider::Single(cap) if cap.to_key() == wanted => {
+                if !providers.iter().any(|p| p == &item.rec.package.name) {
+                    providers.push(item.rec.package.name.clone());
+                }
+            }
+            InitProvider::Ambiguous(caps) => {
+                let keys = caps.iter().map(|c| c.to_key()).collect::<Vec<_>>().join(", ");
+                ambiguous.push(format!("{} [{keys}]", item.rec.package.name));
+            }
+            _ => {}
         }
+    }
+    if !ambiguous.is_empty() {
+        return Some(Notice::Info(format!(
+            "ambiguous init-system providers in this plan: {} — not resolved by preference (§6.2)",
+            ambiguous.join("; ")
+        )));
     }
     if providers.is_empty() {
         Some(Notice::Info(format!(

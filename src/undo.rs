@@ -389,7 +389,7 @@ pub(crate) fn history_undo(root: &Path, id: u64, yes: bool) -> Result<()> {
     }
     crate::nawa_note!("package hooks and other external side effects are not reversed");
     if !yes {
-        crate::confirm::confirm(&format!("nawa: undo transaction {id}?"), false)?;
+        crate::presentation::confirm::confirm(&format!("nawa: undo transaction {id}?"), false)?;
     }
     let mut op = crate::transaction::context::begin_operation(
         root,

@@ -162,7 +162,7 @@ fn refresh_remote_index(url: &str, cache: &Path) -> Result<bool> {
             Ok(false)
         }
         Ok(false) => bail!("remote index not available (HTTP error): {index_url}"),
-        Err(e) if crate::diag::has_io_kind(&e, std::io::ErrorKind::PermissionDenied) => {
+        Err(e) if crate::presentation::diag::has_io_kind(&e, std::io::ErrorKind::PermissionDenied) => {
             let _ = std::fs::remove_file(cache.join("index.toml.part"));
             crate::nawa_warn!("repository cache is not writable; using cached index");
             Ok(true)

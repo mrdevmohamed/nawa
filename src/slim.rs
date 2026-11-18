@@ -32,7 +32,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::humanize::format_size;
+use crate::presentation::humanize::format_size;
 
 /// Bumped whenever the slimming rules change. It is part of the build id, so
 /// `--use-cache` never serves an archive made by older rules.

@@ -5,9 +5,9 @@
 
 use anyhow::{Error, Result};
 
-use crate::color::{Palette, Stream};
-use crate::diag::{render_error, Env};
-use crate::output::write_stderr;
+use crate::presentation::color::{Palette, Stream};
+use crate::presentation::diag::{render_error, Env};
+use crate::presentation::output::write_stderr;
 
 /// `nawa: error: ...` plus indented causes and an optional hint; colors only
 /// on a real terminal (see `diag::render_error`).

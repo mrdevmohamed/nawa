@@ -15,7 +15,7 @@ fn styled_prompt(prompt: &str) -> String {
     match prompt.strip_prefix("nawa:") {
         Some(rest) => format!(
             "{}{}",
-            crate::color::Palette::auto(crate::color::Stream::Stderr).brand("nawa:"),
+            crate::presentation::color::Palette::auto(crate::presentation::color::Stream::Stderr).brand("nawa:"),
             rest
         ),
         None => prompt.to_string(),

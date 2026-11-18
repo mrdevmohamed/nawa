@@ -2,10 +2,10 @@
 
 use anyhow::{bail, Context, Result};
 use crate::ctx::Ctx;
-use crate::color::Palette;
+use crate::presentation::color::Palette;
 use std::path::PathBuf;
 use crate::cli::PlanFlags;
-use crate::color::Stream;
+use crate::presentation::color::Stream;
 use crate::build;
 use crate::buildenv;
 use crate::db;

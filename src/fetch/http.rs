@@ -158,7 +158,7 @@ const PROGRESS_MIN_BYTES: u64 = 256 * 1024;
 
 /// Text of one progress line: `name  12.3 MiB / 45.0 MiB  27%` (no total: just the size).
 pub(crate) fn progress_line(label: &str, done: u64, total: Option<u64>) -> String {
-    use crate::humanize::format_size;
+    use crate::presentation::humanize::format_size;
     match total {
         Some(t) if t > 0 => format!(
             "  {label}  {} / {}  {:>3}%",

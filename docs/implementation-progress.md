@@ -17,7 +17,7 @@
 | 4 — System profiles & planning | **DONE** (profile model + merge rules + loader §7; profile wired into plan generation §8.1–8.4 — install/update report the init decision, invalid profiles fail closed; byte-identity + probes verified. Stage-3 exit met: dry-run plans explain every init-provider and package decision without managing services. The candidate→provider capability comparison still awaits the B3 index schema — see blockers) |
 | 5 — Migration engine | in progress: the migration domain model (§10.1–§10.3) + the durable record store (top-level `migration_record.rs`) + the persistent mutation-gate check wired into every exclusive acquisition (§10.3, block-only) + the read-only `system migrate` inspection CLI (§12.2, slice 3) + the migration coordinator with the typed in-process permit and the `planned → preparing → awaiting-reboot / failed / needs-recovery` lifecycle (§10.3–§10.4, slice 4) + durable write-ahead/lifecycle hardening (5B) + crash recovery and explicit live-host resume (5C) + adversarial security verification (5D: §13 gates, lock ownership, no-follow/permissions, handler allowlist and plugin boundary, demonstrated by tests); next: metadata v4 wiring, Phase 6 blockers |
 | 6 — Faseela runit→systemd migration | **BLOCKED** (external re-inspection 2026-11-18: current Faseela has *already* moved to systemd — runit recipes removed, `init = "systemd"` profile — so the migration premise no longer matches current HEAD; B1/B4/B5/B6/B7 still open. Nawa-side preflight, explicit authorization, read-only plan and resume are implemented; real boot transition is not) |
-| 7 — Final verification | not started |
+| 7 — Final verification | in progress: presentation modules consolidated under `src/presentation/`, obsolete `dead_code` allowances removed, provider-selection explanation wired through the solver, layering gate strengthened and negative-probed, architecture audit synchronized; final battery green |
 
 ## Completed phases
 
@@ -1279,6 +1279,40 @@ Nawa-independent slices landed:
   battery (688 bin tests + integration, 1 pre-existing env failure), both
   smoke suites, touched files rustfmt-clean.
 
+### Phase 7 — source-tree ownership and quality audit (in progress)
+
+* **Presentation layer consolidated:** `color`, `confirm`, `diag`,
+  `humanize` and `output` moved from `src/` into `src/presentation/`; all
+  `crate::<module>::` references updated; `main.rs` now declares one
+  `presentation` module. `Notice::emit` moved to `commands/installing.rs` so
+  presentation never imports application (which would close a dependency
+  cycle with the five merged modules). The layering gate's `PRESENTATION` set
+  and legacy allowlist were updated (11 → 8 entries, all naming the single
+  `presentation` module).
+* **Dead-code review:** removed obsolete module-level `#![allow(dead_code)]`
+  from `domain/{system/{migration,capability,identity,profile},
+  planning/install}` and the record store and detector once their consumers
+  landed. Retained only two justified item-level allowances (the future
+  verified-rollback transitions, blocked on B5). The B3 domain model lost its
+  allowance because every item is now wired.
+* **Provider explanation wired:** `Candidate::provides` is consumed by
+  `domain::planning::install::init_provider_names`; `Plan::init_providers`
+  carries the solver's authenticated provider set into `provider_note`, which
+  now uses the domain `InitProvider` classification (Single / Ambiguous /
+  Absent) instead of re-deriving it. The profile's `init_capability()` is the
+  single source of the declared decision.
+* **Git tree:** 147 Rust files, 35 directly under `src/` (down from 40);
+  cohesive subsystems (build/fetch/install/transaction/plugins/sandbox/
+  repo/groups/lint/upgrade/cli/domain/application) left intact.
+* **Verification:** check, clippy `-D warnings`, layering (52 modules, no
+  cycles) green; the new presentation-direction rule was negative-probed by
+  temporarily importing `presentation::color` from `version.rs` (rejected,
+  file restored); full battery green except the known toolchain-under-`/home`
+  env failure; both smoke suites pass; all touched files rustfmt-clean.
+* `docs/architecture-audit.md` gained a "current state" section and corrected
+  the stale service/CLI/module-ownership facts; §§1–17 remain the historical
+  Stage-0 snapshot for the behavior baseline.
+
 ## Changed files (this phase, updated as work lands)
 
 * `docs/architecture-audit.md` (new, Phase 0)
@@ -1483,6 +1517,17 @@ Nawa-independent slices landed:
     `FailPoint` is `pub(crate)` under `cfg(test)`; production paths
     unchanged)
 
+* Phase 7 (in progress):
+  * `src/presentation/{mod,color,confirm,diag,humanize,output}.rs` (new home
+    for the five presentation modules; `git mv` + path updates)
+  * `src/main.rs`, `src/commands/installing.rs` (module registration,
+    `Notice::emit` moved here), all files with presentation paths updated
+  * `scripts/check-layering.py` (PRESENTATION set + allowlist updated)
+  * `src/domain/{system,planning}/*.rs`, `src/migration_record.rs`,
+    `src/application/features/system/detect.rs` (obsolete `dead_code` removed)
+  * `src/plan.rs`, `src/domain/planning/install.rs`,
+    `src/application/features/package/plan_install.rs` (provider explanation)
+  * `docs/architecture-audit.md` (current-state section + corrected facts)
 * Phase 6 preflight (in progress):
   * `src/application/features/system/migrate_apply.rs` (new — built-in
     definition, read-only `plan`, live-host `preflight`, explicit

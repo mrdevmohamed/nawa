@@ -8,6 +8,45 @@
 > system-intelligence stages that follow. The design specification is
 > `docs/design/system-intelligence-and-migrations.md`.
 
+## 0. Current state (post Phase 5–7 implementation)
+
+> This section reflects the **shipped code** on
+> `feature/system-intelligence-migration`; §§1–17 below remain the historical
+> Stage-0 audit of `master` and are kept for the behavior baseline.
+
+* **Source tree:** 146 Rust files, 35 directly under `src/`. `main.rs` is a
+  minimal process entry (parse → overrides → config → ctx → `commands::run`
+  → post-transaction triggers → plugin events → exit); `bootstrap.rs` owns
+  error rendering and exit codes. Cohesive subsystems stay intact: `build/`,
+  `fetch/`, `install/`, `transaction/`, `plugins/`, `sandbox/`, `repo/`,
+  `groups/`, `lint/`, `upgrade/`, `cli/`, `domain/`, `application/`.
+* **Presentation layer:** `color`, `confirm`, `diag`, `humanize` and `output`
+  now live under `src/presentation/` (a single top-level module in the
+  layering gate). `Notice::emit` was moved to `commands` so presentation never
+  imports application and the graph stays acyclic.
+* **Application / Domain:** feature use cases under
+  `application/features/{package,system}/`, ports under `application/ports/`,
+  lifecycle lock policy in `application/lifecycle.rs`. Pure rules under
+  `domain/{package,planning,system}/`; the B3 metadata model is wired and has
+  no `dead_code` allowance.
+* **Migration subsystem:** `migration_record.rs` (durable store) plus
+  `migrate_coordinator.rs`, `migrate_recover.rs`, `migrate_apply.rs` and
+  `migrate_inspect.rs` under `application/features/system/`.
+  `lock::MigrationAuthority` is the lock-defined, unforgeable gate-crossing
+  capability, mintable only from the migration subtree (layering-enforced).
+* **Dependency direction:** `python3 scripts/check-layering.py` reports
+  **52 modules, no cycles, no crate-root globs**; the legacy presentation
+  allowlist now names only `presentation` and shrinks as use cases land.
+  Domain/Application never import presentation; a negative probe (a
+  `version.rs` import of `presentation::color`) is rejected.
+* **Verification:** `cargo check`/`clippy -D warnings`/layering green; full
+  battery green except the pre-existing toolchain-under-`/home` sandbox
+  test; both smoke suites pass; touched files rustfmt-clean.
+* **External Phase 6 status:** Faseela HEAD already uses systemd, so B2 is
+  resolved; B1/B4/B5/B6/B7 remain and are documented with owners/files and
+  acceptance tests in `docs/implementation-progress.md`. No external repo
+  was modified and no real boot verification was performed.
+
 ## 1. Scope and method
 
 * Full walk of `src/` (115 files, ~39,300 lines, 53 top-level modules).
@@ -35,8 +74,8 @@
 
 | Module | Ownership today | Notes |
 |---|---|---|
-| `main.rs` (430) | process entry, global flag parse, config load, lock acquisition, recovery trigger, pre/post installed-set snapshotting, command dispatch table, post-transaction trigger dispatch, plugin event dispatch, error rendering | several responsibilities (see §4) |
-| `cli.rs` (950) | clap `Cli`/`Cmd`/subcommand enums, three hand-written shell completion scripts, and **lock policy** (`lock_mode`) | policy lives in the CLI layer |
+| `main.rs` (~110) | **current:** minimal process entry — parse, overrides, config, ctx, `commands::run`, post-transaction triggers, plugin events, exit | orchestration moved to `commands/dispatch.rs`; error policy in `bootstrap.rs` |
+| `cli/` (`mod`,`args`,`completions`) | **current:** clap enums, completions; lock policy moved to `application::lifecycle` as a typed `Request` → `LockNeed` | application owns the policy; no CLI types cross the boundary |
 | `ctx.rs` | `Ctx` (resolved root/recipes/builddir/profiles + config), `resolve_mode`, `resolve_repo` | wiring helper |
 | `config.rs` (709) | layered nawa.toml (defaults → system → local → env), `InstallMode`, trust keys, sources | adapter + model in one |
 | `db.rs` (419) | installed-package **persistence** (TOML desc/files/hashes) *and* pure identity rules (`valid_name`, `valid_version`, `check_name`, `Entry`, `InstallReason`, legacy date normalization) | mixed: domain invariants inside the database adapter |
@@ -58,8 +97,8 @@
 | `recovery.rs` | `recover_and_report` entry point calling journal+history recovery | application lifecycle |
 | `lock.rs` (292) | flock lock file, holder pid, wait loop, `NAWA_LOCK_HELD` bypass | OS adapter + policy |
 | `interrupt.rs` | Ctrl-C flag, deferred checkpoints | process adapter |
-| `output.rs`, `diag.rs`, `color.rs`, `confirm.rs`, `humanize.rs` | terminal output, error rendering, palette, prompts, formatting | presentation |
-| `service.rs` (395) | **runit service management**: list/enable/disable/start/stop/restart/status via `sv`, plus `keep_disabled` marker check | scheduled for removal (Stage 1) |
+| `presentation/` (`output`,`diag`,`color`,`confirm`,`humanize`) | **current:** terminal output, error rendering, palette, prompts, formatting | one top-level module in the layering gate; never imported by Domain/Application |
+| ~~`service.rs`~~ | **removed** in Phase 1b; service management belongs to the init system / systemd presets, not Nawa | admin `disabled/` markers are ordinary payload files |
 | `sandbox/` (5), `buildenv.rs`, `build/` (7), `fetchrun/` (4), `sources.rs`, `assets.rs`, `closure.rs`, `slim.rs`, `lint/` (3), `profile.rs` | the build pipeline: sandboxing (fork/mount/unshare), build env, sections, staging, lint, split packages, build profiles | cohesive subsystem; build profiles ≠ system profile |
 | `groups/` (2) | group definitions + local membership records | model + storage |
 | `plugins/` (7) | discovery, manifest, JSONL protocol, runner, events, sandbox | adapter + use cases |
@@ -69,9 +108,11 @@
 
 `commands/` (13 files, `mod.rs` re-exports everything `pub(crate) use x::*`):
 
-`building` `configuring` `fetching` `groups` `history` `installing`
-`plugins` `querying` `recipes` `sandbox` `service` `signing` — these are
-application use cases invoked by `main::run_command`'s match on `Cmd`.
+`building` `configuring` `dispatch` `fetching` `groups` `history` `installing`
+`plugins` `querying` `recipes` `sandbox` `signing` `system` — presentation
+handlers invoked by `commands::dispatch::run_command`. `service` was removed;
+`system` implements the read-only migration inspection plus `plan`/`apply`/
+`resume` (§12.2).
 
 ## 3. Actual dependency directions (measured)
 
@@ -286,22 +327,17 @@ guard) plus a private typed migration permit.
 
 ## 8. Service-management subsystem and runit compatibility state
 
-### 8.1 What exists in Nawa
+### 8.1 What exists in Nawa — **all removed in Phase 1b**
 
-* `src/service.rs` (395 lines): `/etc/sv` + `/etc/runit/runsvdir/default`
-  listing, enable/disable (symlink into runsvdir), start/stop/restart and
-  status via **the `sv` binary** (first-party service control), live-root +
-  root checks, and the disabled marker (`<root>/etc/runit/disabled/<n>`).
-* `src/commands/service.rs`: `cmd_service` dispatch for `ServiceCmd`.
-* `cli.rs`: `Cmd::Service`, `ServiceCmd`, completion entries in all three
-  shell scripts, and `lock_mode`'s `Cmd::Service => None`.
-* `install/payload.rs:563`: the **only installer integration** —
-  `keep_disabled(root, to)` skips installing a staged `/etc/runit/runsvdir/default/<name>`
-  link when the admin-disabled marker exists and the link is absent,
-  so a package upgrade cannot re-enable a disabled service.
-* `scripts/smoke-v06.sh` §7 exercises `nawa service` end-to-end.
-* `plugins/manifest.rs` `RESERVED_COMMANDS` includes `service` (a test
-  asserts every built-in command is reserved).
+* ~~`src/service.rs`, `src/commands/service.rs`, `Cmd::Service`~~: deleted;
+  no `sv` calls remain anywhere in Nawa.
+* ~~`install/payload.rs::keep_disabled`~~: removed; admin `disabled/` markers
+  are ordinary payload files and are never deleted by Nawa.
+* ~~`smoke-v06.sh` §7~~: removed; the suite passes without a service command.
+* `plugins/manifest.rs` deliberately still lists `service` in
+  `RESERVED_COMMANDS` (a plugin may now register that name).
+* Migration handlers never inspect or manage services; unit/preset files are
+  ordinary package payloads. This is verified by tests in Phase 5D.
 
 ### 8.2 What Faseela owns today (checked in faseela-repo @ main)
 

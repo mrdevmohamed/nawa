@@ -9,7 +9,7 @@
 //! indented below it (without the noisy `(os error N)` suffix), and a few
 //! well-known failure kinds get a one-line, actionable hint.
 
-use crate::color::Palette;
+use crate::presentation::color::Palette;
 use crate::error::Class;
 use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt;

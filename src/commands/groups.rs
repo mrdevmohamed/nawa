@@ -6,7 +6,7 @@
 use anyhow::{Context, Result};
 use crate::ctx::Ctx;
 use crate::cli::PlanFlags;
-use crate::confirm;
+use crate::presentation::confirm;
 use crate::db;
 use crate::fetch;
 use crate::groups;
@@ -30,7 +30,7 @@ pub(crate) fn cmd_group_list(ctx: &Ctx) -> Result<()> {
         println!(
             "{:<14}  {:<10}  {}",
             g.group_id,
-            crate::humanize::format_date(g.installed_at),
+            crate::presentation::humanize::format_date(g.installed_at),
             g.packages.join(" ")
         );
     }
@@ -43,7 +43,7 @@ pub(crate) fn cmd_group_info(ctx: &Ctx, id: &str) -> Result<()> {
         bail!("group {id} is not installed (install it with `nawa group install {id}`)");
     };
     println!("Group:     {} ({})", g.group_id, g.packages.len());
-    println!("Installed: {}", crate::humanize::format_date(g.installed_at));
+    println!("Installed: {}", crate::presentation::humanize::format_date(g.installed_at));
     if !g.source_repository.is_empty() {
         println!("Source:    {}", g.source_repository);
     }

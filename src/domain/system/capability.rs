@@ -25,10 +25,6 @@
 //! index — not wired into any store until that schema is specified (§16.1,
 //! Phase 3).
 
-// Foundation module for the system-intelligence migration: consumed by the
-// profile (Phase 4), solver and migration (Phase 3/5) work. Until then its
-// items are deliberately unused, so `dead_code` is allowed at module scope.
-#![allow(dead_code)]
 
 /// One normalized capability identity: `domain=identity` (§6.1, e.g.
 /// `init-system=runit`).

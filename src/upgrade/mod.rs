@@ -56,7 +56,7 @@ pub(crate) fn upgrade(
 
     // the plan is on the table; a real run needs an explicit go-ahead
     // (scripts pass --yes; a piped stdin without it is refused, not guessed)
-    crate::confirm::confirm("nawa: proceed with the upgrade?", opts.yes)?;
+    crate::presentation::confirm::confirm("nawa: proceed with the upgrade?", opts.yes)?;
     apply_plan(root, &open, &plan, opts)
 }
 
@@ -132,7 +132,7 @@ fn build_plan<'a>(
 }
 
 fn print_plan(plan: &UpgradePlan<'_>) {
-    let pal = crate::color::Palette::auto(crate::color::Stream::Stdout);
+    let pal = crate::presentation::color::Palette::auto(crate::presentation::color::Stream::Stdout);
     crate::nawa_info!("{} package(s) to upgrade:", plan.upgrades.len());
     for upgrade in &plan.upgrades {
         let name = &upgrade.entry.name;

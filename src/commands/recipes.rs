@@ -20,7 +20,7 @@
 //! and are not repeated here.
 use crate::cli::RecipeCmd;
 use crate::ctx::Ctx;
-use crate::humanize;
+use crate::presentation::humanize;
 use crate::recipe;
 
 use anyhow::{bail, Result};
