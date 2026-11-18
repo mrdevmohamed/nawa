@@ -267,22 +267,27 @@ fn render_plan(view: &PlanView) {
     let wv = rows.iter().map(|r| r.ver.len()).max().unwrap_or(0).max("Version".len());
     let wd = rows.iter().map(|r| size_cell(r.dl).len()).max().unwrap_or(0).max("Download".len());
     let wi = rows.iter().map(|r| size_cell(r.inst).len()).max().unwrap_or(0).max("Installed".len());
+    let wh = rows.iter().map(|r| r.sha256.as_ref().map_or(1, String::len)).max().unwrap_or(1).max("SHA-256".len());
+    if let Some(repository) = &view.repository {
+        println!("Repository: {repository}");
+    }
     println!();
     println!(
         "{}",
         pal.header(&format!(
-            "  {:>3}  {:<wn$}  {:<wv$}  {:<6}  {:>wd$}  {:>wi$}  Reason",
-            "#", "Package", "Version", "Source", "Download", "Installed"
+            "  {:>3}  {:<wn$}  {:<wv$}  {:<6}  {:>wd$}  {:>wi$}  {:<wh$}  Reason",
+            "#", "Package", "Version", "Source", "Download", "Installed", "SHA-256"
         ))
     );
     for (i, r) in rows.iter().enumerate() {
         let (dl, inst) = (size_cell(r.dl), size_cell(r.inst));
         println!(
-            "  {:>3}  {}  {}  {}  {dl:>wd$}  {inst:>wi$}  {}",
+            "  {:>3}  {}  {}  {}  {dl:>wd$}  {inst:>wi$}  {:<wh$}  {}",
             i + 1,
             pal.name(&format!("{:<wn$}", r.name)),
             pal.ver(&format!("{:<wv$}", r.ver)),
             pal.dim(&format!("{:<6}", r.tag)),
+            r.sha256.as_deref().unwrap_or("-"),
             pal.dim(&r.note),
         );
     }

@@ -157,20 +157,8 @@ pub(crate) fn apply_transaction(
         sources.push(source);
     }
 
-    let from_repo = count_repo(&sources, extras);
-    (ui.info)(&format!(
-        "{total} package(s) to install into {} ({from_repo} from the repository, {} to build)",
-        ctx.root.display(),
-        total - from_repo
-    ));
-    (ui.show_plan)(&plan_view(plan, extras, &sources));
-    if request.dry_run {
-        (ui.info)("dry run — nothing was built or installed");
-        return Ok(Applied::NothingToDo);
-    }
-
-    // `install_mode = ask`: on a terminal, let the user choose the source
-    // for everything the repository could supply
+    // Resolve the global ask choice before displaying or confirming the plan.
+    // The user must approve the source, version and digest the executor uses.
     if sourcing.ask && count_repo(&sources, extras) > 0 {
         let c = (ui.choose)(
             "nawa: install the repository-available packages from the repository (r) or build them from source (b)?",
@@ -184,11 +172,25 @@ pub(crate) fn apply_transaction(
                     re.name
                 );
             }
-            for s in sources.iter_mut() {
-                *s = Source::Build;
+            for source in &mut sources {
+                *source = Source::Build;
             }
-            (ui.info)(&format!("building all {total} package(s) from source"));
         }
+    }
+
+    let from_repo = count_repo(&sources, extras);
+    (ui.info)(&format!(
+        "{total} package(s) to install into {} ({from_repo} from the repository, {} to build)",
+        ctx.root.display(),
+        total - from_repo
+    ));
+    (ui.show_plan)(&plan_view(plan, extras, &sources, sourcing));
+    if request.dry_run {
+        (ui.info)("dry run — nothing was built or installed");
+        return Ok(Applied::NothingToDo);
+    }
+    if sourcing.ask && from_repo == 0 {
+        (ui.info)(&format!("building all {total} package(s) from source"));
     }
     (ui.confirm)(&format!("nawa: install {total} package(s)?"))?;
 
@@ -510,24 +512,46 @@ fn ordered_steps(plan: &plan::Plan, binary_count: usize) -> Vec<plan::PlanStep> 
     steps
 }
 
-fn plan_view(plan: &plan::Plan, extras: &[repo::RepoEntry], sources: &[Source]) -> PlanView {
+fn plan_view(
+    plan: &plan::Plan,
+    extras: &[repo::RepoEntry],
+    sources: &[Source],
+    sourcing: &Sourcing,
+) -> PlanView {
     let mut rows: Vec<PlanRow> = Vec::with_capacity(plan.items.len() + extras.len());
     for action in ordered_steps(plan, extras.len()) {
         match action {
             plan::PlanStep::Recipe(index) => {
                 let it = &plan.items[index];
-                let (tag, dl, inst) = match &sources[index] {
-                    Source::Repo(re) => ("repo", re.size, re.installed_size),
-                    Source::Build => ("build", 0, 0),
+                let (tag, version, dl, inst, sha256) = match &sources[index] {
+                    Source::Repo(re) => (
+                        "repo",
+                        format!("{}-{}", re.version, re.rel),
+                        re.size,
+                        re.installed_size,
+                        Some(re.sha256.clone()),
+                    ),
+                    Source::Build => (
+                        "build",
+                        format!("{}-{}", it.rec.package.version, it.rec.package.rel),
+                        0,
+                        0,
+                        None,
+                    ),
                 };
                 let mut note = it.why.label().to_string();
+                if matches!(&sources[index], Source::Repo(_))
+                    && sourcing.mode == InstallMode::Auto
+                {
+                    note.push_str(" (build fallback if fetch fails)");
+                }
                 if let Some(old) = &it.replaces {
                     note.push_str(&format!(" (replaces {old})"));
                 }
                 rows.push(PlanRow {
                     name: it.rec.package.name.clone(),
-                    ver: format!("{}-{}", it.rec.package.version, it.rec.package.rel),
-                    tag, dl, inst, note,
+                    ver: version,
+                    tag, dl, inst, note, sha256,
                 });
             }
             plan::PlanStep::Binary(index) => {
@@ -541,11 +565,15 @@ fn plan_view(plan: &plan::Plan, extras: &[repo::RepoEntry], sources: &[Source]) 
                     name: re.name.clone(),
                     ver: format!("{}-{}", re.version, re.rel),
                     tag: "repo", dl: re.size, inst: re.installed_size, note,
+                    sha256: Some(re.sha256.clone()),
                 });
             }
         }
     }
-    PlanView { rows }
+    PlanView {
+        repository: sourcing.open.as_ref().and_then(|open| open.base_url.clone()),
+        rows,
+    }
 }
 
 #[cfg(test)]
@@ -674,8 +702,9 @@ mod tests {
                     .iter()
                     .map(|r| {
                         format!(
-                            "{}|{}|{}|{}|{}|{}",
-                            r.name, r.ver, r.tag, r.dl, r.inst, r.note
+                            "{}|{}|{}|{}|{}|{}|{}",
+                            r.name, r.ver, r.tag, r.dl, r.inst, r.note,
+                            r.sha256.as_deref().unwrap_or("-")
                         )
                     })
                     .collect::<Vec<_>>()
@@ -761,13 +790,16 @@ mod tests {
             ..Default::default()
         };
         let binary = repo_entry("runtime-lib", "1.0", 1);
-        let view = plan_view(&planned, &[binary], &[Source::Build]);
+        let view = plan_view(&planned, &[binary], &[Source::Build], &Sourcing::build_only());
         assert_eq!(
             view.rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(),
             ["runtime-lib", "app"]
         );
         assert_eq!(view.rows[0].note, "dependency");
+        assert_eq!(view.rows[0].sha256.as_deref(), Some("00"));
         assert_eq!(view.rows[1].note, "explicit");
+        assert_eq!(view.rows[1].sha256, None);
+        assert_eq!(view.repository, None);
     }
 
     #[test]
@@ -813,7 +845,7 @@ mod tests {
         );
         assert_eq!(
             recorder.of("SHOW "),
-            ["SHOW curl|1.0-1|build|0|0|explicit".to_string()]
+            ["SHOW curl|1.0-1|build|0|0|explicit|-".to_string()]
         );
         assert!(recorder.find("CONFIRM").is_none());
         assert!(recorder.builds.borrow().is_empty());
@@ -865,7 +897,7 @@ mod tests {
         assert!(error
             .to_string()
             .contains("`tool` has no recipe, so it cannot be built"));
-        assert!(recorder.find("SHOW").is_some());
+        assert!(recorder.find("SHOW").is_none());
         assert!(recorder.find("CHOOSE").is_some());
         assert!(recorder.find("CONFIRM").is_none());
         assert!(recorder.builds.borrow().is_empty());
@@ -955,7 +987,7 @@ mod tests {
         assert!(confirm < fetch);
         assert_eq!(
             recorder.of("SHOW "),
-            ["SHOW curl|2.0-1|repo|0|0|explicit".to_string()]
+            ["SHOW curl|1.0-1|repo|0|0|explicit|00".to_string()]
         );
     }
 

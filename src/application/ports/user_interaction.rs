@@ -26,11 +26,15 @@ pub(crate) struct PlanRow {
     /// why this package is in the plan, e.g. `explicit` or
     /// `group (replaces 1.0-1)`
     pub note: String,
+    /// Exact repository artifact digest; absent for locally built packages.
+    pub sha256: Option<String>,
 }
 
 /// The complete plan as display data, one [`PlanRow`] per package in install
 /// order (dependencies first, repository-only `extras` last).
 pub(crate) struct PlanView {
+    /// Repository identity used by the plan, when supplied by the provider.
+    pub repository: Option<String>,
     pub rows: Vec<PlanRow>,
 }
 
