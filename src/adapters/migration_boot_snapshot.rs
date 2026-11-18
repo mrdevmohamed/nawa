@@ -32,6 +32,7 @@ use crate::adapters::{atomic, unique};
 use crate::domain::system::migration::check_id;
 
 const SNAPSHOT_SCHEMA: u32 = 1;
+const MAX_SNAPSHOT_ENTRIES: usize = 999;
 const FIXED_PATHS: &[&str] = &[
     "boot/grub/grub.cfg",
     "boot/vmlinuz",
@@ -141,8 +142,20 @@ pub(crate) fn capture(root: &Path, migration_id: &str) -> Result<SnapshotInfo> {
                 paths.push(target);
             }
         }
+
+        // Preserve the old runit service configuration as part of the boot
+        // recovery set. Symlinked directories are captured as leaves, never
+        // traversed, so the walk cannot escape the selected target root.
+        paths.extend(collect_runit_service_paths(&root)?);
         paths.sort();
         paths.dedup();
+        if paths.len() > MAX_SNAPSHOT_ENTRIES {
+            bail!(
+                "boot recovery snapshot has {} entries; the safe limit is {}",
+                paths.len(),
+                MAX_SNAPSHOT_ENTRIES
+            );
+        }
 
         let mut entries = Vec::with_capacity(paths.len());
         let mut total_bytes = 0u64;
@@ -581,7 +594,67 @@ fn valid_blob_name(name: &str) -> bool {
         && name[6..9].bytes().all(|byte| byte.is_ascii_digit())
 }
 
-fn allowed_path(path: &Path) -> bool {
+/// Return every regular-file or symlink leaf below the required runit service
+/// directory. Real directories are traversed; symlinks are recorded, not followed.
+fn collect_runit_service_paths(root: &Path) -> Result<Vec<String>> {
+    fn walk(root: &Path, directory: &Path, output: &mut Vec<String>) -> Result<()> {
+        let mut children = fs::read_dir(directory)
+            .with_context(|| format!("read runit service directory {}", directory.display()))?
+            .collect::<std::io::Result<Vec<_>>>()?;
+        children.sort_by_key(|entry| entry.file_name());
+
+        for child in children {
+            let path = child.path();
+            let metadata = fs::symlink_metadata(&path)
+                .with_context(|| format!("inspect runit service entry {}", path.display()))?;
+            if metadata.file_type().is_symlink() || metadata.is_file() {
+                let relative = path
+                    .strip_prefix(root)
+                    .context("runit service entry escaped the selected target root")?;
+                let value = relative
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("runit service path is not UTF-8"))?
+                    .to_string();
+                if !allowed_path(Path::new(&value)) {
+                    bail!("runit service entry {value:?} is outside the snapshot allowlist");
+                }
+                output.push(value);
+                if output.len() > MAX_SNAPSHOT_ENTRIES {
+                    bail!(
+                        "runit service tree exceeds the safe limit of {} entries",
+                        MAX_SNAPSHOT_ENTRIES
+                    );
+                }
+            } else if metadata.is_dir() {
+                walk(root, &path, output)?;
+            } else {
+                bail!(
+                    "runit service entry {} is not a regular file, directory or symlink",
+                    path.display()
+                );
+            }
+        }
+        Ok(())
+    }
+
+    let relative = Path::new("etc/runit/runsvdir/default");
+    let directory = root.join(relative);
+    let metadata = fs::symlink_metadata(&directory).with_context(|| {
+        format!("inspect required runit service directory {}", directory.display())
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!(
+            "required runit service directory {} is not a real directory",
+            directory.display()
+        );
+    }
+
+    let mut paths = Vec::new();
+    walk(root, &directory, &mut paths)?;
+    Ok(paths)
+}
+
+fn allowed_path(path: &Path) {
     if !path.is_relative()
         || path
             .components()
@@ -591,6 +664,7 @@ fn allowed_path(path: &Path) -> bool {
     }
     let value = path.to_string_lossy();
     FIXED_PATHS.iter().any(|allowed| value == *allowed)
+        || value.starts_with("etc/runit/runsvdir/default/")
         || (value.starts_with("boot/vmlinuz-") && !value[5..].contains('/'))
         || (value.starts_with("boot/initramfs-")
             && value.ends_with(".img")
@@ -844,7 +918,17 @@ mod tests {
         ));
         fs::create_dir_all(root.join("boot/grub")).unwrap();
         fs::create_dir_all(root.join("usr/bin")).unwrap();
-        fs::create_dir_all(root.join("etc/runit")).unwrap();
+        fs::create_dir_all(root.join("etc/runit/runsvdir/default/networking")).unwrap();
+        fs::write(
+            root.join("etc/runit/runsvdir/default/networking/run"),
+            b"#!/bin/sh\nexec dhcpcd\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("etc/runit/runsvdir/default/agetty-tty1/run"),
+            b"#!/bin/sh\nexec getty 38400 tty1\n",
+        )
+        .unwrap();
         fs::write(root.join("boot/grub/grub.cfg"), b"old grub config\n").unwrap();
         fs::write(root.join("boot/vmlinuz-6.10.5"), b"old kernel bytes").unwrap();
         fs::write(
@@ -887,6 +971,28 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(permissions, 0o700);
+    }
+
+    #[test]
+    fn snapshot_captures_nested_runit_service_tree_and_restores_it() {
+        let root = fixture("runit-tree");
+        let info = make_snapshot(&root);
+        let service_run = root.join("etc/runit/runsvdir/default/networking/run");
+        let agetty_run = root.join("etc/runit/runsvdir/default/agetty-tty1/run");
+
+        fs::remove_file(&service_run).unwrap();
+        fs::write(&agetty_run, b"changed service definition\n").unwrap();
+
+        restore(&root, "faseela-runit-to-systemd-v1").unwrap();
+        assert_eq!(
+            fs::read(&service_run).unwrap(),
+            b"#!/bin/sh\nexec dhcpcd\n"
+        );
+        assert_eq!(
+            fs::read(&agetty_run).unwrap(),
+            b"#!/bin/sh\nexec getty 38400 tty1\n"
+        );
+        assert!(info.entries >= FIXED_PATHS.len() + 4);
     }
 
     #[test]
