@@ -151,7 +151,7 @@ pub(crate) const RESERVED_COMMANDS: &[&str] = &[
     "why", "deps", "deps-all", "remove", "query", "list", "files", "owner",
     "revdep", "repo-create", "repo-update", "sync", "keygen", "sign", "verify", "trust",
     "upgrade", "rollback", "repolist", "makecache", "repoquery", "clean",
-    "fetch", "recipe", "group", "history", "plugin", "config", "init",
+    "fetch", "recipe", "group", "history", "plugin", "config", "system", "init",
     "completions", "sandbox-init", "sandbox-probe", "__complete_pkgs", "help",
 ];
 

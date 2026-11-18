@@ -125,7 +125,10 @@ impl RecordDoc {
         }
     }
 
-    fn into_record(self, file: &Path) -> Result<MigrationRecord> {
+    /// Validate the parsed document. This never names the file: the
+    /// single `.with_context` at the `load` boundary names it exactly
+    /// once for every failure below (§10.3 fail closed).
+    fn into_record(self) -> Result<MigrationRecord> {
         if self.schema != SCHEMA_VERSION {
             bail!(
                 "unsupported migration record schema {} (this nawa understands schema {SCHEMA_VERSION})",
@@ -178,8 +181,8 @@ impl RecordDoc {
             schema: self.schema,
             id: self.id,
             definition_version: self.definition_version,
-            from: self.from.into_capability(file)?,
-            to: self.to.into_capability(file)?,
+            from: self.from.into_capability()?,
+            to: self.to.into_capability()?,
             handler,
             state,
             steps,
@@ -195,16 +198,19 @@ impl CapabilityDoc {
         }
     }
 
-    fn into_capability(self, file: &Path) -> Result<Capability> {
-        Capability::parse(&format!("{}={}", self.domain, self.identity))
-            .map_err(anyhow::Error::msg)
-            .with_context(|| format!("system migration record {}", file.display()))
+    /// Parse the capability key. The failure message names the key, not
+    /// the file — the `load` boundary adds the file context (once).
+    fn into_capability(self) -> Result<Capability> {
+        Capability::parse(&format!("{}={}", self.domain, self.identity)).map_err(anyhow::Error::msg)
     }
 }
 
 /// Load the record of `id`, if it exists. Absence is not an error and not
 /// a decision (§5.1 semantics, like the profile loader); a record that
-/// fails validation is an error naming the file — fail closed.
+/// fails validation is an error naming the file — fail closed. `load` is
+/// the single site that names the file: every failure below it (parse,
+/// schema, state, handler, capability, steps) is wrapped here exactly
+/// once, so the rendered chain is `<file context>: <cause>`.
 pub(crate) fn load(root: &Path, id: &str) -> Result<Option<MigrationRecord>> {
     let path = record_path(root, id)?;
     let raw = match std::fs::read_to_string(&path) {
@@ -214,13 +220,15 @@ pub(crate) fn load(root: &Path, id: &str) -> Result<Option<MigrationRecord>> {
             return Err(e).with_context(|| format!("system migration record {}", path.display()))
         }
     };
-    let doc: RecordDoc = toml::from_str(&raw).with_context(|| {
-        format!(
-            "system migration record {} is not valid TOML",
-            path.display()
-        )
-    })?;
-    doc.into_record(&path).map(Some)
+    let doc: RecordDoc = toml::from_str(&raw)
+        .context("record is not valid TOML")
+        .with_context(|| format!("system migration record {}", path.display()))?;
+    // every validation failure names the exact file (§10.3 fail closed):
+    // the doc header promises "an error naming the file" for unknown
+    // schema/state/handler/capability and invalid steps alike
+    doc.into_record()
+        .with_context(|| format!("system migration record {}", path.display()))
+        .map(Some)
 }
 
 /// Durably publish `record` (§10.3: atomic publication, restrictive
@@ -232,6 +240,29 @@ pub(crate) fn save(root: &Path, record: &MigrationRecord) -> Result<()> {
     let doc = RecordDoc::from_record(record);
     atomic::write_atomic(&path, toml::to_string_pretty(&doc)?.as_bytes(), 0o600)
         .with_context(|| format!("publish migration record {}", path.display()))
+}
+
+/// The ids of every record file under `root`, sorted. Directory absence
+/// is not an error (`Ok(vec![])`): no migration record exists yet. Only
+/// `*.toml` names count; a caller that needs the contents loads each id
+/// through [`load`], which reports exactly what is wrong with a record
+/// that fails validation.
+pub(crate) fn record_ids(root: &Path) -> Result<Vec<String>> {
+    let dir = migrations_dir(root);
+    let rd = match std::fs::read_dir(&dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(e).with_context(|| format!("read migration records {}", dir.display()))
+        }
+    };
+    let mut ids: Vec<String> = rd
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .filter_map(|name| name.strip_suffix(".toml").map(|id| id.to_string()))
+        .collect();
+    ids.sort();
+    Ok(ids)
 }
 
 /// One active migration gate found under `root` (§10.3): while any record
@@ -246,27 +277,12 @@ pub(crate) struct ActiveGate {
 }
 
 /// Every gate-keeping record under `root`, sorted by id. Empty when no
-/// migration is active. The gate-check wiring (next slice) decides how to
-/// treat multiple simultaneous gates — this store only reports honestly.
+/// migration is active. Any record that fails validation fails the whole
+/// scan: the mutation gate must refuse fail-closed rather than risk
+/// changing the package set while a pending migration cannot be ruled out.
 pub(crate) fn active_gates(root: &Path) -> Result<Vec<ActiveGate>> {
-    let dir = migrations_dir(root);
-    let rd = match std::fs::read_dir(&dir) {
-        Ok(rd) => rd,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => {
-            return Err(e).with_context(|| format!("read migration records {}", dir.display()))
-        }
-    };
-    let mut ids: Vec<String> = rd
-        .filter_map(|entry| entry.ok())
-        .filter_map(|entry| {
-            let name = entry.file_name().to_string_lossy().to_string();
-            name.strip_suffix(".toml").map(|id| id.to_string())
-        })
-        .collect();
-    ids.sort();
     let mut gates = Vec::new();
-    for id in ids {
+    for id in record_ids(root)? {
         if let Some(record) = load(root, &id)? {
             if record.state.keeps_gate() {
                 gates.push(ActiveGate {
@@ -398,6 +414,9 @@ mod tests {
             "{e:#}"
         );
 
+        // every validation failure names the exact file (the module
+        // header's fail-closed promise) — the schema case asserts both
+        // the file and the cause
         std::fs::write(
             &path,
             "schema = 99\nid = \"m\"\ndefinition_version = 1\nfrom = { domain = \"init-system\", identity = \"runit\" }\nto = { domain = \"init-system\", identity = \"systemd\" }\nhandler = \"faseela.init.runit_to_systemd\"\nstate = \"planned\"\n",
@@ -407,6 +426,10 @@ mod tests {
         assert!(
             format!("{e:#}").contains("unsupported migration record schema 99"),
             "{e:#}"
+        );
+        assert!(
+            format!("{e:#}").contains("faseela-runit-to-systemd-v1.toml"),
+            "the validation failure names the file: {e:#}"
         );
 
         std::fs::write(

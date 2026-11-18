@@ -44,7 +44,9 @@ pub(crate) enum Request {
     /// `build --install` / `update` lock themselves around the install step
     /// only (holding the db lock through a full build would starve readers)
     PerStep,
-    /// read-only database inspection: `outdated` and the query family
+    /// read-only inspection under a shared lock: `outdated`, the query
+    /// family, and the `system migrate` record inspection (all read nawa
+    /// state under `<root>/var/lib/nawa`; readers exclude writers only)
     ReadDb,
     /// group remove takes an outer exclusive lock; group install/list/info
     /// rely on the install path's own per-transaction locks (an outer lock

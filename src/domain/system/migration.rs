@@ -59,6 +59,19 @@ impl HandlerId {
             )),
         }
     }
+
+    /// The handler's contract for the reboot boundary (§10.4 stage 6/7:
+    /// a pending-migration exit, then an explicit resume after reboot).
+    /// This is *derived*, never persisted: the record binds only the
+    /// handler, and [`MigrationDefinition::new`] enforces the binding
+    /// above, so the requirement follows from the handler identity alone —
+    /// a record cannot claim "no reboot" for a handler that owns the
+    /// reboot boundary.
+    pub(crate) fn requires_reboot(self) -> bool {
+        match self {
+            HandlerId::FaseelaInitRunitToSystemd => true,
+        }
+    }
 }
 
 /// Validate a migration id. The id becomes a file name under the record
@@ -427,6 +440,15 @@ impl MigrationRecord {
             steps: Vec::new(),
         }
     }
+
+    /// Whether this migration requires a reboot to complete — derived from
+    /// the trusted handler binding, not a persisted field (§10.1/§10.2: the
+    /// definition validation pairs each handler with its reboot boundary,
+    /// so the record's handler identity decides). Display and recovery
+    /// logic read this instead of inventing a separate record field.
+    pub(crate) fn requires_reboot(&self) -> bool {
+        self.handler.requires_reboot()
+    }
 }
 
 #[cfg(test)]
@@ -740,6 +762,29 @@ mod tests {
         assert_eq!(record.handler, d.handler);
         assert_eq!(record.state, MigrationState::Planned);
         assert!(record.steps.is_empty());
+    }
+
+    #[test]
+    fn the_reboot_requirement_follows_the_handler_binding_not_a_field() {
+        // the trusted handler contract: the runit→systemd handler owns the
+        // reboot boundary (§10.4) — derived from the handler identity, so a
+        // record (which persists no separate flag) reports it from the
+        // binding alone
+        let d = runit_to_systemd();
+        assert!(HandlerId::FaseelaInitRunitToSystemd.requires_reboot());
+        assert!(MigrationRecord::new(&d).requires_reboot());
+        // and the definition validation agrees: a definition of this
+        // handler without the reboot boundary is a construction error
+        let e = MigrationDefinition::new(
+            "m1",
+            1,
+            cap("init-system=runit"),
+            cap("init-system=systemd"),
+            HandlerId::FaseelaInitRunitToSystemd,
+            false,
+        )
+        .unwrap_err();
+        assert!(e.contains("requires a reboot"), "{e}");
     }
 
     #[test]

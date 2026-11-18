@@ -15,7 +15,7 @@
 | 2 — Init identity & capability foundation | **DONE** (detection + capability/identity domain model) |
 | 3 — Metadata & capability resolution | **DONE** (B3 proposal; the whole package planner — install, outdated, orphans, removal ordering — in `domain/planning/`, behavior verified byte-identical) |
 | 4 — System profiles & planning | **DONE** (profile model + merge rules + loader §7; profile wired into plan generation §8.1–8.4 — install/update report the init decision, invalid profiles fail closed; byte-identity + probes verified. Stage-3 exit met: dry-run plans explain every init-provider and package decision without managing services. The candidate→provider capability comparison still awaits the B3 index schema — see blockers) |
-| 5 — Migration engine | in progress: the migration domain model (§10.1–§10.3) + the durable record store (now top-level `migration_record.rs`) + the persistent mutation-gate check wired into every exclusive acquisition (§10.3, block-only); next: read-only `system migrate` inspection CLI, then the coordinator/permit |
+| 5 — Migration engine | in progress: the migration domain model (§10.1–§10.3) + the durable record store (top-level `migration_record.rs`) + the persistent mutation-gate check wired into every exclusive acquisition (§10.3, block-only) + the read-only `system migrate` inspection CLI (§12.2, slice 3); next: the coordinator with the typed in-process permit (§10.3), then the durable lifecycle |
 | 6 — Faseela runit→systemd migration | **BLOCKED** (see blockers) |
 | 7 — Final verification | not started |
 
@@ -402,8 +402,9 @@ the handlers own only parsing, rendering and prompts.
 ## Current task
 
 **Phase 5 — migration engine** (design §10–§12, Stage 4). Running log
-below ("Done within Phase 5 so far"); the gate is wired (slice 2), the
-read-only `system migrate` inspection CLI is next (see "Exact next
+below ("Done within Phase 5 so far"): the gate is wired (slice 2) and
+the read-only `system migrate` inspection CLI is landed (slice 3); the
+coordinator with the typed in-process permit is next (see "Exact next
 task"). Phase 3's planning work is complete and folded into Phases 4–5;
 its notes below are kept for the record.
 
@@ -758,6 +759,129 @@ Gate semantics (`lock.rs::check_migration_gate`, wired into `acquire`):
   goes away). The existing forged-marker tests still pass unchanged —
   the gate-free marker error text is preserved exactly.
 
+### Done within Phase 5 so far (3): the read-only inspection CLI (§12.2)
+
+The record store's first production consumers: `nawa system migrate
+list` / `show <id>` / `status` — strictly read-only per §12.2, under the
+namespace §12.2 names (no second top-level `migrate` command).
+
+Lock policy (application-owned, not per-command):
+
+* All three commands translate to `Request::ReadDb` (shared lock) in
+  `cli/args.rs::lock_request` — the records live under
+  `<root>/var/lib/nawa`, which the database lock covers, so a listing is
+  one coherent snapshot. Readers are never gate-checked (§10.3 keeps
+  inspection available during a pending migration), and a shared
+  acquire on a root with no lock file is `Attempt::NotNeeded`, so
+  inspection never creates anything.
+* `application/lifecycle.rs`'s `Request::ReadDb` doc updated to name the
+  migration-inspection consumers.
+
+Shape (functional core / imperative shell, same split as `history`):
+
+* `application/features/system/migrate_inspect.rs` (new): the use cases
+  return typed values — `list(root) -> Listing { records, unreadable }`
+  sorted by id, `show(root, id) -> MigrationRecord`,
+  `status(root) -> Status { dir, blocked, gates, unreadable, scan_error
+  }` (+9 unit tests).
+* `commands/system.rs` (new): `cmd_system`/`cmd_migrate` plus pure
+  render functions returning `Vec<String>` (`render_list`,
+  `render_show`, `render_step`, `render_status`, `render_gate`) so every
+  presentation rule is unit-testable (+12 unit tests). Column layout
+  mirrors `nawa history`. Registered in `commands/mod.rs`; dispatch arm
+  `Cmd::System { action }` added in `commands/dispatch.rs`.
+* `cli/args.rs`: `Cmd::System`, `SystemCmd`, `MigrateCmd::{List, Show {
+  id }, Status}`; `src/plugins/manifest.rs` adds `"system"` to
+  `RESERVED_COMMANDS` (plugins can never shadow it); bash/zsh/fish
+  completions in `cli/completions.rs` gained the namespace.
+
+Per-command semantics (§12.2, verified by tests):
+
+* `list` — every record in deterministic (sorted-id) order with state,
+  from→to capability keys and definition version; an empty store is a
+  stated result ("no migration record exists under <dir> — no migration
+  has ever been started under this root"), not silence. Corrupt records
+  do not hide the readable ones: rows print first, then the command
+  fails with exit 1 naming each unreadable id with its *actual*
+  validation cause (the full error chain, file + failure).
+* `show <id>` — the full durable record: schema, definition version,
+  from/to capabilities, state, handler, and requires-reboot derived
+  from the trusted handler binding (see below), plus every ordered
+  write-ahead step with intent and outcome; an intent without an
+  outcome prints as `INTERRUPTED` and never reads as a success (§10.3:
+  reconciled on restart). Unknown id → exit 1 naming the record
+  directory and pointing at `list`; a corrupt record → exit 1 naming
+  the exact file and the validation failure (this command is allowed to
+  fail loudly where the gate's best-effort scan must not).
+* `status` — informational, exit 0 in every case: whether package
+  mutations are blocked under the selected root, by which migration(s)
+  (id + state, sorted), and the record directory. It mirrors the gate's
+  fail-closed semantics rather than inventing its own: an unreadable
+  record (or a record directory that cannot be read at all) is reported
+  as "blocked fail-closed — the record state cannot be verified",
+  because that is exactly what `lock::check_migration_gate` does with
+  the same input. The machine-checkable refusal remains the gate's
+  exit-1 error on mutating commands.
+
+Derived reboot requirement (§10.1/§10.2):
+
+* `domain/system/migration.rs` gains `HandlerId::requires_reboot()` and
+  `MigrationRecord::requires_reboot()`: whether a migration needs the
+  reboot boundary follows from the *trusted handler binding* (the
+  built-in runit→systemd handler owns the reboot boundary, §10.4), not
+  from a persisted flag a repository could set. Documented as never
+  persisted; pinned by the new domain test
+  `the_reboot_requirement_follows_the_handler_binding_not_a_field`.
+
+Record-store repairs and refactors (`migration_record.rs`):
+
+* Concrete defect: `load`'s schema/state/handler/step validation errors
+  did not name the record file (only the TOML-parse and capability
+  paths did), contradicting the store's documented fail-closed contract
+  ("an error naming the file"). Fixed by making `load` the single site
+  that names the file: `into_record`/`into_capability` lost their
+  now-redundant file contexts (the capability path had produced the
+  file name twice in one chain), the TOML parse keeps its
+  "not valid TOML" cause under the same one-time context, and every
+  failure renders as `<file>: <cause>`. The store test was strengthened
+  to pin file-naming on the schema path. Observable consequence beyond
+  `show`: gate refusals on corrupt records now carry the file path in
+  their error chain (existing gate tests assert on cause substrings, so
+  they pass unchanged).
+* `record_ids(root)` extracted (sorted `.toml` ids, directory-read
+  errors propagate); `active_gates` refactored onto it with identical
+  semantics.
+* Inspection scan policy: a record seen in the directory listing but
+  absent when read (`Ok(None)` mid-scan) is reported as an
+  `UnreadableRecord` ("removed while being read") rather than silently
+  skipped — under the shared inspection lock nothing may remove
+  records, so absence is a defect worth naming.
+
+Verification:
+
+* 35 new tests: 9 use case + 12 presentation + 13 integration
+  (`tests/migrate.rs`: list on a fresh root / empty dir / several
+  records / corrupt-record aggregate error, full `show` incl. an
+  interrupted step, unknown id exit 1, corrupt `show` exit 1, `status`
+  with an active gate / without one / with a corrupt record, a
+  read-only proof (byte-for-byte record file unchanged + no new files
+  after all three commands), rootedness under `--root`, an offline
+  root), plus the domain reboot-binding test.
+* Gates green; manual probes on the binary: seeded `awaiting-reboot`
+  record → `list`/`show`/`status` report it and `status` says mutations
+  are blocked; a by-name `install -n` still refuses at the gate while
+  `system migrate status` exits 0; `--help` lists `system`; unknown-id
+  and corrupt-record paths exit 1 with the messages above.
+* Existing commands untouched: no fixture carries a migration record
+  and the only production paths that read records are the three new
+  commands plus the gate check from slice 2, which is already wired.
+* Existing commands untouched, verified byte-level vs HEAD (isolated
+  worktree build): `--version` identical; the only `--help` and
+  completion-script (bash/zsh/fish) differences are the new `system`
+  entries themselves — no other byte changes. Both release smoke
+  suites (v05 + v06, which exercise real install/update/rollback
+  transactions) pass on the new binary.
+
 ## Changed files (this phase, updated as work lands)
 
 * `docs/architecture-audit.md` (new, Phase 0)
@@ -900,6 +1024,34 @@ Gate semantics (`lock.rs::check_migration_gate`, wired into `acquire`):
   * `src/domain/system/migration.rs` (doc pointer to the record store)
   * `tests/lock.rs` (4 new gate tests + 3 pre-existing over-long
     `assert!` calls canonicalized to rustfmt's exact preferred form)
+* Phase 5 (inspection CLI, in progress):
+  * `src/application/features/system/migrate_inspect.rs` (new —
+    `list`/`show`/`status` use cases over the record store, typed
+    `Listing`/`UnreadableRecord`/`Status` + 9 tests)
+  * `src/commands/system.rs` (new — `cmd_system`/`cmd_migrate` + pure
+    renderers `render_list`/`render_show`/`render_step`/
+    `render_status`/`render_gate` + 12 tests)
+  * `src/commands/mod.rs`, `src/commands/dispatch.rs` (one-line
+    registration + `Cmd::System` dispatch arm)
+  * `src/cli/args.rs` (`Cmd::System`/`SystemCmd`/`MigrateCmd` +
+    `lock_request` → `Request::ReadDb`)
+  * `src/cli/completions.rs`, `src/plugins/manifest.rs`
+    (RESERVED_COMMANDS gains `"system"`; completions for bash/zsh/fish)
+  * `src/domain/system/migration.rs` (`HandlerId::requires_reboot()` +
+    `MigrationRecord::requires_reboot()` — derived from the trusted
+    handler binding, documented as never persisted; 1 new test)
+  * `src/migration_record.rs` (`record_ids()` extracted, `active_gates`
+    refactored onto it; `load` is now the single site that names the
+    record file on every validation failure — the capability path's
+    duplicate file context removed, the schema/state/handler/step paths
+    gained it + strengthened test)
+  * `src/application/features/system/mod.rs`,
+    `src/application/lifecycle.rs` (registration + `Request::ReadDb`
+    doc naming the inspection consumers)
+  * `tests/migrate.rs` (new — 13 integration tests for the three
+    commands, incl. the read-only proof and offline-root coverage)
+  * `docs/commands.md` (the three commands documented, System and
+    maintenance section)
 
 ## Tests actually executed
 
@@ -920,10 +1072,13 @@ Gate semantics (`lock.rs::check_migration_gate`, wired into `acquire`):
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 4 wiring tree) | 686 pass / 2 ignored / 3 env-failed (= 678 + 3 InitSelection + 1 loader provenance + 1 plan note + 3 desired-init tests; same 3 env failures) |
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 5 migration-model tree) | 706 pass / 2 ignored / 3 env-failed (= 686 + 13 domain migration + 7 record-store tests; same 3 env failures) |
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 5 gate-wiring tree) | 714 pass / 2 ignored / 3 env-failed (= 706 + 4 lock unit + 4 lock integration tests; same 3 env failures) |
-| `cargo clippy --all-targets --offline -- -D warnings` | pass (Phase 1a + 1b + 1c + 1d + 1e + 2 + 3/B3 + 3/solver + 3/removal + 4/profile + 4/wiring + 5/model + 5/gate) |
-| `python3 scripts/check-layering.py` | pass (54 after 1a; 53 after 1b; 54 after 1c; 55 after 2 — the new `domain` layer; 55 after 3/B3, 3/solver, 3/removal and 4/profile — the count is top-level modules, the new `domain/package`, `domain/planning`, `domain/system/profile` + `features/system/profile` submodules are scanned; 55 after 4/wiring and 5/model — `domain/system/migration` + `features/system/migrate` are submodules of existing top-level modules; **56 after 5/gate** — the record store moved to the top-level `migration_record` module, no cycles: lock → migration_record → domain/atomic, application → lock via the transaction-apply path only) |
+| `cargo test --all-targets --offline --no-fail-fast` (Phase 5 inspection tree) | 751 pass / 2 ignored / 1 env-failed (= 714 + 35 new: 9 inspection use case + 12 presentation + 13 `tests/migrate.rs` + 1 domain reboot-binding test; plus the 2 plugin tests that were env-blocked at the Phase-0 baseline passed this run — container permission state differs between sessions; the remaining env failure is the toolchain-under-`/home` sandbox test) |
+| `cargo clippy --all-targets --offline -- -D warnings` | pass (Phase 1a + 1b + 1c + 1d + 1e + 2 + 3/B3 + 3/solver + 3/removal + 4/profile + 4/wiring + 5/model + 5/gate + 5/inspection) |
+| `python3 scripts/check-layering.py` | pass (54 after 1a; 53 after 1b; 54 after 1c; 55 after 2 — the new `domain` layer; 55 after 3/B3, 3/solver, 3/removal and 4/profile — the count is top-level modules, the new `domain/package`, `domain/planning`, `domain/system/profile` + `features/system/profile` submodules are scanned; 55 after 4/wiring and 5/model — `domain/system/migration` + `features/system/migrate` are submodules of existing top-level modules; 56 after 5/gate — the record store moved to the top-level `migration_record` module; **56 after 5/inspection** — `features/system/migrate_inspect` and `commands/system` are submodules of existing top-level modules, no cycles: commands → application/features/system → migration_record → domain/atomic, lock untouched) |
 | `bash scripts/smoke-v06.sh` (release build, Phases 1b + 1c + 1d + 2) | ALL V0.6 SMOKE TESTS PASSED |
 | `bash scripts/smoke-v05.sh` (release build, Phases 1d + 2) | ALL SMOKE TESTS PASSED |
+| `bash scripts/smoke-v05.sh` (release build, 5/inspection tree) | ALL SMOKE TESTS PASSED |
+| `bash scripts/smoke-v06.sh` (release build, 5/inspection tree) | ALL V0.6 SMOKE TESTS PASSED |
 | HEAD-vs-1c behavior diff (`--help`, `--version`, completions × 3, isolated worktree build) | byte-identical |
 | HEAD-vs-1d behavior diff (`--help`, `--version`, completions × 3 + 12 read/planning commands, isolated worktree build) | byte-identical |
 | HEAD-vs-2 behavior diff (`--help`, `--version`, completions × 3, isolated worktree build) | byte-identical (detection adds no CLI surface) |
@@ -952,7 +1107,11 @@ files clean, lock.rs stays at its pre-existing 7 hunks (the one
 violation my gate tests introduced was fixed before commit) and
 tests/lock.rs hunks 5 → **2** — three pre-existing over-long `assert!`
 calls were canonicalized to rustfmt's exact preferred form while adding
-the gate tests, zero new violations) |
+the gate tests, zero new violations; **5/inspection: the three new
+files (`migrate_inspect.rs`, `commands/system.rs`, `tests/migrate.rs`)
+are rustfmt-clean; the `manifest.rs` hunks are pre-existing at HEAD
+(12, verified against the pristine file — the one-line
+RESERVED_COMMANDS edit adds none)** |
 
 ## Known problems
 
@@ -982,39 +1141,40 @@ the gate tests, zero new violations) |
 
 ## Exact next task
 
-**Phase 5, third slice: read-only migration record inspection
-(§12.2)** — give the record store its first real production consumers
-with the `nawa system migrate` namespace, read-only only:
+**Phase 5, fourth slice: the migration coordinator and the typed
+in-process permit (§10.3)** — the gate is currently block-only (no
+bypass exists); this slice adds the *only* legitimate way past it:
 
-* `nawa system migrate list` — every record under the selected root:
-  id, durable state, from→to capability keys, definition version; says
-  so explicitly when the list is empty (and whether that means "no
-  migration ever started").
-* `nawa system migrate show <id>` — the full record: handler,
-  requires-reboot binding, and the ordered write-ahead steps with
-  intents/outcomes (an intent without outcome is *interrupted* — say
-  so, §10.3). Unknown id → exit 1 naming the record directory; a
-  corrupt record is reported with its validation cause (readers stay
-  honest; this command is allowed to fail loudly where the gate's
-  silent skip must not).
-* `nawa system migrate status` — gate-active summary: whether package
-  mutations are currently blocked under the selected root, by which
-  migration(s). Exit 0 in both cases (informational); the machine-
-  checkable refusal already exists as the gate's exit-1 error on
-  mutating commands.
-* Rules: strictly read-only (never creates or modifies records; works
-  on offline roots and any `--root`); no second top-level `migrate`
-  namespace (§12.2); plain text output consistent with the existing
-  `history`-style listing; new subcommands only — no existing command's
-  bytes change.
-* Tests: unit tests over the presentation mapping (record → lines,
-  interrupted-step rendering); integration tests (list on an empty
-  root, list/show with seeded records incl. an interrupted step, show
-  unknown id exit 1, status with and without a gate). Gates as always +
-  byte-identity vs HEAD (existing commands untouched) + probes of the
-  three new subcommands on both a fresh root and a seeded one; commit
-  and update this tracker.
+* A private, unforgeable permit type owned by the coordinator: it can
+  be neither constructed outside the coordinator module nor carried
+  across a process boundary — no environment variable, no CLI flag, no
+  plugin capability, no inherited child-process state. The gate check
+  in `lock::acquire` accepts authorization only through this type.
+* The coordinator holds the exclusive package-database lock itself
+  while a migration's package operations run, and invokes the
+  application package use cases in-process (no nested `nawa` CLI, no
+  re-entrant lock acquisition — the permit, not a second lock, is what
+  authorizes the inner operations). `BeginPreparation` requires the
+  coordinator to hold that lock (documented in `lock.rs` when the gate
+  landed).
+* No weakening of the gate: `NAWA_LOCK_HELD` stays forge-proof and
+  never authorizes a mutation; the permit dies with the coordinator's
+  verified completion or completed verified rollback.
+* Record creation and `Transition` application become real: the durable
+  `planned` record is written only after live-host preflight +
+  explicit approval (offline-root planning stays read-only), and state
+  transitions go through `domain::system::migration::transition` with
+  the write-ahead step discipline (§10.3) — step intent persisted
+  before the side effect, outcome after.
+* Scope discipline for this slice: coordinator skeleton + permit +
+  `planned → preparing → …` lifecycle plumbing with tests; the actual
+  runit→systemd handler body stays out (Phase 6, blocked on B1/B2/B5).
+* Tests: unit tests for the permit type (unconstructible outside,
+  non-serializable), coordinator lifecycle transitions against a
+  scratch root, gate-interaction tests (a permit-bearing in-process
+  operation proceeds; a forged marker still refuses). Gates as always;
+  commit and update this tracker.
 
-The coordinator slice follows (typed in-process permit §10.3 +
-`apply_transaction` lock-ownership inversion), then record creation and
-state transitions.
+Then: durable lifecycle/write-ahead steps hardening (5B), crash
+recovery (5C), security verification (5D), then Phase 6 (blocked on
+B1/B2/B5/B6/B7) and the §8 index-v4 metadata wiring.

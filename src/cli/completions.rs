@@ -15,7 +15,7 @@ pub(crate) const COMPLETION_BASH: &str = r#"# bash completion for nawa (generate
 _nawa() {
     local cur prev commands pkgs
     cur="${COMP_WORDS[COMP_CWORD]}"
-    commands="build install outdated update autoremove deps deps-all search info why query list remove files owner revdep repo-create repo-update sync keygen sign verify trust upgrade rollback repolist makecache repoquery fetch recipe clean group history plugin config init completions"
+    commands="build install outdated update autoremove deps deps-all search info why query list remove files owner revdep repo-create repo-update sync keygen sign verify trust upgrade rollback repolist makecache repoquery fetch recipe clean group history plugin config system init completions"
     pkgs="$(nawa __complete_pkgs 2>/dev/null)"
     if [ "$COMP_CWORD" -eq 1 ]; then
         COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
@@ -42,6 +42,12 @@ _nawa() {
             fi ;;
         config)
             COMPREPLY=( $(compgen -W "show" -- "$cur") ) ;;
+        system)
+            if [ "$COMP_CWORD" -eq 2 ]; then
+                COMPREPLY=( $(compgen -W "migrate" -- "$cur") )
+            elif [ "$COMP_CWORD" -eq 3 ]; then
+                COMPREPLY=( $(compgen -W "list show status" -- "$cur") )
+            fi ;;
         completions)
             COMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") ) ;;
         *)
@@ -85,6 +91,7 @@ _nawa() {
         'history:Show the package transaction history'
         'plugin:Manage and run plugins'
         'config:Show the effective configuration'
+        'system:Inspect system state (migration records, read-only)'
         'init:Write a nawa.toml template'
         'completions:Print shell completion scripts'
     )
@@ -101,6 +108,11 @@ _nawa() {
                 _files ;;
             config)
                 _values 'action' show ;;
+            system)
+                case $CURRENT in
+                    3) _values 'action' migrate ;;
+                    4) _values 'migrate action' list show status ;;
+                esac ;;
             recipe)
                 _values 'action' check ;;
             completions)
@@ -128,12 +140,15 @@ complete -c nawa -n '__fish_use_subcommand' -a 'remove' -d 'Remove an installed 
 complete -c nawa -n '__fish_use_subcommand' -a 'fetch' -d 'Download and verify sources, then run the fetch backends'
 complete -c nawa -n '__fish_use_subcommand' -a 'recipe' -d 'Inspect and check recipes'
 complete -c nawa -n '__fish_seen_subcommand_from recipe' -a 'check' -d 'Source-independent recipe warnings'
-complete -c nawa -n '__fish_use_subcommand' -a 'files owner repo-create repo-update keygen sign verify trust upgrade rollback config init completions'
+complete -c nawa -n '__fish_use_subcommand' -a 'files owner repo-create repo-update keygen sign verify trust upgrade rollback config system init completions'
 # package names, completed dynamically
 set -l pkg_cmds build install update deps deps-all info files remove rollback why query list
 complete -c nawa -n "__fish_seen_subcommand_from $pkg_cmds" -a "(nawa __complete_pkgs 2>/dev/null)"
 # config actions
 complete -c nawa -n '__fish_seen_subcommand_from config' -a 'show'
+# system actions
+complete -c nawa -n '__fish_seen_subcommand_from system' -a 'migrate' -d 'Migration records'
+complete -c nawa -n '__fish_seen_subcommand_from migrate' -a 'list show status' -d 'Migration record inspection'
 # completion shells
 complete -c nawa -n '__fish_seen_subcommand_from completions' -a 'bash zsh fish'
 "#;

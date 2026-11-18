@@ -505,6 +505,13 @@ pub(crate) enum Cmd {
         action: ConfigCmd,
     },
 
+    /// Inspect the system state recorded under the selected root
+    /// (read-only: nothing is created, changed or executed)
+    System {
+        #[command(subcommand)]
+        action: SystemCmd,
+    },
+
     /// Write a commented nawa.toml template into the current directory
     /// (or, with --system, the system-wide /etc/nawa/nawa.toml)
     Init {
@@ -617,6 +624,14 @@ impl Cmd {
             | Cmd::Revdep { .. }
             | Cmd::Deps { .. }
             | Cmd::DepsAll { .. } => Request::ReadDb, // repo/sign tooling and everything below touches no package database
+            // `system migrate` inspection reads the migration records under
+            // `<root>/var/lib/nawa` (the state directory the lock covers):
+            // a shared lock excludes the coordinator's record updates, so
+            // `list` shows one coherent snapshot. Readers are never
+            // gate-checked (§10.3: read-only inspection stays available
+            // while a migration is pending), and a fresh root needs no
+            // lock at all — the shared path never creates state.
+            Cmd::System { .. } => Request::ReadDb,
             Cmd::RepoCreate { .. }
             | Cmd::RepoUpdate { .. }
             | Cmd::Keygen { .. }
@@ -729,6 +744,33 @@ pub(crate) enum HistoryCmd {
 pub(crate) enum ConfigCmd {
     /// Print the effective configuration, annotated with each value's source
     Show,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum SystemCmd {
+    /// Migration records under the selected root (read-only inspection,
+    /// design §12.2 — the single migration namespace; there is no
+    /// top-level `nawa migrate`)
+    Migrate {
+        #[command(subcommand)]
+        action: MigrateCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum MigrateCmd {
+    /// List every migration record under the selected root: id, durable
+    /// state, source/target capability and definition version
+    List,
+    /// Show one migration record in full, including its write-ahead steps
+    Show {
+        /// the migration id (the record name without its `.toml`)
+        id: String,
+    },
+    /// Whether package mutations are currently blocked by the persistent
+    /// migration gate, and by which migration (informational; always
+    /// exits 0)
+    Status,
 }
 
 #[derive(Clone, Copy, ValueEnum)]

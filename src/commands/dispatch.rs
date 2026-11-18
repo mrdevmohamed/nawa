@@ -257,6 +257,7 @@ fn run_command(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             ConfigCmd::Show => cmd_config_show(ctx),
         },
         Cmd::Init { force, system } => cmd_init(force, system),
+        Cmd::System { action } => cmd_system(ctx, action),
         Cmd::Completions { shell } => {
             print!("{}", completions_script(shell));
             Ok(())

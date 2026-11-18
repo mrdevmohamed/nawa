@@ -119,9 +119,14 @@ Repository creation has schema-specific requirements. Index schema v2 and later 
 | nawa config show | Show effective configuration and where each value came from. |
 | nawa init | Write a project configuration template. |
 | nawa init --system | Write the system-wide configuration template. |
+| nawa system migrate list | List system migration records in deterministic order; never mutates anything. |
+| nawa system migrate show ID | Show one migration record in full, including every step's intent and outcome. |
+| nawa system migrate status | Show whether the mutation gate is held and which migrations are in progress. |
 | nawa completions SHELL | Print shell completion scripts for bash, zsh, or fish. |
 
 **Group installation status:** the command exists, but currently refuses to install a group until signed group metadata is published by a repository. See the [implementation status](design/IMPLEMENTATION-STATUS.md).
+
+**Migration inspection:** the three `nawa system migrate` inspection commands are strictly read-only. They take a shared database lock, work with `--root` against offline roots, and never create records, change migration state, or run migration handlers.
 
 ## Common examples
 
