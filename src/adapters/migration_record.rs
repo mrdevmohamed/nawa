@@ -51,29 +51,86 @@ pub(crate) fn migrations_dir(root: &Path) -> PathBuf {
     root.join("var/lib/nawa/migrations")
 }
 
-/// Create the record directory (and its state-dir parents) with restrictive
-/// 0700 permissions before publication. `atomic::write_atomic` creates missing
-/// parents with the process umask, which may be permissive; the migration
-/// journal must be root-only like the transaction journal (§10.3, §13).
-fn ensure_records_dir(root: &Path) -> Result<()> {
+/// Resolve and validate the complete state-directory chain without
+/// following symlinks below the selected root. Checking only the final
+/// `migrations` directory is insufficient: `var`, `var/lib`, or
+/// `var/lib/nawa` could otherwise redirect authoritative migration state
+/// outside the target root (§13).
+///
+/// Missing directories are absence for readers and are created one level at
+/// a time for writers. The root itself is canonicalized once so an explicitly
+/// supplied root alias is resolved before the no-follow walk begins.
+fn checked_records_dir(root: &Path, create: bool) -> Result<Option<PathBuf>> {
     use std::os::unix::fs::DirBuilderExt;
-    let dir = migrations_dir(root);
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true).mode(0o700);
-    builder
-        .create(&dir)
-        .with_context(|| format!("create migration records directory {}", dir.display()))?;
-    // A symlinked record directory would move authoritative state outside the
-    // selected root; refuse it (no-follow, §13).
-    let meta = std::fs::symlink_metadata(&dir)
-        .with_context(|| format!("inspect migration records directory {}", dir.display()))?;
-    if !meta.file_type().is_dir() {
-        bail!(
-            "migration records directory {} is not a real directory (symlinks are refused)",
-            dir.display()
-        );
+
+    let canonical_root = root
+        .canonicalize()
+        .with_context(|| format!("resolve migration target root {}", root.display()))?;
+    let root_meta = std::fs::symlink_metadata(&canonical_root)
+        .with_context(|| format!("inspect migration target root {}", canonical_root.display()))?;
+    if !root_meta.file_type().is_dir() {
+        bail!("migration target root {} is not a real directory", canonical_root.display());
     }
-    Ok(())
+
+    let mut current = canonical_root;
+    for component in ["var", "lib", "nawa", "migrations"] {
+        let next = current.join(component);
+        match std::fs::symlink_metadata(&next) {
+            Ok(meta) if meta.file_type().is_symlink() => bail!(
+                "migration state path {} is a symlink — refusing to follow it (§13)",
+                next.display()
+            ),
+            Ok(meta) if !meta.file_type().is_dir() => bail!(
+                "migration state path {} is not a directory",
+                next.display()
+            ),
+            Ok(_) => current = next,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && !create => {
+                return Ok(None);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let mode = if component == "migrations" { 0o700 } else { 0o755 };
+                let mut builder = std::fs::DirBuilder::new();
+                builder.mode(mode);
+                match builder.create(&next) {
+                    Ok(()) => current = next,
+                    Err(create_error) if create_error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        // A concurrent creator is acceptable only if the
+                        // next no-follow inspection proves it is a directory.
+                        let meta = std::fs::symlink_metadata(&next).with_context(|| {
+                            format!("inspect migration state path {}", next.display())
+                        })?;
+                        if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
+                            bail!("migration state path {} is not a real directory", next.display());
+                        }
+                        current = next;
+                    }
+                    Err(create_error) => {
+                        return Err(create_error).with_context(|| {
+                            format!("create migration state directory {}", next.display())
+                        });
+                    }
+                }
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("inspect migration state path {}", next.display())
+                });
+            }
+        }
+    }
+    Ok(Some(current))
+}
+
+/// Create the record directory and its parents with restrictive permissions
+/// before publication. Existing parent directories are never followed when
+/// they are symlinks; the final record directory is tightened to 0700.
+fn ensure_records_dir(root: &Path) -> Result<PathBuf> {
+    let dir = checked_records_dir(root, true)?
+        .expect("create=true always returns the validated migration directory");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("restrict migration records directory {}", dir.display()))?;
+    Ok(dir)
 }
 
 /// The (validated) record file of `id`. The id is validated through the
@@ -252,7 +309,11 @@ impl CapabilityDoc {
 /// schema, state, handler, capability, steps) is wrapped here exactly
 /// once, so the rendered chain is `<file context>: <cause>`.
 pub(crate) fn load(root: &Path, id: &str) -> Result<Option<MigrationRecord>> {
-    let path = record_path(root, id)?;
+    check_id(id).map_err(anyhow::Error::msg)?;
+    let Some(dir) = checked_records_dir(root, false)? else {
+        return Ok(None);
+    };
+    let path = dir.join(format!("{id}.toml"));
     check_no_follow(&path)?;
     let raw = match std::fs::read_to_string(&path) {
         Ok(raw) => raw,
@@ -277,9 +338,10 @@ pub(crate) fn load(root: &Path, id: &str) -> Result<Option<MigrationRecord>> {
 /// be created and which transitions are legal — and must apply them
 /// through the domain state machine before calling this.
 pub(crate) fn save(root: &Path, record: &MigrationRecord) -> Result<()> {
-    let path = record_path(root, &record.id)?;
+    check_id(&record.id).map_err(anyhow::Error::msg)?;
+    let dir = ensure_records_dir(root)?;
+    let path = dir.join(format!("{}.toml", record.id));
     check_no_follow(&path)?;
-    ensure_records_dir(root)?;
     let doc = RecordDoc::from_record(record);
     atomic::write_atomic(&path, toml::to_string_pretty(&doc)?.as_bytes(), 0o600)
         .with_context(|| format!("publish migration record {}", path.display()))
@@ -292,7 +354,12 @@ pub(crate) fn save(root: &Path, record: &MigrationRecord) -> Result<()> {
 /// durable is removed, never left lying about) and the recovery slice's
 /// discard decision.
 pub(crate) fn remove(root: &Path, id: &str) -> Result<()> {
-    let path = record_path(root, id)?;
+    check_id(id).map_err(anyhow::Error::msg)?;
+    let Some(dir) = checked_records_dir(root, false)? else {
+        return Ok(());
+    };
+    let path = dir.join(format!("{id}.toml"));
+    check_no_follow(&path)?;
     match std::fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -306,18 +373,9 @@ pub(crate) fn remove(root: &Path, id: &str) -> Result<()> {
 /// through [`load`], which reports exactly what is wrong with a record
 /// that fails validation.
 pub(crate) fn record_ids(root: &Path) -> Result<Vec<String>> {
-    let dir = migrations_dir(root);
-    match std::fs::symlink_metadata(&dir) {
-        Ok(meta) if meta.file_type().is_symlink() => bail!(
-            "migration records directory {} is a symlink — refusing to follow it (§13)",
-            dir.display()
-        ),
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => {
-            return Err(e).with_context(|| format!("inspect migration records {}", dir.display()))
-        }
-    }
+    let Some(dir) = checked_records_dir(root, false)? else {
+        return Ok(Vec::new());
+    };
     let rd = match std::fs::read_dir(&dir) {
         Ok(rd) => rd,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
