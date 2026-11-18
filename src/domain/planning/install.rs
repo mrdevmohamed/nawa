@@ -400,9 +400,9 @@ mod tests {
             },
         ]);
         let result = providers_for(&candidates, &requested);
-        assert_eq!(result.matching, ["networkd"]);
-        assert_eq!(result.ambiguous, ["dual-network"]);
-        assert_eq!(result.unknown, ["legacy-provider"]);
+        assert_eq!(result.matching, vec!["networkd".to_string()]);
+        assert_eq!(result.ambiguous, vec!["dual-network".to_string()]);
+        assert_eq!(result.unknown, vec!["legacy-provider".to_string()]);
     }
 
     #[test]
