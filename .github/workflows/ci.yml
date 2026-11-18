@@ -140,7 +140,12 @@ jobs:
           stat -c '%a %U %n' "$CARGO_TARGET_DIR" /var/tmp
           getfacl -p "$CARGO_TARGET_DIR" 2>/dev/null || true
           cargo test --release --locked --no-fail-fast --no-run
-          sudo -E env "PATH=$PATH" "HOME=$HOME" "CARGO_HOME=$HOME/.cargo" "RUSTUP_HOME=$RUSTUP_HOME" \
+          # The Cargo test runner is a top-level process, not a hook child. Strip any
+          # ambient marker inherited from the runner; run_hook sets it explicitly
+          # only on the actual child process. Forged-marker behavior is covered
+          # by the migration_security integration tests.
+          sudo -E env -u NAWA_LOCK_HELD -u NAWA_POST_TRANSACTION_HOOKS_RUNNING \
+            "PATH=$PATH" "HOME=$HOME" "CARGO_HOME=$HOME/.cargo" "RUSTUP_HOME=$RUSTUP_HOME" \
             bash -c 'umask 022; exec cargo test --release --locked --no-fail-fast -- --nocapture' 2>&1 \
             | tee "$RUNNER_TEMP/test.log"
 
