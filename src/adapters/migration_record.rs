@@ -61,7 +61,7 @@ pub(crate) fn migrations_dir(root: &Path) -> PathBuf {
 /// a time for writers. The root itself is canonicalized once so an explicitly
 /// supplied root alias is resolved before the no-follow walk begins.
 fn checked_records_dir(root: &Path, create: bool) -> Result<Option<PathBuf>> {
-    use std::os::unix::fs::DirBuilderExt;
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 
     let canonical_root = root
         .canonicalize()
@@ -84,7 +84,27 @@ fn checked_records_dir(root: &Path, create: bool) -> Result<Option<PathBuf>> {
                 "migration state path {} is not a directory",
                 next.display()
             ),
-            Ok(_) => current = next,
+            Ok(meta) => {
+                // Ancestors must not be replaceable by an unrelated user.
+                // Root-owned system directories and the effective user's
+                // private test/offline-root directories are both valid.
+                let uid = crate::adapters::sys::geteuid();
+                if meta.uid() != 0 && meta.uid() != uid {
+                    bail!(
+                        "migration state directory {} is owned by uid {}, not root or the current effective uid {}",
+                        next.display(),
+                        meta.uid(),
+                        uid
+                    );
+                }
+                if meta.permissions().mode() & 0o022 != 0 {
+                    bail!(
+                        "migration state directory {} is group- or world-writable; refusing an unsafe record path",
+                        next.display()
+                    );
+                }
+                current = next;
+            },
             Err(error) if error.kind() == std::io::ErrorKind::NotFound && !create => {
                 return Ok(None);
             }
@@ -146,12 +166,35 @@ fn record_path(root: &Path, id: &str) -> Result<PathBuf> {
 /// no-follow handling). Atomic publication already replaces the symlink
 /// itself on write; reads must not follow it either.
 fn check_no_follow(path: &Path) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
     match std::fs::symlink_metadata(path) {
         Ok(meta) if meta.file_type().is_symlink() => bail!(
             "migration record {} is a symlink — refusing to follow it (§13)",
             path.display()
         ),
-        Ok(_) => Ok(()),
+        Ok(meta) if !meta.file_type().is_file() => bail!(
+            "migration record {} is not a regular file",
+            path.display()
+        ),
+        Ok(meta) => {
+            let uid = crate::adapters::sys::geteuid();
+            if meta.uid() != 0 && meta.uid() != uid {
+                bail!(
+                    "migration record {} is owned by uid {}, not root or the current effective uid {}",
+                    path.display(),
+                    meta.uid(),
+                    uid
+                );
+            }
+            if meta.permissions().mode() & 0o022 != 0 {
+                bail!(
+                    "migration record {} is group- or world-writable; refusing untrusted migration state",
+                    path.display()
+                );
+            }
+            Ok(())
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e).with_context(|| format!("inspect {}", path.display())),
     }
