@@ -61,7 +61,7 @@ pub(crate) fn migrations_dir(root: &Path) -> PathBuf {
 /// a time for writers. The root itself is canonicalized once so an explicitly
 /// supplied root alias is resolved before the no-follow walk begins.
 fn checked_records_dir(root: &Path, create: bool) -> Result<Option<PathBuf>> {
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    use std::os::unix::fs::DirBuilderExt;
 
     let canonical_root = root
         .canonicalize()
@@ -126,6 +126,7 @@ fn checked_records_dir(root: &Path, create: bool) -> Result<Option<PathBuf>> {
 /// before publication. Existing parent directories are never followed when
 /// they are symlinks; the final record directory is tightened to 0700.
 fn ensure_records_dir(root: &Path) -> Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
     let dir = checked_records_dir(root, true)?
         .expect("create=true always returns the validated migration directory");
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
