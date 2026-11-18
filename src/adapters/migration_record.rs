@@ -61,7 +61,7 @@ pub(crate) fn migrations_dir(root: &Path) -> PathBuf {
 /// a time for writers. The root itself is canonicalized once so an explicitly
 /// supplied root alias is resolved before the no-follow walk begins.
 fn checked_records_dir(root: &Path, create: bool) -> Result<Option<PathBuf>> {
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    use std::os::unix::fs::DirBuilderExt;
 
     let canonical_root = root
         .canonicalize()
@@ -81,7 +81,7 @@ fn checked_records_dir(root: &Path, create: bool) -> Result<Option<PathBuf>> {
                 next.display()
             ),
             Ok(meta) if !meta.file_type().is_dir() => bail!(
-                "migration state path {} is not a directory",
+                "migration state path {} is not a directory (Not a directory)",
                 next.display()
             ),
             Ok(meta) => {
@@ -156,6 +156,7 @@ fn ensure_records_dir(root: &Path) -> Result<PathBuf> {
 
 /// The (validated) record file of `id`. The id is validated through the
 /// domain model, so it can never traverse out of the record directory.
+#[cfg(test)]
 #[cfg(test)]
 fn record_path(root: &Path, id: &str) -> Result<PathBuf> {
     check_id(id).map_err(anyhow::Error::msg)?;
