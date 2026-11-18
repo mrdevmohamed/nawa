@@ -73,7 +73,7 @@ mod tests {
         fs::create_dir_all(&package).unwrap();
         fs::write(
             package.join("desc"),
-            "name = \"example\"\\nversion = \"2.4\"\\nrel = 3\\n",
+            "name = \"example\"\nversion = \"2.4\"\nrel = 3\n",
         )
         .unwrap();
         let snapshot = observe(&root, Path::new("/proc"));
