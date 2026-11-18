@@ -26,9 +26,17 @@ use crate::domain::package::version::vercmp;
 use crate::domain::system::observation::ObservedSystem;
 
 mod source;
-mod system_transition;
+pub(crate) mod system_transition;
 
 pub(crate) use source::{archive_download_url, fetch_entry, open_repo, ArchiveAuth, OpenRepo};
+pub(crate) use system_transition::{
+    plan as plan_system_transition,
+    render as render_system_transition,
+    PackageAction,
+    PackageActionKind,
+    PackageActionSource,
+    Preview as SystemTransitionPreview,
+};
 
 pub(crate) struct UpgradeOpts {
     pub dry_run: bool,

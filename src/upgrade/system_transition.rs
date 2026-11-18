@@ -16,7 +16,7 @@ use crate::domain::planning::install::{self, Candidate, CandidateOrigin, Why};
 use super::{ArchiveAuth, OpenRepo};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum Preview {
+pub(crate) enum Preview {
     Unresolved {
         from: Option<String>,
         to: String,
@@ -36,22 +36,33 @@ pub(super) enum Preview {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct PackageAction {
-    pub(super) kind: PackageActionKind,
-    pub(super) name: String,
-    pub(super) current: Option<String>,
-    pub(super) target: String,
-    pub(super) reason: String,
+pub(crate) struct PackageAction {
+    pub(crate) kind: PackageActionKind,
+    pub(crate) name: String,
+    pub(crate) current: Option<String>,
+    pub(crate) target: String,
+    pub(crate) reason: String,
+    /// The action is pinned to an archive entry in the authenticated index.
+    pub(crate) source: PackageActionSource,
+    pub(crate) archive: String,
+    pub(crate) sha256: String,
+    pub(crate) size: u64,
+    pub(crate) download_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PackageActionKind {
+pub(crate) enum PackageActionKind {
     Install,
     Upgrade,
     Keep,
 }
 
-pub(super) fn plan(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PackageActionSource {
+    AuthenticatedRepository,
+}
+
+pub(crate) fn plan(
     observed: &ObservedSystem,
     open: &OpenRepo,
     installed: &HashMap<String, String>,
@@ -392,31 +403,74 @@ fn build_from_observation(
             Why::Update => "requested package update".to_string(),
         };
         let action = match item.replaces {
-            Some(current) => PackageAction {
-                kind: PackageActionKind::Upgrade,
-                name: item.name,
-                current: Some(current),
-                target: target_version,
-                reason,
+            Some(current) => {
+                let Some(entry) = open.index.find(&item.name) else {
+                    return Some(Preview::Unresolved {
+                        from: Some(from),
+                        to: target,
+                        profile_source,
+                        reason: format!("the authenticated candidate {} has no matching index entry", item.name),
+                    });
+                };
+                PackageAction {
+                    kind: PackageActionKind::Upgrade,
+                    name: item.name,
+                    current: Some(current),
+                    target: target_version,
+                    reason,
+                    source: PackageActionSource::AuthenticatedRepository,
+                    archive: entry.file.clone(),
+                    sha256: entry.sha256.clone(),
+                    size: entry.size,
+                    download_url: entry.download_url.clone(),
+                }
             },
-            None => PackageAction {
-                kind: PackageActionKind::Install,
-                name: item.name,
-                current: None,
-                target: target_version,
-                reason,
+            None => {
+                let Some(entry) = open.index.find(&item.name) else {
+                    return Some(Preview::Unresolved {
+                        from: Some(from),
+                        to: target,
+                        profile_source,
+                        reason: format!("the authenticated candidate {} has no matching index entry", item.name),
+                    });
+                };
+                PackageAction {
+                    kind: PackageActionKind::Install,
+                    name: item.name,
+                    current: None,
+                    target: target_version,
+                    reason,
+                    source: PackageActionSource::AuthenticatedRepository,
+                    archive: entry.file.clone(),
+                    sha256: entry.sha256.clone(),
+                    size: entry.size,
+                    download_url: entry.download_url.clone(),
+                }
             },
         };
         package_actions.push(action);
     }
     for name in resolution.up_to_date {
         if let Some(candidate) = candidates.get(&name) {
+            let Some(entry) = open.index.find(&name) else {
+                return Some(Preview::Unresolved {
+                    from: Some(from),
+                    to: target,
+                    profile_source,
+                    reason: format!("the retained candidate {name} has no matching authenticated index entry"),
+                });
+            };
             package_actions.push(PackageAction {
                 kind: PackageActionKind::Keep,
                 name: name.clone(),
                 current: installed.get(&name).cloned(),
                 target: install::version_rel(&candidate.version, candidate.rel),
                 reason: "already satisfies the authenticated target package candidate".to_string(),
+                source: PackageActionSource::AuthenticatedRepository,
+                archive: entry.file.clone(),
+                sha256: entry.sha256.clone(),
+                size: entry.size,
+                download_url: entry.download_url.clone(),
             });
         }
     }
@@ -440,7 +494,7 @@ fn runtime_identity(runtime: &RuntimeInit) -> Option<String> {
     }
 }
 
-pub(super) fn render(preview: &Preview) -> Vec<String> {
+pub(crate) fn render(preview: &Preview) -> Vec<String> {
     match preview {
         Preview::Unresolved { from, to, profile_source, reason } => vec![
             "System transition check (separate from the ordinary package upgrade)".to_string(),
@@ -478,6 +532,10 @@ pub(super) fn render(preview: &Preview) -> Vec<String> {
                     (None, _) => action.target.clone(),
                 };
                 lines.push(format!("    {marker} {} {version_text} — {}", action.name, action.reason));
+                lines.push(format!(
+                    "      source: authenticated repository; archive: {}; size: {} bytes; sha256: {}",
+                    action.archive, action.size, action.sha256
+                ));
             }
             lines.extend([
                 "  Deferred system actions:".to_string(),

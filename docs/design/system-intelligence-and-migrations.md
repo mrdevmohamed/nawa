@@ -95,6 +95,20 @@ The plan must explain:
 7. boot, recovery, and compatibility risks;
 8. what approval is required.
 
+The application boundary returns one immutable `SystemPlan`, assembled from a single
+`SystemSnapshot` and one repository inspection. It records repository-source
+fingerprint, exact signed-index SHA-256, trusted signer fingerprint, archive
+authentication mode, typed transition outcome, deterministic plan identity,
+and each selected package's source, version, archive filename, size and
+SHA-256. Unknown inventory, invalid configuration, unavailable repositories,
+untrusted metadata and unresolved provider selection remain explicit typed
+states; they are never represented as an empty candidate set.
+
+A plan identity is a content-derived identifier over the observed facts,
+installed inventory, repository evidence and ordered artifact pins. It is an
+inspection identity only at this stage: approval-to-execution validation must
+still bind and re-check that identity before any mutation.
+
 The planner is read-only. It must not create migration records, change profiles, modify boot artifacts, or install packages.
 
 A normal `install`, `update`, or `upgrade` must not silently switch the running init. An init-provider transition requires a distinct migration plan and explicit approval.

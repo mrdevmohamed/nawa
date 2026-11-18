@@ -13,10 +13,10 @@
 | 1 — Structural refactor + service removal | **DONE** (1a, 1b, 1c, 1d, 1e — 1e is the deferred apply-transaction extraction) |
 | 2 — Init identity & capability foundation | **GENERIC DECLARATION LOOKUP + INIT-SYSTEM POLICY** (the pure planner now finds providers by arbitrary normalized capability domain and preserves ambiguous/unknown candidates; only init-system has actionable policy and migration semantics) |
 | 3 — Metadata & capability resolution | **SOURCE-AWARE PACKAGE RESOLUTION CORE IMPLEMENTED; GENERIC SOLVER INCOMPLETE** (recipe and authenticated binary candidates now share one dependency graph for install/update planning; v4 runtime dependencies and capabilities are consumed; version ranges, conflicts, replacements and broader capability constraints remain open) |
-| 4 — System profiles & planning | **PARTIAL PLATFORM** (schema-2 required/preferred/forbidden provider policies now have strict parsing, validation, per-domain admin precedence and provenance; init-system status/plan/upgrade preview explain these policies. A single typed end-to-end SystemPlan and actionable semantics beyond init-system remain open) |
+| 4 — System profiles & planning | **TYPED READ-ONLY SYSTEMPLAN VERTICAL SLICE** (schema-2 policies, one immutable snapshot, typed repository/trust evidence, a typed transition result, deterministic plan identity and exact archive pins are connected; approval-to-execution pinning and non-init policy semantics remain open) |
 | 5 — Migration engine | **PREPARATION FRAMEWORK PRESENT; RECOVERY/BOOT EXECUTION BLOCKED**: typed state machine, durable journal, mutation gate, preparation coordinator and recovery inspection exist; snapshot is not wired to coordinator/recovery and post-boot finalization is absent. |
 | 6 — Faseela runit→systemd migration | **BLOCKED** (current Faseela HEAD already uses systemd; the legacy runit migration is for older installations. Real BIOS/UEFI boot acceptance and rescue/recovery contracts remain open.) |
-| 7 — Platform verification | **IN PROGRESS**: observation hardening is CI-verified; schema-2 policy and rendering work is staged for CI; source-aware package planning is CI-verified; full typed SystemPlan, generic solver constraints, snapshot/recovery integration and real BIOS/UEFI acceptance remain open. |
+| 7 — Platform verification | **IN PROGRESS**: observation hardening, schema-2 policy, source-aware package planning and their integrated baseline are CI-verified; typed SystemPlan and artifact-pin work is the current slice; approval/transaction binding, generic solver constraints, snapshot/recovery integration and real BIOS/UEFI acceptance remain open. |
 | System Intelligence platform | **IN PROGRESS** — accepted direction: System Intelligence is the umbrella; migration is one high-risk feature within it. |
 
 ## Accepted platform direction (2026-11-18)
@@ -1959,10 +1959,27 @@ The last preview integration was repaired without weakening the module-layering 
 
 ## Exact next task
 
-**Connect the current capabilities into one coherent, explainable SystemPlan.**
-The source-aware package resolver and schema-2 provider policy model now exist;
-do not build another solver or reimplement either feature. Continue in this
-dependency order:
+**Bind the typed SystemPlan to approval and execution without re-resolving.**
+The first read-only integration slice is implemented. Continue in this order:
+
+1. Carry the plan identity, repository/index identity and each package archive
+   SHA-256 into a migration-specific approval object; reject stale or changed
+   metadata/artifacts before opening the transaction.
+2. Reuse the existing package transaction executor, lock and WAL for approved
+   package actions. A fresh solver pass must never substitute an artifact after
+   approval; the approved action order and exact digests are authoritative.
+3. Complete generic solver semantics (version constraints, conflicts and
+   replacements) only with explicit metadata and deterministic rules.
+4. Strengthen migration record and snapshot filesystem access with
+   race-resistant dirfd/openat operations where supported; preserve no-follow
+   and ownership checks.
+5. Bind boot snapshot manifests and root identity to migration records, then
+   wire capture/restore into coordinator and recovery with lifecycle cleanup
+   and tamper handling.
+6. Implement post-boot verification/finalization only after restore is proven;
+   run interrupted-install, failed-boot, rescue and rollback scenarios in
+   disposable BIOS/UEFI VMs with retained external-rescue evidence.
+
 
 1. Introduce one typed, immutable, read-only system plan that consumes a single
    `SystemSnapshot`, effective profile/policy and authenticated repository
@@ -2060,3 +2077,31 @@ Intelligence. Version constraints, conflicts, replacement semantics, generic
 profile policies, complete system-plan explainability, transaction plan
 pinning, snapshot/coordinator integration, post-boot finalization and real
 BIOS/UEFI rescue acceptance remain open.
+
+## Typed SystemPlan — read-only composition (2026-11-18)
+
+* `nawa system plan` now builds one feature-owned `SystemPlan` from one
+  `SystemSnapshot`; the command no longer independently composes observation,
+  installed inventory and transition preview.
+* Repository assessment distinguishes not-configured, not-inspected,
+  invalid-configuration, unavailable and opened states. Opened repositories
+  retain a source fingerprint, exact index SHA-256, index schema, configured
+  trusted-key fingerprint, archive-authentication mode and package count.
+  Credentials and raw private repository paths are not rendered.
+* The existing init-system resolver remains the sole provider/dependency
+  resolver. Its typed preview is now consumed by the application plan rather
+  than converted into strings before the command receives it.
+* Every install/upgrade/keep action in that transition preview carries its
+  authenticated repository source, archive filename, byte size, download URL
+  reference and exact SHA-256. The renderer shows the archive digest and size.
+  The ordered action set and repository proof are included in a deterministic
+  `sp-<sha256>` plan identity.
+* No approval or execution path consumes this identity yet. This is deliberate:
+  the next step is to bind it to explicit migration approval and reject stale
+  repository/index/artifact state before any transaction. The migration
+  coordinator and boot-changing handler remain blocked and untouched.
+* The preceding policy and observation baseline passed full CI on commit
+  `da9157e432fba0db8a5b2595997fb78503baf208`, Actions
+  [#44397318056](https://github.com/mrdevmohamed/nawa/actions/runs/44397318056).
+  The SystemPlan slice in this section is a new change and must not be marked
+  verified until a branch-head workflow passes.

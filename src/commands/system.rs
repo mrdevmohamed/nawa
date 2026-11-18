@@ -19,6 +19,7 @@ use crate::application::features::system::migrate_apply as apply_use;
 use crate::application::features::system::migrate_inspect as inspect;
 use crate::application::features::system::migrate_recover as recover;
 use crate::application::features::system::profile as system_profile;
+use crate::application::features::system::plan as system_plan;
 use crate::application::ports::user_interaction::UserInteraction;
 use crate::cli::{MigrateCmd, SystemCmd, SystemProfileCmd};
 use crate::application::context::Ctx;
@@ -49,61 +50,95 @@ fn print_system_profile(root: &Path) -> Result<()> {
 }
 
 fn print_system_plan(ctx: &Ctx) -> Result<()> {
-    // Compose runtime/profile/filesystem evidence and installed package
-    // versions once. Repository planning consumes this same snapshot rather
-    // than re-reading the local package database in a second use case.
-    let snapshot = crate::application::features::system::observation::observe(
-        &ctx.root,
-        Path::new("/proc"),
-    );
-    for line in render_system_plan(&snapshot.observed) {
+    let plan = system_plan::build(&ctx.root, Path::new("/proc"), ctx.repo.as_deref());
+    for line in render_system_plan(&plan.snapshot.observed) {
         println!("{line}");
     }
-
-    let installed_versions = match &snapshot.packages {
-        crate::application::features::system::observation::PackageInventory::Available(packages) => packages,
-        crate::application::features::system::observation::PackageInventory::Unavailable { reason } => {
-            println!(
-                "  Repository plan: unresolved — installed package inventory could not be read: {reason}"
-            );
-            return Ok(());
-        }
-    };
-
-    // The system planner reuses the authenticated transition resolver used by
-    // ordinary upgrade previews. It never has a separate provider-selection
-    // implementation and it never applies the resulting migration.
-    let Some(repository) = ctx.repo.as_deref() else {
-        println!("  Repository plan: unresolved — no repository is configured; no package provider was selected.");
-        return Ok(());
-    };
-    let repo_ref = match crate::fetch::RepoRef::parse(repository) {
-        Ok(repo_ref) => repo_ref,
-        Err(error) => {
-            println!(
-                "  Repository plan: unresolved — repository configuration is invalid: {error:#}"
-            );
-            return Ok(());
-        }
-    };
-    match crate::upgrade::preview_system_transition(
-        &ctx.root,
-        &repo_ref,
-        &snapshot.observed,
-        installed_versions,
-    ) {
-        Ok(Some(lines)) => {
-            println!();
-            for line in lines {
-                println!("{line}");
-            }
-        }
-        Ok(None) => println!("  Repository plan: no separate init-system transition is required by the observed runtime and target profile."),
-        Err(error) => println!(
-            "  Repository plan: unresolved — authenticated repository metadata could not be loaded or verified: {error:#}"
-        ),
+    println!();
+    for line in render_unified_system_plan(&plan) {
+        println!("{line}");
     }
     Ok(())
+}
+
+fn render_unified_system_plan(plan: &system_plan::SystemPlan) -> Vec<String> {
+    let mut lines = vec![
+        "Unified SystemPlan (read-only; no package, boot or profile changes)".to_string(),
+        format!("  Plan identity: {}", plan.identity),
+    ];
+
+    match &plan.repository {
+        system_plan::RepositoryAssessment::NotConfigured => {
+            lines.push("  Repository: not configured".to_string());
+        }
+        system_plan::RepositoryAssessment::NotInspected { reason } => {
+            lines.push(format!("  Repository: not inspected ({reason})"));
+        }
+        system_plan::RepositoryAssessment::InvalidConfiguration {
+            source_fingerprint,
+            reason,
+        } => {
+            lines.push(format!(
+                "  Repository: invalid configuration (source fingerprint {source_fingerprint})"
+            ));
+            lines.push(format!("    reason: {reason}"));
+        }
+        system_plan::RepositoryAssessment::Unavailable {
+            kind,
+            source_fingerprint,
+            reason,
+        } => {
+            lines.push(format!(
+                "  Repository: unavailable ({kind:?}; source fingerprint {source_fingerprint})"
+            ));
+            lines.push(format!("    reason: {reason}"));
+        }
+        system_plan::RepositoryAssessment::Opened {
+            kind,
+            source_fingerprint,
+            index_schema,
+            index_sha256,
+            trusted_signer_sha256,
+            authenticated_by_trusted_key,
+            archive_auth,
+            package_count,
+        } => {
+            lines.push(format!(
+                "  Repository: opened ({kind:?}; source fingerprint {source_fingerprint})"
+            ));
+            lines.push(format!(
+                "    index: schema {}; packages: {package_count}; sha256: {index_sha256}",
+                index_schema
+                    .map(|schema| format!("v{schema}"))
+                    .unwrap_or_else(|| "legacy".to_string())
+            ));
+            lines.push(format!(
+                "    trusted signer: {}",
+                trusted_signer_sha256.as_deref().unwrap_or("not established")
+            ));
+            lines.push(format!(
+                "    trust: {}; archive authentication: {archive_auth:?}",
+                if *authenticated_by_trusted_key {
+                    "verified against a configured trusted key"
+                } else {
+                    "not verified against a configured trusted key"
+                }
+            ));
+        }
+    }
+
+    match &plan.transition {
+        system_plan::TransitionAssessment::NotEvaluated { reason } => {
+            lines.push(format!("  Transition: unresolved — {reason}"));
+        }
+        system_plan::TransitionAssessment::NoChange => {
+            lines.push("  Transition: no separate init-system transition is required by the observed runtime and target profile.".to_string());
+        }
+        system_plan::TransitionAssessment::Preview(preview) => {
+            lines.extend(crate::upgrade::render_system_transition(preview));
+        }
+    }
+    lines
 }
 
 fn print_system_explanation(root: &Path, topic: &str) -> Result<()> {
@@ -334,7 +369,7 @@ fn render_system_plan(observed: &detect::ObservedSystem) -> Vec<String> {
             lines.push(format!("    - {} at {} ({})", candidate.kind.capability_identity(), candidate.path.display(), candidate.evidence));
         }
     }
-    lines.push("  Package actions: resolved separately from authenticated repository metadata; this inspection does not apply them.".to_string());
+    lines.push("  Exact repository provenance, transition decision and artifact pins are shown in the Unified SystemPlan section.".to_string());
     lines
 }
 

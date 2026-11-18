@@ -7,6 +7,11 @@ use std::path::Path;
 
 // ---- checksums -------------------------------------------------------------
 
+pub(crate) fn sha256_bytes(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    hex::encode(digest)
+}
+
 pub(crate) fn sha256_of_file(path: &Path) -> Result<String> {
     let mut f = std::fs::File::open(path)
         .with_context(|| format!("cannot open {} for hashing", path.display()))?;
