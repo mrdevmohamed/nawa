@@ -919,6 +919,7 @@ mod tests {
         fs::create_dir_all(root.join("boot/grub")).unwrap();
         fs::create_dir_all(root.join("usr/bin")).unwrap();
         fs::create_dir_all(root.join("etc/runit/runsvdir/default/networking")).unwrap();
+        fs::create_dir_all(root.join("etc/runit/runsvdir/default/agetty-tty1")).unwrap();
         fs::write(
             root.join("etc/runit/runsvdir/default/networking/run"),
             b"#!/bin/sh\nexec dhcpcd\n",
