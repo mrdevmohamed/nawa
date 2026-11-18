@@ -6,7 +6,6 @@
 //! separate from the normal upgrade transaction.
 
 use std::collections::{BTreeMap, HashMap};
-use crate::adapters::db::Entry;
 use crate::domain::system::migration::builtin_faseela_runit_to_systemd;
 use crate::domain::system::observation::{
     Confidence, Context, DesiredInit, ObservedSystem, RuntimeInit,
@@ -55,7 +54,7 @@ pub(super) enum PackageActionKind {
 pub(super) fn plan(
     observed: &ObservedSystem,
     open: &OpenRepo,
-    installed: &HashMap<String, Entry>,
+    installed: &HashMap<String, String>,
 ) -> Option<Preview> {
     build_from_observation(observed, open, installed)
 }
@@ -259,10 +258,7 @@ fn build_from_observation(
         );
     }
 
-    let installed_versions: HashMap<String, String> = installed
-        .iter()
-        .map(|(name, entry)| (name.clone(), install::version_rel(&entry.version, entry.rel)))
-        .collect();
+    let installed_versions = installed.clone();
     let resolution = match install::install_plan(
         std::slice::from_ref(&provider_package),
         &installed_versions,
@@ -329,9 +325,7 @@ fn build_from_observation(
             package_actions.push(PackageAction {
                 kind: PackageActionKind::Keep,
                 name: name.clone(),
-                current: installed
-                    .get(&name)
-                    .map(|entry| install::version_rel(&entry.version, entry.rel)),
+                current: installed.get(&name).cloned(),
                 target: install::version_rel(&candidate.version, candidate.rel),
                 reason: "already satisfies the authenticated target package candidate".to_string(),
             });
@@ -419,6 +413,7 @@ mod tests {
     use crate::domain::system::identity::InitKind;
     use crate::domain::system::observation::InstalledInit;
     use crate::domain::system::profile::SystemProfile;
+    use std::collections::HashMap;
     use std::path::{Path, PathBuf};
 
     fn root() -> PathBuf {
