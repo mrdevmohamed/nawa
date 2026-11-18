@@ -10,14 +10,67 @@
 
 | Phase | State |
 |---|---|
-| 0 — Source audit | **DONE** (this session) |
+| 0 — Source audit | **DONE** (baseline audit; refresh against the integrated platform before final acceptance) |
 | 1 — Structural refactor + service removal | **DONE** (1a, 1b, 1c, 1d, 1e — 1e is the deferred apply-transaction extraction) |
-| 2 — Init identity & capability foundation | **DONE** (detection + capability/identity domain model) |
-| 3 — Metadata & capability resolution | **DONE** (B3 proposal is now wired: recipe `[capabilities]` → `.PKGINFO provides` → signed index v4 → solver, legacy v1–v3 unchanged; the whole package planner — install, outdated, orphans, removal ordering — in `domain/planning/`) |
-| 4 — System profiles & planning | **DONE** (profile model + merge rules + loader §7; profile wired into plan generation §8.1–8.4 — install/update report the init decision, invalid profiles fail closed; byte-identity + probes verified. B3 signed-index v4 provider metadata is wired into candidate explanations; legacy v1–v3 remains explicitly unknown) |
-| 5 — Migration engine | **FRAMEWORK IMPLEMENTED**: typed migration model, durable record store, persistent exclusive-lock mutation gate, read-only inspection, coordinator/permit, write-ahead lifecycle, crash recovery, explicit live-host resume and adversarial security tests. The real distribution boot handler remains blocked by Phase 6 contracts; `apply` refuses before creating a record or changing packages. |
-| 6 — Faseela runit→systemd migration | **BLOCKED** (external re-inspection 2026-11-18: current Faseela has *already* moved to systemd — runit recipes removed, `init = "systemd"` profile — so the migration premise no longer matches current HEAD; B1/B4/B5/B6/B7 still open. Nawa-side preflight, explicit authorization, read-only plan and resume are implemented; real boot transition is not) |
-| 7 — Final verification | **DONE (Nawa-side)**: source ownership reorganization, system inspection, read-only transition preview and final CI verification are complete. Real Faseela boot acceptance remains Phase 6 and is not implied. |
+| 2 — Init identity & capability foundation | **DONE FOR THE FIRST VERTICAL SLICE** (the generic model exists, but observed capabilities and providers currently cover init-system only) |
+| 3 — Metadata & capability resolution | **DONE FOR INIT PROVIDERS; PLATFORM SOLVER INCOMPLETE** (recipe → .PKGINFO → signed index v4 → solver is wired; version constraints, capability requirements beyond init, conflicts and replacements are not represented by the current index model) |
+| 4 — System profiles & planning | **PARTIAL PLATFORM** (profile model and precedence work for init-system; system planning is being unified with the authenticated repository transition preview) |
+| 5 — Migration engine | **FRAMEWORK IMPLEMENTED, BOOT EXECUTION BLOCKED**: typed state machine, durable journal, mutation gate, coordinator and recovery exist; Snapshot is not yet wired to coordinator/recovery and the real boot handler remains blocked. |
+| 6 — Faseela runit→systemd migration | **BLOCKED** (current Faseela HEAD already uses systemd; the legacy runit migration is for older installations. Real BIOS/UEFI boot acceptance and rescue/recovery contracts remain open.) |
+| 7 — Platform verification | **IN PROGRESS**: Nawa-side inspection and repository preview exist; unified system planning, full solver semantics, integrated recovery and real boot acceptance are not complete. |
+| System Intelligence platform | **IN PROGRESS** — accepted direction: System Intelligence is the umbrella; migration is one high-risk feature within it. |
+
+## Accepted platform direction (2026-11-18)
+
+The selected product direction is to complete **System Intelligence as a coherent
+system-aware planning and reconciliation layer**, with migration as one feature
+that consumes the same observations, capability metadata, policy, solver and
+explainable plan. Do not treat the runit-to-systemd handler as the product.
+
+The current implementation is an init-system vertical slice, not a complete
+system intelligence platform. Preserve the existing Feature-Oriented Hexagonal
+Architecture with Functional Core / Imperative Shell; do not restart the
+architecture or create a second dependency solver.
+
+Platform completion requires these connected capabilities:
+
+1. **Observation:** a normalized, read-only system snapshot that distinguishes
+   runtime facts, installed state, desired profile, execution context, evidence,
+   confidence, unknowns and contradictions. Never infer host facts for an
+   offline root.
+2. **Capabilities and providers:** versioned declarations with explicit
+   trust/provenance, exclusivity, compatibility and ambiguity rules. Keep
+   `init-system` as the first supported domain; do not invent additional
+   provider domains before their metadata and policy contracts are specified.
+3. **Unified solver:** one deterministic domain solver for package dependencies,
+   provider selection and system constraints. The current v4 model carries
+   runtime dependency names and capabilities, but not version ranges, conflicts
+   or replacements; those are explicit platform gaps, not silently supported
+   features.
+4. **Profiles and policy:** merge distribution defaults and administrator
+   overrides with clear precedence; represent required, preferred and forbidden
+   decisions only when their semantics and trust boundaries are defined.
+5. **Explainable plans:** show observed state, desired state, selected providers,
+   exact package actions, constraints, unresolved facts, risks and the reason
+   for every action. Pin trusted metadata and artifact identities before approval.
+6. **Execution and reconciliation:** reuse Nawa's transaction/installer path,
+   persistent locking and write-ahead journal. No second installer or generic
+   shell-command migration engine.
+7. **Verification and recovery:** verify postconditions from observed system
+   state; make interrupted operations resumable or explicitly
+   `needs-recovery`. Boot snapshots and external rescue paths must be wired and
+   tested before a boot-changing migration can execute.
+
+A normal package install/update must never silently switch the running init.
+A migration requires its own explicit approval, a verified live-host context,
+trusted package metadata, a boot/recovery contract and post-reboot verification.
+`--yes` for an ordinary package transaction is not migration authorization.
+
+The first implementation priority is to finish the common platform path and
+its security invariants, then complete the init-system migration as its first
+high-risk consumer. Current Faseela systemd installations must not be migrated
+again; test the runit-to-systemd path only in disposable VMs representing
+supported legacy installations.
 
 ## Completed phases
 
