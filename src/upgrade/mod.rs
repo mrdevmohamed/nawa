@@ -68,14 +68,10 @@ pub(crate) fn preview_system_transition(
     root: &Path,
     repo_ref: &RepoRef,
     observed: &ObservedSystem,
+    installed_versions: &HashMap<String, String>,
 ) -> Result<Option<Vec<String>>> {
     let open = open_repo(root, repo_ref, false, false)?;
-    let installed: HashMap<String, crate::adapters::db::Entry> = Db::new(root)
-        .installed()?
-        .into_iter()
-        .map(|entry| (entry.name.clone(), entry))
-        .collect();
-    let Some(preview) = system_transition::plan(observed, &open, &installed) else {
+    let Some(preview) = system_transition::plan(observed, &open, installed_versions) else {
         return Ok(None);
     };
     Ok(Some(system_transition::render(&preview)))
@@ -90,8 +86,19 @@ fn upgrade_inner(
 ) -> Result<()> {
     let open = open_repo(root, repo_ref, opts.allow_unsigned, opts.force)?;
     let mut plan = build_plan(root, &open.index, recipes)?;
-    plan.system_transition = observed
-        .and_then(|observed| system_transition::plan(observed, &open, &plan.installed));
+    let installed_versions: HashMap<String, String> = plan
+        .installed
+        .iter()
+        .map(|(name, entry)| {
+            (
+                name.clone(),
+                crate::domain::planning::install::version_rel(&entry.version, entry.rel),
+            )
+        })
+        .collect();
+    plan.system_transition = observed.and_then(|observed| {
+        system_transition::plan(observed, &open, &installed_versions)
+    });
 
     if plan.upgrades.is_empty() && plan.system_transition.is_none() {
         crate::nawa_info!("everything up to date ({} installed)", plan.installed.len());
