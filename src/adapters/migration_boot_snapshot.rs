@@ -31,7 +31,7 @@ use std::path::{Component, Path, PathBuf};
 use crate::adapters::{atomic, unique};
 use crate::domain::system::migration::check_id;
 
-const SNAPSHOT_SCHEMA: u32 = 1;
+const SNAPSHOT_SCHEMA: u32 = 2;
 const MAX_SNAPSHOT_ENTRIES: usize = 999;
 const FIXED_PATHS: &[&str] = &[
     "boot/grub/grub.cfg",
@@ -81,6 +81,7 @@ enum Restorable {
     Absent,
     File { bytes: Vec<u8>, mode: u32 },
     Symlink { target: String },
+    Directory { mode: u32 },
 }
 
 #[derive(Debug)]
@@ -213,7 +214,7 @@ pub(crate) fn verify(root: &Path, migration_id: &str) -> Result<SnapshotInfo> {
     let bytes = validated.iter().fold(0u64, |sum, entry| {
         sum.saturating_add(match &entry.state {
             Restorable::File { bytes, .. } => bytes.len() as u64,
-            Restorable::Symlink { .. } | Restorable::Absent => 0,
+            Restorable::Symlink { .. } | Restorable::Directory { .. } | Restorable::Absent => 0,
         })
     });
     Ok(SnapshotInfo {
@@ -235,7 +236,7 @@ pub(crate) fn restore(root: &Path, migration_id: &str) -> Result<SnapshotInfo> {
     let bytes = validated.iter().fold(0u64, |sum, entry| {
         sum.saturating_add(match &entry.state {
             Restorable::File { bytes, .. } => bytes.len() as u64,
-            Restorable::Symlink { .. } | Restorable::Absent => 0,
+            Restorable::Symlink { .. } | Restorable::Directory { .. } | Restorable::Absent => 0,
         })
     });
 
@@ -245,7 +246,16 @@ pub(crate) fn restore(root: &Path, migration_id: &str) -> Result<SnapshotInfo> {
     for entry in &validated {
         let create = !matches!(&entry.state, Restorable::Absent);
         let _ = ensure_target_parent(&root, &entry.path, create)?;
-        reject_directory_leaf(&root.join(&entry.path))?;
+        if !matches!(&entry.state, Restorable::Directory { .. }) {
+            reject_directory_leaf(&root.join(&entry.path))?;
+        } else if let Ok(metadata) = fs::symlink_metadata(root.join(&entry.path)) {
+            if metadata.file_type().is_symlink() || (!metadata.is_dir() && !metadata.is_file()) {
+                bail!(
+                    "refusing to replace unsafe runit service directory entry {}",
+                    root.join(&entry.path).display()
+                );
+            }
+        }
     }
 
     for entry in &validated {
@@ -270,6 +280,29 @@ pub(crate) fn restore(root: &Path, migration_id: &str) -> Result<SnapshotInfo> {
             Restorable::Symlink { target } => {
                 validate_link_target(&entry.path, target)?;
                 replace_symlink(&destination, target)?;
+            }
+            Restorable::Directory { mode } => {
+                match fs::symlink_metadata(&destination) {
+                    Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+                    Ok(metadata) if metadata.is_file() => {
+                        fs::remove_file(&destination)?;
+                        fs::create_dir(&destination)?;
+                    }
+                    Ok(_) => bail!(
+                        "refusing to restore runit service directory over {}",
+                        destination.display()
+                    ),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        fs::create_dir(&destination).with_context(|| {
+                            format!("restore runit service directory {}", destination.display())
+                        })?;
+                    }
+                    Err(error) => return Err(error).with_context(|| {
+                        format!("inspect runit service directory {}", destination.display())
+                    }),
+                }
+                fs::set_permissions(&destination, fs::Permissions::from_mode(*mode))?;
+                atomic::sync_directory(destination.parent().expect("validated path has parent"))?;
             }
         }
     }
@@ -362,9 +395,22 @@ fn capture_entry(
         ));
     }
 
+    if metadata.is_dir() {
+        return Ok((
+            Entry {
+                path: relative.to_string(),
+                kind: "directory".to_string(),
+                mode: Some(metadata.permissions().mode() & 0o7777),
+                blob: None,
+                target: None,
+                sha256: None,
+            },
+            None,
+        ));
+    }
     if !metadata.is_file() {
         bail!(
-            "boot recovery artifact {} is not a regular file or symlink",
+            "boot recovery artifact {} is not a regular file, directory or symlink",
             path.display()
         );
     }
@@ -549,6 +595,22 @@ fn load_validated(
                 verify_hash(&bytes, expected, &entry.path)?;
                 Restorable::File { bytes, mode }
             }
+            "directory" => {
+                let mode = entry.mode.ok_or_else(|| {
+                    anyhow::anyhow!("directory entry {} has no mode", entry.path)
+                })?;
+                if mode > 0o7777
+                    || entry.blob.is_some()
+                    || entry.target.is_some()
+                    || entry.sha256.is_some()
+                {
+                    bail!(
+                        "directory boot recovery entry {} has invalid metadata",
+                        entry.path
+                    );
+                }
+                Restorable::Directory { mode }
+            }
             "symlink" => {
                 if entry.mode.is_some() || entry.blob.is_some() {
                     bail!(
@@ -626,6 +688,23 @@ fn collect_runit_service_paths(root: &Path) -> Result<Vec<String>> {
                     );
                 }
             } else if metadata.is_dir() {
+                let relative = path
+                    .strip_prefix(root)
+                    .context("runit service directory escaped the selected target root")?;
+                let value = relative
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("runit service path is not UTF-8"))?
+                    .to_string();
+                if !allowed_path(Path::new(&value)) {
+                    bail!("runit service directory {value:?} is outside the snapshot allowlist");
+                }
+                output.push(value);
+                if output.len() > MAX_SNAPSHOT_ENTRIES {
+                    bail!(
+                        "runit service tree exceeds the safe limit of {} entries",
+                        MAX_SNAPSHOT_ENTRIES
+                    );
+                }
                 walk(root, &path, output)?;
             } else {
                 bail!(
@@ -650,6 +729,7 @@ fn collect_runit_service_paths(root: &Path) -> Result<Vec<String>> {
     }
 
     let mut paths = Vec::new();
+    paths.push(relative.to_string_lossy().into_owned());
     walk(root, &directory, &mut paths)?;
     Ok(paths)
 }
@@ -664,6 +744,7 @@ fn allowed_path(path: &Path) {
     }
     let value = path.to_string_lossy();
     FIXED_PATHS.iter().any(|allowed| value == *allowed)
+        || value == "etc/runit/runsvdir/default"
         || value.starts_with("etc/runit/runsvdir/default/")
         || (value.starts_with("boot/vmlinuz-") && !value[5..].contains('/'))
         || (value.starts_with("boot/initramfs-")
@@ -920,6 +1001,12 @@ mod tests {
         fs::create_dir_all(root.join("usr/bin")).unwrap();
         fs::create_dir_all(root.join("etc/runit/runsvdir/default/networking")).unwrap();
         fs::create_dir_all(root.join("etc/runit/runsvdir/default/agetty-tty1")).unwrap();
+        fs::create_dir(root.join("etc/runit/runsvdir/default/empty-service")).unwrap();
+        fs::set_permissions(
+            root.join("etc/runit/runsvdir/default/empty-service"),
+            fs::Permissions::from_mode(0o750),
+        )
+        .unwrap();
         fs::write(
             root.join("etc/runit/runsvdir/default/networking/run"),
             b"#!/bin/sh\nexec dhcpcd\n",
@@ -983,6 +1070,7 @@ mod tests {
 
         fs::remove_file(&service_run).unwrap();
         fs::write(&agetty_run, b"changed service definition\n").unwrap();
+        fs::remove_dir(root.join("etc/runit/runsvdir/default/empty-service")).unwrap();
 
         restore(&root, "faseela-runit-to-systemd-v1").unwrap();
         assert_eq!(
@@ -993,7 +1081,13 @@ mod tests {
             fs::read(&agetty_run).unwrap(),
             b"#!/bin/sh\nexec getty 38400 tty1\n"
         );
-        assert!(info.entries >= FIXED_PATHS.len() + 4);
+        let empty_service = root.join("etc/runit/runsvdir/default/empty-service");
+        assert!(empty_service.is_dir());
+        assert_eq!(
+            fs::metadata(empty_service).unwrap().permissions().mode() & 0o777,
+            0o750
+        );
+        assert!(info.entries >= FIXED_PATHS.len() + 7);
     }
 
     #[test]
