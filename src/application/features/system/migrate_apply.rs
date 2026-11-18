@@ -195,15 +195,15 @@ impl MigrationApproval {
 }
 
 /// Blockers are evaluated against the default branches. Companion changes
-/// may be ready in PRs, but they do not alter the installed distribution until
-/// merged and accepted by the relevant boot tests.
+/// are merged; installed-root and real disk-boot acceptance remain separate
+/// requirements and are not inferred from successful CI.
 const HANDLER_BLOCKERS: &[&str] = &[
-    "B1: Faseela PR #59 adds init=/usr/lib/systemd/systemd to installed-disk GRUB but is not merged; real BIOS and UEFI boots through SAQ must still verify PID 1",
-    "B2: legacy runit-services packages own /usr/bin/init -> /usr/bin/runit; the systemd package also owns /usr/bin/init, and Nawa's normal file-conflict guard refuses the handoff unless generic --force is used; no migration-scoped journaled ownership-transfer path exists, so do not use --force",
-    "B4: Faseela Repo PR #203 adds /usr/share/nawa/system-profile.toml but is not merged and no installed-root acceptance test has verified the effective profile",
+    "B1: Faseela PR #59 and SAQ PR #4 are merged; installed GRUB passes init=/usr/lib/systemd/systemd, but a disposable BIOS+UEFI disk boot through real SAQ must still verify /proc/1/comm=systemd",
+    "B2: exact /usr/bin/init co-ownership is migration-scoped and tested; sequencing (retain runit-services through reboot, remove only after verification) still depends on the B5 finalizer/recovery path and is not wired to the production handler",
+    "B4: Faseela Repo PR #203 is merged and base-files ships /usr/share/nawa/system-profile.toml; installed-root acceptance must verify Nawa's distribution default and administrator override",
     "B5: no migration-specific boot artifact retention, old-entry restoration, or tested external rescue contract exists",
     "B6: no disposable BIOS+UEFI installed-disk migration harness with snapshots and real SAQ/PID 1 verification exists",
-    "B7: Faseela Repo PR #203 removes service-manager mutations from five package hooks and adds a recipe guard, but it is not merged; current main still has the old hook behavior",
+    "B7: Faseela Repo PR #203 is merged; recipe CI rejects direct service-state mutations in privileged hooks and transaction-trigger sources, and Faseela applies vendor presets during image provisioning; installed-package acceptance remains required and the static guard is not a shell sandbox",
 ];
 
 /// How an apply attempt ended before any package mutation.

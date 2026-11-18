@@ -182,6 +182,33 @@ impl MigrationDefinition {
     }
 }
 
+/// Opaque authority for the one legacy file overlap required by the
+/// built-in Faseela runit -> systemd migration. It is not a general
+/// package-conflict override and cannot be constructed by package metadata.
+#[derive(Debug)]
+pub(crate) struct LegacyInitHandoff {
+    _seal: (),
+}
+
+impl MigrationDefinition {
+    /// Mint the narrow handoff authority only for the reviewed built-in
+    /// transition. The installer still validates the package name, exact
+    /// path, sole legacy owner and both symlink targets against the live root.
+    pub(crate) fn legacy_init_handoff(&self) -> Option<LegacyInitHandoff> {
+        if self.id == "faseela-runit-to-systemd-v1"
+            && self.version == 1
+            && matches!(&self.handler, HandlerId::FaseelaInitRunitToSystemd)
+            && self.from.to_key() == "init-system=runit"
+            && self.to.to_key() == "init-system=systemd"
+            && self.requires_reboot
+        {
+            Some(LegacyInitHandoff { _seal: () })
+        } else {
+            None
+        }
+    }
+}
+
 /// The reviewed built-in Faseela init transition. This is a domain
 /// definition, not repository metadata or an executable handler supplied by
 /// a package.

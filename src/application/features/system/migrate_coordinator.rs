@@ -115,8 +115,8 @@ use crate::application::ports::user_interaction::UserInteraction;
 use crate::application::context::Ctx;
 use crate::adapters::db::InstallReason;
 use crate::domain::system::migration::{
-    transition, MigrationDefinition, MigrationRecord, MigrationState, StepOutcome, StepRecord,
-    Transition,
+    transition, LegacyInitHandoff, MigrationDefinition, MigrationRecord, MigrationState,
+    StepOutcome, StepRecord, Transition,
 };
 use crate::adapters::lock;
 use crate::adapters::migration_record as store;
@@ -269,6 +269,9 @@ pub(crate) fn prepare(ctx: &Ctx, request: PreparationRequest<'_>) -> Result<Prep
     })?;
     // the permit lives exactly as long as this coordinator run
     let permit = MigrationPermit { _seal: Seal };
+    let legacy_init_handoff = definition.legacy_init_handoff().ok_or_else(|| {
+        anyhow!("the migration definition does not authorize the built-in legacy init handoff")
+    })?;
     // Ctrl+C/SIGTERM/SIGHUP are deferred for the whole preparation (the
     // guards nest with the installer's own): a signal does not kill the
     // process mid-save or mid-side-effect — the next between-steps check
@@ -445,6 +448,7 @@ pub(crate) fn prepare(ctx: &Ctx, request: PreparationRequest<'_>) -> Result<Prep
                         force: *force,
                         allow_unsigned: *allow_unsigned,
                         source,
+                        legacy_init_handoff: &legacy_init_handoff,
                     },
                     &mut op,
                     ui,

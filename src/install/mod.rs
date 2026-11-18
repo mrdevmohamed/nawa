@@ -24,6 +24,7 @@ use std::path::PathBuf;
 use crate::adapters::interrupt;
 use crate::adapters::db::Entry;
 use crate::adapters::sign;
+use crate::domain::system::migration::LegacyInitHandoff;
 
 /// How the bytes of the archive being installed were authenticated. Decides
 /// the provenance record written next to the content-addressed object.
@@ -111,6 +112,27 @@ pub(crate) fn install_archive_pinned(
     root: &Path,
     opts: InstallOpts<'_>,
 ) -> Result<Entry> {
+    install_archive_pinned_inner(archive_path, root, opts, None)
+}
+
+/// Migration-only pinned install using the typed legacy-init handoff.
+/// The payload layer independently checks the exact package, file owner and
+/// both symlink targets before permitting the one co-owned path.
+pub(crate) fn install_archive_pinned_for_migration(
+    archive_path: &Path,
+    root: &Path,
+    opts: InstallOpts<'_>,
+    authority: &LegacyInitHandoff,
+) -> Result<Entry> {
+    install_archive_pinned_inner(archive_path, root, opts, Some(authority))
+}
+
+fn install_archive_pinned_inner(
+    archive_path: &Path,
+    root: &Path,
+    opts: InstallOpts<'_>,
+    legacy_init_handoff: Option<&LegacyInitHandoff>,
+) -> Result<Entry> {
     let InstallOpts { force, allow_unsigned, key, reason, pinned_sha, file_journal } = opts;
     let snapshot_dir = root.join(".nawa");
     let snapshot = crate::fetch::snapshot_file(archive_path, pinned_sha, &snapshot_dir)?;
@@ -138,6 +160,7 @@ pub(crate) fn install_archive_pinned(
         true,
         auth,
         file_journal,
+        legacy_init_handoff,
     )
 }
 
@@ -196,7 +219,7 @@ pub(crate) fn install_archive_from_index_proof(
             repo_id: None,
         },
     };
-    install_archive_payload(snapshot.path(), archive_path, root, force, reason, false, auth, file_journal)
+    install_archive_payload(snapshot.path(), archive_path, root, force, reason, false, auth, file_journal, None)
 }
 
 /// Borrowed proof bundle for a trusted-index install.

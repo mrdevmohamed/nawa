@@ -323,6 +323,21 @@ impl Db {
         }
         Ok(map)
     }
+
+    /// All installed packages that claim one exact path. Unlike
+    /// file_owners, this preserves intentional co-ownership instead of
+    /// collapsing it to whichever package happened to be visited last.
+    pub fn owners_of_file(&self, path: &str) -> Result<Vec<String>> {
+        let mut owners = Vec::new();
+        for entry in self.installed()? {
+            if self.files(&entry.name)?.iter().any(|file| file == path) {
+                owners.push(entry.name);
+            }
+        }
+        owners.sort();
+        owners.dedup();
+        Ok(owners)
+    }
 }
 
 #[cfg(test)]

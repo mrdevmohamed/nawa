@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 use crate::application::features::package::plan_install::{Source, Sourcing};
 use crate::application::features::system::migrate_coordinator::MigrationPermit;
+use crate::domain::system::migration::LegacyInitHandoff;
 use crate::application::ports::user_interaction::{PlanRow, PlanView, UserInteraction};
 use crate::adapters::config::InstallMode;
 use crate::application::context::Ctx;
@@ -71,6 +72,8 @@ struct InstallRequest<'a> {
     signed_index: bool,
     /// Where this archive comes from, for the history record.
     source: &'a str,
+    /// Present only on an approved system migration package step.
+    legacy_init_handoff: Option<&'a LegacyInitHandoff>,
 }
 
 /// Lock ownership for one install step (§10.3). The ordinary path takes
@@ -116,6 +119,8 @@ pub(crate) struct MigrationInstall<'a> {
     pub(crate) allow_unsigned: bool,
     /// provenance for the history record
     pub(crate) source: &'a str,
+    /// Opaque authority minted from the validated built-in migration.
+    pub(crate) legacy_init_handoff: &'a LegacyInitHandoff,
 }
 
 /// Show the plan, ask, then install every item in order — dependencies
@@ -214,6 +219,7 @@ pub(crate) fn apply_transaction(
                     index_sha256: index_sha256.as_deref(),
                     signed_index,
                     source,
+                    legacy_init_handoff: None,
                 },
                 sourcing.open.as_ref(),
                 op,
@@ -259,6 +265,7 @@ pub(crate) fn apply_transaction(
                     index_sha256: Some(re.sha256.as_str()),
                     signed_index,
                     source: "repository",
+                    legacy_init_handoff: None,
                 },
                 sourcing.open.as_ref(),
                 op,
@@ -433,18 +440,20 @@ fn install_one(
         }
         pinned => {
             let expected = pinned.unwrap_or(target.artifact_sha256.as_str());
-            install::install_archive_pinned(
-                archive,
-                &ctx.root,
-                install::InstallOpts {
-                    force: details.force,
-                    allow_unsigned: details.allow_unsigned,
-                    key: None,
-                    reason: effective_reason,
-                    pinned_sha: Some(expected),
-                    file_journal,
-                },
-            )
+            let opts = install::InstallOpts {
+                force: details.force,
+                allow_unsigned: details.allow_unsigned,
+                key: None,
+                reason: effective_reason,
+                pinned_sha: Some(expected),
+                file_journal,
+            };
+            match details.legacy_init_handoff {
+                Some(authority) => install::install_archive_pinned_for_migration(
+                    archive, &ctx.root, opts, authority,
+                ),
+                None => install::install_archive_pinned(archive, &ctx.root, opts),
+            }
         }
     };
     install::record_install_outcome(
@@ -484,6 +493,9 @@ pub(crate) fn install_for_migration(
     guard: &lock::DbLock,
     permit: &MigrationPermit,
 ) -> Result<()> {
+    if request.force {
+        bail!("migration package steps cannot use generic --force; the typed legacy-init handoff is the only permitted conflict exception");
+    }
     install_one(
         ctx,
         request.archive,
@@ -499,6 +511,7 @@ pub(crate) fn install_for_migration(
             // mutation phase); no repository index proof is involved
             signed_index: false,
             source: request.source,
+            legacy_init_handoff: Some(request.legacy_init_handoff),
         },
         None,
         op,

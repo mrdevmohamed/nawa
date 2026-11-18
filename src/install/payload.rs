@@ -12,6 +12,7 @@ use crate::install::hooks::{hook_status_path, run_tracked_hook, save_hooks};
 use crate::install::journal::{FileJournalId, Tx};
 use crate::adapters::interrupt;
 use crate::adapters::sign;
+use crate::domain::system::migration::LegacyInitHandoff;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn install_archive_payload(
@@ -23,6 +24,7 @@ pub(crate) fn install_archive_payload(
     cache_detached_signature: bool,
     auth: InstallAuth,
     file_journal: Option<FileJournalId>,
+    legacy_init_handoff: Option<&LegacyInitHandoff>,
 ) -> Result<Entry> {
     let db = Db::new(root);
     // Ctrl+C / SIGTERM / SIGHUP are deferred from here to the end of the
@@ -75,7 +77,15 @@ pub(crate) fn install_archive_payload(
     let (staged_files, staged_hashes) = stage_tree(&tmp)?;
     let owners = db.file_owners()?;
     if !force {
-        check_file_conflicts(&tmp, root, &name, &staged_files, &owners)?;
+        check_file_conflicts(
+            &tmp,
+            root,
+            &name,
+            &staged_files,
+            &owners,
+            &db,
+            legacy_init_handoff,
+        )?;
     }
 
     // ---- remember the previous version for rollback -------------------------
@@ -239,6 +249,39 @@ struct PackageIdentity<'a> {
     arch: &'a str,
 }
 
+/// Check whether the built-in migration may share this one legacy path.
+/// This is deliberately narrower than a generic force override: the only
+/// accepted state is systemd replacing runit-services' original symlink.
+fn legacy_init_handoff_matches(
+    tmp: &Path,
+    root: &Path,
+    name: &str,
+    path: &str,
+    db: &Db,
+    authority: Option<&LegacyInitHandoff>,
+) -> Result<bool> {
+    if authority.is_none() || name != "systemd" || path != "/usr/bin/init" {
+        return Ok(false);
+    }
+    if db.owners_of_file(path)? != ["runit-services".to_string()] {
+        return Ok(false);
+    }
+    let staged = tmp.join(path.trim_start_matches('/'));
+    let installed = root.join(path.trim_start_matches('/'));
+    let staged_target = match std::fs::read_link(staged) {
+        Ok(target) => target,
+        Err(_) => return Ok(false),
+    };
+    let installed_target = match std::fs::read_link(installed) {
+        Ok(target) => target,
+        Err(_) => return Ok(false),
+    };
+    Ok(
+        staged_target == Path::new("../lib/systemd/systemd")
+            && installed_target == Path::new("/usr/bin/runit"),
+    )
+}
+
 /// Fail when the staged tree would overwrite a file another package owns.
 /// Directories merge silently, and a symlink that already points where this
 /// package wants it is a no-op.
@@ -248,6 +291,8 @@ fn check_file_conflicts(
     name: &str,
     staged_files: &[String],
     owners: &std::collections::HashMap<String, String>,
+    db: &Db,
+    legacy_init_handoff: Option<&LegacyInitHandoff>,
 ) -> Result<()> {
     let mut conflicts: Vec<String> = Vec::new();
     for f in staged_files {
@@ -268,7 +313,27 @@ fn check_file_conflicts(
                 continue;
             }
         }
-        if let Some(owner) = owners.get(f) {
+        if f == "/usr/bin/init" {
+            let recorded = db.owners_of_file(f)?;
+            let foreign: Vec<&String> = recorded.iter().filter(|owner| owner.as_str() != name).collect();
+            if !foreign.is_empty() {
+                if legacy_init_handoff_matches(
+                    tmp,
+                    root,
+                    name,
+                    f,
+                    db,
+                    legacy_init_handoff,
+                )? {
+                    continue;
+                }
+                conflicts.push(format!(
+                    "{f} (owned by {})",
+                    foreign.iter().map(|owner| owner.as_str()).collect::<Vec<_>>().join(", ")
+                ));
+                continue;
+            }
+        } else if let Some(owner) = owners.get(f) {
             if owner != name {
                 conflicts.push(format!("{f} (owned by {owner})"));
             }
@@ -642,51 +707,117 @@ pub(crate) fn contents_differ(staged: &Path, dest: &Path) -> bool {
 
 #[cfg(test)]
 mod legacy_init_conflict_tests {
-    use super::check_file_conflicts;
+    use super::*;
+    use crate::adapters::db::{Db, InstallReason};
+    use crate::domain::system::migration::builtin_faseela_runit_to_systemd;
     use std::collections::HashMap;
     use std::os::unix::fs::symlink;
     use std::path::PathBuf;
 
-    #[test]
-    fn systemd_payload_cannot_silently_take_legacy_runit_init() {
-        let root = crate::testutil::tmpdir("legacy-runit-init-root");
-        let staged = crate::testutil::tmpdir("legacy-runit-init-stage");
-        let root_init = root.join("usr/bin/init");
+    fn seed_runit_owner(root: &Path) {
+        let entry = crate::testutil::entry("runit-services", "1.0", &"a".repeat(64));
+        Db::new(root)
+            .add(&entry, &["/usr/bin/init".to_string()], &HashMap::new())
+            .unwrap();
+    }
+
+    fn stage_systemd_init(base: &Path) -> PathBuf {
+        let staged = base.join("stage");
         let staged_init = staged.join("usr/bin/init");
-
-        std::fs::create_dir_all(root_init.parent().unwrap()).unwrap();
         std::fs::create_dir_all(staged_init.parent().unwrap()).unwrap();
-
-        // Historical runit-services payload: /usr/bin/init -> /usr/bin/runit.
-        symlink("/usr/bin/runit", &root_init).unwrap();
-        // Current systemd payload wants a different owner and target.
         symlink("../lib/systemd/systemd", &staged_init).unwrap();
+        staged
+    }
 
-        let owners = HashMap::from([(
-            "/usr/bin/init".to_string(),
-            "runit-services".to_string(),
-        )]);
+    #[test]
+    fn systemd_payload_cannot_take_legacy_runit_init_without_migration_authority() {
+        let base = crate::testutil::tmpdir("legacy-runit-init-denied");
+        let root = base.join("root");
+        let root_init = root.join("usr/bin/init");
+        std::fs::create_dir_all(root_init.parent().unwrap()).unwrap();
+        symlink("/usr/bin/runit", &root_init).unwrap();
+        seed_runit_owner(&root);
+        let staged = stage_systemd_init(&base);
+        let db = Db::new(&root);
+        let owners = db.file_owners().unwrap();
         let staged_files = vec!["/usr/bin/init".to_string()];
 
         let error = check_file_conflicts(
-            &staged,
-            &root,
-            "systemd",
-            &staged_files,
-            &owners,
-        )
-        .expect_err("a legacy package owner must block an unapproved init handoff");
+            &staged, &root, "systemd", &staged_files, &owners, &db, None,
+        ).expect_err("ordinary installation must not take the legacy init entry point");
 
         assert!(error.to_string().contains("/usr/bin/init"));
         assert!(error.to_string().contains("runit-services"));
+        assert_eq!(std::fs::read_link(&root_init).unwrap(), PathBuf::from("/usr/bin/runit"));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn migration_handoff_is_exact_and_leaves_both_package_records_until_finalization() {
+        let base = crate::testutil::tmpdir("legacy-runit-init-handoff");
+        let root = base.join("root");
+        let root_init = root.join("usr/bin/init");
+        std::fs::create_dir_all(root_init.parent().unwrap()).unwrap();
+        symlink("/usr/bin/runit", &root_init).unwrap();
+        seed_runit_owner(&root);
+
+        let staged = base.join("stage");
+        let staged_init = staged.join("usr/bin/init");
+        std::fs::create_dir_all(staged_init.parent().unwrap()).unwrap();
+        symlink("../lib/systemd/systemd", &staged_init).unwrap();
+        let archive_path = base.join("systemd-261.5-2.nawa.tar.zst");
+        archive::create(
+            &staged,
+            "pkgname = systemd\npkgver = 261.5\npkgrel = 2\narch = x86_64\nrundeps = \nsize = 1\n",
+            &archive_path,
+        ).unwrap();
+
+        let definition = builtin_faseela_runit_to_systemd();
+        let authority = definition.legacy_init_handoff().expect("the built-in migration grants the narrow authority");
+        install_archive_payload(
+            &archive_path, &archive_path, &root, false, InstallReason::Explicit,
+            false, InstallAuth::LocalBuild, None, Some(&authority),
+        ).unwrap();
+
+        let db = Db::new(&root);
+        assert_eq!(std::fs::read_link(&root_init).unwrap(), PathBuf::from("../lib/systemd/systemd"));
         assert_eq!(
-            std::fs::read_link(&root_init).unwrap(),
-            PathBuf::from("/usr/bin/runit"),
-            "the old init entry point must remain unchanged after rejection",
+            db.owners_of_file("/usr/bin/init").unwrap(),
+            vec!["runit-services".to_string(), "systemd".to_string()],
+            "the old package record remains until post-boot finalization",
         );
 
-        let _ = std::fs::remove_dir_all(root);
-        // check_file_conflicts removes the staging tree on conflict.
-        assert!(!staged.exists());
+        // Removing the legacy package after verification must not delete the
+        // path now shared with systemd.
+        crate::install::rollback::remove_with("runit-services", &root, false).unwrap();
+        assert!(db.entry("runit-services").unwrap().is_none());
+        assert_eq!(db.owners_of_file("/usr/bin/init").unwrap(), vec!["systemd".to_string()]);
+        assert_eq!(std::fs::read_link(&root_init).unwrap(), PathBuf::from("../lib/systemd/systemd"));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn migration_handoff_rejects_additional_owners() {
+        let base = crate::testutil::tmpdir("legacy-runit-init-extra-owner");
+        let root = base.join("root");
+        let root_init = root.join("usr/bin/init");
+        std::fs::create_dir_all(root_init.parent().unwrap()).unwrap();
+        symlink("/usr/bin/runit", &root_init).unwrap();
+        seed_runit_owner(&root);
+        let extra = crate::testutil::entry("other-owner", "1.0", &"b".repeat(64));
+        Db::new(&root)
+            .add(&extra, &["/usr/bin/init".to_string()], &HashMap::new())
+            .unwrap();
+
+        let staged = stage_systemd_init(&base);
+        let db = Db::new(&root);
+        let owners = db.file_owners().unwrap();
+        let authority = builtin_faseela_runit_to_systemd().legacy_init_handoff().unwrap();
+        let error = check_file_conflicts(
+            &staged, &root, "systemd", &["/usr/bin/init".to_string()],
+            &owners, &db, Some(&authority),
+        ).expect_err("an additional package owner must keep the collision blocked");
+        assert!(error.to_string().contains("other-owner"));
+        let _ = std::fs::remove_dir_all(base);
     }
 }
