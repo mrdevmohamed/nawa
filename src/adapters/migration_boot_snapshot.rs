@@ -1209,6 +1209,7 @@ mod tests {
         let root = fixture("preflight-no-mutation");
         make_snapshot(&root);
 
+        fs::remove_file(root.join("boot/grub/grub.cfg")).unwrap();
         fs::remove_dir(root.join("boot/grub")).unwrap();
         let outside = root.with_extension("outside");
         fs::create_dir_all(&outside).unwrap();
