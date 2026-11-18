@@ -44,10 +44,76 @@ pub(crate) struct EffectiveProfile {
 /// distribution defaults and administrator override (§7's recommended
 /// layout; the exact filename is the open B4 contract).
 pub(crate) fn load_effective(root: &Path) -> Result<EffectiveProfile> {
-    load_effective_at(
-        &root.join("usr/share/nawa/system-profile.toml"),
-        &root.join("etc/nawa/system-profile.toml"),
-    )
+    let defaults = target_profile_path(root, Path::new("usr/share/nawa/system-profile.toml"))?;
+    let overrides = target_profile_path(root, Path::new("etc/nawa/system-profile.toml"))?;
+    load_effective_at(&defaults, &overrides)
+}
+
+/// Resolve a profile path while ensuring that an existing file or its
+/// nearest existing ancestor stays inside the selected target root.
+///
+/// Canonicalizing the complete path also rejects a final profile-file
+/// symlink that points outside the target. When the profile or some parent
+/// directory is absent, the nearest existing ancestor is checked and the
+/// unresolved target path is returned so the normal NotFound behavior is
+/// preserved. This is a containment check, not a race-free openat walk.
+fn target_profile_path(root: &Path, relative: &Path) -> Result<std::path::PathBuf> {
+    if relative.is_absolute()
+        || relative.components().any(|component| {
+            !matches!(component, std::path::Component::Normal(_))
+        })
+    {
+        anyhow::bail!("invalid system profile path beneath target root: {}", relative.display());
+    }
+
+    let canonical_root = std::fs::canonicalize(root)
+        .with_context(|| format!("canonicalize system target root {}", root.display()))?;
+    let candidate = canonical_root.join(relative);
+
+    match std::fs::canonicalize(&candidate) {
+        Ok(resolved) => {
+            if !resolved.starts_with(&canonical_root) {
+                anyhow::bail!(
+                    "system profile {} resolves outside selected target root {}",
+                    candidate.display(),
+                    canonical_root.display()
+                );
+            }
+            Ok(resolved)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // The file may be absent, but do not let an already-present
+            // ancestor symlink redirect even the missing path outside root.
+            let mut ancestor = candidate.parent();
+            while let Some(path) = ancestor {
+                match std::fs::canonicalize(path) {
+                    Ok(resolved) => {
+                        if !resolved.starts_with(&canonical_root) {
+                            anyhow::bail!(
+                                "system profile path {} has an ancestor outside selected target root {}",
+                                candidate.display(),
+                                canonical_root.display()
+                            );
+                        }
+                        break;
+                    }
+                    Err(parent_error)
+                        if parent_error.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        ancestor = path.parent();
+                    }
+                    Err(parent_error) => {
+                        return Err(parent_error).with_context(|| {
+                            format!("inspect system profile path ancestor {}", path.display())
+                        });
+                    }
+                }
+            }
+            Ok(candidate)
+        }
+        Err(error) => Err(error)
+            .with_context(|| format!("resolve system profile {}", candidate.display())),
+    }
 }
 
 /// The effective target profile from two explicit files (injectable so the
@@ -182,6 +248,63 @@ init-system = \"systemd\"
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.dir);
         }
+    }
+
+    #[test]
+    fn load_effective_rejects_a_profile_beneath_an_external_ancestor_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let f = Fixture::new("external-ancestor");
+        let outside = f.dir.join("outside/usr/share/nawa");
+        std::fs::create_dir_all(&outside).unwrap();
+        write(&outside.join("system-profile.toml"), DESKTOP);
+        symlink(f.dir.join("outside/usr"), f.dir.join("usr")).unwrap();
+
+        let error = load_effective(&f.dir).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("outside selected target root"),
+            "an external ancestor must be refused: {message}"
+        );
+    }
+
+    #[test]
+    fn load_effective_rejects_a_final_profile_symlink_outside_the_root() {
+        use std::os::unix::fs::symlink;
+
+        let f = Fixture::new("external-file");
+        let outside = f.dir.join("outside-profile.toml");
+        write(&outside, DESKTOP);
+        let defaults = f.dir.join("usr/share/nawa/system-profile.toml");
+        std::fs::create_dir_all(defaults.parent().unwrap()).unwrap();
+        symlink(&outside, &defaults);
+
+        let error = load_effective(&f.dir).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("outside selected target root"),
+            "an external final symlink must be refused: {message}"
+        );
+    }
+
+    #[test]
+    fn load_effective_accepts_an_in_root_profile_directory_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let f = Fixture::new("internal-ancestor");
+        let actual = f.dir.join("real/usr/share/nawa/system-profile.toml");
+        write(&actual, DESKTOP);
+        symlink(f.dir.join("real/usr"), f.dir.join("usr"));
+
+        let effective = load_effective(&f.dir).unwrap();
+        assert_eq!(
+            effective.profile.as_ref().and_then(|profile| profile.provider("init-system")),
+            Some("systemd")
+        );
+        assert!(
+            effective.role_sources["init-system"].starts_with(&f.dir),
+            "reported provenance must remain inside the selected root"
+        );
     }
 
     #[test]
