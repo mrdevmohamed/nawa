@@ -104,8 +104,13 @@ supported legacy installations.
   special files and unsafe paths, and enforces a 999-entry cap. Snapshot
   manifest schema is now v2 to encode directory entries. Regression coverage
   exercises nested service files, a relative symlink, and restoration of an
-  empty directory's mode. CI for this change is running; do not mark this
-  adapter verified until the latest branch-head workflow passes.
+  empty directory's mode. Restore now also validates that every service path
+  has all of its captured directory ancestors, then removes service files,
+  symlinks and directories created after capture (without following symlinks),
+  so rollback reconciles the complete captured service tree rather than only
+  overwriting known entries. A regression test covers removal of a newly
+  created service. The latest adapter changes are awaiting CI; do not mark
+  this adapter verified until the branch-head workflow passes.
 
 * Do not wire snapshot execution into the boot-changing coordinator until the
   record-store and snapshot path contracts are hardened and their integration
