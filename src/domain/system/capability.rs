@@ -1,11 +1,12 @@
 //! Capability identities and normalized provider declarations (design §6).
 //!
 //! Package names are implementation details; system requirements are
-//! expressed as capabilities (§6). The only capability domain in scope for
-//! this migration is `init-system`, and provider selection is limited to
-//! the exact identities `init-system=runit` and `init-system=systemd` (§6).
-//! No other capability domain may be added without a separate, justified
-//! design decision.
+//! expressed as normalized capabilities (§6). The model accepts arbitrary
+//! domains so the shared planner can reason about declarations generically.
+//! The first actionable provider domain is `init-system`, with the exact
+//! supported identities `runit` and `systemd`. Other domains remain
+//! descriptive metadata until their policy, compatibility and execution
+//! contracts are separately specified.
 //!
 //! For critical roles such as init-system, a migration must require
 //! explicit, *authenticated* provider metadata (§6.3): a local unsigned
@@ -74,7 +75,7 @@ impl Capability {
         format!("{}={}", self.domain, self.identity)
     }
 
-    /// True for the one domain in scope for this migration (§6).
+    /// True for the first actionable provider domain (§6).
     pub(crate) fn is_init_system(&self) -> bool {
         self.domain == "init-system"
     }
