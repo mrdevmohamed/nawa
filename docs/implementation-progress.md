@@ -90,7 +90,8 @@ supported legacy installations.
   OS-style `Not a directory` diagnostic; and the offline system-plan test
   inherited the built-in repository instead of explicitly disabling it.
   The dead-code and diagnostic issues have been corrected, and the test now
-  sets `NAWA_REPO=""` to isolate the no-repository case. These corrections
+  supplies an isolated `NAWA_CONFIG` containing `repo = ""` (the empty
+  environment variable is intentionally ignored by config resolution). These corrections
   require a fresh CI result.
 * Do not wire snapshot execution into the boot-changing coordinator until the
   record-store and snapshot path contracts are hardened and their integration
