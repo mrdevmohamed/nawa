@@ -13,17 +13,17 @@
 //! This module models the declaration itself; authentication is enforced
 //! where archives and index entries are verified.
 //!
-//! This is the Phase 2 schema proposal (illustrative recipe spelling, §6.1):
+//! The metadata chain is wired: recipe `[capabilities]` declarations are
+//! normalized into archive `.PKGINFO` and authenticated in signed repository
+//! index schema v4. The resolver keeps legacy v1-v3 metadata explicitly
+//! unknown; it never infers capabilities from package names or file presence.
+//!
+//! Recipe spelling:
 //!
 //! ```toml
 //! [capabilities]
 //! provides = ["init-system=runit"]
 //! ```
-//!
-//! The normalized values are meant to be recorded in the built archive's
-//! `.PKGINFO` and duplicated (authenticated) in a future signed repository
-//! index — not wired into any store until that schema is specified (§16.1,
-//! Phase 3).
 
 
 /// One normalized capability identity: `domain=identity` (§6.1, e.g.
