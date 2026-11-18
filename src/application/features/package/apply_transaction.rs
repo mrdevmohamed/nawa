@@ -172,9 +172,7 @@ pub(crate) fn apply_transaction(
                     re.name
                 );
             }
-            for source in &mut sources {
-                *source = Source::Build;
-            }
+            sources.fill(Source::Build);
         }
     }
 
