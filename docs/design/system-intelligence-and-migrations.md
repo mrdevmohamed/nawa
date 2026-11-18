@@ -190,6 +190,8 @@ The sequence is dependency-driven; a later stage must not be marked complete mer
 Implemented or substantially present:
 - Feature-Oriented Hexagonal Architecture and Functional Core / Imperative Shell baseline;
 - init-system observation, profile loading, capability metadata and provider explanation;
+- source-aware package resolution for recipe and authenticated binary candidates on install/update, with a single mixed topological action order and cross-source dependency tests;
+- explicit reporting for legacy repository metadata whose runtime dependency closure is unknown, while migration candidate selection remains fail-closed;
 - read-only system status/profile/plan/explain CLI;
 - authenticated repository transition preview integration;
 - migration domain state machine, durable journal, mutation gate, coordinator preparation path and recovery inspection;
@@ -199,6 +201,7 @@ Implemented or substantially present:
 Still incomplete:
 - a fully generic capability model beyond the init-system vertical slice;
 - complete dependency solver semantics (version ranges, conflicts, replacements);
+- exact artifact/source pinning for approval and execution; auto/ask currently use a conservative union of recipe and repository dependency closures when either source may be selected;
 - a single fully connected observation-to-policy-to-solver-to-plan application flow;
 - migration record store ancestor path hardening and race-resistant filesystem access;
 - snapshot integration with coordinator and recovery;

@@ -12,11 +12,11 @@
 | 0 — Source audit | **DONE** (baseline audit; refresh against the integrated platform before final acceptance) |
 | 1 — Structural refactor + service removal | **DONE** (1a, 1b, 1c, 1d, 1e — 1e is the deferred apply-transaction extraction) |
 | 2 — Init identity & capability foundation | **GENERIC DECLARATION LOOKUP + INIT-SYSTEM POLICY** (the pure planner now finds providers by arbitrary normalized capability domain and preserves ambiguous/unknown candidates; only init-system has actionable policy and migration semantics) |
-| 3 — Metadata & capability resolution | **INIT PROVIDER VERTICAL SLICE WORKS; PLATFORM SOLVER INCOMPLETE** (recipe → .PKGINFO → signed index v4 → provider selection is wired; version ranges, conflicts, replacements and broader capability constraints remain open) |
-| 4 — System profiles & planning | **PARTIAL PLATFORM** (system plan now consumes one immutable snapshot of runtime/profile/filesystem facts plus installed package versions; authenticated provider resolution is shared with upgrade planning, but broader policy/solver semantics remain open) |
+| 3 — Metadata & capability resolution | **SOURCE-AWARE PACKAGE RESOLUTION CORE IMPLEMENTED; GENERIC SOLVER INCOMPLETE** (recipe and authenticated binary candidates now share one dependency graph for install/update planning; v4 runtime dependencies and capabilities are consumed; version ranges, conflicts, replacements and broader capability constraints remain open) |
+| 4 — System profiles & planning | **PARTIAL PLATFORM** (system plan consumes one immutable observation and installed inventory; package install/update now use source-aware recipe/binary planning with one mixed topological action order; generic policy semantics, full artifact pinning and broader system constraints remain open) |
 | 5 — Migration engine | **PREPARATION FRAMEWORK PRESENT; RECOVERY/BOOT EXECUTION BLOCKED**: typed state machine, durable journal, mutation gate, preparation coordinator and recovery inspection exist; snapshot is not wired to coordinator/recovery and post-boot finalization is absent. |
 | 6 — Faseela runit→systemd migration | **BLOCKED** (current Faseela HEAD already uses systemd; the legacy runit migration is for older installations. Real BIOS/UEFI boot acceptance and rescue/recovery contracts remain open.) |
-| 7 — Platform verification | **IN PROGRESS**: read-only inspection and repository preview exist; unified planning, complete solver semantics, integrated recovery and real BIOS/UEFI acceptance remain open. |
+| 7 — Platform verification | **IN PROGRESS**: read-only observation and migration preview exist; source-aware unified package planning is wired into install/update and CI-verified; policy semantics, complete solver constraints, snapshot/recovery integration and real BIOS/UEFI acceptance remain open. |
 | System Intelligence platform | **IN PROGRESS** — accepted direction: System Intelligence is the umbrella; migration is one high-risk feature within it. |
 
 ## Accepted platform direction (2026-11-18)
@@ -1845,18 +1845,28 @@ The last preview integration was repaired without weakening the module-layering 
 
 ## Exact next task
 
-**System Intelligence platform — close the common planning and security path
-before enabling boot-changing migration.** Work in this order:
+**Complete System Intelligence as one explainable, policy-aware planning and
+reconciliation platform.** The source-aware package resolver is now present in
+`install` and `update`; do not recreate that work or add another solver. Continue
+in this order:
 
-1. Finish migration record-store path safety and verify all fail-closed tests.
-2. Establish the immutable observation contract and its evidence/provenance
-   coverage for live host, container, chroot and offline target roots.
-3. Unify provider selection, package constraints and explainable planning
-   around the existing domain solver; do not add a second solver.
-4. Complete profile/policy conflict semantics and trust provenance.
-5. Wire transaction execution, snapshots, recovery and post-boot verification.
-6. Only then resume Faseela/SAQ distribution-owned BIOS/UEFI and rescue
-   acceptance.
+1. Add immutable candidate/artifact identity to approved plan output and ensure
+   the executor consumes the exact source/version selected before confirmation.
+2. Define profile policy types and precedence (required, preferred, forbidden)
+   with distribution/admin provenance, explicit conflict behavior and strict
+   schema evolution. Do not infer policy from provider presence.
+3. Connect the system observation, installed inventory, profile policy and
+   package/provider resolver into one read-only system plan with per-action
+   explanations, trust status and unresolved facts.
+4. Strengthen migration record and snapshot filesystem access with race-resistant
+   dirfd/openat operations where supported; keep no-follow and ownership checks.
+5. Bind the boot snapshot manifest and root identity to the migration record,
+   then wire capture/restore into coordinator and recovery with explicit
+   lifecycle cleanup and tamper handling.
+6. Implement post-boot verification/finalization only after the restore path is
+   proven; retain the old provider until all runtime and boot postconditions pass.
+7. Run interrupted-install, failed-boot, restore and successful migration
+   scenarios in disposable BIOS and UEFI VMs with external-rescue evidence.
 
 The real runit-to-systemd handler must remain fail-closed until the
 distribution-owned boot and recovery contracts are resolved:
@@ -1886,3 +1896,46 @@ Faseela/SAQ boot blockers.
 * CI run [#44312508908](https://github.com/mrdevmohamed/nawa/actions/runs/44312508908) passed on commit `c433c38dfc5a13efc7f9d11fc34877ed93b8d1fe`: build, Clippy, tests, Ubuntu 22.04/24.04 root/user coverage, CLI smoke, all four build-isolation levels, and static musl.
 * The preceding root-only test failure was an inherited hook-marker issue in the CI launcher. The root test runner now removes `NAWA_LOCK_HELD` and `NAWA_POST_TRANSACTION_HOOKS_RUNNING` from its own environment; real hook children still receive `NAWA_LOCK_HELD` explicitly from `run_hook`. The adversarial integration test `a_forged_held_marker_cannot_resume_a_migration_or_cross_the_gate` remains enabled and passed.
 * This closes Phase 7 for Nawa's source and preview work only. It does **not** close Phase 6: the real runit-to-systemd handler remains blocked by B1/B2/B4/B5/B6/B7, and no real BIOS/UEFI migration is claimed.
+
+
+## Phase 7 update — source-aware unified package planning (2026-11-18)
+
+The package dependency graph now includes both recipe-backed and authenticated
+repository binary candidates. The application projects the resolver result into
+recipe and binary action pools, but preserves one explicit `PlanStep` sequence
+for display and execution. Cross-source dependency edges are covered in both
+directions, as are binary-to-binary edges.
+
+Source policy is part of the planner input:
+- `build` uses recipe candidates and build/runtime recipe dependencies only.
+- `repo` uses architecture-compatible authenticated repository candidates and
+  their declared runtime dependencies only; explicit targets are checked
+  before planning so a missing archive is reported as a repository miss.
+- `auto` and `ask` conservatively combine recipe and repository dependency
+  closures when the repository candidate is at least as new as the recipe,
+  preserving a safe fallback/choice path. This can plan the union rather than
+  the eventual source-specific minimum; exact source pinning remains next work.
+
+Legacy index entries without `rundeps` remain installable for compatibility,
+but the resolver records the dependency closure as unknown and the application
+surfaces that uncertainty. It does not reinterpret absent metadata as an empty
+list. The system-transition path remains stricter and excludes unknown runtime
+dependency metadata from migration candidates.
+
+The normal `update` command now consumes the same source-aware plan and passes
+binary-only actions through the same transaction executor. This preserves
+dependency order and reports mixed-source actions in the plan view. The strict
+repository update path validates target availability/version before opening
+a transaction.
+
+CI run [#44385523918](https://github.com/mrdevmohamed/nawa/actions/runs/44385523918)
+passed on commit `28dcd908220f72f93ab46fa964afe786f437e101`: build, Clippy,
+unit/integration tests, Ubuntu 22.04/24.04 user/root coverage, CLI smoke tests
+(including real recipe build, signing/upgrade/rollback, remote repositories and
+services), static musl, and all isolation modes.
+
+This is a verified package-planning milestone, not completion of System
+Intelligence. Version constraints, conflicts, replacement semantics, generic
+profile policies, complete system-plan explainability, transaction plan
+pinning, snapshot/coordinator integration, post-boot finalization and real
+BIOS/UEFI rescue acceptance remain open.
