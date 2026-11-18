@@ -30,6 +30,7 @@ use crate::domain::system::capability::Capability;
 use crate::domain::system::identity::InitKind;
 use crate::domain::system::migration::MigrationDefinition;
 use crate::domain::system::observation::Confidence;
+use crate::application::features::system::plan::{self, SystemPlanPin};
 
 /// Expose the built-in domain migration definition to the application
 /// coordinator. The value is not read from a repository; its handler binding
@@ -168,6 +169,7 @@ fn preflight_inner(root: &Path, proc: &Path, require_root: bool) -> Result<detec
 #[derive(Debug)]
 pub(crate) struct MigrationApproval {
     _private: (),
+    plan: SystemPlanPin,
 }
 
 impl MigrationApproval {
@@ -177,6 +179,7 @@ impl MigrationApproval {
         to: &Capability,
         acknowledge_reboot: bool,
         acknowledge_recovery: bool,
+        plan: SystemPlanPin,
     ) -> Result<Self> {
         let definition = builtin_definition();
         if id != definition.id || *from != definition.from || *to != definition.to {
@@ -190,7 +193,10 @@ impl MigrationApproval {
         if !acknowledge_reboot || !acknowledge_recovery {
             bail!("migration authorization must acknowledge the reboot boundary and the documented recovery path (§12.4)");
         }
-        Ok(MigrationApproval { _private: () })
+        if plan.migration_id != id || !plan.identity.starts_with("sp-") || plan.identity.len() != 67 {
+            bail!("migration approval requires the exact reviewed SystemPlan identity (§12.4)");
+        }
+        Ok(MigrationApproval { _private: (), plan })
     }
 }
 
@@ -221,9 +227,14 @@ pub(crate) enum ApplyRefusal {
 pub(crate) fn apply(
     root: &Path,
     proc: &Path,
+    repository: &str,
     approval: MigrationApproval,
 ) -> Result<ApplyRefusal> {
-    let _ = approval; // consumed: one authorization authorizes one attempt
+    // Recheck only the approved observations and signed artifact identities.
+    // The solver is deliberately not invoked again: approved order and pins
+    // remain authoritative and a different artifact cannot be substituted.
+    plan::verify_approval_pin(root, proc, repository, &approval.plan)
+        .context("migration SystemPlan approval verification")?;
     preflight(root, proc).context("migration apply preflight")?;
     Ok(ApplyRefusal::HandlerBlocked(HANDLER_BLOCKERS.to_vec()))
 }
@@ -342,6 +353,19 @@ mod tests {
         preflight_for_tests(&root, &proc).expect("all preflight facts hold");
     }
 
+    fn test_plan_pin(migration_id: &str) -> SystemPlanPin {
+        SystemPlanPin {
+            identity: format!("sp-{}", "0".repeat(64)),
+            migration_id: migration_id.to_string(),
+            source_fingerprint: "1".repeat(64),
+            index_sha256: "2".repeat(64),
+            signer_sha256: "3".repeat(64),
+            observed_sha256: "4".repeat(64),
+            installed_packages: Vec::new(),
+            artifacts: Vec::new(),
+        }
+    }
+
     #[test]
     fn explicit_authorization_must_name_the_exact_migration_and_boundaries() {
         let d = builtin_definition();
@@ -350,11 +374,13 @@ mod tests {
             &d.from,
             &d.to,
             true,
-            true
+            true,
+            test_plan_pin(&d.id)
         )
         .is_ok());
-        assert!(MigrationApproval::explicit("other", &d.from, &d.to, true, true).is_err());
-        assert!(MigrationApproval::explicit(&d.id, &d.from, &d.to, false, true).is_err());
+        assert!(MigrationApproval::explicit("other", &d.from, &d.to, true, true, test_plan_pin("other")).is_err());
+        assert!(MigrationApproval::explicit(&d.id, &d.from, &d.to, false, true, test_plan_pin(&d.id)).is_err());
+        assert!(MigrationApproval::explicit(&d.id, &d.from, &d.to, true, true, test_plan_pin("other")).is_err());
     }
 
     #[test]
@@ -366,7 +392,7 @@ mod tests {
         let proc = fake_proc(&base, "/usr/bin/runit", "runit", &root);
         let d = builtin_definition();
         let approval =
-            MigrationApproval::explicit(&d.id, &d.from, &d.to, true, true).unwrap();
+            MigrationApproval::explicit(&d.id, &d.from, &d.to, true, true, test_plan_pin(&d.id)).unwrap();
         match apply_for_tests(&root, &proc, approval).unwrap() {
             ApplyRefusal::HandlerBlocked(blockers) => {
                 assert!(blockers.iter().any(|b| {
