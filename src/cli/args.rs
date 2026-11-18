@@ -631,6 +631,13 @@ impl Cmd {
             // gate-checked (§10.3: read-only inspection stays available
             // while a migration is pending), and a fresh root needs no
             // lock at all — the shared path never creates state.
+            // inspection is a coherent shared-lock snapshot; `resume` takes
+            // its own exclusive lock through the migration capability so it
+            // can cross the gate — an outer lock here would deadlock against
+            // that non-reentrant flock.
+            Cmd::System {
+                action: SystemCmd::Migrate { action: MigrateCmd::Resume },
+            } => Request::NoDb,
             Cmd::System { .. } => Request::ReadDb,
             Cmd::RepoCreate { .. }
             | Cmd::RepoUpdate { .. }
@@ -771,6 +778,10 @@ pub(crate) enum MigrateCmd {
     /// migration gate, and by which migration (informational; always
     /// exits 0)
     Status,
+    /// Reconcile an interrupted migration and, after reboot, verify the
+    /// target init and finalize the durable record (live host only, explicit
+    /// operation — never automatic; design §10.3–§10.5, §12.2)
+    Resume,
 }
 
 #[derive(Clone, Copy, ValueEnum)]

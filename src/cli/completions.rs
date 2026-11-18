@@ -46,7 +46,7 @@ _nawa() {
             if [ "$COMP_CWORD" -eq 2 ]; then
                 COMPREPLY=( $(compgen -W "migrate" -- "$cur") )
             elif [ "$COMP_CWORD" -eq 3 ]; then
-                COMPREPLY=( $(compgen -W "list show status" -- "$cur") )
+                COMPREPLY=( $(compgen -W "list show status resume" -- "$cur") )
             fi ;;
         completions)
             COMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") ) ;;
@@ -111,7 +111,7 @@ _nawa() {
             system)
                 case $CURRENT in
                     3) _values 'action' migrate ;;
-                    4) _values 'migrate action' list show status ;;
+                    4) _values 'migrate action' list show status resume ;;
                 esac ;;
             recipe)
                 _values 'action' check ;;
@@ -148,7 +148,7 @@ complete -c nawa -n "__fish_seen_subcommand_from $pkg_cmds" -a "(nawa __complete
 complete -c nawa -n '__fish_seen_subcommand_from config' -a 'show'
 # system actions
 complete -c nawa -n '__fish_seen_subcommand_from system' -a 'migrate' -d 'Migration records'
-complete -c nawa -n '__fish_seen_subcommand_from migrate' -a 'list show status' -d 'Migration record inspection'
+complete -c nawa -n '__fish_seen_subcommand_from migrate' -a 'list show status resume' -d 'Migration record inspection and recovery'
 # completion shells
 complete -c nawa -n '__fish_seen_subcommand_from completions' -a 'bash zsh fish'
 "#;

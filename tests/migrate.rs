@@ -419,3 +419,59 @@ fn inspection_works_on_an_offline_root_with_no_live_system() {
     );
     let _ = fs::remove_dir_all(&root);
 }
+
+// ---- resume (explicit live-host recovery, §12.2) -------------------------
+
+#[test]
+fn resume_is_documented_in_help_and_all_three_completions() {
+    let out = nawa().arg("--help").output().unwrap();
+    let help = String::from_utf8_lossy(&out.stdout);
+    assert!(help.contains("system"), "the namespace is listed: {help}");
+
+    for (shell, needle) in [
+        ("bash", "list show status resume"),
+        ("zsh", "list show status resume"),
+        ("fish", "list show status resume"),
+    ] {
+        let out = nawa().args(["completions", shell]).output().unwrap();
+        let script = String::from_utf8_lossy(&out.stdout);
+        assert!(script.contains(needle), "{shell} completion: {script}");
+    }
+}
+
+#[test]
+fn resume_refuses_an_offline_root_and_changes_nothing() {
+    let root = scratch("resume-offline");
+    seed(&root, "faseela-runit-to-systemd-v1", "awaiting-reboot", "");
+    let before = record_snapshot(&root);
+
+    let (stdout, stderr, ok) = run(&root, &["system", "migrate", "resume"]);
+    assert!(!ok, "resume is a live-host operation: {stdout}");
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("offline root") || combined.contains("live-host"),
+        "the refusal explains the boundary: {combined}"
+    );
+    assert_eq!(
+        record_snapshot(&root),
+        before,
+        "no record was changed on the offline root"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn resume_on_a_fresh_root_reports_no_interrupted_migration() {
+    let root = scratch("resume-fresh-offline");
+    // On an offline root the live-host preflight refuses before any record
+    // is touched — there is no fake success path (§12.2).
+    let (stdout, stderr, ok) = run(&root, &["system", "migrate", "resume"]);
+    assert!(!ok, "{stdout}");
+    let combined = format!("{stdout}{stderr}");
+    assert!(combined.contains("offline root"), "{combined}");
+    assert!(
+        !root.join("var/lib/nawa/lock").exists(),
+        "no lock was created on the refused offline root"
+    );
+    let _ = fs::remove_dir_all(&root);
+}

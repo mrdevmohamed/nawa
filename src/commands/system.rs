@@ -1,36 +1,74 @@
 //! `nawa system migrate` presentation (design §12.2): the read-only
-//! migration-record inspection commands. The use case
-//! (`application::features::system::migrate_inspect`) decides what exists
-//! and what failed; this module decides how it is printed, over typed
-//! values so every rendering rule is unit-testable.
+//! migration-record inspection commands plus the explicit `resume` recovery
+//! command. The use cases (`application::features::system::migrate_inspect`
+//! and `migrate_recover`) decide what exists, what failed and what was
+//! reconciled; this module decides how it is printed, over typed values so
+//! every rendering rule is unit-testable.
 //!
-//! All three commands are strictly read-only (§10.3): they never create or
-//! modify a record, never transition a state and never execute a handler.
+//! `list`/`show`/`status` are strictly read-only (§10.3): they never create
+//! or modify a record, never transition a state and never execute a handler.
 //! The shared lock is already held (the dispatch whole-command lock), so a
-//! listing is one coherent snapshot of the record store.
+//! listing is one coherent snapshot of the record store. `resume` is the
+//! explicit live-host recovery path and takes its own exclusive lock through
+//! the migration capability; it rejects offline roots, chroots and containers
+//! before touching any record (§12.2).
 
 use anyhow::{anyhow, Result};
 use std::path::Path;
 
 use crate::application::features::system::migrate_inspect as inspect;
+use crate::application::features::system::migrate_recover as recover;
+use crate::application::ports::user_interaction::UserInteraction;
 use crate::cli::{MigrateCmd, SystemCmd};
 use crate::ctx::Ctx;
 use crate::domain::system::migration::{MigrationRecord, StepOutcome, StepRecord};
 use crate::migration_record::ActiveGate;
 
-/// `nawa system migrate [list|show|status]`
+/// `nawa system migrate [list|show|status|resume]`
 pub(crate) fn cmd_system(ctx: &Ctx, action: SystemCmd) -> Result<()> {
     match action {
-        SystemCmd::Migrate { action } => cmd_migrate(&ctx.root, action),
+        SystemCmd::Migrate { action } => cmd_migrate(ctx, action),
     }
 }
 
-fn cmd_migrate(root: &Path, action: MigrateCmd) -> Result<()> {
+fn cmd_migrate(ctx: &Ctx, action: MigrateCmd) -> Result<()> {
     match action {
-        MigrateCmd::List => print_list(root),
-        MigrateCmd::Show { id } => print_show(root, &id),
-        MigrateCmd::Status => print_status(root),
+        MigrateCmd::List => print_list(&ctx.root),
+        MigrateCmd::Show { id } => print_show(&ctx.root, &id),
+        MigrateCmd::Status => print_status(&ctx.root),
+        MigrateCmd::Resume => print_resume(ctx),
     }
+}
+
+/// Presentation adapter for the recovery use case. Recovery never prompts,
+/// so `choose`/`confirm` are inert; progress and warnings still flow through
+/// the real status macros (functional core / imperative shell).
+fn recovery_ui() -> UserInteraction {
+    UserInteraction {
+        stderr_line: Box::new(|line| eprintln!("{line}")),
+        info: Box::new(|line| crate::nawa_info!("{}", line)),
+        warn: Box::new(|line| crate::nawa_warn!("{}", line)),
+        show_plan: Box::new(|_| {}),
+        choose: Box::new(|_prompt, _default, _allowed| anyhow::bail!("migration recovery does not prompt")),
+        confirm: Box::new(|_prompt| anyhow::bail!("migration recovery does not confirm")),
+    }
+}
+
+fn print_resume(ctx: &Ctx) -> Result<()> {
+    let ui = recovery_ui();
+    let (report, outcome) = recover::recover_and_resume(ctx, &ui)?;
+    if report.notes.is_empty() {
+        crate::nawa_info!("no interrupted migration needed recovery");
+    }
+    for note in &report.notes {
+        println!("{}", render_recovery_note(note));
+    }
+    if let Some(outcome) = outcome {
+        for line in render_resume_outcome(&outcome) {
+            println!("{line}");
+        }
+    }
+    Ok(())
 }
 
 fn print_list(root: &Path) -> Result<()> {
@@ -201,6 +239,48 @@ fn yes_no(value: bool) -> &'static str {
         "yes"
     } else {
         "no"
+    }
+}
+
+/// One recovery decision, rendered from typed data (no decisions here).
+fn render_recovery_note(note: &recover::RecoveryNote) -> String {
+    use recover::RecoveryAction as A;
+    let action = match &note.action {
+        A::Discarded => "discarded the abandoned planned record".to_string(),
+        A::ReConcluded(state) => format!("re-concluded as {}", state.as_str()),
+        A::HistoryFinalized(detail) => format!("finalized transaction history: {detail}"),
+        A::NeedsRecovery(reason) => format!("needs recovery: {reason}"),
+        A::Unchanged(reason) => format!("unchanged: {reason}"),
+    };
+    format!("  {}: {action}", note.id)
+}
+
+/// The post-reboot verification result, rendered from typed data.
+fn render_resume_outcome(outcome: &recover::ResumeOutcome) -> Vec<String> {
+    match outcome {
+        recover::ResumeOutcome::Verified(record) => vec![
+            format!(
+                "Migration {} resumed: target init verified, state {} (mutation gate clear)",
+                record.id,
+                record.state.as_str()
+            ),
+            "  Old-provider cleanup remains a separate, explicitly authorized action".to_string(),
+        ],
+        recover::ResumeOutcome::NeedsRecovery(record, failures) => {
+            let mut lines = vec![format!(
+                "Migration {} verification failed: state {} (mutation gate stays active)",
+                record.id,
+                record.state.as_str()
+            )];
+            for failure in failures {
+                lines.push(format!("  - {failure}"));
+            }
+            lines.push(
+                "  Resolve the boot/init issue, then run `nawa system migrate resume` again"
+                    .to_string(),
+            );
+            lines
+        }
     }
 }
 
@@ -521,5 +601,50 @@ mod tests {
             text.contains("zzz-migration is rollback-required"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn recovery_notes_render_every_action_kind_without_deciding() {
+        use recover::RecoveryAction as A;
+        let cases = [
+            (A::Discarded, "discarded the abandoned planned record"),
+            (A::ReConcluded(MigrationState::AwaitingReboot), "re-concluded as awaiting-reboot"),
+            (A::HistoryFinalized("transaction 1 reconciled as partial".into()), "finalized transaction history"),
+            (A::NeedsRecovery("ambiguous".into()), "needs recovery: ambiguous"),
+            (A::Unchanged("terminal".into()), "unchanged: terminal"),
+        ];
+        for (action, expected) in cases {
+            let line = render_recovery_note(&recover::RecoveryNote {
+                id: "mig".to_string(),
+                action,
+            });
+            assert!(line.starts_with("  mig: "), "{line}");
+            assert!(line.contains(expected), "missing {expected:?} in {line}");
+        }
+    }
+
+    #[test]
+    fn a_verified_resume_is_rendered_with_the_gate_clear_result() {
+        let outcome = recover::ResumeOutcome::Verified(record(
+            "faseela-runit-to-systemd-v1",
+            MigrationState::Completed,
+        ));
+        let text = joined(&render_resume_outcome(&outcome));
+        assert!(text.contains("target init verified"), "{text}");
+        assert!(text.contains("mutation gate clear"), "{text}");
+        assert!(text.contains("Old-provider cleanup remains a separate"), "{text}");
+    }
+
+    #[test]
+    fn a_failed_resume_renders_every_failure_and_the_gate_warning() {
+        let outcome = recover::ResumeOutcome::NeedsRecovery(
+            record("mig", MigrationState::NeedsRecovery),
+            vec!["PID 1 is runit".to_string(), "boot entry missing".to_string()],
+        );
+        let text = joined(&render_resume_outcome(&outcome));
+        assert!(text.contains("mutation gate stays active"), "{text}");
+        assert!(text.contains("PID 1 is runit"), "{text}");
+        assert!(text.contains("boot entry missing"), "{text}");
+        assert!(text.contains("run `nawa system migrate resume` again"), "{text}");
     }
 }

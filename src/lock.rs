@@ -66,6 +66,103 @@ pub(crate) fn lock_path(root: &Path) -> PathBuf {
     root.join("var/lib/nawa/lock")
 }
 
+/// The lock-defined in-process capability that authorizes the migration core
+/// to hold the exclusive package-database lock *while a migration gate is
+/// active* (§10.3, §13: "the only bypass is the private, typed in-process
+/// permit held by the active migration coordinator"). Recovery needs this:
+/// the gate is already durable when a killed coordinator's record is
+/// inspected, so an ordinary [`acquire`] would refuse — correctly — and the
+/// migration recovery use case must be able to take the lock past its own
+/// gate to reconcile and conclude the record.
+///
+/// Authority is structural and in-process only:
+///
+/// * the seal is private to this module, so no value can be constructed
+///   outside `lock` except through [`migration_authority`];
+/// * there is no `serde`, `Display`, `FromStr`, environment spelling, CLI
+///   flag or plugin capability that can carry one — a nested `nawa` process
+///   gets no authority and is still refused by the gate;
+/// * the layering check (`scripts/check-layering.py`) rejects any call to
+///   [`migration_authority`] from outside the migration feature subtree, so
+///   an ordinary package command cannot mint one either.
+///
+/// It is deliberately *not* `Clone`/`Copy`: minting is one-shot at the point
+/// where the migration use case needs to cross the gate.
+#[derive(Debug)]
+pub(crate) struct MigrationAuthority {
+    _seal: AuthoritySeal,
+}
+
+#[derive(Debug)]
+struct AuthoritySeal;
+
+/// Mint the gate-crossing capability for the migration recovery use case.
+/// Only compiled-in migration feature code may call this (enforced by the
+/// layering check); no external input can reach it.
+pub(crate) fn migration_authority() -> MigrationAuthority {
+    MigrationAuthority { _seal: AuthoritySeal }
+}
+
+/// Acquire the exclusive database lock while a migration gate is active,
+/// presenting [`MigrationAuthority`] as proof that the caller is the
+/// migration core reconciling its own gate. This is the *only* path that
+/// skips [`check_migration_gate`]; every ordinary exclusive acquisition
+/// still goes through [`acquire`] and is gate-checked.
+///
+/// The `NAWA_LOCK_HELD` marker is still refused: a hook-spawned nested
+/// `nawa` is never a migration coordinator, and the marker can be forged,
+/// so it must not become a gate bypass (§10.3, §13).
+pub(crate) fn acquire_for_migration(
+    root: &Path,
+    _authority: MigrationAuthority,
+) -> Result<Option<DbLock>> {
+    if std::env::var_os(HELD_ENV).is_some() {
+        bail!(
+            "a nested nawa process ({HELD_ENV} is set) cannot cross the migration \
+             mutation gate: recovery runs in the coordinator process only"
+        );
+    }
+    acquire_unchecked(root, Mode::Exclusive)
+}
+
+/// The gate-free inner acquisition used only by `acquire_for_migration`.
+/// `acquire` itself keeps its gate check on the ordinary path.
+fn acquire_unchecked(root: &Path, mode: Mode) -> Result<Option<DbLock>> {
+    let timeout = std::env::var("NAWA_LOCK_TIMEOUT")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .map(Duration::from_secs);
+    let started = Instant::now();
+    let mut announced = false;
+    loop {
+        match try_acquire(root, mode)? {
+            Attempt::Locked(l) => return Ok(Some(l)),
+            Attempt::NotNeeded => return Ok(None),
+            Attempt::Busy => {
+                if !announced {
+                    announced = true;
+                    crate::nawa_info_stderr!(
+                        "waiting for the package database lock ({}){}",
+                        lock_path(root).display(),
+                        holder_hint(root)
+                    );
+                }
+                if let Some(t) = timeout {
+                    if started.elapsed() >= t {
+                        bail!(
+                            "timed out after {}s waiting for the database lock{}",
+                            t.as_secs(),
+                            holder_hint(root)
+                        );
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        }
+    }
+}
+
 /// The persistent migration mutation gate (design §10.3): while a migration
 /// record under `root` is in a gate-keeping state, every Nawa-owned
 /// package-mutating command must stop *before changing the package set*.
@@ -145,46 +242,14 @@ pub(crate) fn acquire(root: &Path, mode: Mode) -> Result<Option<DbLock>> {
             }
         }
     }
-    let timeout = std::env::var("NAWA_LOCK_TIMEOUT")
-        .ok()
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .filter(|&s| s > 0)
-        .map(Duration::from_secs);
-    let started = Instant::now();
-    let mut announced = false;
-    loop {
-        match try_acquire(root, mode)? {
-            Attempt::Locked(l) => {
-                if mode == Mode::Exclusive {
-                    // under our own exclusive flock (§10.3: the gate is
-                    // checked under the exclusive package database lock)
-                    check_migration_gate(root)?;
-                }
-                return Ok(Some(l));
-            }
-            Attempt::NotNeeded => return Ok(None),
-            Attempt::Busy => {
-                if !announced {
-                    announced = true;
-                    crate::nawa_info_stderr!(
-                        "waiting for the package database lock ({}){}",
-                        lock_path(root).display(),
-                        holder_hint(root)
-                    );
-                }
-                if let Some(t) = timeout {
-                    if started.elapsed() >= t {
-                        bail!(
-                            "timed out after {}s waiting for the database lock{}",
-                            t.as_secs(),
-                            holder_hint(root)
-                        );
-                    }
-                }
-                std::thread::sleep(Duration::from_millis(200));
-            }
-        }
+    let guard = acquire_unchecked(root, mode)?;
+    if mode == Mode::Exclusive && guard.is_some() {
+        // under our own exclusive flock (§10.3: the gate is checked under
+        // the exclusive package database lock). If not acquired, no lock
+        // was needed/possible; callers that need ownership handle `None`.
+        check_migration_gate(root)?;
     }
+    Ok(guard)
 }
 
 #[derive(Debug)]

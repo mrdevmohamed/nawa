@@ -192,6 +192,23 @@ def main():
             for p in general:
                 print(f"    {p}")
 
+    # The migration gate-crossing capability is minted only by the migration
+    # feature subtree. A call from any other module would let an ordinary
+    # package command cross a pending migration's gate (§10.3/§13).
+    MIGRATION_MINT = "migration_authority()"
+    MIGRATION_MINT_ALLOWED = "application/features/system/"
+    for m, paths in modules.items():
+        for p in paths:
+            for n, line in enumerate(strip_tests(open(p).read()), 1):
+                if MIGRATION_MINT in line:
+                    rel = os.path.relpath(p, SRC).replace(os.sep, "/")
+                    if rel != "lock.rs" and not rel.startswith(MIGRATION_MINT_ALLOWED):
+                        failed = True
+                        print(
+                            "error: only migration feature code may mint the "
+                            f"migration gate-crossing capability: {p}:{n}"
+                        )
+
     # the allowlist documents temporary exceptions and must shrink
     for entry in sorted(LEGACY_PRESENTATION_IMPORTS):
         if not edges[entry[0]].get(entry[1]):

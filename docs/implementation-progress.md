@@ -15,7 +15,7 @@
 | 2 — Init identity & capability foundation | **DONE** (detection + capability/identity domain model) |
 | 3 — Metadata & capability resolution | **DONE** (B3 proposal; the whole package planner — install, outdated, orphans, removal ordering — in `domain/planning/`, behavior verified byte-identical) |
 | 4 — System profiles & planning | **DONE** (profile model + merge rules + loader §7; profile wired into plan generation §8.1–8.4 — install/update report the init decision, invalid profiles fail closed; byte-identity + probes verified. Stage-3 exit met: dry-run plans explain every init-provider and package decision without managing services. The candidate→provider capability comparison still awaits the B3 index schema — see blockers) |
-| 5 — Migration engine | in progress: the migration domain model (§10.1–§10.3) + the durable record store (top-level `migration_record.rs`) + the persistent mutation-gate check wired into every exclusive acquisition (§10.3, block-only) + the read-only `system migrate` inspection CLI (§12.2, slice 3) + the migration coordinator with the typed in-process permit and the `planned → preparing → awaiting-reboot / failed / needs-recovery` lifecycle (§10.3–§10.4, slice 4) + durable write-ahead/lifecycle hardening (5B: single verified publication path with reload-verify, db-truth failure classification, gate/begin abandon, deferred interrupts, the seven crash boundaries documented and pinned by tests); next: recovery (5C), then security verification (5D) |
+| 5 — Migration engine | in progress: the migration domain model (§10.1–§10.3) + the durable record store (top-level `migration_record.rs`) + the persistent mutation-gate check wired into every exclusive acquisition (§10.3, block-only) + the read-only `system migrate` inspection CLI (§12.2, slice 3) + the migration coordinator with the typed in-process permit and the `planned → preparing → awaiting-reboot / failed / needs-recovery` lifecycle (§10.3–§10.4, slice 4) + durable write-ahead/lifecycle hardening (5B) + crash recovery and explicit live-host resume (5C: cases A–F in `migrate_recover.rs`, the lock-defined migration authority, the `system migrate resume` command); next: security verification (5D) |
 | 6 — Faseela runit→systemd migration | **BLOCKED** (see blockers) |
 | 7 — Final verification | not started |
 
@@ -1114,6 +1114,77 @@ during iteration with "no space left on device" — the `/tmp` tmpfs was
 100% full of stale test scratch; after cleanup they pass, unchanged by
 this slice), release build + both smoke suites.
 
+### Done within Phase 5 so far (6): crash recovery, resume, verification, finalization (5C) (§10.3–§10.5, §12.2, §14.1)
+
+5B pinned the exact on-disk shapes a killed or failed preparation leaves; 5C
+builds the recovery lifecycle on them. New use case
+`application/features/system/migrate_recover.rs`; new CLI verb
+`nawa system migrate resume` (the §12.2 namespace, no second top-level
+namespace); `list`/`show`/`status` stay read-only.
+
+* **Lock-defined gate-crossing capability (§13).** `lock.rs` gains
+  `MigrationAuthority` (zero-sized, module-private seal, no Clone/serde/env/
+  CLI representation) with `migration_authority()` and
+  `acquire_for_migration(root, authority)`. This is the only path that skips
+  the gate check; it still refuses `NAWA_LOCK_HELD` (a forged nested process
+  can never cross the gate). `scripts/check-layering.py` now rejects a mint
+  call from outside `application/features/system/`, so an ordinary package
+  command cannot construct one. The coordinator's private `MigrationPermit`
+  is unchanged; `lock::acquire` is factored onto the same inner acquire loop
+  so the ordinary path's gate check cannot drift from the recovery one.
+* **Case A — interrupted `planned`.** A `planned` record is not gate-active,
+  so the absence of a gate proves nothing. Recovery inspects the linked
+  transaction; only when no committed package change exists is the record
+  discarded, and the removal re-read to prove it. Committed packages (or a
+  persisted step) are preserved and retroactively declared `needs-recovery`,
+  closing the gate (the legal `planned → preparing → needs-recovery` path).
+* **Case B — intent without outcome.** Never re-runs the step. The linked
+  package transaction is reconciled through the *existing*
+  `transaction::recovery::reconcile` (package WAL, never duplicated), and the
+  reconciled per-package before/after states are compared against the actual
+  database using `PackageState::matches_entry` (identity + digest). A committed
+  change whose after-state no longer matches, a failed change whose before-state
+  does not match, and a mismatched success claim all fail closed to
+  `needs-recovery` with the gate kept. A step with no journal and a package
+  named in its intent present is likewise ambiguous.
+* **Case C — every step resolved, conclusion unpublished.** Reconstructs the
+  conclusion from durable outcomes *after verifying their postconditions in
+  the database* (a success claim without a committed change is rejected),
+  then publishes through the same reload-verified atomic path as 5B.
+* **Case D — `awaiting-reboot` with unfinished history.** Finalizes the
+  linked transaction record via the existing WAL reconciliation without
+  changing the authoritative migration record; a discrepancy is reported
+  honestly, never silently "fixed".
+* **Case E — resume.** Live-host only (`observe`/`observe_canonical`): refuses
+  offline roots, chroots, containers and unattributable contexts before
+  touching a record; requires root. Verifies PID 1 identity, the target
+  provider staged in the root, explicit init-entry-point selection (B1),
+  the retained old provider (recovery route), and the recorded source/target
+  against the trusted handler. No service is inspected or managed. Success →
+  `completed` (gate clear); failure → `needs-recovery` (gate kept). Finalization
+  deliberately does **not** retire runit — that needs its own verified rollback
+  window and package plan (B2/B5).
+* **Case F — rollback.** Only a verified compensation with a documented boot
+  restoration may move `rollback-required → failed`. None exists until B1/B2/B5
+  are resolved, so verification failure and `verifying`/`rollback-required`
+  states stay `needs-recovery` with the gate active — no invented rollback.
+* **CLI** (`commands/system.rs`, `cli/args.rs`, `cli/completions.rs`):
+  `MigrateCmd::Resume` maps to `Request::NoDb` (it takes its own authority-
+  gated lock; an outer lock would deadlock the non-reentrant flock); all three
+  completions list `resume`. Recovery/resume decisions are rendered from typed
+  values (`render_recovery_note`, `render_resume_outcome`), all unit-tested.
+* **Tests:** 18 new recovery use-case tests (all five cases, the gate
+  invariants, the zero-sized authority, forged-marker refusal, deterministic
+  scan, offline-root refusal) + 3 presentation render tests + 3 integration
+  tests (`tests/migrate.rs`: help/completions, offline-root refusal with a
+  byte-identical record snapshot, no lock created on refusal).
+* **Verification:** `cargo check --all-targets --offline` clean;
+  `cargo clippy --all-targets --offline -- -D warnings` clean; layering green
+  (56 modules — no new top-level modules; the new mint rule enforces the
+  authority boundary); full battery **664 pass / 2 ignored / 1 known env-fail**
+  (the pre-existing toolchain-under-`/home` sandbox test); release build +
+  both smoke suites pass; every new/touched file is rustfmt-clean.
+
 ## Changed files (this phase, updated as work lands)
 
 * `docs/architecture-audit.md` (new, Phase 0)
@@ -1318,6 +1389,22 @@ this slice), release build + both smoke suites.
     `FailPoint` is `pub(crate)` under `cfg(test)`; production paths
     unchanged)
 
+* Phase 5 (5C recovery, in progress):
+  * `src/application/features/system/migrate_recover.rs` (new — cases A–F:
+    `recover`, `recover_planned`, `recover_gate_active`, `finalize_history`,
+    `resume`/`resume_with`, `verify_boot_postconditions`, the reload-verified
+    `persist`, plus 18 tests)
+  * `src/application/features/system/mod.rs` (registration + doc)
+  * `src/lock.rs` (`MigrationAuthority`, `migration_authority`,
+    `acquire_for_migration`, `acquire_unchecked`; the ordinary `acquire`
+    refactored onto the shared loop; gate check preserved)
+  * `scripts/check-layering.py` (new mint-authority rule)
+  * `src/cli/args.rs` (`MigrateCmd::Resume`, `Request::NoDb` mapping so the
+    use case owns its lock), `src/cli/completions.rs` (bash/zsh/fish)
+  * `src/commands/system.rs` (resume handler + `recovery_ui`,
+    `render_recovery_note`, `render_resume_outcome` + 3 tests)
+  * `tests/migrate.rs` (3 resume integration tests)
+
 ## Tests actually executed
 
 | Command | Result |
@@ -1340,6 +1427,7 @@ this slice), release build + both smoke suites.
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 5 inspection tree) | 751 pass / 2 ignored / 1 env-failed (= 714 + 35 new: 9 inspection use case + 12 presentation + 13 `tests/migrate.rs` + 1 domain reboot-binding test; plus the 2 plugin tests that were env-blocked at the Phase-0 baseline passed this run — container permission state differs between sessions; the remaining env failure is the toolchain-under-`/home` sandbox test) |
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 5 coordinator tree) | 758 pass / 2 ignored / 1 env-failed (= 751 + 7 new coordinator lifecycle tests; same 1 env failure. First run of the two install-driven lifecycle tests failed on the fixture — the staged `.PKGINFO` lacked `pkgrel`, which the verified installer requires nonzero — fixed in the fixture, re-run clean) |
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 5B tree) | 772 pass / 2 ignored / 1 env-failed (= 758 + 14 new 5B crash-boundary tests; same 1 env failure. During iteration 3 fetch/go tests failed transiently with "no space left on device" — the `/tmp` tmpfs was 100% full from stale test scratch dirs; after cleanup they pass, unchanged by this slice) |
+| `cargo test --all-targets --offline --no-fail-fast` (Phase 5C tree) | ~796 pass / 2 ignored / 1 env-failed across all targets (bin target 664 = 643 + 18 recovery + 3 presentation; 16 `tests/migrate.rs` incl. 3 new resume tests; all other integration targets green); same 1 pre-existing toolchain-under-`/home` env failure |
 | `cargo test --offline` (bin only, 5B iteration) | 643 pass / 1 ignored (the coordinator module: 21 tests = 629 + 14) |
 | `cargo clippy --all-targets --offline -- -D warnings` | pass (Phase 1a + 1b + 1c + 1d + 1e + 2 + 3/B3 + 3/solver + 3/removal + 4/profile + 4/wiring + 5/model + 5/gate + 5/inspection + 5/coordinator + 5B) |
 | `python3 scripts/check-layering.py` | pass (54 after 1a; 53 after 1b; 54 after 1c; 55 after 2 — the new `domain` layer; 55 after 3/B3, 3/solver, 3/removal and 4/profile — the count is top-level modules, the new `domain/package`, `domain/planning`, `domain/system/profile` + `features/system/profile` submodules are scanned; 55 after 4/wiring and 5/model — `domain/system/migration` + `features/system/migrate` are submodules of existing top-level modules; 56 after 5/gate — the record store moved to the top-level `migration_record` module; 56 after 5/inspection — `features/system/migrate_inspect` and `commands/system` are submodules of existing top-level modules, no cycles: commands → application/features/system → migration_record → domain/atomic, lock untouched; **56 after 5/coordinator** — `features/system/migrate_coordinator` is a submodule of an existing top-level module; the one new edge `features/package → features/system` (the permit type import) is an intended application-internal edge the checker's intra-application skip does not count; **56 after 5B — no new modules or edges (the store `remove` and the test injector live in existing modules)**) |
@@ -1423,39 +1511,31 @@ untouched pre-existing red** |
 
 ## Exact next task
 
-**Phase 5C — crash recovery / resume / verify / finalize (§10.3–§10.5,
-§14.1)** — 5B pinned the exact on-disk shapes a killed or failed
-preparation leaves; this slice builds the recovery lifecycle on them:
+**Phase 5D — adversarial security verification (§13)** — 5C landed the
+recovery/resume path and the lock-defined gate-crossing capability; the
+next slice demonstrates the §13 invariants with tests rather than by
+inspection:
 
-* Recovery use cases over the record store (the domain states already
-  exist): inspect incomplete migrations; reconcile an interrupted step
-  (intent without outcome) against the *actual* package-database state
-  — never re-run a non-idempotent step blindly, never treat a missing
-  outcome as success, never treat a failed command as "no side effect"
-  (5B's `step_committed`/`verify_install_postcondition` predicates are
-  the shared classification core); resume a `preparing` migration's
-  remaining approved steps; verify after reboot (`verifying` →
-  `completed`/`failed`); finalize the outstanding transaction history
-  (5B leaves it `preparing` when the finish failed); a documented
-  rollback route (`rollback-required` → verified compensation) and
-  `needs-recovery` when the state is genuinely ambiguous.
-* Shapes to consume (pinned by 5B tests): `planned` after a kill (no
-  gate — inspect and discard or re-plan); `preparing` with an
-  intent-without-outcome; `preparing` with every step resolved and the
-  conclusion unpublished (re-conclude); `awaiting-reboot` with the
-  history still `preparing` (finalize history).
-* Rules that stay binding: the mutation gate is never cleared without
-  verified completion or a completed verified rollback; package WAL
-  (file-journal) recovery stays separate from boot recovery; the
-  permit stays unforgeable — recovery acquires past the gate through
-  the lock-defined capability the permit implements (design §13), no
-  env bypass, no nested nawa processes.
-* CLI surface per §12.2 only if the design names recovery verbs —
-  check §12 before adding any command; otherwise the use cases are
-  application-internal like 5B.
+* Mutation gate: every package-mutating entry point checked; the gate
+  survives process restart and reboot; corrupt/missing/unreadable record
+  directories fail closed; multiple records handled deterministically;
+  terminal states follow the domain machine; read-only commands stay
+  available only where snapshot consistency is proven.
+* Lock ownership: `NAWA_LOCK_HELD` never grants mutation authority; a
+  hook cannot spawn a nested mutating command past the parent lock; a
+  child cannot inherit migration authority; the permit cannot be forged,
+  serialized or minted outside the migration subtree (the layering rule
+  now enforces the last point); ordinary package commands cannot obtain
+  it; lock ownership and migration authority remain connected.
+* Filesystem: migration-id validation, path traversal, symlink/no-follow
+  handling, record ownership/permissions, atomic publication, directory
+  and file sync, malicious TOML, target-root path handling, the read/mutate
+  race. Trust boundary: built-in allowlisted handlers only; repository
+  metadata never supplies executables; plugins cannot register handlers;
+  `.HOOKS`/triggers are not handlers; no nested `nawa` executor.
 
-Then: security verification (5D — full §13 audit of the gate/permit/
-record surface plus security-focused integration tests), the
-`docs/design/package-metadata-chain.md` wiring (B3), Phase 6 blocker
-inspection (faseela/faseela-repo/saq repos for B1/B2/B5/B6/B7 — no
-external changes without authorization), Phase 7 final audit.
+Then: the `docs/design/package-metadata-chain.md` wiring (B3) across
+recipe → archive `.PKGINFO` → signed index v4 → solver, Phase 6 blocker
+re-inspection (faseela/faseela-repo/saq for B1/B2/B5/B6/B7 — read-only,
+no external changes without authorization), Phase 7 final source-tree
+and quality audit.
