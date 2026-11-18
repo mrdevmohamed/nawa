@@ -19,8 +19,10 @@ use anyhow::Result;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::adapters::db::Entry;
-use crate::domain::planning::install::{self, Candidate};
+use crate::domain::planning::install::{self, Candidate, CandidateOrigin};
 pub(crate) use crate::domain::planning::install::{InitSelection, Why};
+use crate::domain::package::metadata::RunDeps;
+use crate::repo::RepoEntry;
 use crate::domain::planning::removal::{self, InstalledPkg};
 use crate::domain::system::capability::Provides;
 use crate::domain::system::profile::SystemProfile;
@@ -57,10 +59,21 @@ pub(crate) struct Item {
     pub replaces: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlanStep {
+    Recipe(usize),
+    Binary(usize),
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct Plan {
-    /// build + install order: dependencies first
+    /// Recipe-backed actions; PlanStep indexes preserve their mixed order.
     pub items: Vec<Item>,
+    /// One topological order spanning recipe and binary repository packages.
+    pub order: Vec<PlanStep>,
+    /// Install reason and replaced version for each binary action.
+    pub binary_whys: Vec<Why>,
+    pub binary_replaces: Vec<Option<String>>,
     /// requested targets that need nothing (already at the recipe's version
     /// or newer) — reported, not rebuilt
     pub up_to_date: Vec<String>,
@@ -98,46 +111,79 @@ pub(crate) fn install_plan(
     target_why: Why,
     with_deps: bool,
 ) -> Result<Plan> {
+    let (plan, _) = install_plan_with_binaries(
+        targets, installed, known, &BTreeMap::new(), profile, target_why, with_deps,
+    )?;
+    Ok(plan)
+}
+
+/// Resolve recipe and authenticated binary candidates through the same
+/// domain graph. Repository candidates fill names that have no recipe.
+pub(crate) fn install_plan_with_binaries(
+    targets: &[String],
+    installed: &HashMap<String, Entry>,
+    known: &BTreeMap<String, Recipe>,
+    binaries: &BTreeMap<String, RepoEntry>,
+    profile: Option<&SystemProfile>,
+    target_why: Why,
+    with_deps: bool,
+) -> Result<(Plan, Vec<RepoEntry>)> {
     let installed_full: HashMap<String, String> = installed
         .iter()
         .map(|(name, e)| (name.clone(), full(&e.version, e.rel)))
         .collect();
-    let candidates = candidates_of(known);
+    let candidates = candidates_of_with_binaries(known, binaries)?;
     let init_providers = match profile.and_then(|p| p.init_capability()) {
         Some(cap) => install::init_provider_names(&candidates, &cap.identity),
         None => Vec::new(),
     };
     let resolved = install::install_plan(
-        targets,
-        &installed_full,
-        &candidates,
-        profile,
-        target_why,
-        with_deps,
+        targets, &installed_full, &candidates, profile, target_why, with_deps,
     )?;
-    // The planner only resolves items for candidates it found, so every
-    // resolved name is a recipe here.
-    let items = resolved
-        .items
-        .into_iter()
-        .map(|it| Item {
-            rec: known
-                .get(&it.name)
-                .expect("the planner only resolves known candidates")
-                .clone(),
-            why: it.why,
-            replaces: it.replaces,
-        })
-        .collect();
-    Ok(Plan {
-        items,
-        up_to_date: resolved.up_to_date,
-        init: resolved.init,
-        init_providers,
-    })
+
+    let mut items = Vec::new();
+    let mut extras = Vec::new();
+    let mut order = Vec::with_capacity(resolved.items.len());
+    let mut binary_whys = Vec::new();
+    let mut binary_replaces = Vec::new();
+
+    for item in resolved.items {
+        match item.origin {
+            CandidateOrigin::Recipe => {
+                let index = items.len();
+                items.push(Item {
+                    rec: known.get(&item.name)
+                        .expect("recipe candidate must retain its recipe").clone(),
+                    why: item.why,
+                    replaces: item.replaces,
+                });
+                order.push(PlanStep::Recipe(index));
+            }
+            CandidateOrigin::Repository => {
+                let entry = binaries.get(&item.name).ok_or_else(|| {
+                    anyhow::anyhow!("resolved binary candidate {} has no repository entry", item.name)
+                })?;
+                let index = extras.len();
+                extras.push(entry.clone());
+                binary_whys.push(item.why);
+                binary_replaces.push(item.replaces);
+                order.push(PlanStep::Binary(index));
+            }
+        }
+    }
+
+    Ok((
+        Plan {
+            items, order, binary_whys, binary_replaces,
+            up_to_date: resolved.up_to_date,
+            init: resolved.init,
+            init_providers,
+        },
+        extras,
+    ))
 }
 
-/// The normalized candidate (§8.1) of a source-backed package: build + run
+/// The normalized candidate (§8.1) of a source-backed package:/// The normalized candidate (§8.1) of a source-backed package: build + run
 /// edges in declaration order, plus the capabilities declared in its
 /// `[capabilities]` table (B3 chain §3). A recipe without the table is
 /// `Provides::Unknown`, never an empty declaration (§7).
@@ -155,15 +201,46 @@ fn candidate_of(rec: &Recipe) -> Candidate {
         version: rec.package.version.clone(),
         rel: rec.package.rel,
         deps: deps_of(rec).collect(),
+        dependencies_known: true,
+        origin: CandidateOrigin::Recipe,
         provides,
     }
 }
 
 fn candidates_of(known: &BTreeMap<String, Recipe>) -> BTreeMap<String, Candidate> {
-    known
-        .iter()
-        .map(|(name, rec)| (name.clone(), candidate_of(rec)))
-        .collect()
+    known.iter().map(|(name, rec)| (name.clone(), candidate_of(rec))).collect()
+}
+
+fn binary_candidate_of(entry: &RepoEntry) -> Result<Candidate> {
+    let metadata = crate::domain::package::metadata::metadata_from_options(
+        entry.rundeps.as_ref(), entry.provides.as_ref(),
+    ).map_err(anyhow::Error::msg)?;
+    let (deps, dependencies_known) = match metadata.rundeps {
+        RunDeps::Declared(deps) => (deps, true),
+        RunDeps::Unknown => (Vec::new(), false),
+    };
+    Ok(Candidate {
+        name: entry.name.clone(),
+        version: entry.version.clone(),
+        rel: entry.rel,
+        deps,
+        dependencies_known,
+        origin: CandidateOrigin::Repository,
+        provides: metadata.provides,
+    })
+}
+
+fn candidates_of_with_binaries(
+    known: &BTreeMap<String, Recipe>,
+    binaries: &BTreeMap<String, RepoEntry>,
+) -> Result<BTreeMap<String, Candidate>> {
+    let mut candidates = candidates_of(known);
+    for (name, entry) in binaries {
+        if !candidates.contains_key(name) {
+            candidates.insert(name.clone(), binary_candidate_of(entry)?);
+        }
+    }
+    Ok(candidates)
 }
 
 /// Installed packages whose candidate is newer: `(installed entry, recipe)`,

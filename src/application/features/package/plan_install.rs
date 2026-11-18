@@ -246,7 +246,7 @@ pub(crate) fn provider_note(plan: &crate::application::features::package::plan::
         )))
     } else {
         Some(Notice::Info(format!(
-            "provider of {wanted} in this plan: {} (from authenticated recipe capabilities)",
+            "provider of {wanted} in this plan: {} (from authenticated candidate metadata)",
             providers.join(", ")
         )))
     }
@@ -271,50 +271,27 @@ pub(crate) fn plan(
     with_deps: bool,
     notices: &mut Vec<Notice>,
 ) -> Result<PlanOutcome> {
-    // a name without a recipe can still be installed when the repository has
-    // it (a binary-only package: no dependency resolution, no build)
-    let mut recipe_targets: Vec<String> = Vec::new();
-    let mut extras: Vec<RepoEntry> = Vec::new();
-    for t in targets {
-        if known.contains_key(t) {
-            recipe_targets.push(t.clone());
-            continue;
-        }
-        match sourcing.entry(t) {
-            Some(re) => match installed.get(t) {
-                Some(cur)
-                    if crate::domain::package::version::vercmp(
-                        &format!("{}-{}", cur.version, cur.rel),
-                        &format!("{}-{}", re.version, re.rel),
-                    ) != std::cmp::Ordering::Less =>
-                {
-                    notices.push(Notice::Info(format!(
-                        "{t} is already installed and up to date"
-                    )));
+    // OpenRepo is the trust boundary. Include only entries for this
+    // architecture; build-only mode never contributes repository candidates.
+    let mut binaries = BTreeMap::new();
+    if sourcing.mode != InstallMode::Build {
+        if let Some(open) = &sourcing.open {
+            for entry in &open.index.packages {
+                if crate::adapters::sys::arch_fits(&entry.arch) {
+                    binaries.insert(entry.name.clone(), entry.clone());
                 }
-                _ => extras.push(re.clone()),
-            },
-            // neither a recipe nor a repository package: the planner reports
-            // it with a "did you mean" hint
-            None => recipe_targets.push(t.clone()),
+            }
         }
     }
 
-    let plan = plan::install_plan(
-        &recipe_targets,
-        installed,
-        known,
-        profile.profile.as_ref(),
-        why,
-        with_deps,
+    let (plan, extras) = plan::install_plan_with_binaries(
+        targets, installed, known, &binaries, profile.profile.as_ref(), why, with_deps,
     )?;
     if let Some(note) = init_note(profile, &plan.init) {
         notices.push(note);
     }
     for name in &plan.up_to_date {
-        notices.push(Notice::Info(format!(
-            "{name} is already installed and up to date"
-        )));
+        notices.push(Notice::Info(format!("{name} is already installed and up to date")));
     }
     Ok(PlanOutcome { plan, extras })
 }
@@ -370,7 +347,7 @@ mod tests {
             download_url: None,
             size: 0,
             installed_size: 0,
-            rundeps: None,
+            rundeps: Some(Vec::new()),
             provides: None,
         }
     }
@@ -526,6 +503,70 @@ mod tests {
         assert!(notices.is_empty());
         assert_eq!(outcome.extras.len(), 1);
         assert_eq!(outcome.extras[0].version, "2.0");
+    }
+
+    #[test]
+    fn recipe_to_binary_dependency_is_ordered_before_the_recipe() {
+        let sourcing = Sourcing {
+            mode: InstallMode::Auto, ask: false,
+            open: Some(open_repo(vec![repo_entry("binary-lib", "1.0", 1)])),
+        };
+        let known = BTreeMap::from([("app".to_string(), rec("app", "1.0", &["binary-lib"]))]);
+        let outcome = plan(
+            &["app".to_string()], &known, &inst(vec![]), &sourcing,
+            &no_profile(), Why::Explicit, true, &mut Vec::new(),
+        ).unwrap();
+        assert_eq!(outcome.plan.order, [plan::PlanStep::Binary(0), plan::PlanStep::Recipe(0)]);
+        assert_eq!(outcome.extras[0].name, "binary-lib");
+    }
+
+    #[test]
+    fn binary_to_recipe_dependency_is_ordered_before_the_binary() {
+        let mut binary_app = repo_entry("binary-app", "1.0", 1);
+        binary_app.rundeps = Some(vec!["recipe-lib".to_string()]);
+        let sourcing = Sourcing {
+            mode: InstallMode::Auto, ask: false, open: Some(open_repo(vec![binary_app])),
+        };
+        let known = BTreeMap::from([("recipe-lib".to_string(), rec("recipe-lib", "1.0", &[]))]);
+        let outcome = plan(
+            &["binary-app".to_string()], &known, &inst(vec![]), &sourcing,
+            &no_profile(), Why::Explicit, true, &mut Vec::new(),
+        ).unwrap();
+        assert_eq!(outcome.plan.order, [plan::PlanStep::Recipe(0), plan::PlanStep::Binary(0)]);
+        assert_eq!(outcome.plan.items[0].why, Why::Dependency);
+        assert_eq!(outcome.extras[0].name, "binary-app");
+    }
+
+    #[test]
+    fn binary_to_binary_dependencies_share_the_same_order() {
+        let mut binary_app = repo_entry("binary-app", "1.0", 1);
+        binary_app.rundeps = Some(vec!["binary-lib".to_string()]);
+        let sourcing = Sourcing {
+            mode: InstallMode::Auto, ask: false,
+            open: Some(open_repo(vec![binary_app, repo_entry("binary-lib", "1.0", 1)])),
+        };
+        let outcome = plan(
+            &["binary-app".to_string()], &BTreeMap::new(), &inst(vec![]), &sourcing,
+            &no_profile(), Why::Explicit, true, &mut Vec::new(),
+        ).unwrap();
+        assert_eq!(outcome.plan.order, [plan::PlanStep::Binary(0), plan::PlanStep::Binary(1)]);
+        assert_eq!(outcome.extras[0].name, "binary-lib");
+        assert_eq!(outcome.extras[1].name, "binary-app");
+        assert_eq!(outcome.plan.binary_whys, [Why::Dependency, Why::Explicit]);
+    }
+
+    #[test]
+    fn legacy_binary_runtime_dependencies_remain_unknown() {
+        let mut legacy = repo_entry("legacy-bin", "1.0", 1);
+        legacy.rundeps = None;
+        let sourcing = Sourcing {
+            mode: InstallMode::Auto, ask: false, open: Some(open_repo(vec![legacy])),
+        };
+        let error = plan(
+            &["legacy-bin".to_string()], &BTreeMap::new(), &inst(vec![]), &sourcing,
+            &no_profile(), Why::Explicit, true, &mut Vec::new(),
+        ).unwrap_err();
+        assert!(error.to_string().contains("runtime dependency metadata"));
     }
 
     #[test]

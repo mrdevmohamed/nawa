@@ -51,24 +51,32 @@ pub(crate) enum Why {
     Update,
 }
 
+/// Where a normalized candidate came from. The application maps this
+/// provenance back to its recipe or authenticated repository entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CandidateOrigin {
+    Recipe,
+    Repository,
+}
+
 /// One normalized candidate (§8.1): a trusted package the planner may
-/// select. Source-backed candidates come from recipes (build + run edges);
-/// binary-only candidates would come from authenticated index metadata and
-/// do not exist yet.
+/// select. Recipe candidates carry build + run dependencies; repository
+/// candidates carry authenticated runtime dependencies from index v4.
 #[derive(Debug, Clone)]
 pub(crate) struct Candidate {
     pub(crate) name: String,
-    /// version without the rel; [`version_rel`] joins it for comparisons
+    /// version without the rel; version_rel joins it for comparisons
     pub(crate) version: String,
     pub(crate) rel: u32,
-    /// The dependency edges the planner follows, in declaration order:
-    /// build + run for a source-backed candidate (§8.1). Duplicates are
-    /// allowed and harmless (a repeated edge is a satisfied no-op).
+    /// Recipe candidates include build + run edges; binary candidates include
+    /// runtime dependencies only.
     pub(crate) deps: Vec<String>,
-    /// capability declarations (the B3 chain, §6.3): normalized from the
-    /// recipe at candidate assembly, or `Unknown` for a legacy source. The
-    /// profile-driven init decision is carried on [`Resolution::init`], and
-    /// the package-side explanation is rendered by the application adapter.
+    /// False means a legacy repository entry did not declare rundeps.
+    /// Unknown is not an empty dependency list and cannot be solved safely.
+    pub(crate) dependencies_known: bool,
+    /// Source provenance is retained through resolution and explanation.
+    pub(crate) origin: CandidateOrigin,
+    /// Capability declarations from the trusted metadata chain.
     pub(crate) provides: Provides,
 }
 
@@ -195,6 +203,7 @@ pub(crate) struct Resolution {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedItem {
     pub(crate) name: String,
+    pub(crate) origin: CandidateOrigin,
     pub(crate) why: Why,
     /// the installed `version-rel` this plan replaces
     pub(crate) replaces: Option<String>,
@@ -292,6 +301,14 @@ fn visit(
         }
     }
 
+    if with_deps && !cand.dependencies_known {
+        bail!(
+            "runtime dependency metadata for repository package {name:?} is unknown; \
+             cannot safely resolve its dependency closure (use --no-deps to skip \
+             dependency resolution explicitly)"
+        );
+    }
+
     if visiting.iter().any(|v| v == name) {
         let mut cycle = visiting.clone();
         cycle.push(name.to_string());
@@ -310,6 +327,7 @@ fn visit(
     done.insert(name.to_string());
     resolution.items.push(ResolvedItem {
         name: cand.name.clone(),
+        origin: cand.origin,
         why: if is_target {
             target_why
         } else {
@@ -355,6 +373,20 @@ mod tests {
             version: ver.to_string(),
             rel,
             deps: deps.iter().map(|d| d.to_string()).collect(),
+            dependencies_known: true,
+            origin: CandidateOrigin::Recipe,
+            provides: Provides::Unknown,
+        }
+    }
+
+    fn binary_cand(name: &str, ver: &str, deps: &[&str], known: bool) -> Candidate {
+        Candidate {
+            name: name.to_string(),
+            version: ver.to_string(),
+            rel: 1,
+            deps: deps.iter().map(|d| d.to_string()).collect(),
+            dependencies_known: known,
+            origin: CandidateOrigin::Repository,
             provides: Provides::Unknown,
         }
     }
@@ -384,11 +416,11 @@ mod tests {
         let candidates = tree(vec![
             Candidate {
                 name: "networkd".to_string(), version: "1".to_string(), rel: 1,
-                deps: vec![], provides: Provides::parse_all(&["network-stack=networkd".to_string()]).unwrap(),
+                deps: vec![], dependencies_known: true, origin: CandidateOrigin::Recipe, provides: Provides::parse_all(&["network-stack=networkd".to_string()]).unwrap(),
             },
             Candidate {
                 name: "dual-network".to_string(), version: "1".to_string(), rel: 1,
-                deps: vec![], provides: Provides::parse_all(&[
+                deps: vec![], dependencies_known: true, origin: CandidateOrigin::Recipe, provides: Provides::parse_all(&[
                     "network-stack=networkd".to_string(),
                     "network-stack=netifd".to_string(),
                 ]).unwrap(),
@@ -396,7 +428,7 @@ mod tests {
             cand("legacy-provider", "1", 1, &[]),
             Candidate {
                 name: "other-domain".to_string(), version: "1".to_string(), rel: 1,
-                deps: vec![], provides: Provides::parse_all(&["init-system=systemd".to_string()]).unwrap(),
+                deps: vec![], dependencies_known: true, origin: CandidateOrigin::Recipe, provides: Provides::parse_all(&["init-system=systemd".to_string()]).unwrap(),
             },
         ]);
         let result = providers_for(&candidates, &requested);
@@ -410,6 +442,44 @@ mod tests {
         // this fixture supplies no capabilities, so Unknown is not an empty declaration
         let c = cand("runit", "2.1.2", 2, &[]);
         assert_eq!(c.provides, Provides::Unknown);
+    }
+
+    #[test]
+    fn recipe_and_binary_candidates_share_one_dependency_graph() {
+        let known = tree(vec![
+            cand("app", "1", 1, &["middle"]),
+            binary_cand("middle", "2", &["runtime-lib", "leaf"], true),
+            cand("runtime-lib", "3", 1, &[]),
+            binary_cand("leaf", "4", &[], true),
+        ]);
+        let result = install_plan(
+            &["app".to_string()], &HashMap::new(), &known, None, Why::Explicit, true,
+        ).unwrap();
+        assert_eq!(names(&result), ["runtime-lib", "leaf", "middle", "app"]);
+        assert_eq!(
+            result.items.iter().map(|item| item.origin).collect::<Vec<_>>(),
+            [
+                CandidateOrigin::Recipe,
+                CandidateOrigin::Repository,
+                CandidateOrigin::Repository,
+                CandidateOrigin::Recipe,
+            ]
+        );
+        assert_eq!(result.items[0].why, Why::Dependency);
+        assert_eq!(result.items[3].why, Why::Explicit);
+    }
+
+    #[test]
+    fn unknown_binary_runtime_dependencies_fail_closed_unless_explicitly_skipped() {
+        let known = tree(vec![binary_cand("legacy-bin", "1", &[], false)]);
+        let error = install_plan(
+            &["legacy-bin".to_string()], &HashMap::new(), &known, None, Why::Explicit, true,
+        ).unwrap_err();
+        assert!(error.to_string().contains("runtime dependency metadata"));
+        let skipped = install_plan(
+            &["legacy-bin".to_string()], &HashMap::new(), &known, None, Why::Explicit, false,
+        ).unwrap();
+        assert_eq!(names(&skipped), ["legacy-bin"]);
     }
 
     #[test]

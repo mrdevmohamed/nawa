@@ -88,7 +88,7 @@ fn validate_state_directory(path: &Path, meta: &std::fs::Metadata) -> Result<()>
 /// a time for writers. The root itself is canonicalized once so an explicitly
 /// supplied root alias is resolved before the no-follow walk begins.
 fn checked_records_dir(root: &Path, create: bool) -> Result<Option<PathBuf>> {
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    use std::os::unix::fs::DirBuilderExt;
 
     let canonical_root = root
         .canonicalize()
