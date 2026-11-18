@@ -664,10 +664,11 @@ fn load_validated(
 }
 
 fn valid_blob_name(name: &str) -> bool {
-    name.starts_with("entry-")
-        && name.ends_with(".bin")
-        && name.len() == 13
-        && name[6..9].bytes().all(|byte| byte.is_ascii_digit())
+    let bytes = name.as_bytes();
+    bytes.len() == 13
+        && bytes.starts_with(b"entry-")
+        && bytes.ends_with(b".bin")
+        && bytes[6..9].iter().all(u8::is_ascii_digit)
 }
 
 /// Return every regular-file or symlink leaf below the required runit service
@@ -1062,6 +1063,15 @@ mod tests {
 
     fn make_snapshot(root: &Path) -> SnapshotInfo {
         capture(root, "faseela-runit-to-systemd-v1").unwrap()
+    }
+
+    #[test]
+    fn blob_name_validation_rejects_non_ascii_without_panicking() {
+        for name in ["entry-000.bin", "entry-💥.bin", "entry-00é.bin", "entry-999.txt"] {
+            let result = std::panic::catch_unwind(|| valid_blob_name(name));
+            assert!(result.is_ok(), "validator panicked for {name:?}");
+            assert_eq!(result.unwrap(), name == "entry-000.bin");
+        }
     }
 
     #[test]
