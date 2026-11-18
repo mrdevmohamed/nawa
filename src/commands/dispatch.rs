@@ -212,10 +212,15 @@ fn run_command(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         Cmd::Trust { keyfile } => cmd_trust(ctx, &keyfile),
         Cmd::Upgrade { repo, dry_run, force, allow_unsigned, yes } => {
             let repo_ref = resolve_repo(ctx, repo)?;
+            let observed = crate::application::features::system::detect::observe(
+                &ctx.root,
+                Path::new("/proc"),
+            );
             crate::upgrade::upgrade(
                 &ctx.root,
                 &repo_ref,
                 &ctx.recipes,
+                &observed,
                 &crate::upgrade::UpgradeOpts { dry_run, force, allow_unsigned, yes },
             )
         }

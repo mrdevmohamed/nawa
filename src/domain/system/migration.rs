@@ -182,6 +182,22 @@ impl MigrationDefinition {
     }
 }
 
+/// The reviewed built-in Faseela init transition. This is a domain
+/// definition, not repository metadata or an executable handler supplied by
+/// a package.
+pub(crate) fn builtin_faseela_runit_to_systemd() -> MigrationDefinition {
+    let parse = |key: &str| Capability::parse(key).expect("the built-in definition is constant");
+    MigrationDefinition::new(
+        "faseela-runit-to-systemd-v1",
+        1,
+        parse("init-system=runit"),
+        parse("init-system=systemd"),
+        HandlerId::FaseelaInitRunitToSystemd,
+        true,
+    )
+    .expect("the built-in definition is valid")
+}
+
 /// The durable migration states (§10.3's table). Serialized as the exact
 /// lowercase names of that table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

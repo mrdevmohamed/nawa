@@ -31,128 +31,39 @@ use std::path::{Path, PathBuf};
 
 use crate::domain::system::identity::{classify_pid1, identify, InitKind, Pid1};
 
-/// One observation together with the source it came from (§5.1: an
-/// observation must include its source and confidence).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Evidence {
-    pub(crate) source: String,
-    pub(crate) value: String,
-}
+pub(crate) use crate::domain::system::observation::{
+    Confidence, Context, DesiredInit, Evidence, InitCandidate, InstalledInit,
+    ObservedSystem, RuntimeInit,
+};
 
-/// Where the managed root stands relative to this process (§5.5: the
-/// execution context is its own field, never merged into an init value).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Context {
-    /// canonical root, PID 1 evidence statable, no container/chroot markers
-    LiveHost { evidence: Vec<Evidence> },
-    /// container markers found; runtime observations refer to the container
-    Container { evidence: Vec<Evidence> },
-    /// this process's root is not PID 1's root: `/proc/1` belongs to the
-    /// outer environment
-    Chroot { evidence: Vec<Evidence> },
-    /// an explicit non-canonical `--root`: target-root evidence only (§5.5
-    /// target-root row; §5.5 offline row: planning/inspection only, apply
-    /// forbidden)
-    OfflineRoot { root: PathBuf },
-    /// the environment could not be attributed — reported, not guessed
-    Unknown { reason: String },
-}
-
-/// Confidence of a runtime-init observation (§5.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Confidence {
-    /// both readable sources agree
-    Proven,
-    /// one source identifies the init
-    Indicated,
-}
-
-/// The observed runtime init of the managed environment (§5.1). `Unknown`
-/// is a valid result and is never replaced by a guess.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RuntimeInit {
-    Observed {
-        kind: InitKind,
-        confidence: Confidence,
-        evidence: Vec<Evidence>,
-    },
-    Unknown {
-        reason: String,
-    },
-}
-
-/// What the target root has staged for init (§5.2 installed state).
-/// Presence is evidence of installed intent, never proof of the running
-/// PID 1 (§5.5). Two providers may legitimately coexist during a staged
-/// transition (§6.2) — both are reported, and a contradiction is not
-/// resolved by a preference.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(crate) struct InstalledInit {
-    pub(crate) candidates: Vec<InitCandidate>,
-}
-
-/// One staged init candidate found in the target root.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct InitCandidate {
-    pub(crate) kind: InitKind,
-    /// path inside (or under) the target root
-    pub(crate) path: PathBuf,
-    pub(crate) evidence: String,
-}
-
-/// The desired init (§5.3 desired state): what the effective target profile
-/// (§7) declares for the `init-system` role, with the declaring file for
-/// attribution (§5.1). A missing profile is *not declared* — never read as
-/// a decision; an invalid profile fails closed and is reported (§7), never
-/// guessed around.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum DesiredInit {
-    /// a system profile selects the provider: the normalized identity and
-    /// the file that declared it
-    Declared { identity: String, source: String },
-    /// no profile declares an init provider (no profile files, or no
-    /// `init-system` role): the desired state is undeclared
-    NotDeclared,
-    /// a profile file exists but is invalid: fail closed, reported (§7)
-    Invalid { reason: String },
-}
-
-/// The full observation for one detection (§5.5 contract: the execution
-/// context, the observed runtime init, the installed/configured init
-/// candidate and the desired init profile as four separate fields).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ObservedSystem {
-    /// the root that was observed
-    pub(crate) root: PathBuf,
-    pub(crate) context: Context,
-    pub(crate) runtime: RuntimeInit,
-    pub(crate) installed: InstalledInit,
-    pub(crate) desired: DesiredInit,
-}
-
-/// The desired init declared by the target root's system profile (§5.3):
-/// read-only; an invalid profile is reported (`Invalid`), never guessed
-/// around (§7 fail-closed).
-fn desired_init(root: &Path) -> DesiredInit {
+/// Read the desired init and retain the validated profile from the same
+/// filesystem snapshot. Missing policy is not interpreted as an empty one.
+fn desired_state(root: &Path) -> (DesiredInit, Option<crate::domain::system::profile::SystemProfile>) {
     match super::profile::load_effective(root) {
-        Ok(effective) => match effective
-            .profile
-            .as_ref()
-            .and_then(|p| p.provider("init-system"))
-        {
-            Some(identity) => DesiredInit::Declared {
-                identity: identity.to_string(),
-                source: effective
-                    .role_sources
-                    .get("init-system")
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_default(),
+        Ok(effective) => {
+            let desired = match effective
+                .profile
+                .as_ref()
+                .and_then(|profile| profile.provider("init-system"))
+            {
+                Some(identity) => DesiredInit::Declared {
+                    identity: identity.to_string(),
+                    source: effective
+                        .role_sources
+                        .get("init-system")
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_default(),
+                },
+                None => DesiredInit::NotDeclared,
+            };
+            (desired, effective.profile)
+        }
+        Err(error) => (
+            DesiredInit::Invalid {
+                reason: format!("{error:#}"),
             },
-            None => DesiredInit::NotDeclared,
-        },
-        Err(e) => DesiredInit::Invalid {
-            reason: format!("{e:#}"),
-        },
+            None,
+        ),
     }
 }
 
@@ -164,6 +75,7 @@ pub(crate) fn observe(root: &Path, proc: &Path) -> ObservedSystem {
     if !is_canonical(root) {
         // §5.5 target-root/offline rows: report installed/configured
         // candidates only; host /proc is not the target's runtime state
+        let (desired, effective_profile) = desired_state(root);
         return ObservedSystem {
             root: root.to_path_buf(),
             context: Context::OfflineRoot {
@@ -174,7 +86,8 @@ pub(crate) fn observe(root: &Path, proc: &Path) -> ObservedSystem {
                     .to_string(),
             },
             installed: installed_init(root),
-            desired: desired_init(root),
+            desired,
+            effective_profile,
         };
     }
     observe_canonical(root, proc)
@@ -203,12 +116,14 @@ pub(crate) fn observe_canonical(managed_root: &Path, proc: &Path) -> ObservedSys
         // being managed; the context field is what a migration gate checks
         _ => runtime_init(proc),
     };
+    let (desired, effective_profile) = desired_state(managed_root);
     ObservedSystem {
         root: managed_root.to_path_buf(),
         context,
         runtime,
         installed: installed_init(managed_root),
-        desired: desired_init(managed_root),
+        desired,
+        effective_profile,
     }
 }
 

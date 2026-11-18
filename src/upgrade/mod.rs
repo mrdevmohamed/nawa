@@ -23,6 +23,7 @@ use crate::repo;
 #[cfg(test)]
 use crate::adapters::sign;
 use crate::domain::package::version::vercmp;
+use crate::domain::system::observation::ObservedSystem;
 
 mod source;
 mod system_transition;
@@ -42,11 +43,12 @@ pub(crate) fn upgrade(
     root: &Path,
     repo_ref: &RepoRef,
     recipes: &Path,
+    observed: &ObservedSystem,
     opts: &UpgradeOpts,
 ) -> Result<()> {
     let open = open_repo(root, repo_ref, opts.allow_unsigned, opts.force)?;
     let mut plan = build_plan(root, &open.index, recipes)?;
-    plan.system_transition = system_transition::plan(root, &open, &plan.installed);
+    plan.system_transition = system_transition::plan(observed, &open, &plan.installed);
 
     if plan.upgrades.is_empty() && plan.system_transition.is_none() {
         crate::nawa_info!("everything up to date ({} installed)", plan.installed.len());

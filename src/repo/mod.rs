@@ -8,7 +8,7 @@ pub mod pack;
 
 pub(crate) use model::{
     Index, RepoEntry, ARCHIVE_LOCATION_PER_PACKAGE_URL, INDEX_SCHEMA_V2, INDEX_SCHEMA_V3,
-    RECIPES_SUFFIX,
+    INDEX_SCHEMA_V4, RECIPES_SUFFIX,
 };
 #[cfg(test)]
 pub(crate) use model::{

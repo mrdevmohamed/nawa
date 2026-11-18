@@ -28,22 +28,13 @@ use anyhow::{bail, Context, Result};
 use crate::application::features::system::detect::{self, Context as ExecContext, RuntimeInit};
 use crate::domain::system::capability::Capability;
 use crate::domain::system::identity::InitKind;
-use crate::domain::system::migration::{HandlerId, MigrationDefinition};
+use crate::domain::system::migration::MigrationDefinition;
 
 /// The one built-in migration definition (§10.1). Constructed here, not read
 /// from a repository: its handler binding and reboot requirement are checked
 /// by the domain model at construction time.
 pub(crate) fn builtin_definition() -> MigrationDefinition {
-    let parse = |key: &str| Capability::parse(key).expect("the built-in definition is constant");
-    MigrationDefinition::new(
-        "faseela-runit-to-systemd-v1",
-        1,
-        parse("init-system=runit"),
-        parse("init-system=systemd"),
-        HandlerId::FaseelaInitRunitToSystemd,
-        true,
-    )
-    .expect("the built-in definition is valid")
+    crate::domain::system::migration::builtin_faseela_runit_to_systemd()
 }
 
 /// The read-only plan: what was observed, what was declared and what the

@@ -6,14 +6,14 @@
 //! separate from the normal upgrade transaction.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
-
 use crate::adapters::db::Entry;
-use crate::application::features::system::{detect, migrate_apply, profile};
+use crate::domain::system::migration::builtin_faseela_runit_to_systemd;
+use crate::domain::system::observation::{
+    Confidence, Context, DesiredInit, ObservedSystem, RuntimeInit,
+};
 use crate::domain::package::metadata::RunDeps;
 use crate::domain::planning::install::{self, Candidate, Why};
 use crate::domain::system::capability::InitProvider;
-use crate::domain::system::identity::InitKind;
 
 use super::{ArchiveAuth, OpenRepo};
 
@@ -54,23 +54,22 @@ pub(super) enum PackageActionKind {
 }
 
 pub(super) fn plan(
-    root: &Path,
+    observed: &ObservedSystem,
     open: &OpenRepo,
     installed: &HashMap<String, Entry>,
 ) -> Option<Preview> {
-    let observed = detect::observe(root, Path::new("/proc"));
-    build_from_observation(&observed, open, installed)
+    build_from_observation(observed, open, installed)
 }
 
 fn build_from_observation(
-    observed: &detect::ObservedSystem,
+    observed: &ObservedSystem,
     open: &OpenRepo,
     installed: &HashMap<String, Entry>,
 ) -> Option<Preview> {
     let (target, profile_source) = match &observed.desired {
-        detect::DesiredInit::Declared { identity, source } => (identity.clone(), source.clone()),
-        detect::DesiredInit::NotDeclared => return None,
-        detect::DesiredInit::Invalid { reason } => {
+        DesiredInit::Declared { identity, source } => (identity.clone(), source.clone()),
+        DesiredInit::NotDeclared => return None,
+        DesiredInit::Invalid { reason } => {
             return Some(Preview::Unresolved {
                 from: runtime_identity(&observed.runtime),
                 to: "unknown".to_string(),
@@ -81,18 +80,18 @@ fn build_from_observation(
     };
 
     let context_reason = match &observed.context {
-        detect::Context::LiveHost { .. } => None,
-        detect::Context::Container { .. } => Some(
+        Context::LiveHost { .. } => None,
+        Context::Container { .. } => Some(
             "the root is a container; its PID 1 is not the verified host init".to_string(),
         ),
-        detect::Context::Chroot { .. } => Some(
+        Context::Chroot { .. } => Some(
             "the root is a chroot; /proc/1 belongs to the outer environment".to_string(),
         ),
-        detect::Context::OfflineRoot { .. } => Some(
+        Context::OfflineRoot { .. } => Some(
             "the selected root is offline; the host PID 1 cannot describe its runtime state"
                 .to_string(),
         ),
-        detect::Context::Unknown { reason } => Some(format!(
+        Context::Unknown { reason } => Some(format!(
             "the execution context cannot be attributed safely: {reason}"
         )),
     };
@@ -106,14 +105,14 @@ fn build_from_observation(
     }
 
     let from = match &observed.runtime {
-        detect::RuntimeInit::Observed {
+        RuntimeInit::Observed {
             kind,
-            confidence: detect::Confidence::Proven,
+            confidence: Confidence::Proven,
             ..
         } => kind.capability_identity(),
-        detect::RuntimeInit::Observed {
+        RuntimeInit::Observed {
             kind,
-            confidence: detect::Confidence::Indicated,
+            confidence: Confidence::Indicated,
             ..
         } => {
             return Some(Preview::Unresolved {
@@ -123,7 +122,7 @@ fn build_from_observation(
                 reason: "PID 1 identity is only indicated by one evidence source; proven runtime identity is required".to_string(),
             });
         }
-        detect::RuntimeInit::Unknown { reason } => {
+        RuntimeInit::Unknown { reason } => {
             return Some(Preview::Unresolved {
                 from: None,
                 to: target,
@@ -136,7 +135,7 @@ fn build_from_observation(
         return None;
     }
 
-    let definition = migrate_apply::builtin_definition();
+    let definition = builtin_faseela_runit_to_systemd();
     if from != definition.from.identity || target != definition.to.identity {
         return Some(Preview::Unresolved {
             from: Some(from.clone()),
@@ -213,23 +212,13 @@ fn build_from_observation(
     }
 
     let provider_package = providers.remove(0);
-    let effective = match profile::load_effective(&observed.root) {
-        Ok(profile) => profile,
-        Err(error) => {
-            return Some(Preview::Unresolved {
-                from: Some(from),
-                to: target,
-                profile_source,
-                reason: format!("the effective target profile could not be reloaded: {error:#}"),
-            });
-        }
-    };
-    let Some(target_profile) = effective.profile.as_ref() else {
+    let Some(target_profile) = observed.effective_profile.as_ref() else {
         return Some(Preview::Unresolved {
             from: Some(from),
             to: target,
             profile_source,
-            reason: "the effective target profile is no longer declared".to_string(),
+            reason: "the observed target profile is unavailable; no package candidate can be planned"
+                .to_string(),
         });
     };
 
@@ -347,10 +336,10 @@ fn build_from_observation(
     })
 }
 
-fn runtime_identity(runtime: &detect::RuntimeInit) -> Option<String> {
+fn runtime_identity(runtime: &RuntimeInit) -> Option<String> {
     match runtime {
-        detect::RuntimeInit::Observed { kind, .. } => Some(kind.capability_identity()),
-        detect::RuntimeInit::Unknown { .. } => None,
+        RuntimeInit::Observed { kind, .. } => Some(kind.capability_identity()),
+        RuntimeInit::Unknown { .. } => None,
     }
 }
 
@@ -413,30 +402,38 @@ pub(super) fn render(preview: &Preview) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use crate::domain::system::identity::InitKind;
+    use crate::domain::system::profile::SystemProfile;
+    use std::path::{Path, PathBuf};
 
     fn root() -> PathBuf {
-        let root = crate::testutil::tmpdir("system-transition-profile");
-        let path = root.join("usr/share/nawa/system-profile.toml");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, "schema = 1\n[providers]\ninit-system = \"systemd\"\n").unwrap();
-        root
+        crate::testutil::tmpdir("system-transition-profile")
     }
 
-    fn observed(root: &Path, runtime: InitKind) -> detect::ObservedSystem {
-        detect::ObservedSystem {
+    fn observed(root: &Path, runtime: InitKind) -> ObservedSystem {
+        ObservedSystem {
             root: root.to_path_buf(),
-            context: detect::Context::LiveHost { evidence: Vec::new() },
-            runtime: detect::RuntimeInit::Observed {
+            context: Context::LiveHost { evidence: Vec::new() },
+            runtime: RuntimeInit::Observed {
                 kind: runtime,
-                confidence: detect::Confidence::Proven,
+                confidence: Confidence::Proven,
                 evidence: Vec::new(),
             },
-            installed: detect::InstalledInit::default(),
-            desired: detect::DesiredInit::Declared {
+            installed: InstalledInit::default(),
+            desired: DesiredInit::Declared {
                 identity: "systemd".to_string(),
-                source: root.join("usr/share/nawa/system-profile.toml").display().to_string(),
+                source: "/usr/share/nawa/system-profile.toml".to_string(),
             },
+            effective_profile: Some(SystemProfile {
+                schema: 1,
+                distribution: Some("faseela".to_string()),
+                profile: Some("desktop".to_string()),
+                architecture: Some(std::env::consts::ARCH.to_string()),
+                providers: BTreeMap::from([(
+                    "init-system".to_string(),
+                    "systemd".to_string(),
+                )]),
+            }),
         }
     }
 
@@ -538,7 +535,7 @@ mod tests {
         let root = root();
         let repo = open_v4(vec![entry("systemd", &[], &["init-system=systemd"])]);
         let mut observation = observed(&root, InitKind::Runit);
-        observation.context = detect::Context::OfflineRoot { root: root.clone() };
+        observation.context = Context::OfflineRoot { root: root.clone() };
         let result = build_from_observation(&observation, &repo, &HashMap::new()).unwrap();
         assert!(matches!(result, Preview::Unresolved { reason, .. } if reason.contains("offline")));
         let _ = std::fs::remove_dir_all(root);
