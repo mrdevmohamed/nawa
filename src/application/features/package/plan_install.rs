@@ -441,6 +441,7 @@ mod tests {
         EffectiveProfile {
             profile: None,
             role_sources: BTreeMap::new(),
+            policy_sources: BTreeMap::new(),
         }
     }
 
@@ -452,6 +453,10 @@ mod tests {
                 .unwrap();
         EffectiveProfile {
             role_sources: BTreeMap::from([(
+                "init-system".to_string(),
+                std::path::PathBuf::from("/etc/nawa/system-profile.toml"),
+            )]),
+            policy_sources: BTreeMap::from([(
                 "init-system".to_string(),
                 std::path::PathBuf::from("/etc/nawa/system-profile.toml"),
             )]),
