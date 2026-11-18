@@ -178,6 +178,11 @@ supported legacy installations.
   `38da9c11b173b968f91665f77a3c846c5942a450`). This remains a containment
   check, not a race-resistant dirfd/openat implementation.
 
+* Test-fixture correction: the external-symlink regression fixtures use
+  sibling paths outside the selected root (not child paths inside the
+  fixture); this ensures the tests exercise a real root escape rather than
+  an accepted in-root alias.
+
 * Verification boundary: the last completed green CI before these changes is
   run [#44387912047](https://github.com/mrdevmohamed/nawa/actions/runs/44387912047)
   on `fcddf56e6f2b876e8f691cb3c27dddb668eef91d`. Run [#44392392276](https://github.com/mrdevmohamed/nawa/actions/runs/44392392276)

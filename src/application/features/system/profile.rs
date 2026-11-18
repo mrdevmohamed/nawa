@@ -255,10 +255,14 @@ init-system = \"systemd\"
         use std::os::unix::fs::symlink;
 
         let f = Fixture::new("external-ancestor");
-        let outside = f.dir.join("outside/usr/share/nawa");
+        let outside_root = f.dir.with_file_name(format!(
+            "{}-outside-root",
+            f.dir.file_name().unwrap().to_string_lossy()
+        ));
+        let outside = outside_root.join("usr/share/nawa");
         std::fs::create_dir_all(&outside).unwrap();
         write(&outside.join("system-profile.toml"), DESKTOP);
-        symlink(f.dir.join("outside/usr"), f.dir.join("usr")).unwrap();
+        symlink(outside_root.join("usr"), f.dir.join("usr")).unwrap();
 
         let error = load_effective(&f.dir).unwrap_err();
         let message = format!("{error:#}");
@@ -266,6 +270,7 @@ init-system = \"systemd\"
             message.contains("outside selected target root"),
             "an external ancestor must be refused: {message}"
         );
+        let _ = std::fs::remove_dir_all(outside_root);
     }
 
     #[test]
@@ -273,7 +278,10 @@ init-system = \"systemd\"
         use std::os::unix::fs::symlink;
 
         let f = Fixture::new("external-file");
-        let outside = f.dir.join("outside-profile.toml");
+        let outside = f.dir.with_file_name(format!(
+            "{}-outside-profile.toml",
+            f.dir.file_name().unwrap().to_string_lossy()
+        ));
         write(&outside, DESKTOP);
         let defaults = f.dir.join("usr/share/nawa/system-profile.toml");
         std::fs::create_dir_all(defaults.parent().unwrap()).unwrap();
@@ -285,6 +293,7 @@ init-system = \"systemd\"
             message.contains("outside selected target root"),
             "an external final symlink must be refused: {message}"
         );
+        let _ = std::fs::remove_file(outside);
     }
 
     #[test]
