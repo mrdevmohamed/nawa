@@ -285,7 +285,7 @@ init-system = \"systemd\"
         write(&outside, DESKTOP);
         let defaults = f.dir.join("usr/share/nawa/system-profile.toml");
         std::fs::create_dir_all(defaults.parent().unwrap()).unwrap();
-        symlink(&outside, &defaults);
+        symlink(&outside, &defaults).unwrap();
 
         let error = load_effective(&f.dir).unwrap_err();
         let message = format!("{error:#}");
@@ -303,7 +303,7 @@ init-system = \"systemd\"
         let f = Fixture::new("internal-ancestor");
         let actual = f.dir.join("real/usr/share/nawa/system-profile.toml");
         write(&actual, DESKTOP);
-        symlink(f.dir.join("real/usr"), f.dir.join("usr"));
+        symlink(f.dir.join("real/usr"), f.dir.join("usr")).unwrap();
 
         let effective = load_effective(&f.dir).unwrap();
         assert_eq!(
