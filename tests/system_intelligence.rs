@@ -12,6 +12,9 @@ fn nawa() -> Command {
     let mut command = Command::new(nawa_bin());
     for key in ["NAWA_CONFIG", "NAWA_ROOT", "NAWA_RECIPES", "NAWA_BUILDDIR", "NAWA_PROFILES", "NAWA_JOBS", "NAWA_REPO", "NAWA_INSTALL_MODE"] { command.env_remove(key); }
     command.env("NAWA_SYSCONFDIR", std::env::temp_dir().join("nawa-system-intelligence-no-sysconf"));
+    // Explicitly disable the built-in repository for deterministic inspection tests.
+    // Tests that need repository metadata opt back in explicitly.
+    command.env("NAWA_REPO", "none");
     // The built-in stable repository is the last config fallback, so an empty
     // NAWA_REPO cannot disable it. Use an isolated config file with repo="".
     let config = std::env::temp_dir().join(format!(
@@ -144,6 +147,7 @@ init-system = "systemd"
     )
     .unwrap();
     let output = nawa()
+        .env_remove("NAWA_REPO")
         .env("NAWA_CONFIG", &config)
         .args(["--root", root.to_str().unwrap(), "system", "plan"])
         .output()
