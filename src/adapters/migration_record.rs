@@ -123,6 +123,26 @@ fn checked_records_dir(root: &Path, create: bool) -> Result<Option<PathBuf>> {
                         if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
                             bail!("migration state path {} is not a real directory", next.display());
                         }
+                        // A concurrent creator must satisfy the exact same
+                        // ownership and write-permission checks as a directory
+                        // observed by the ordinary path. Type validation alone
+                        // would let an attacker win the create race with a
+                        // group/world-writable state directory.
+                        let uid = crate::adapters::sys::geteuid();
+                        if meta.uid() != 0 && meta.uid() != uid {
+                            bail!(
+                                "migration state directory {} is owned by uid {}, not root or the current effective uid {}",
+                                next.display(),
+                                meta.uid(),
+                                uid
+                            );
+                        }
+                        if meta.permissions().mode() & 0o022 != 0 {
+                            bail!(
+                                "migration state directory {} is group- or world-writable; refusing an unsafe record path",
+                                next.display()
+                            );
+                        }
                         current = next;
                     }
                     Err(create_error) => {
