@@ -51,6 +51,33 @@ pub(crate) fn migrations_dir(root: &Path) -> PathBuf {
     root.join("var/lib/nawa/migrations")
 }
 
+/// Validate a directory used in the authoritative migration-state path.
+/// Both ordinary observations and the AlreadyExists race path use this
+/// function so concurrent creation cannot weaken the path's trust checks.
+fn validate_state_directory(path: &Path, meta: &std::fs::Metadata) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
+        bail!("migration state path {} is not a real directory", path.display());
+    }
+    let uid = crate::adapters::sys::geteuid();
+    if meta.uid() != 0 && meta.uid() != uid {
+        bail!(
+            "migration state directory {} is owned by uid {}, not root or the current effective uid {}",
+            path.display(),
+            meta.uid(),
+            uid
+        );
+    }
+    if meta.permissions().mode() & 0o022 != 0 {
+        bail!(
+            "migration state directory {} is group- or world-writable; refusing an unsafe record path",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 /// Resolve and validate the complete state-directory chain without
 /// following symlinks below the selected root. Checking only the final
 /// `migrations` directory is insufficient: `var`, `var/lib`, or
@@ -76,33 +103,8 @@ fn checked_records_dir(root: &Path, create: bool) -> Result<Option<PathBuf>> {
     for component in ["var", "lib", "nawa", "migrations"] {
         let next = current.join(component);
         match std::fs::symlink_metadata(&next) {
-            Ok(meta) if meta.file_type().is_symlink() => bail!(
-                "migration state path {} is a symlink — refusing to follow it (§13)",
-                next.display()
-            ),
-            Ok(meta) if !meta.file_type().is_dir() => bail!(
-                "migration state path {} is not a directory (Not a directory)",
-                next.display()
-            ),
             Ok(meta) => {
-                // Ancestors must not be replaceable by an unrelated user.
-                // Root-owned system directories and the effective user's
-                // private test/offline-root directories are both valid.
-                let uid = crate::adapters::sys::geteuid();
-                if meta.uid() != 0 && meta.uid() != uid {
-                    bail!(
-                        "migration state directory {} is owned by uid {}, not root or the current effective uid {}",
-                        next.display(),
-                        meta.uid(),
-                        uid
-                    );
-                }
-                if meta.permissions().mode() & 0o022 != 0 {
-                    bail!(
-                        "migration state directory {} is group- or world-writable; refusing an unsafe record path",
-                        next.display()
-                    );
-                }
+                validate_state_directory(&next, &meta)?;
                 current = next;
             },
             Err(error) if error.kind() == std::io::ErrorKind::NotFound && !create => {
@@ -120,29 +122,9 @@ fn checked_records_dir(root: &Path, create: bool) -> Result<Option<PathBuf>> {
                         let meta = std::fs::symlink_metadata(&next).with_context(|| {
                             format!("inspect migration state path {}", next.display())
                         })?;
-                        if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
-                            bail!("migration state path {} is not a real directory", next.display());
-                        }
-                        // A concurrent creator must satisfy the exact same
-                        // ownership and write-permission checks as a directory
-                        // observed by the ordinary path. Type validation alone
-                        // would let an attacker win the create race with a
-                        // group/world-writable state directory.
-                        let uid = crate::adapters::sys::geteuid();
-                        if meta.uid() != 0 && meta.uid() != uid {
-                            bail!(
-                                "migration state directory {} is owned by uid {}, not root or the current effective uid {}",
-                                next.display(),
-                                meta.uid(),
-                                uid
-                            );
-                        }
-                        if meta.permissions().mode() & 0o022 != 0 {
-                            bail!(
-                                "migration state directory {} is group- or world-writable; refusing an unsafe record path",
-                                next.display()
-                            );
-                        }
+                        // Apply the same no-follow, ownership and mode
+                        // checks as the ordinary path after winning the race.
+                        validate_state_directory(&next, &meta)?;
                         current = next;
                     }
                     Err(create_error) => {
@@ -742,6 +724,25 @@ mod tests {
                 "no state was created outside the selected root through {component}"
             );
         }
+    }
+
+    #[test]
+    fn state_directory_validation_rejects_symlinks_and_writable_modes() {
+        let root = crate::testutil::tmpdir("migrate-store-directory-validation");
+        let writable = root.join("writable");
+        std::fs::create_dir(&writable).unwrap();
+        std::fs::set_permissions(&writable, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let metadata = std::fs::symlink_metadata(&writable).unwrap();
+        let error = validate_state_directory(&writable, &metadata).unwrap_err();
+        assert!(format!("{error:#}").contains("group- or world-writable"), "{error:#}");
+
+        let real = root.join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let metadata = std::fs::symlink_metadata(&link).unwrap();
+        let error = validate_state_directory(&link, &metadata).unwrap_err();
+        assert!(format!("{error:#}").contains("not a real directory"), "{error:#}");
     }
 
     #[test]
