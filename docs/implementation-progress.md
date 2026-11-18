@@ -13,7 +13,7 @@
 | 1 — Structural refactor + service removal | **DONE** (1a, 1b, 1c, 1d, 1e — 1e is the deferred apply-transaction extraction) |
 | 2 — Init identity & capability foundation | **GENERIC DECLARATION LOOKUP + INIT-SYSTEM POLICY** (the pure planner now finds providers by arbitrary normalized capability domain and preserves ambiguous/unknown candidates; only init-system has actionable policy and migration semantics) |
 | 3 — Metadata & capability resolution | **INIT PROVIDER VERTICAL SLICE WORKS; PLATFORM SOLVER INCOMPLETE** (recipe → .PKGINFO → signed index v4 → provider selection is wired; version ranges, conflicts, replacements and broader capability constraints remain open) |
-| 4 — System profiles & planning | **PARTIAL PLATFORM** (profile precedence and read-only system plan exist; one immutable observation is used for the upgrade transition preview, but a single policy/solver/explanation flow is still incomplete) |
+| 4 — System profiles & planning | **PARTIAL PLATFORM** (system plan now consumes one immutable snapshot of runtime/profile/filesystem facts plus installed package versions; authenticated provider resolution is shared with upgrade planning, but broader policy/solver semantics remain open) |
 | 5 — Migration engine | **PREPARATION FRAMEWORK PRESENT; RECOVERY/BOOT EXECUTION BLOCKED**: typed state machine, durable journal, mutation gate, preparation coordinator and recovery inspection exist; snapshot is not wired to coordinator/recovery and post-boot finalization is absent. |
 | 6 — Faseela runit→systemd migration | **BLOCKED** (current Faseela HEAD already uses systemd; the legacy runit migration is for older installations. Real BIOS/UEFI boot acceptance and rescue/recovery contracts remain open.) |
 | 7 — Platform verification | **IN PROGRESS**: read-only inspection and repository preview exist; unified planning, complete solver semantics, integrated recovery and real BIOS/UEFI acceptance remain open. |
@@ -100,6 +100,16 @@ supported legacy installations.
 * Do not wire snapshot execution into the boot-changing coordinator until the
   record-store and snapshot path contracts are hardened and their integration
   tests are passing.
+
+* System planning now composes a single `SystemSnapshot` containing the
+  detector's runtime/context/profile/filesystem observation and the installed
+  package version inventory from the selected target root. A corrupt or
+  unreadable local package database is represented as unavailable and surfaced
+  as an unresolved plan; it is never silently treated as an empty inventory.
+  The same normalized inventory is passed into the authenticated provider
+  resolver, avoiding a second package-database read during `nawa system plan`.
+  Tests cover empty, populated and corrupt inventories, plus malformed
+  repository metadata. This integration is awaiting CI.
 
 * Capability provider lookup is now a reusable pure-domain operation in
   `domain/planning/install.rs`: it distinguishes exact matches, multiple
