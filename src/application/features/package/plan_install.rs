@@ -282,6 +282,19 @@ pub(crate) fn plan(
         }
     }
 
+    // Strict repository mode validates explicit targets before the solver:
+    // it must distinguish a repository miss from an absent source recipe.
+    // No transaction is opened until every requested target is known to exist.
+    if sourcing.mode == InstallMode::Repo {
+        for target in targets {
+            if !binaries.contains_key(target) {
+                bail!(
+                    "`{target}` is not in the repository for this architecture (use --build or auto mode to build from a recipe)"
+                );
+            }
+        }
+    }
+
     let (plan, extras) = match plan::install_plan_with_binaries(plan::InstallPlanInput {
         targets,
         installed,
