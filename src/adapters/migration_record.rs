@@ -156,6 +156,7 @@ fn ensure_records_dir(root: &Path) -> Result<PathBuf> {
 
 /// The (validated) record file of `id`. The id is validated through the
 /// domain model, so it can never traverse out of the record directory.
+#[cfg(test)]
 fn record_path(root: &Path, id: &str) -> Result<PathBuf> {
     check_id(id).map_err(anyhow::Error::msg)?;
     Ok(migrations_dir(root).join(format!("{id}.toml")))
