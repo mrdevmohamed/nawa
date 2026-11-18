@@ -364,49 +364,44 @@ pub(crate) fn cmd_update(
         crate::nawa_info!("everything is up to date");
         return Ok(());
     }
-    let plan = plan::install_plan(
-        &targets,
-        &installed,
-        &known,
-        effective.profile.as_ref(),
-        plan::Why::Update,
-        true,
-    )?;
     let repo_url = repo.or_else(|| ctx.repo.clone());
     let (sourcing, sourcing_notes) = plan_install::open_sourcing(
-        ctx,
-        mode,
-        repo_url.as_deref(),
-        flags.allow_unsigned,
-        flags.force,
+        ctx, mode, repo_url.as_deref(), flags.allow_unsigned, flags.force,
     )?;
-    for note in &sourcing_notes {
-        note.emit();
-    }
-    if let Some(note) = plan_install::init_note(&effective, &plan.init) {
-        note.emit();
-    }
-    if let Some(note) = plan_install::provider_note(&plan) {
-        note.emit();
-    }
+    for note in &sourcing_notes { note.emit(); }
 
-    // In strict repository mode, every update target must be available at
-    // least at the version requested by its recipe. Never silently downgrade
-    // or report a stale repository package as a completed update.
+    // Strict repository updates must validate every requested package before
+    // resolving or opening the transaction. A stale archive is never a
+    // successful update merely because it can be installed.
     if mode == InstallMode::Repo {
-        for item in &plan.items {
-            let name = &item.rec.package.name;
-            let re = sourcing.entry(name).ok_or_else(|| {
-                anyhow::anyhow!("{name} has no package for this architecture in the repository")
-            })?;
+        for name in &targets {
+            let recipe = known.get(name).ok_or_else(|| anyhow::anyhow!("no recipe for {name}"))?;
+            let re = sourcing.entry(name).ok_or_else(|| anyhow::anyhow!(
+                "{name} has no package for this architecture in the repository"
+            ))?;
             let available = format!("{}-{}", re.version, re.rel);
-            let wanted = format!("{}-{}", item.rec.package.version, item.rec.package.rel);
+            let wanted = format!("{}-{}", recipe.package.version, recipe.package.rel);
             if version::vercmp(&available, &wanted) == std::cmp::Ordering::Less {
                 bail!(
                     "repository has {name} {available}, but the recipe requires {wanted}; publish the newer package first, or use --from auto / --build"
                 );
             }
         }
+    }
+
+    let mut notices = Vec::new();
+    let planned = plan_install::plan(
+        &targets, &known, &installed, &sourcing, &effective,
+        plan::Why::Update, true, &mut notices,
+    );
+    for notice in &notices { notice.emit(); }
+    let outcome = planned?;
+    let plan = outcome.plan;
+    let extras = outcome.extras;
+    if let Some(note) = plan_install::provider_note(&plan) { note.emit(); }
+    if plan.items.is_empty() && extras.is_empty() {
+        crate::nawa_info!("everything is up to date");
+        return Ok(());
     }
 
     let repo_ids: Vec<String> = sourcing
@@ -438,7 +433,7 @@ pub(crate) fn cmd_update(
         extras_why: plan::Why::Update,
     };
     let ui = interaction(flags.yes);
-    let result = apply_transaction(ctx, &plan, &[], &sourcing, &mut op, &request, &ui);
+    let result = apply_transaction(ctx, &plan, &extras, &sourcing, &mut op, &request, &ui);
     let outcome = match result {
         Ok(applied) => applied,
         Err(err) => {
@@ -446,8 +441,10 @@ pub(crate) fn cmd_update(
             op.finish(Some(&err))?;
             // also after a partial run: whatever was installed is worth
             // checking
-            let changed: Vec<String> =
-                plan.items.iter().map(|it| it.rec.package.name.clone()).collect();
+            let changed: Vec<String> = plan.items.iter()
+                .map(|it| it.rec.package.name.clone())
+                .chain(extras.iter().map(|entry| entry.name.clone()))
+                .collect();
             warn_revdep(ctx, &changed);
             return Err(err);
         }
@@ -459,12 +456,15 @@ pub(crate) fn cmd_update(
     if let Applied::Done { seconds, .. } = outcome {
         crate::nawa_success!(
             "done — {} package(s) installed in {}",
-            plan.items.len(),
+            plan.items.len() + extras.len(),
             format_duration(seconds)
         );
     }
     // also after a partial run: whatever was installed is worth checking
-    let changed: Vec<String> = plan.items.iter().map(|it| it.rec.package.name.clone()).collect();
+    let changed: Vec<String> = plan.items.iter()
+        .map(|it| it.rec.package.name.clone())
+        .chain(extras.iter().map(|entry| entry.name.clone()))
+        .collect();
     warn_revdep(ctx, &changed);
     Ok(())
 }
