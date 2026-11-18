@@ -106,6 +106,7 @@ fn deps_of(
 /// * `with_deps`  — follow dependencies (`--no-deps` turns this off)
 /// * `profile`    — the effective target profile (§8.1 plan input); its
 ///   `init-system` declaration becomes `Plan::init` (§8.2)
+#[cfg(test)]
 pub(crate) fn install_plan(
     targets: &[String],
     installed: &HashMap<String, Entry>,
