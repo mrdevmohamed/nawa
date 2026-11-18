@@ -270,10 +270,36 @@ fn pid1_evidence(exe: &Option<String>, comm: &Option<String>) -> Vec<Evidence> {
     evidence
 }
 
+/// Resolve a fixed path beneath the selected target root without allowing
+/// an ancestor symlink to escape into the host filesystem. In-root merged-
+/// usr links (for example `/sbin -> usr/sbin`) remain valid: canonicalizing
+/// the parent is allowed only when the result still lies below the canonical
+/// target root. The final entry itself is deliberately not canonicalized so
+/// a broken symlink still records installed intent.
+fn target_root_entry(root: &Path, relative: &str) -> Option<std::path::PathBuf> {
+    let relative = Path::new(relative);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| component == std::path::Component::ParentDir)
+    {
+        return None;
+    }
+    let name = relative.file_name()?;
+    let parent = relative.parent().unwrap_or_else(|| Path::new(""));
+    let canonical_root = fs::canonicalize(root).ok()?;
+    let canonical_parent = fs::canonicalize(canonical_root.join(parent)).ok()?;
+    if !canonical_parent.starts_with(&canonical_root) {
+        return None;
+    }
+    Some(canonical_parent.join(name))
+}
+
 /// The staged init candidates of a target root (§5.2). Paths are checked
-/// with `symlink_metadata` (a broken symlink is still installed intent) and
-/// symlink targets are classified by their text — never resolved through
-/// the filesystem, so detection never leaves the target root.
+/// with `symlink_metadata` (a broken final symlink is still installed
+/// intent) after proving that every ancestor resolves inside the target
+/// root. Final symlink targets are classified by their text — never
+/// resolved through the filesystem, so detection never leaves the target.
 fn installed_init(root: &Path) -> InstalledInit {
     let mut candidates = Vec::new();
 
@@ -285,7 +311,9 @@ fn installed_init(root: &Path) -> InstalledInit {
         ("usr/bin/runit", InitKind::Runit),
         ("sbin/runit-init", InitKind::Runit),
     ] {
-        let full = root.join(rel);
+        let Some(full) = target_root_entry(root, rel) else {
+            continue;
+        };
         if fs::symlink_metadata(&full).is_ok() {
             candidates.push(InitCandidate {
                 kind,
@@ -298,7 +326,9 @@ fn installed_init(root: &Path) -> InstalledInit {
     // the generic `init` entry point: evidence of installed intent, never
     // proof of the running PID 1 (§5.5)
     for rel in ["sbin/init", "usr/sbin/init", "usr/bin/init"] {
-        let full = root.join(rel);
+        let Some(full) = target_root_entry(root, rel) else {
+            continue;
+        };
         let Ok(meta) = fs::symlink_metadata(&full) else {
             continue;
         };
@@ -621,6 +651,40 @@ mod tests {
             other => panic!("expected Unknown, got {other:?}"),
         }
         assert!(matches!(observed.runtime, RuntimeInit::Unknown { .. }));
+    }
+
+    #[test]
+    fn installed_detection_rejects_ancestor_symlinks_that_escape_the_target_root() {
+        let base = crate::testutil::tmpdir("detect-root-escape");
+        let root = dir(&base, "rootdir");
+        file(&base, "host/usr/lib/systemd/systemd", "");
+        symlink(base.join("host/usr").as_path(), root.join("usr")).unwrap();
+
+        let installed = installed_init(&root);
+        assert!(
+            !installed.candidates.iter().any(|candidate| candidate.kind == InitKind::Systemd),
+            "an ancestor symlink must not expose host-side init binaries: {:?}",
+            installed.candidates
+        );
+    }
+
+    #[test]
+    fn installed_detection_allows_ancestor_symlinks_that_stay_inside_the_root() {
+        let base = crate::testutil::tmpdir("detect-root-internal-link");
+        let root = dir(&base, "rootdir");
+        dir(&base, "rootdir/usr/sbin");
+        symlink("usr/sbin", root.join("sbin")).unwrap();
+        symlink("../lib/systemd/systemd", root.join("usr/sbin/init")).unwrap();
+
+        let installed = installed_init(&root);
+        assert!(
+            installed.candidates.iter().any(|candidate| {
+                candidate.kind == InitKind::Systemd
+                    && candidate.evidence.contains("symlink → ../lib/systemd/systemd")
+            }),
+            "an in-root merged-/usr symlink remains valid evidence: {:?}",
+            installed.candidates
+        );
     }
 
     #[test]
