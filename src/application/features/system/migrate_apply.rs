@@ -186,6 +186,7 @@ impl MigrationApproval {
 /// merged and accepted by the relevant boot tests.
 const HANDLER_BLOCKERS: &[&str] = &[
     "B1: Faseela PR #59 adds init=/usr/lib/systemd/systemd to installed-disk GRUB but is not merged; real BIOS and UEFI boots through SAQ must still verify PID 1",
+    "B2: legacy runit-services packages own /usr/bin/init -> /usr/bin/runit; the systemd package also owns /usr/bin/init, and Nawa's normal file-conflict guard refuses the handoff unless generic --force is used; no migration-scoped journaled ownership-transfer path exists, so do not use --force",
     "B4: Faseela Repo PR #203 adds /usr/share/nawa/system-profile.toml but is not merged and no installed-root acceptance test has verified the effective profile",
     "B5: no migration-specific boot artifact retention, old-entry restoration, or tested external rescue contract exists",
     "B6: no disposable BIOS+UEFI installed-disk migration harness with snapshots and real SAQ/PID 1 verification exists",
@@ -340,6 +341,7 @@ mod tests {
         match apply_for_tests(&root, &proc, approval).unwrap() {
             ApplyRefusal::HandlerBlocked(blockers) => {
                 assert!(blockers.iter().any(|b| b.contains("B1") && b.contains("PR #59")));
+                assert!(blockers.iter().any(|b| b.contains("B2") && b.contains("/usr/bin/init") && b.contains("--force")));
                 assert!(blockers.iter().any(|b| b.contains("B4") && b.contains("PR #203")));
                 assert!(blockers.iter().any(|b| b.contains("B5")));
                 assert!(blockers.iter().any(|b| b.contains("B6")));
