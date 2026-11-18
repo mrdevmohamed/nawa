@@ -1,8 +1,7 @@
 # Nawa implementation progress
 
 > Live tracker for the system-intelligence-and-migrations implementation.
-> Specification: `docs/design/system-intelligence-and-migrations.md`
-> (design branch `docs/system-intelligence-migration-design`).
+> Canonical specification: `docs/design/system-intelligence-and-migrations.md`.
 > Audit: `docs/architecture-audit.md`. Update this file before ending every
 > working session. Do not redo completed work; read it first.
 
@@ -13,11 +12,11 @@
 | 0 — Source audit | **DONE** (baseline audit; refresh against the integrated platform before final acceptance) |
 | 1 — Structural refactor + service removal | **DONE** (1a, 1b, 1c, 1d, 1e — 1e is the deferred apply-transaction extraction) |
 | 2 — Init identity & capability foundation | **DONE FOR THE FIRST VERTICAL SLICE** (the generic model exists, but observed capabilities and providers currently cover init-system only) |
-| 3 — Metadata & capability resolution | **DONE FOR INIT PROVIDERS; PLATFORM SOLVER INCOMPLETE** (recipe → .PKGINFO → signed index v4 → solver is wired; version constraints, capability requirements beyond init, conflicts and replacements are not represented by the current index model) |
-| 4 — System profiles & planning | **PARTIAL PLATFORM** (profile model and precedence work for init-system; system planning is being unified with the authenticated repository transition preview) |
-| 5 — Migration engine | **FRAMEWORK IMPLEMENTED, BOOT EXECUTION BLOCKED**: typed state machine, durable journal, mutation gate, coordinator and recovery exist; Snapshot is not yet wired to coordinator/recovery and the real boot handler remains blocked. |
+| 3 — Metadata & capability resolution | **INIT PROVIDER VERTICAL SLICE WORKS; PLATFORM SOLVER INCOMPLETE** (recipe → .PKGINFO → signed index v4 → provider selection is wired; version ranges, conflicts, replacements and broader capability constraints remain open) |
+| 4 — System profiles & planning | **PARTIAL PLATFORM** (profile precedence and read-only system plan exist; one immutable observation is used for the upgrade transition preview, but a single policy/solver/explanation flow is still incomplete) |
+| 5 — Migration engine | **PREPARATION FRAMEWORK PRESENT; RECOVERY/BOOT EXECUTION BLOCKED**: typed state machine, durable journal, mutation gate, preparation coordinator and recovery inspection exist; snapshot is not wired to coordinator/recovery and post-boot finalization is absent. |
 | 6 — Faseela runit→systemd migration | **BLOCKED** (current Faseela HEAD already uses systemd; the legacy runit migration is for older installations. Real BIOS/UEFI boot acceptance and rescue/recovery contracts remain open.) |
-| 7 — Platform verification | **IN PROGRESS**: Nawa-side inspection and repository preview exist; unified system planning, full solver semantics, integrated recovery and real boot acceptance are not complete. |
+| 7 — Platform verification | **IN PROGRESS**: read-only inspection and repository preview exist; unified planning, complete solver semantics, integrated recovery and real BIOS/UEFI acceptance remain open. |
 | System Intelligence platform | **IN PROGRESS** — accepted direction: System Intelligence is the umbrella; migration is one high-risk feature within it. |
 
 ## Accepted platform direction (2026-11-18)
@@ -71,6 +70,31 @@ its security invariants, then complete the init-system migration as its first
 high-risk consumer. Current Faseela systemd installations must not be migrated
 again; test the runit-to-systemd path only in disposable VMs representing
 supported legacy installations.
+
+## Current execution update (2026-11-18)
+
+* The canonical architecture and delivery contract is now present at
+  `docs/design/system-intelligence-and-migrations.md`. It defines the shared
+  observation, capability/provider, planning, policy, transaction and
+  recovery contracts; it explicitly keeps migration as a high-risk consumer.
+* Migration record storage now validates each path component below the
+  canonical target root (`var/lib/nawa/migrations`) with no-follow metadata
+  checks, creates missing components one level at a time, and tightens the
+  final record directory to mode 0700. Tests exercise symlinked `var`,
+  `var/lib`, and `var/lib/nawa` ancestors across save/load/list/remove.
+  This is a path-hardening improvement, not yet a race-free dirfd/openat
+  implementation; that stronger boundary remains a security follow-up.
+* The latest observed CI run after these changes failed and must not be
+  described as green: Clippy rejected the now-test-only `record_path`
+  helper as dead code; the migration security integration test expected the
+  OS-style `Not a directory` diagnostic; and the offline system-plan test
+  inherited the built-in repository instead of explicitly disabling it.
+  The dead-code and diagnostic issues have been corrected, and the test now
+  sets `NAWA_REPO=""` to isolate the no-repository case. These corrections
+  require a fresh CI result.
+* Do not wire snapshot execution into the boot-changing coordinator until the
+  record-store and snapshot path contracts are hardened and their integration
+  tests are passing.
 
 ## Completed phases
 
@@ -1771,10 +1795,21 @@ The last preview integration was repaired without weakening the module-layering 
 
 ## Exact next task
 
-**Phase 6 — external Faseela/SAQ integration and real boot acceptance.** The
-Nawa-side migration framework and safe preflight are implemented, but the
-real runit-to-systemd handler must remain fail-closed until the following
-distribution-owned contracts are resolved:
+**System Intelligence platform — close the common planning and security path
+before enabling boot-changing migration.** Work in this order:
+
+1. Finish migration record-store path safety and verify all fail-closed tests.
+2. Establish the immutable observation contract and its evidence/provenance
+   coverage for live host, container, chroot and offline target roots.
+3. Unify provider selection, package constraints and explainable planning
+   around the existing domain solver; do not add a second solver.
+4. Complete profile/policy conflict semantics and trust provenance.
+5. Wire transaction execution, snapshots, recovery and post-boot verification.
+6. Only then resume Faseela/SAQ distribution-owned BIOS/UEFI and rescue
+   acceptance.
+
+The real runit-to-systemd handler must remain fail-closed until the
+distribution-owned boot and recovery contracts are resolved:
 
 * B1/B6: run Faseela PR #60's release-workflow installed-disk harness against a real release ISO in BIOS and UEFI; require the installed system's serial markers for PID 1 and System Profile, and retain both logs as acceptance evidence.
 * B4: verify the profile marker from the actual installed root and keep the unit-level defaults/administrator-override test.
