@@ -306,4 +306,42 @@ init-system = \"systemd\"
             Some(f.defaults.as_path())
         );
     }
+
+    #[test]
+    fn load_effective_uses_the_faseela_distribution_and_admin_override_paths() {
+        let f = Fixture::new("faseela-layout");
+        let defaults = f.dir.join("usr/share/nawa/system-profile.toml");
+        let overrides = f.dir.join("etc/nawa/system-profile.toml");
+        write(
+            &defaults,
+            "schema = 1\ndistribution = \"faseela\"\narchitecture = \"x86_64\"\n\n[providers]\ninit-system = \"systemd\"\n",
+        );
+
+        // This is the exact path and schema emitted by Faseela's base-files
+        // recipe. The production loader must discover it without injected paths.
+        let distribution = load_effective(&f.dir).unwrap();
+        let profile = distribution.profile.as_ref().unwrap();
+        assert_eq!(profile.distribution.as_deref(), Some("faseela"));
+        assert_eq!(profile.architecture.as_deref(), Some("x86_64"));
+        assert_eq!(profile.provider("init-system"), Some("systemd"));
+        assert_eq!(
+            distribution.role_sources.get("init-system").map(|p| p.as_path()),
+            Some(defaults.as_path())
+        );
+
+        write(
+            &overrides,
+            "schema = 1\nprofile = \"administrator-managed\"\n\n[providers]\ninit-system = \"runit\"\n",
+        );
+        let effective = load_effective(&f.dir).unwrap();
+        let profile = effective.profile.as_ref().unwrap();
+        assert_eq!(profile.distribution.as_deref(), Some("faseela"));
+        assert_eq!(profile.profile.as_deref(), Some("administrator-managed"));
+        assert_eq!(profile.provider("init-system"), Some("runit"));
+        assert_eq!(
+            effective.role_sources.get("init-system").map(|p| p.as_path()),
+            Some(overrides.as_path())
+        );
+    }
+
 }
