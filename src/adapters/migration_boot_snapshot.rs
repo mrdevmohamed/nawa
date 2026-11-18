@@ -225,8 +225,9 @@ pub(crate) fn verify(root: &Path, migration_id: &str) -> Result<SnapshotInfo> {
     })
 }
 
-/// Restore the captured file state. The entire manifest and all saved file
-/// payloads are validated before the first target path is touched. Re-running
+/// Restore the captured boot and runit service state. The entire manifest and
+/// all saved file payloads are validated before the first target path is touched.
+/// Re-running
 /// restore after interruption is safe; already-restored entries are simply
 /// written to the same captured state again.
 pub(crate) fn restore(root: &Path, migration_id: &str) -> Result<SnapshotInfo> {
@@ -537,6 +538,13 @@ fn load_validated(
             manifest.migration_id
         );
     }
+    if manifest.entries.len() > MAX_SNAPSHOT_ENTRIES {
+        bail!(
+            "boot recovery manifest has {} entries; the safe limit is {}",
+            manifest.entries.len(),
+            MAX_SNAPSHOT_ENTRIES
+        );
+    }
 
     let mut validated = Vec::with_capacity(manifest.entries.len());
     let mut seen = HashSet::new();
@@ -645,6 +653,9 @@ fn load_validated(
         if !seen.contains(*required) {
             bail!("boot recovery manifest is missing required entry {required}");
         }
+    }
+    if !seen.contains("etc/runit/runsvdir/default") {
+        bail!("boot recovery manifest is missing the required runit service tree");
     }
     Ok(validated)
 }
@@ -1101,6 +1112,13 @@ mod tests {
             PathBuf::from("../agetty-tty1")
         );
         assert!(info.entries >= FIXED_PATHS.len() + 8);
+        let manifest: Manifest = toml::from_str(
+            &fs::read_to_string(info.directory.join("manifest.toml")).unwrap(),
+        )
+        .unwrap();
+        assert!(manifest.entries.iter().any(|entry| {
+            entry.path == "etc/runit/runsvdir/default" && entry.kind == "directory"
+        }));
     }
 
     #[test]
