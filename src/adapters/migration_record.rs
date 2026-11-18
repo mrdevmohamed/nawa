@@ -724,6 +724,30 @@ mod tests {
     }
 
     #[test]
+    fn group_or_world_writable_state_paths_and_records_are_refused() {
+        let root = crate::testutil::tmpdir("migrate-store-writable-state");
+        let state_parent = root.join("var/lib/nawa");
+        std::fs::create_dir_all(&state_parent).unwrap();
+        std::fs::set_permissions(&state_parent, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(
+            record_ids(&root).is_err(),
+            "a writable state parent could let another user replace migration records"
+        );
+        assert!(
+            save(&root, &MigrationRecord::new(&definition())).is_err(),
+            "writers must not publish through a writable state parent"
+        );
+
+        std::fs::set_permissions(&state_parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let record = MigrationRecord::new(&definition());
+        save(&root, &record).unwrap();
+        let path = migrations_dir(&root).join(format!("{}.toml", record.id));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(load(&root, &record.id).is_err(), "world-writable records are untrusted");
+        assert!(remove(&root, &record.id).is_err(), "removal must validate record ownership too");
+    }
+
+    #[test]
     fn ids_that_traverse_are_refused_before_touching_the_filesystem() {
         let root = crate::testutil::tmpdir("migrate-store-traversal");
         assert!(record_path(&root, "../host").is_err());
