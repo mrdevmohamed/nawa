@@ -93,6 +93,36 @@ fn system_plan_keeps_an_offline_runtime_unresolved_and_is_explicitly_read_only()
 }
 
 #[test]
+fn system_plan_reports_unavailable_repository_metadata_as_unresolved() {
+    let root = scratch("plan-repository-unavailable");
+    write_profile(&root, "usr/share/nawa/system-profile.toml", "schema = 1\\n[providers]\\ninit-system = \\"systemd\\"\\n");
+    let repository = root.join("repository");
+    fs::create_dir_all(&repository).unwrap();
+    fs::write(repository.join("index.toml"), "not valid TOML").unwrap();
+
+    let config = root.join("nawa.toml");
+    fs::write(
+        &config,
+        format!("repo = {:?}\\n", repository.to_string_lossy()),
+    )
+    .unwrap();
+    let output = nawa()
+        .env("NAWA_CONFIG", &config)
+        .args(["--root", root.to_str().unwrap(), "system", "plan"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "system plan is an inspection report: {stdout}");
+    assert!(stdout.contains("Decision: unresolved"), "{stdout}");
+    assert!(
+        stdout.contains("Repository plan: unresolved — authenticated repository metadata could not be loaded or verified"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("not valid TOML"), "{stdout}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn explain_init_system_documents_the_metadata_and_service_boundary() {
     let root = scratch("explain-init");
     let (stdout, stderr, success) = run(&root, &["system", "explain", "init-system"]);
