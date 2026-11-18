@@ -79,7 +79,8 @@ fn system_plan_keeps_an_offline_runtime_unresolved_and_is_explicitly_read_only()
     assert!(stdout.contains("System plan (read-only"), "{stdout}");
     assert!(stdout.contains("Decision: unresolved"), "{stdout}");
     assert!(stdout.contains("runtime PID 1 is unknown"), "{stdout}");
-    assert!(stdout.contains("Package actions: not calculated"), "{stdout}");
+    assert!(stdout.contains("Package actions: resolved separately from authenticated repository metadata"), "{stdout}");
+    assert!(stdout.contains("Repository plan: unresolved — no repository is configured"), "{stdout}");
     let _ = fs::remove_dir_all(root);
 }
 
