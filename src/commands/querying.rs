@@ -3,11 +3,11 @@
 use anyhow::{bail, Result};
 use std::collections::BTreeSet;
 use crate::application::features::package::query;
-use crate::ctx::Ctx;
+use crate::application::context::Ctx;
 use std::collections::HashSet;
 use crate::presentation::color::Palette;
 use crate::presentation::color::Stream;
-use crate::db;
+use crate::adapters::db;
 use crate::deps;
 use crate::presentation::humanize::format_date;
 use crate::presentation::humanize::format_size;

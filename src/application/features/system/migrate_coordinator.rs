@@ -78,7 +78,7 @@
 //!   `preparing` until recovery finalizes it.
 //!
 //! Interruption (Ctrl+C/SIGTERM/SIGHUP) is deferred for the whole
-//! preparation: the coordinator holds an [`crate::interrupt::Guard`], so a
+//! preparation: the coordinator holds an [`crate::adapters::interrupt::Guard`], so a
 //! signal during a record save or a side effect does not kill the process —
 //! the current step completes and the between-steps check turns the pending
 //! signal into that step's failure, routed through the normal lifecycle
@@ -112,8 +112,8 @@ use std::path::{Path, PathBuf};
 
 use crate::application::features::package::apply_transaction::install_for_migration;
 use crate::application::ports::user_interaction::UserInteraction;
-use crate::ctx::Ctx;
-use crate::db::InstallReason;
+use crate::application::context::Ctx;
+use crate::adapters::db::InstallReason;
 use crate::domain::system::migration::{
     transition, MigrationDefinition, MigrationRecord, MigrationState, StepOutcome, StepRecord,
     Transition,
@@ -274,7 +274,7 @@ pub(crate) fn prepare(ctx: &Ctx, request: PreparationRequest<'_>) -> Result<Prep
     // process mid-save or mid-side-effect — the next between-steps check
     // turns it into that step's failure, which the lifecycle split below
     // resolves (see the module header). Guards drop after `conclude`.
-    let _interrupt_guard = crate::interrupt::Guard::new();
+    let _interrupt_guard = crate::adapters::interrupt::Guard::new();
 
     // A migration id is unique under a root. An existing record (any
     // state) is never silently overwritten: re-running a failed
@@ -367,7 +367,7 @@ pub(crate) fn prepare(ctx: &Ctx, request: PreparationRequest<'_>) -> Result<Prep
         // system is consistent. The interrupt becomes a step failure like
         // any other: nothing committed → compensated, something committed
         // → needs-recovery.
-        if let Err(interrupted) = crate::interrupt::check() {
+        if let Err(interrupted) = crate::adapters::interrupt::check() {
             failure = Some(anyhow!(
                 "interrupted before migration step {} ({}): {interrupted}",
                 step.id,
@@ -381,7 +381,7 @@ pub(crate) fn prepare(ctx: &Ctx, request: PreparationRequest<'_>) -> Result<Prep
         // command means that no side effect occurred)
         let before = match &step.operation {
             PackageOperation::Install { package, .. } => {
-                match crate::db::Db::new(&ctx.root).entry(package) {
+                match crate::adapters::db::Db::new(&ctx.root).entry(package) {
                     Ok(entry) => entry,
                     Err(error) => {
                         failure = Some(anyhow!(
@@ -624,7 +624,7 @@ fn abandon_gate_failure(
 fn step_committed(
     ctx: &Ctx,
     operation: &PackageOperation,
-    before: Option<&crate::db::Entry>,
+    before: Option<&crate::adapters::db::Entry>,
 ) -> bool {
     let PackageOperation::Install {
         archive,
@@ -632,7 +632,7 @@ fn step_committed(
         reason,
         ..
     } = operation;
-    let current = match crate::db::Db::new(&ctx.root).entry(package) {
+    let current = match crate::adapters::db::Db::new(&ctx.root).entry(package) {
         Ok(current) => current,
         Err(_) => return true,
     };
@@ -651,8 +651,8 @@ fn step_committed(
 /// version/rel, the installed digest, and the recorded reason (legacy
 /// records may leave the reason empty, which stays compatible).
 fn same_install_state(
-    current: Option<&crate::db::Entry>,
-    before: Option<&crate::db::Entry>,
+    current: Option<&crate::adapters::db::Entry>,
+    before: Option<&crate::adapters::db::Entry>,
 ) -> bool {
     match (current, before) {
         (None, None) => true,
@@ -680,7 +680,7 @@ fn verify_install_postcondition(ctx: &Ctx, operation: &PackageOperation) -> Resu
         expected_sha256,
         ..
     } = operation;
-    let current = crate::db::Db::new(&ctx.root)
+    let current = crate::adapters::db::Db::new(&ctx.root)
         .entry(package)?
         .ok_or_else(|| {
             anyhow!(
@@ -818,7 +818,7 @@ fn conclude(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::archive;
+    use crate::adapters::archive;
     use crate::domain::system::capability::Capability;
     use crate::domain::system::migration::{HandlerId, MigrationState};
     use std::cell::RefCell;
@@ -871,7 +871,7 @@ mod tests {
         let pkginfo = format!("pkgname = {name}\npkgver = {version}\npkgrel = 1\narch = x86_64\n");
         let out = root.join("stage").join(format!("{name}.nawa.tar.zst"));
         archive::create(&pkgdir, &pkginfo, &out).unwrap();
-        let digest = crate::checksum::sha256_of_file(&out).unwrap();
+        let digest = crate::adapters::checksum::sha256_of_file(&out).unwrap();
         (out, digest)
     }
 
@@ -976,7 +976,7 @@ mod tests {
             .expect("the record was published");
         assert_eq!(on_disk.state, MigrationState::AwaitingReboot);
         // the real package was installed through the ordinary installer
-        let db = crate::db::Db::new(&root);
+        let db = crate::adapters::db::Db::new(&root);
         assert!(
             db.entry("sysd").unwrap().is_some(),
             "the approved step really installed the package"
@@ -1034,7 +1034,7 @@ mod tests {
             "the failure reason is durable: {reason}"
         );
         // nothing was installed
-        let db = crate::db::Db::new(&root);
+        let db = crate::adapters::db::Db::new(&root);
         assert!(db.entry("sysd").unwrap().is_none());
         // the gate is clear: an ordinary exclusive acquisition works
         let guard = lock::acquire(&root, lock::Mode::Exclusive)
@@ -1085,7 +1085,7 @@ mod tests {
             "the failure is durable: {reason}"
         );
         // the first package really was installed (it committed)
-        let db = crate::db::Db::new(&root);
+        let db = crate::adapters::db::Db::new(&root);
         assert!(db.entry("sysd").unwrap().is_some());
         // the gate stays active (needs-recovery is gate-keeping)
         let error = lock::acquire(&root, lock::Mode::Exclusive).unwrap_err();
@@ -1208,7 +1208,7 @@ mod tests {
     struct Armed;
     impl Drop for Armed {
         fn drop(&mut self) {
-            crate::atomic::failure_injection::clear();
+            crate::adapters::atomic::failure_injection::clear();
         }
     }
 
@@ -1216,8 +1216,8 @@ mod tests {
     /// `path_contains` (record saves live under `migrations/`, history
     /// records under `history/tx-*.toml`; journal step files match
     /// neither, so the counts are independent of install internals).
-    fn arm(point: crate::atomic::FailPoint, nth: u32, path_contains: &'static str) -> Armed {
-        crate::atomic::failure_injection::arm_at(point, nth, path_contains);
+    fn arm(point: crate::adapters::atomic::FailPoint, nth: u32, path_contains: &'static str) -> Armed {
+        crate::adapters::atomic::failure_injection::arm_at(point, nth, path_contains);
         Armed
     }
 
@@ -1225,7 +1225,7 @@ mod tests {
     struct Simulated;
     impl Drop for Simulated {
         fn drop(&mut self) {
-            crate::interrupt::clear_simulated_interrupt();
+            crate::adapters::interrupt::clear_simulated_interrupt();
         }
     }
 
@@ -1284,7 +1284,7 @@ mod tests {
         let root = crate::testutil::tmpdir("migrate-coord-publish-gate");
         let ctx = ctx_with(&root);
         // record saves under `migrations/`: 1 planned, 2 the gate
-        let _armed = arm(crate::atomic::FailPoint::Published, 2, "migrations");
+        let _armed = arm(crate::adapters::atomic::FailPoint::Published, 2, "migrations");
         let outcome =
             prepare_with(&ctx, vec![]).expect("the published-but-unconfirmed gate save stands");
         let record = committed(&outcome);
@@ -1306,7 +1306,7 @@ mod tests {
         // stranding a lifecycle that never started.
         let root = crate::testutil::tmpdir("migrate-coord-gate-wrote");
         let ctx = ctx_with(&root);
-        let _armed = arm(crate::atomic::FailPoint::Wrote, 2, "migrations");
+        let _armed = arm(crate::adapters::atomic::FailPoint::Wrote, 2, "migrations");
         let error = prepare_with(&ctx, vec![]).unwrap_err();
         let text = format!("{error:#}");
         assert!(
@@ -1338,7 +1338,7 @@ mod tests {
         let root = crate::testutil::tmpdir("migrate-coord-planned-wrote");
         let ctx = ctx_with(&root);
         {
-            let _armed = arm(crate::atomic::FailPoint::Wrote, 1, "migrations");
+            let _armed = arm(crate::adapters::atomic::FailPoint::Wrote, 1, "migrations");
             let error = prepare_with(&ctx, vec![]).unwrap_err();
             let text = format!("{error:#}");
             assert!(
@@ -1367,7 +1367,7 @@ mod tests {
         // stays active.
         let root = crate::testutil::tmpdir("migrate-coord-conclude-wrote");
         let ctx = ctx_with(&root);
-        let _armed = arm(crate::atomic::FailPoint::Wrote, 3, "migrations");
+        let _armed = arm(crate::adapters::atomic::FailPoint::Wrote, 3, "migrations");
         let (outcome, lines) = prepare_capture(&ctx, vec![]);
         let record = ambiguous(&outcome.expect("the escalation concludes the run"));
         assert_eq!(record.state, MigrationState::NeedsRecovery);
@@ -1399,7 +1399,7 @@ mod tests {
         // not undo or mask the committed preparation.
         let root = crate::testutil::tmpdir("migrate-coord-finish-wrote");
         let ctx = ctx_with(&root);
-        let _armed = arm(crate::atomic::FailPoint::Wrote, 2, "transactions");
+        let _armed = arm(crate::adapters::atomic::FailPoint::Wrote, 2, "transactions");
         let (outcome, lines) = prepare_capture(&ctx, vec![]);
         let record = committed(&outcome.expect("the migration outcome stands"));
         assert_eq!(record.state, MigrationState::AwaitingReboot);
@@ -1427,7 +1427,7 @@ mod tests {
         let root = crate::testutil::tmpdir("migrate-coord-intent-wrote");
         let ctx = ctx_with(&root);
         let (archive, sha) = staged_archive(&root, "sysd", "1");
-        let _armed = arm(crate::atomic::FailPoint::Wrote, 3, "migrations");
+        let _armed = arm(crate::adapters::atomic::FailPoint::Wrote, 3, "migrations");
         let (outcome, _lines) =
             prepare_capture(&ctx, vec![install_step("sysd", &archive, &sha, false)]);
         let record = compensated(&outcome.expect("the run completes with a failed step"));
@@ -1435,7 +1435,7 @@ mod tests {
         let reason = failed_reason(&record.steps[0]);
         assert!(reason.contains("write-ahead intent"), "{reason}");
         assert!(
-            crate::db::Db::new(&root).entry("sysd").unwrap().is_none(),
+            crate::adapters::db::Db::new(&root).entry("sysd").unwrap().is_none(),
             "the side effect never ran"
         );
         lock::acquire(&root, lock::Mode::Exclusive)
@@ -1454,7 +1454,7 @@ mod tests {
         let root = crate::testutil::tmpdir("migrate-coord-outcome-wrote");
         let ctx = ctx_with(&root);
         let (archive, sha) = staged_archive(&root, "sysd", "1");
-        let _armed = arm(crate::atomic::FailPoint::Wrote, 4, "migrations");
+        let _armed = arm(crate::adapters::atomic::FailPoint::Wrote, 4, "migrations");
         let (outcome, _lines) =
             prepare_capture(&ctx, vec![install_step("sysd", &archive, &sha, false)]);
         let record = ambiguous(&outcome.expect("the run completes with a failed step"));
@@ -1462,7 +1462,7 @@ mod tests {
         let on_disk = store::load(&root, record.id.as_str()).unwrap().unwrap();
         assert_eq!(on_disk.state, MigrationState::NeedsRecovery);
         assert!(
-            crate::db::Db::new(&root).entry("sysd").unwrap().is_some(),
+            crate::adapters::db::Db::new(&root).entry("sysd").unwrap().is_some(),
             "the committed install stays committed"
         );
         let error = lock::acquire(&root, lock::Mode::Exclusive).unwrap_err();
@@ -1491,7 +1491,7 @@ mod tests {
         let (archive, sha) = staged_archive(&root, "sysd", "1");
         // journal writes for one step: 1 the transaction state at begin,
         // 2 the step intent, 3 the step result (after the db commit)
-        let _armed = arm(crate::atomic::FailPoint::Wrote, 3, "journal");
+        let _armed = arm(crate::adapters::atomic::FailPoint::Wrote, 3, "journal");
         let (outcome, _lines) =
             prepare_capture(&ctx, vec![install_step("sysd", &archive, &sha, false)]);
         let record = ambiguous(&outcome.expect("the run completes with a failed step"));
@@ -1499,7 +1499,7 @@ mod tests {
         assert_eq!(record.steps.len(), 1);
         assert!(!failed_reason(&record.steps[0]).is_empty());
         assert!(
-            crate::db::Db::new(&root).entry("sysd").unwrap().is_some(),
+            crate::adapters::db::Db::new(&root).entry("sysd").unwrap().is_some(),
             "the package was committed before the failure was reported"
         );
         let error = lock::acquire(&root, lock::Mode::Exclusive).unwrap_err();
@@ -1523,7 +1523,7 @@ mod tests {
         let ctx = ctx_with(&root);
         let (archive, sha) = staged_archive(&root, "sysd", "1");
         let _cleared = Simulated;
-        crate::interrupt::simulate_interrupt();
+        crate::adapters::interrupt::simulate_interrupt();
         let (outcome, _lines) =
             prepare_capture(&ctx, vec![install_step("sysd", &archive, &sha, false)]);
         let record = compensated(&outcome.expect("the deferred interrupt is a step failure"));
@@ -1532,7 +1532,7 @@ mod tests {
             record.steps.is_empty(),
             "the interrupt hit before any intent was written"
         );
-        assert!(crate::db::Db::new(&root).entry("sysd").unwrap().is_none());
+        assert!(crate::adapters::db::Db::new(&root).entry("sysd").unwrap().is_none());
         lock::acquire(&root, lock::Mode::Exclusive)
             .unwrap()
             .expect("nothing was committed, so no gate");
@@ -1663,7 +1663,7 @@ mod tests {
             "{error:#}"
         );
         // the planned identity holds
-        let db = crate::db::Db::new(&root);
+        let db = crate::adapters::db::Db::new(&root);
         db.add(
             &crate::testutil::entry("sysd", "1", "digest-a"),
             &[],
@@ -1715,7 +1715,7 @@ mod tests {
         assert!(!step_committed(&ctx, &missing, None));
         // the package IS in the database (an error after the commit):
         // committed, decided without reading the missing archive
-        let db = crate::db::Db::new(&root);
+        let db = crate::adapters::db::Db::new(&root);
         db.add(
             &crate::testutil::entry("sysd", "1", "digest-a"),
             &[],

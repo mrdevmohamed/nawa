@@ -3,4 +3,5 @@
 //! returns data; command handlers keep argument parsing and rendering.
 
 pub(crate) mod package;
+pub(crate) mod repository;
 pub(crate) mod system;

@@ -122,7 +122,7 @@ fn preflight_inner(root: &Path, proc: &Path, require_root: bool) -> Result<detec
             "system migrate apply is refused: the execution context cannot be verified ({reason})"
         ),
     }
-    if require_root && crate::sys::geteuid() != 0 {
+    if require_root && crate::adapters::sys::geteuid() != 0 {
         bail!("system migrate apply requires root privileges for boot/init changes");
     }
     let definition = builtin_definition();

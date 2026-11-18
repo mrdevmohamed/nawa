@@ -6,11 +6,11 @@ use std::path::{Path, PathBuf};
 
 use super::sections::installed_sonames;
 use super::{buildid_sidecar, build_id_for, cache_id_for, BuildOpts};
-use crate::archive;
-use crate::buildenv::Isolation;
-use crate::closure::AssembledRoot;
+use crate::adapters::archive;
+use crate::build::buildenv::Isolation;
+use crate::build::closure::AssembledRoot;
 use crate::recipe::Recipe;
-use crate::slim;
+use crate::build::slim;
 
 /// Every staged path (sorted, rooted at `/`) and the total size of the
 /// regular files. An empty tree is a failed install section.

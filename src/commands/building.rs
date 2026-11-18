@@ -1,19 +1,19 @@
 //! `build` command handlers.
 
 use anyhow::{bail, Context, Result};
-use crate::ctx::Ctx;
+use crate::application::context::Ctx;
 use crate::presentation::color::Palette;
 use std::path::PathBuf;
 use crate::cli::PlanFlags;
 use crate::presentation::color::Stream;
 use crate::build;
-use crate::buildenv;
-use crate::db;
+use crate::build::buildenv;
+use crate::adapters::db;
 use crate::cli::default_jobs;
 use crate::install;
 use crate::lock;
 use crate::plan;
-use crate::profile;
+use crate::build::profile;
 use crate::recipe;
 use crate::recovery;
 use crate::transaction;
@@ -85,10 +85,10 @@ pub(crate) fn cmd_build(
     )?;
     let db = db::Db::new(&ctx.root);
     let before = db.entry(name)?;
-    let target = install::inspect_archive_state(&archive, crate::db::InstallReason::Explicit, before.as_ref())?;
-    let actual_name = crate::archive::read_pkginfo(&archive)
+    let target = install::inspect_archive_state(&archive, crate::adapters::db::InstallReason::Explicit, before.as_ref())?;
+    let actual_name = crate::adapters::archive::read_pkginfo(&archive)
         .ok()
-        .and_then(|raw| crate::archive::parse_pkginfo(&raw).ok())
+        .and_then(|raw| crate::adapters::archive::parse_pkginfo(&raw).ok())
         .and_then(|info| info.get("pkgname").cloned())
         .unwrap_or_default();
     if actual_name != name {
@@ -106,7 +106,7 @@ pub(crate) fn cmd_build(
     let file_journal = install::FileJournalId::for_step(recorder.tx(), step_no);
     let result = install::install_archive_pinned(
         &archive, &ctx.root,
-        install::InstallOpts { force: install_force, allow_unsigned: false, key: None, reason: crate::db::InstallReason::Explicit, pinned_sha: Some(&digest), file_journal },
+        install::InstallOpts { force: install_force, allow_unsigned: false, key: None, reason: crate::adapters::db::InstallReason::Explicit, pinned_sha: Some(&digest), file_journal },
     );
     install::record_install_outcome(
         &mut recorder,

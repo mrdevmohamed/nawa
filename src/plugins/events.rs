@@ -289,7 +289,7 @@ fn failure(tx: u64, plugin: &str, event: &str, error: String) -> ObserverFailure
         plugin_id: plugin.to_string(),
         event_type: event.to_string(),
         error,
-        recorded_at: crate::artifact::now_secs(),
+        recorded_at: crate::adapters::artifact::now_secs(),
     }
 }
 
@@ -297,7 +297,7 @@ fn store_failure(root: &Path, failure: &ObserverFailure) -> Result<()> {
     let dir = failures_dir(root);
     std::fs::create_dir_all(&dir)?;
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
-    let sequence = crate::unique::next();
+    let sequence = crate::adapters::unique::next();
     let target = dir.join(format!(
         "{:010}-{}-{}-{}-{}-{sequence}.toml",
         failure.transaction_id,
@@ -306,7 +306,7 @@ fn store_failure(root: &Path, failure: &ObserverFailure) -> Result<()> {
         failure.recorded_at,
         std::process::id()
     ));
-    crate::atomic::write_atomic(
+    crate::adapters::atomic::write_atomic(
         &target,
         toml::to_string(failure)?.as_bytes(),
         0o600,

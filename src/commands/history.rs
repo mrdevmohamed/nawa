@@ -6,7 +6,7 @@ use anyhow::Result;
 use std::path::Path;
 
 use crate::cli::HistoryCmd;
-use crate::ctx::Ctx;
+use crate::application::context::Ctx;
 use crate::transaction::history::PackageChange;
 use crate::{transaction, undo};
 

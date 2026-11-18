@@ -47,7 +47,7 @@ pub(crate) use cache::{
 };
 #[cfg(test)]
 pub(crate) use cache::{candidate_urls, candidate_urls_with, unique_part_path};
-pub(crate) use crate::checksum::{sha256_of_file, verify_sha256};
+pub(crate) use crate::adapters::checksum::{sha256_of_file, verify_sha256};
 pub(crate) use extract::{detect_source_format, extract_source_archive, extract_source_archive_stripped};
 #[cfg(test)]
 pub(crate) use extract::SourceFormat;

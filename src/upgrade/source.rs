@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use crate::fetch::{self, RepoRef};
 use crate::repo;
-use crate::sign;
+use crate::adapters::sign;
 
 use super::verify::{
     check_archive_matches_index, check_index_freshness, require_trust_for_remote,

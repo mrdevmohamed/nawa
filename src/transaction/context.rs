@@ -67,7 +67,7 @@ pub(crate) fn begin_operation(
     repositories: &[String],
 ) -> Result<OperationHandle> {
     let tx = super::history::allocate_id(root)?;
-    let started_at = crate::artifact::now_secs();
+    let started_at = crate::adapters::artifact::now_secs();
     journal::write_tx_state(
         root,
         &journal::TxState {
@@ -197,7 +197,7 @@ impl OperationHandle {
         } else {
             TxStatus::Failed
         };
-        let finished_at = crate::artifact::now_secs();
+        let finished_at = crate::adapters::artifact::now_secs();
         let changes = std::mem::take(&mut self.changes);
         let record = self.record(tx, status, Some(finished_at), changes);
         crate::transaction::history::write_record(&self.root, &record)?;
@@ -242,7 +242,7 @@ impl RecorderHandle<'_> {
     /// mutation runs).
     pub fn step_intent(
         &mut self, package: &str, action: StepAction,
-        before: Option<&crate::db::Entry>, target: Option<&crate::db::Entry>,
+        before: Option<&crate::adapters::db::Entry>, target: Option<&crate::adapters::db::Entry>,
         artifact_sha256: &str,
     ) -> Result<u32> {
         let target = target.map(PackageState::from_entry);
@@ -252,7 +252,7 @@ impl RecorderHandle<'_> {
     /// Persist a target snapshot parsed from an archive or repository index.
     pub fn step_intent_state(
         &mut self, package: &str, action: StepAction,
-        before: Option<&crate::db::Entry>, target: Option<&PackageState>,
+        before: Option<&crate::adapters::db::Entry>, target: Option<&PackageState>,
         artifact_sha256: &str,
     ) -> Result<u32> {
         let Some(tx) = self.op.tx else { return Ok(0) };
@@ -276,8 +276,8 @@ impl RecorderHandle<'_> {
         package: &str,
         action: StepAction,
         status: StepStatus,
-        before: Option<&crate::db::Entry>,
-        after: Option<&crate::db::Entry>,
+        before: Option<&crate::adapters::db::Entry>,
+        after: Option<&crate::adapters::db::Entry>,
         source: &str,
         failure: Option<String>,
         hook: Option<String>,
@@ -326,7 +326,7 @@ fn rustix_uid() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::Db;
+    use crate::adapters::db::Db;
     use crate::testutil::{entry, tmpdir};
 
     #[test]

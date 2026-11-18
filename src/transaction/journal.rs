@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-use crate::atomic;
+use crate::adapters::atomic;
 use super::history::{PackageState, SCHEMA_VERSION};
 
 /// `<root>/var/lib/nawa/history/journal/<id>/`
@@ -77,7 +77,7 @@ pub(crate) fn write_intent(root: &Path, intent: &StepIntent) -> Result<()> {
     if intent.schema != SCHEMA_VERSION {
         anyhow::bail!("unsupported step-intent schema {}", intent.schema);
     }
-    crate::db::check_name(&intent.package)?;
+    crate::adapters::db::check_name(&intent.package)?;
     let path = intent_path(root, intent.tx, intent.step);
     atomic::write_atomic(&path, toml::to_string_pretty(intent)?.as_bytes(), 0o600)
 }
@@ -87,7 +87,7 @@ pub(crate) fn write_result(root: &Path, result: &StepResult) -> Result<()> {
     if result.schema != SCHEMA_VERSION {
         anyhow::bail!("unsupported step-result schema {}", result.schema);
     }
-    crate::db::check_name(&result.package)?;
+    crate::adapters::db::check_name(&result.package)?;
     let path = result_path(root, result.tx, result.step);
     atomic::write_atomic(&path, toml::to_string_pretty(result)?.as_bytes(), 0o600)
 }

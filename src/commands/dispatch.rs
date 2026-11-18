@@ -11,7 +11,7 @@ use anyhow::Result;
 use super::*; // sibling `commands` handlers, grouped by domain
 use crate::application::lifecycle::{lock_need, LockNeed};
 use crate::cli::{completions_script, Cmd, ConfigCmd, GroupCmd, HistoryCmd, PluginCmd};
-use crate::ctx::{resolve_mode, resolve_repo, Ctx};
+use crate::application::context::{resolve_mode, resolve_repo, Ctx};
 
 pub(crate) fn run(ctx: &Ctx, cmd: Cmd, track_package_changes: bool) -> (Result<()>, bool) {
     let mode = lock_need(&cmd.lock_request()).map(|need| match need {
@@ -36,7 +36,7 @@ pub(crate) fn run(ctx: &Ctx, cmd: Cmd, track_package_changes: bool) -> (Result<(
         // one-shot, idempotent migration of legacy nanosecond install dates
         // (roadmap §4.3): only clearly-nanosecond values are rewritten, each
         // with a .bak copy of the old desc
-        let notes = match crate::db::migrate_install_dates(&ctx.root) {
+        let notes = match crate::adapters::db::migrate_install_dates(&ctx.root) {
             Ok(notes) => notes,
             Err(error) => return (Err(error), false),
         };
@@ -106,7 +106,7 @@ pub(crate) fn should_run_post_transaction_hooks(cmd: &Cmd) -> bool {
 /// Compare package payload identity, excluding ownership-only metadata such as
 /// the explicit/dependency/group install reason. Shared cache triggers need to
 /// run only when package payloads were installed, replaced, or removed.
-fn installed_package_payload_changed(before: &[crate::db::Entry], after: &[crate::db::Entry]) -> bool {
+fn installed_package_payload_changed(before: &[crate::adapters::db::Entry], after: &[crate::adapters::db::Entry]) -> bool {
     if before.len() != after.len() {
         return true;
     }
@@ -124,12 +124,12 @@ fn installed_package_payload_changed(before: &[crate::db::Entry], after: &[crate
 /// Read the installed package set. Commands with a whole-operation lock already
 /// hold a consistent view; commands that lock per step take a shared lock only
 /// for this read.
-fn installed_snapshot(root: &Path, needs_shared_lock: bool) -> Result<Vec<crate::db::Entry>> {
+fn installed_snapshot(root: &Path, needs_shared_lock: bool) -> Result<Vec<crate::adapters::db::Entry>> {
     if needs_shared_lock {
         let _snapshot_lock = crate::lock::acquire(root, crate::lock::Mode::Shared)?;
-        crate::db::Db::new(root).installed()
+        crate::adapters::db::Db::new(root).installed()
     } else {
-        crate::db::Db::new(root).installed()
+        crate::adapters::db::Db::new(root).installed()
     }
 }
 
@@ -206,7 +206,7 @@ fn run_command(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         Cmd::Keygen { out } => cmd_keygen(out),
         Cmd::Sign { file, key } => cmd_sign(&file, key.as_deref()),
         Cmd::Verify { file, key } => {
-            crate::sign::verify_standalone(&file, &ctx.root, key.as_deref())?;
+            crate::adapters::sign::verify_standalone(&file, &ctx.root, key.as_deref())?;
             Ok(())
         }
         Cmd::Trust { keyfile } => cmd_trust(ctx, &keyfile),
@@ -221,20 +221,20 @@ fn run_command(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         }
         Cmd::Sync { repo, force, allow_unsigned } => {
             let repo_ref = resolve_repo(ctx, repo)?;
-            crate::sync::sync(&ctx.root, &repo_ref, &ctx.recipes, &crate::sync::SyncOpts { force, allow_unsigned })
+            crate::application::features::repository::sync::sync(&ctx.root, &repo_ref, &ctx.recipes, &crate::application::features::repository::sync::SyncOpts { force, allow_unsigned })
         }
-        Cmd::Repolist { all } => crate::repositories::cmd_repolist(&ctx.cfg, all),
+        Cmd::Repolist { all } => crate::commands::repositories::cmd_repolist(&ctx.cfg, all),
         Cmd::Makecache { allow_unsigned, force } => {
-            crate::repositories::cmd_makecache(&ctx.cfg, &ctx.root, allow_unsigned, force)
+            crate::commands::repositories::cmd_makecache(&ctx.cfg, &ctx.root, allow_unsigned, force)
         }
         Cmd::Repoquery { name, repo_id, info } => {
-            crate::repositories::cmd_repoquery(&ctx.cfg, &ctx.root, &name, repo_id.as_deref(), info)
+            crate::commands::repositories::cmd_repoquery(&ctx.cfg, &ctx.root, &name, repo_id.as_deref(), info)
         }
         Cmd::Fetch { names, all, isolation, sources_only, offline, allow_degraded } => {
             cmd_fetch_checked(ctx, &names, all, isolation.as_deref(), sources_only, offline, allow_degraded)
         }
         Cmd::Recipe { action } => cmd_recipe(ctx, action),
-        Cmd::Clean { category, dry_run } => crate::repositories::cmd_clean(ctx, &category, dry_run),
+        Cmd::Clean { category, dry_run } => crate::commands::repositories::cmd_clean(ctx, &category, dry_run),
         Cmd::Group { action } => match action {
             GroupCmd::List => cmd_group_list(ctx),
             GroupCmd::Info { id } => cmd_group_info(ctx, &id),
@@ -275,8 +275,8 @@ fn run_command(ctx: &Ctx, cmd: Cmd) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn sample_entry(name: &str) -> crate::db::Entry {
-        crate::db::Entry {
+    fn sample_entry(name: &str) -> crate::adapters::db::Entry {
+        crate::adapters::db::Entry {
             name: name.to_string(),
             version: "1.0.0".to_string(),
             rel: 1,

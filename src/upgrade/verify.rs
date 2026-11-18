@@ -4,7 +4,7 @@ use anyhow::{bail, Result};
 use std::path::Path;
 
 use crate::repo;
-use crate::sign;
+use crate::adapters::sign;
 
 pub(crate) fn require_trust_for_remote(root: &Path, url: &str, allow_unsigned: bool) -> Result<()> {
     if allow_unsigned {
@@ -105,8 +105,8 @@ pub(crate) fn check_archive_matches_index(
     re: &repo::RepoEntry,
     strict_v2: bool,
 ) -> Result<()> {
-    let raw = crate::archive::read_pkginfo(archive)?;
-    let info = crate::archive::parse_pkginfo(&raw)?;
+    let raw = crate::adapters::archive::read_pkginfo(archive)?;
+    let info = crate::adapters::archive::parse_pkginfo(&raw)?;
     let get = |k: &str| info.get(k).cloned().unwrap_or_default();
     let rel: u32 = match info.get("pkgrel") {
         Some(raw) => match raw.parse::<u32>() {
@@ -120,7 +120,7 @@ pub(crate) fn check_archive_matches_index(
     };
     let arch = get("arch");
     let host = std::env::var("NAWA_ARCH").unwrap_or_else(|_| std::env::consts::ARCH.to_string());
-    if !crate::sys::arch_fits(&arch) {
+    if !crate::adapters::sys::arch_fits(&arch) {
         bail!("archive {} is built for {arch}, this system is {host}", re.file);
     }
     if get("pkgname") != re.name || get("pkgver") != re.version || rel != re.rel || arch != re.arch {

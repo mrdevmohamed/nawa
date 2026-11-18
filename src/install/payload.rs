@@ -4,14 +4,14 @@ use anyhow::{bail, Context, Result};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::artifact;
-use crate::archive;
-use crate::db::{Db, Entry};
+use crate::adapters::artifact;
+use crate::adapters::archive;
+use crate::adapters::db::{Db, Entry};
 use crate::install::InstallAuth;
 use crate::install::hooks::{hook_status_path, run_tracked_hook, save_hooks};
 use crate::install::journal::{FileJournalId, Tx};
-use crate::interrupt;
-use crate::sign;
+use crate::adapters::interrupt;
+use crate::adapters::sign;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn install_archive_payload(
@@ -19,7 +19,7 @@ pub(crate) fn install_archive_payload(
     cache_name_source: &Path,
     root: &Path,
     force: bool,
-    reason: crate::db::InstallReason,
+    reason: crate::adapters::db::InstallReason,
     cache_detached_signature: bool,
     auth: InstallAuth,
     file_journal: Option<FileJournalId>,
@@ -141,7 +141,7 @@ pub(crate) fn install_archive_payload(
 
     // ---- register in db (atomic: temp file + rename) -------------------------
     let reason = match reason {
-        crate::db::InstallReason::Keep => old.as_ref().map(|o| o.reason.clone()).unwrap_or_else(|| "explicit".into()),
+        crate::adapters::db::InstallReason::Keep => old.as_ref().map(|o| o.reason.clone()).unwrap_or_else(|| "explicit".into()),
         r => r.as_str().to_string(),
     };
     let entry = Entry {
@@ -523,7 +523,7 @@ pub(crate) fn stage_tree(staged: &Path) -> Result<(Vec<String>, std::collections
 }
 
 /// Re-export of the shared containment check (see `src/pathutil.rs`).
-pub(crate) use crate::pathutil::ensure_inside_root;
+pub(crate) use crate::adapters::pathutil::ensure_inside_root;
 
 /// Recursively move `src` into `dst`, merging directories.
 ///

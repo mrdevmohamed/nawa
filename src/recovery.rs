@@ -39,7 +39,7 @@ pub(crate) fn recover_and_report(root: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{Db, Entry};
+    use crate::adapters::db::{Db, Entry};
     use crate::install::journal::{FileJournalId, Tx};
     use crate::transaction::history::{PackageState, TxStatus, SCHEMA_VERSION};
     use crate::transaction::journal::{self, StepIntent, TxState};

@@ -43,12 +43,12 @@ pub(crate) fn diff_archives(a: &Path, b: &Path) -> Result<Vec<String>> {
 
 /// The soname → owner index for `sandbox`-level lint: the installed db.
 pub(crate) fn installed_sonames(root: &Path) -> Result<BTreeMap<String, String>> {
-    let db = crate::db::Db::new(root);
+    let db = crate::adapters::db::Db::new(root);
     let mut out = BTreeMap::new();
     for entry in db.installed()? {
         for f in db.files(&entry.name)? {
             let rel = f.trim_start_matches('/');
-            if let Some(soname) = crate::closure::soname_of(rel) {
+            if let Some(soname) = crate::build::closure::soname_of(rel) {
                 out.entry(soname).or_insert_with(|| entry.name.clone());
             }
         }

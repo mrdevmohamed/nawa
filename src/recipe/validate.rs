@@ -38,8 +38,8 @@ impl Recipe {
         self.validate_mirrors()?;
         self.validate_capabilities()?;
         // names/versions become directory and archive file names
-        crate::db::check_name(&self.package.name)?;
-        if !crate::db::valid_version(&self.package.version) {
+        crate::adapters::db::check_name(&self.package.name)?;
+        if !crate::adapters::db::valid_version(&self.package.version) {
             bail!(
                 "recipe {} has an invalid package.version `{}`",
                 self.package.name,

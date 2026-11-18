@@ -1,7 +1,7 @@
 //! `config show` and `init`.
 
 use anyhow::{bail, Context, Result};
-use crate::ctx::Ctx;
+use crate::application::context::Ctx;
 use crate::presentation::color::Palette;
 use std::path::PathBuf;
 use crate::presentation::color::Stream;

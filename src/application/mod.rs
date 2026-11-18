@@ -18,6 +18,7 @@
 //!   code: `cli`, `commands`, `output`, `color`, `diag`, `humanize`,
 //!   `confirm`, `bootstrap`).
 
+pub(crate) mod context;
 pub(crate) mod features;
 pub(crate) mod lifecycle;
 pub(crate) mod ports;

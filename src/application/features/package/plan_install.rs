@@ -15,8 +15,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::application::features::system::profile::EffectiveProfile;
 use crate::config::InstallMode;
-use crate::ctx::Ctx;
-use crate::db::Entry;
+use crate::application::context::Ctx;
+use crate::adapters::db::Entry;
 use crate::fetch::RepoRef;
 use crate::plan::{self, Why};
 use crate::recipe::Recipe;
@@ -69,7 +69,7 @@ impl Sourcing {
     pub(crate) fn entry(&self, name: &str) -> Option<&RepoEntry> {
         let open = self.open.as_ref()?;
         let re = open.index.find(name)?;
-        if crate::sys::arch_fits(&re.arch) {
+        if crate::adapters::sys::arch_fits(&re.arch) {
             Some(re)
         } else {
             None

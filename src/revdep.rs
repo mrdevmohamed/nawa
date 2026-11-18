@@ -30,7 +30,7 @@ use std::io::Read;
 use std::path::Path;
 
 use crate::glob::glob_match;
-use crate::db::Db;
+use crate::adapters::db::Db;
 use crate::install::{exists_in_root, resolve_in_root};
 use crate::lint::{self, ElfInfo};
 
@@ -453,8 +453,8 @@ pub(crate) fn affected(db: &Db, changed: &[String]) -> Result<Vec<String>> {
 
 /// `pkgname` of a package archive (`.PKGINFO`), if it can be read.
 pub(crate) fn archive_name(archive: &Path) -> Option<String> {
-    let info = crate::archive::read_pkginfo(archive).ok()?;
-    crate::archive::parse_pkginfo(&info).ok()?.remove("pkgname")
+    let info = crate::adapters::archive::read_pkginfo(archive).ok()?;
+    crate::adapters::archive::parse_pkginfo(&info).ok()?.remove("pkgname")
 }
 
 // ---- which package provides a missing library ----------------------------------
@@ -592,12 +592,12 @@ fn archive_libs(archive: &Path, wanted: &BTreeSet<String>) -> Option<Vec<String>
         let Ok(p) = entry.path() else {
             continue;
         };
-        let Ok(rel) = p.strip_prefix(crate::archive::PAYLOAD) else {
+        let Ok(rel) = p.strip_prefix(crate::adapters::archive::PAYLOAD) else {
             continue;
         };
         let rel_s = rel.to_string_lossy();
         let rel_s: &str = &rel_s;
-        if crate::closure::soname_of(rel_s).is_some() {
+        if crate::build::closure::soname_of(rel_s).is_some() {
             let base = rel_s.rsplit('/').next().unwrap_or(rel_s);
             if wanted.contains(base) {
                 found.push(base.to_string());
@@ -687,7 +687,7 @@ impl Report {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::Entry;
+    use crate::adapters::db::Entry;
 
     fn tmp(tag: &str) -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!("nawa-revdep-{}-{tag}", std::process::id()));
@@ -858,7 +858,7 @@ mod tests {
         std::fs::write(st.join("usr/lib/libfoo.so.1"), b"x").unwrap();
         std::fs::write(st.join("usr/lib/other.txt"), b"x").unwrap();
         let pkginfo = "pkgname = foo\npkgver = 1.0\npkgrel = 1\narch = x86_64\nsize = 1\n";
-        crate::archive::create(&st, pkginfo, &out.join("foo-1.0-1.nawa.tar.zst")).unwrap();
+        crate::adapters::archive::create(&st, pkginfo, &out.join("foo-1.0-1.nawa.tar.zst")).unwrap();
 
         let missing: BTreeSet<String> =
             ["libfoo.so.1", "libbar.so.2", "libnope.so"].iter().map(|s| s.to_string()).collect();

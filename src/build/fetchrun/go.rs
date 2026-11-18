@@ -158,7 +158,7 @@ pub(crate) fn ensure_go_entry(r: &FetchRun, plan: &GoPlan, key: &str) -> Result<
         "{}.tmp-{}-{}",
         key,
         std::process::id(),
-        crate::unique::next()
+        crate::adapters::unique::next()
     ));
     let _ = std::fs::remove_dir_all(&temp);
     std::fs::create_dir_all(&temp)

@@ -16,7 +16,7 @@ use std::collections::BTreeSet;
 /// Group ids become file names under `var/lib/nawa/groups/installed/`, so
 /// they use the same conservative alphabet as package names.
 pub(crate) fn check_group_id(id: &str) -> Result<()> {
-    if !crate::db::valid_name(id) {
+    if !crate::adapters::db::valid_name(id) {
         bail!(
             "invalid group id `{}` (allowed: letters, digits and + _ . -)",
             id.escape_debug()
@@ -69,7 +69,7 @@ impl GroupDefinition {
             };
             let mut seen = BTreeSet::new();
             for p in list {
-                crate::db::check_name(p)
+                crate::adapters::db::check_name(p)
                     .with_context(|| format!("group {} has an invalid {list_name} member", self.id))?;
                 if !seen.insert(p.clone()) {
                     bail!("group {} lists `{p}` twice in {list_name}", self.id);

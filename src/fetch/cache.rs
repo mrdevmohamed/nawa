@@ -6,7 +6,7 @@ use std::fs::{File, OpenOptions};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-use crate::checksum::verify_sha256;
+use crate::adapters::checksum::verify_sha256;
 use super::http::{check_offline, download, offline};
 
 pub(crate) fn digest_cache_dir(src_cache: &Path) -> PathBuf {
@@ -51,7 +51,7 @@ pub(crate) fn lock_digest_entry(path: &Path) -> Result<CacheLock> {
 /// gets its own file name so two concurrent builds of the same digest can
 /// never corrupt each other's partial bytes.
 pub(crate) fn unique_part_path(dest: &Path) -> PathBuf {
-    let seq = crate::unique::next();
+    let seq = crate::adapters::unique::next();
     let base = dest
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())

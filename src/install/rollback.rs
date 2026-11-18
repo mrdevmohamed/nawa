@@ -3,19 +3,19 @@
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
-use crate::artifact;
-use crate::db::{Db, Entry};
+use crate::adapters::artifact;
+use crate::adapters::db::{Db, Entry};
 use crate::install::hooks::{load_hooks, run_hook};
 use crate::install::journal::Tx;
 use crate::install::payload::save_undo;
 use crate::install::previous::{resolve_previous, synthesize_entry};
 use crate::install::{inspect_archive_state, install_archive, install_archive_from_index_proof, install_archive_pinned, FileJournalId, InstallOpts};
-use crate::interrupt;
-use crate::sign;
+use crate::adapters::interrupt;
+use crate::adapters::sign;
 
 pub(crate) fn rollback(name: &str, root: &Path) -> Result<()> {
     let db = Db::new(root);
-    crate::db::check_name(name)?;
+    crate::adapters::db::check_name(name)?;
     let previous = match resolve_previous(root, name)? {
         Some(previous) => previous,
         None => bail!("no undo record for `{name}` — nothing to roll back"),
@@ -48,7 +48,7 @@ pub(crate) fn rollback(name: &str, root: &Path) -> Result<()> {
     };
     // Preserve an installed package's current reason; reinstalls after removal
     // become explicit, matching the established "keep" behavior.
-    let target = inspect_archive_state(archive_for_snapshot, crate::db::InstallReason::Keep, before.as_ref())?;
+    let target = inspect_archive_state(archive_for_snapshot, crate::adapters::db::InstallReason::Keep, before.as_ref())?;
     let digest = target.artifact_sha256.clone();
     let mut operation = crate::transaction::begin_operation(
         root,
@@ -151,24 +151,24 @@ fn install_restore_source(
                 root,
                 false,
                 &digest,
-                crate::db::InstallReason::Keep,
+                crate::adapters::db::InstallReason::Keep,
                 None,
                 file_journal,
             ),
             "signed-index proof re-verified".to_string(),
         ),
         RestoreSource::Detached { object, digest } => (
-            install_archive_pinned(&object, root, InstallOpts { force: false, allow_unsigned: true, key: None, reason: crate::db::InstallReason::Keep, pinned_sha: Some(&digest), file_journal }),
+            install_archive_pinned(&object, root, InstallOpts { force: false, allow_unsigned: true, key: None, reason: crate::adapters::db::InstallReason::Keep, pinned_sha: Some(&digest), file_journal }),
             "detached signature re-verified".to_string(),
         ),
         RestoreSource::Pinned { object, digest, proof } => (
-            install_archive_pinned(&object, root, InstallOpts { force: false, allow_unsigned: true, key: None, reason: crate::db::InstallReason::Keep, pinned_sha: Some(&digest), file_journal }),
+            install_archive_pinned(&object, root, InstallOpts { force: false, allow_unsigned: true, key: None, reason: crate::adapters::db::InstallReason::Keep, pinned_sha: Some(&digest), file_journal }),
             proof,
         ),
         RestoreSource::Legacy { archive } => (
             // Legacy records carry no digest, so the modern linked installer
             // cannot verify them anyway; keep the established unsigned path.
-            install_archive(&archive, root, false, true, None, crate::db::InstallReason::Explicit),
+            install_archive(&archive, root, false, true, None, crate::adapters::db::InstallReason::Explicit),
             "legacy cached archive (no recorded authentication proof)".to_string(),
         ),
     }

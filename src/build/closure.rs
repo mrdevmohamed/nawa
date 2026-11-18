@@ -114,7 +114,7 @@ fn verified_archive(
             archive.display()
         );
     }
-    crate::sign::verify_for_install(&archive, root, None, allow_unsigned)
+    crate::adapters::sign::verify_for_install(&archive, root, None, allow_unsigned)
         .with_context(|| format!("verify {}", archive.display()))?;
     Ok(archive)
 }
@@ -278,10 +278,10 @@ fn extract_and_index(
     for entry in ar.entries()? {
         let mut entry = entry?;
         let p = entry.path()?.to_path_buf();
-        let Some(rel) = p.strip_prefix(crate::archive::PAYLOAD).ok().filter(|r| !r.as_os_str().is_empty()) else {
+        let Some(rel) = p.strip_prefix(crate::adapters::archive::PAYLOAD).ok().filter(|r| !r.as_os_str().is_empty()) else {
             continue;
         };
-        crate::archive::extract_entry_into(&mut entry, rel, dir)?;
+        crate::adapters::archive::extract_entry_into(&mut entry, rel, dir)?;
         // soname → owner index for the lint's run-dependency check: every
         // file directly in a library dir whose name looks like a shared
         // object (libfoo.so[.1[.2...]])

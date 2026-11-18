@@ -168,7 +168,7 @@ impl PluginManifest {
 
     fn validate_raw(m: RawManifest, approved_dir: &Path) -> Result<Self> {
         let p = m.plugin;
-        if !crate::db::valid_name(&p.id) {
+        if !crate::adapters::db::valid_name(&p.id) {
             bail!(
                 "plugin id {:?} is invalid (allowed: letters, digits and + _ . -)",
                 p.id
@@ -236,7 +236,7 @@ impl PluginManifest {
             bail!("plugin {} declares duplicate command name {:?}", p.id, duplicate[0]);
         }
         for c in &commands {
-            if !crate::db::valid_name(c) {
+            if !crate::adapters::db::valid_name(c) {
                 bail!("plugin {} registers an invalid command name {c:?}", p.id);
             }
             if RESERVED_COMMANDS.contains(&c.as_str()) {

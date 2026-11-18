@@ -22,7 +22,7 @@ use super::journal;
 pub(crate) fn reconcile(root: &Path, tx: u64) -> Result<Option<TransactionRecord>> {
     let Some(state) = read_state(root, tx)? else { return Ok(None) };
     let existing = super::history::load_record(root, tx).ok();
-    let db = crate::db::Db::new(root);
+    let db = crate::adapters::db::Db::new(root);
     let mut changes = Vec::new();
     let mut any_committed = false;
     let mut ambiguous = false;
@@ -82,7 +82,7 @@ pub(crate) fn reconcile(root: &Path, tx: u64) -> Result<Option<TransactionRecord
 
     let status = if ambiguous { TxStatus::NeedsRecovery }
         else if any_committed { TxStatus::Partial } else { TxStatus::Failed };
-    let now = crate::artifact::now_secs();
+    let now = crate::adapters::artifact::now_secs();
     Ok(Some(TransactionRecord {
         schema: super::history::SCHEMA_VERSION, id: tx, command: state.command,
         status: status.as_str().to_string(),
@@ -98,7 +98,7 @@ pub(crate) fn reconcile(root: &Path, tx: u64) -> Result<Option<TransactionRecord
 }
 
 /// A missing target means removal only for an explicit remove action.
-fn infer_pending_outcome(intent: &journal::StepIntent, current: Option<&crate::db::Entry>) -> &'static str {
+fn infer_pending_outcome(intent: &journal::StepIntent, current: Option<&crate::adapters::db::Entry>) -> &'static str {
     if intent.action == "remove" {
         return match current {
             None => "committed",
@@ -173,7 +173,7 @@ pub(crate) fn reconcile_incomplete(root: &Path) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{Db, Entry};
+    use crate::adapters::db::{Db, Entry};
     use crate::transaction::history::{PackageState, SCHEMA_VERSION};
 
     use crate::testutil::tmpdir;
@@ -202,7 +202,7 @@ mod tests {
     fn result_written_before_crash_is_not_discarded() {
         let base = tmpdir("result-before-finish");
         let root = base.join("root");
-        let entry = crate::db::Entry {
+        let entry = crate::adapters::db::Entry {
             name: "demo".into(), version: "1.0".into(), rel: 1, arch: "any".into(),
             reason: "explicit".to_string(), run: vec![], install_date: 0, size: 0,
             artifact_sha256: "a".repeat(64),

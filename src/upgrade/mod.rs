@@ -15,13 +15,13 @@ use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use crate::db::Db;
+use crate::adapters::db::Db;
 use crate::fetch::RepoRef;
 use crate::install;
 use crate::recipe;
 use crate::repo;
 #[cfg(test)]
-use crate::sign;
+use crate::adapters::sign;
 use crate::version::vercmp;
 
 mod source;
@@ -66,7 +66,7 @@ struct PlannedUpgrade<'a> {
 }
 
 struct UpgradePlan<'a> {
-    installed: HashMap<String, crate::db::Entry>,
+    installed: HashMap<String, crate::adapters::db::Entry>,
     upgrades: Vec<PlannedUpgrade<'a>>,
 }
 
@@ -78,10 +78,10 @@ fn build_plan<'a>(
     recipes: &Path,
 ) -> Result<Option<UpgradePlan<'a>>> {
     let db = Db::new(root);
-    let installed_map: HashMap<String, crate::db::Entry> =
+    let installed_map: HashMap<String, crate::adapters::db::Entry> =
         db.installed()?.into_iter().map(|e| (e.name.clone(), e)).collect();
     let mut candidates: Vec<(&repo::RepoEntry, String)> = Vec::new();
-    let mut entries: Vec<&crate::db::Entry> = installed_map.values().collect();
+    let mut entries: Vec<&crate::adapters::db::Entry> = installed_map.values().collect();
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     for e in entries {
         let re = match index.find(&e.name) {
@@ -169,7 +169,7 @@ fn apply_plan(
         let re = upgrade.entry;
         // a Ctrl+C that arrived during the previous package was deferred
         // until it was complete; stop before starting the next one
-        if let Err(error) = crate::interrupt::check() {
+        if let Err(error) = crate::adapters::interrupt::check() {
             first_err = Some(error.into());
             break;
         }
@@ -192,7 +192,7 @@ fn apply_plan(
                     root,
                     opts.force,
                     &re.sha256,
-                    crate::db::InstallReason::Keep,
+                    crate::adapters::db::InstallReason::Keep,
                     Some(install::IndexProof {
                         index_bytes: Some(&open.index_bytes),
                         index_signature: open.index_signature.as_deref(),
@@ -206,7 +206,7 @@ fn apply_plan(
                 install::install_archive_pinned(
                     &src,
                     root,
-                    install::InstallOpts { force: opts.force, allow_unsigned: opts.allow_unsigned, key: None, reason: crate::db::InstallReason::Keep, pinned_sha: Some(&re.sha256), file_journal },
+                    install::InstallOpts { force: opts.force, allow_unsigned: opts.allow_unsigned, key: None, reason: crate::adapters::db::InstallReason::Keep, pinned_sha: Some(&re.sha256), file_journal },
                 )
             }
         });
@@ -247,7 +247,7 @@ pub(crate) use verify::{check_archive_matches_index, check_index_freshness, requ
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::archive;
+    use crate::adapters::archive;
     use std::path::PathBuf;
 
     use crate::testutil::tmpdir;
@@ -321,8 +321,8 @@ mod tests {
             &repo_dir, &index_path, None, repo::INDEX_SCHEMA_V3, Some(&locations)
         ).unwrap();
 
-        let (secret, _public) = crate::sign::keygen(&base.join("publisher")).unwrap();
-        crate::sign::sign(&index_path, &secret).unwrap();
+        let (secret, _public) = crate::adapters::sign::keygen(&base.join("publisher")).unwrap();
+        crate::adapters::sign::sign(&index_path, &secret).unwrap();
 
         let err = match open_repo(&root, &RepoRef::Local(repo_dir), true, false) {
             Ok(_) => panic!("untrusted distributed index must be rejected"),
@@ -339,7 +339,7 @@ mod tests {
 
         // v1.0 installed directly from an archive outside the repo
         let v1 = make_pkg(&base, "demo", "1.0", 1, b"one");
-        install::install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+        install::install_archive(&v1, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
 
         // repo contains 1.0-2 (rel bump)
         let v2 = make_pkg(&base, "demo", "1.0", 2, b"two");
@@ -375,7 +375,7 @@ mod tests {
         let base = tmpdir("upgrade-tamper");
         let root = base.join("root");
         let v1 = make_pkg(&base, "demo", "1.0", 1, b"one");
-        install::install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+        install::install_archive(&v1, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
         let v2 = make_pkg(&base, "demo", "2.0", 1, b"two");
         let repo = setup_repo(&base, &[v2]);
 
@@ -487,7 +487,7 @@ mod tests {
         let base = tmpdir("order-e2e");
         let root = base.join("root");
         let v1 = make_pkg(&base, "a", "1.0", 1, b"one");
-        install::install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+        install::install_archive(&v1, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
         let v2 = make_pkg(&base, "a", "2.0", 1, b"two");
         let repo = setup_repo(&base, &[v2]);
 

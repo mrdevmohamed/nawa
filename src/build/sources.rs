@@ -225,7 +225,7 @@ fn merge_archives(
 fn source_date_epoch(rec: &Recipe, src: &Path) -> Result<u64> {
     let sde = match rec.package.source_date_epoch {
         Some(p) => p,
-        None => crate::buildenv::source_date_epoch_from_files(src).with_context(|| {
+        None => crate::build::buildenv::source_date_epoch_from_files(src).with_context(|| {
             format!("derive SOURCE_DATE_EPOCH for recipe {}", rec.package.name)
         })?,
     };

@@ -205,7 +205,7 @@ pub(crate) fn fetch_sandbox_spec(
 
     Ok(SandboxSpec {
         version: 1,
-        root: if r.opts.isolation == crate::buildenv::Isolation::Closure {
+        root: if r.opts.isolation == crate::build::buildenv::Isolation::Closure {
             RootSpec {
                 mode: "dir".into(),
                 dir: r.work.join("buildroot").to_string_lossy().into_owned(),
@@ -319,7 +319,7 @@ pub(crate) fn resolver_binds(r: &FetchRun) -> Result<Vec<ExtraBind>> {
     let etc = r.work.join("fetch").join("etc");
     std::fs::create_dir_all(&etc)
         .with_context(|| format!("create {}", etc.display()))?;
-    let root = if r.opts.isolation == crate::buildenv::Isolation::Closure {
+    let root = if r.opts.isolation == crate::build::buildenv::Isolation::Closure {
         r.work.join("buildroot")
     } else {
         PathBuf::from("/")

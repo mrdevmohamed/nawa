@@ -598,7 +598,7 @@ impl Cmd {
             // installing by name builds first, so (like `build --install`)
             // it locks around each install step only
             Cmd::Install { targets, .. } => {
-                if targets.iter().all(|t| crate::pathutil::is_archive_arg(t)) {
+                if targets.iter().all(|t| crate::adapters::pathutil::is_archive_arg(t)) {
                     Request::InstallArchives
                 } else {
                     Request::InstallByName

@@ -10,6 +10,7 @@ mod installing;
 mod plugins;
 mod querying;
 mod recipes;
+mod repositories;
 mod sandbox;
 mod signing;
 mod system;

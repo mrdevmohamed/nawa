@@ -53,12 +53,12 @@ pub(crate) fn save(root: &Path, record: &MembershipRecord) -> Result<()> {
     }
     super::check_group_id(&record.group_id)?;
     for p in &record.packages {
-        crate::db::check_name(p)
+        crate::adapters::db::check_name(p)
             .with_context(|| format!("group {} has an invalid member", record.group_id))?;
     }
     let path = record_path(root, &record.group_id)?;
     let bytes = toml::to_string_pretty(record)?;
-    crate::atomic::write_atomic(&path, bytes.as_bytes(), 0o644)
+    crate::adapters::atomic::write_atomic(&path, bytes.as_bytes(), 0o644)
         .with_context(|| format!("publish membership {}", path.display()))
 }
 

@@ -40,7 +40,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-use crate::atomic;
+use crate::adapters::atomic;
 use crate::domain::system::capability::Capability;
 use crate::domain::system::migration::{
     check_id, HandlerId, MigrationRecord, MigrationState, StepOutcome, StepRecord, SCHEMA_VERSION,

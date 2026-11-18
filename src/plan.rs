@@ -18,7 +18,7 @@
 use anyhow::Result;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use crate::db::Entry;
+use crate::adapters::db::Entry;
 use crate::domain::planning::install::{self, Candidate};
 pub(crate) use crate::domain::planning::install::{InitSelection, Why};
 use crate::domain::planning::removal::{self, InstalledPkg};
@@ -30,12 +30,12 @@ use crate::recipe::Recipe;
 /// reason mapping and the label stay here, with the adapters.
 impl Why {
     /// the `reason` argument of `install::install_archive`
-    pub fn db_reason(self) -> crate::db::InstallReason {
+    pub fn db_reason(self) -> crate::adapters::db::InstallReason {
         match self {
-            Why::Explicit => crate::db::InstallReason::Explicit,
-            Why::Dependency => crate::db::InstallReason::Dependency,
-            Why::Group => crate::db::InstallReason::Group,
-            Why::Update => crate::db::InstallReason::Keep,
+            Why::Explicit => crate::adapters::db::InstallReason::Explicit,
+            Why::Dependency => crate::adapters::db::InstallReason::Dependency,
+            Why::Group => crate::adapters::db::InstallReason::Group,
+            Why::Update => crate::adapters::db::InstallReason::Keep,
         }
     }
 
@@ -403,7 +403,7 @@ mod tests {
     fn group_install_reason_is_distinct_from_explicit() {
         let known = tree(vec![rec("dev-tool", "1", &[], &[])]);
         let plan = install_plan(&["dev-tool".into()], &HashMap::new(), &known, None, Why::Group, true).unwrap();
-        assert_eq!(plan.items[0].why.db_reason(), crate::db::InstallReason::Group);
+        assert_eq!(plan.items[0].why.db_reason(), crate::adapters::db::InstallReason::Group);
         assert_eq!(plan.items[0].why.label(), "group");
     }
 

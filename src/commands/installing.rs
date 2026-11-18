@@ -2,7 +2,7 @@
 
 use anyhow::{bail, Result};
 use crate::suggest;
-use crate::ctx::Ctx;
+use crate::application::context::Ctx;
 use crate::config::InstallMode;
 use crate::application::features::package::apply_transaction::{
     apply_transaction, archive_name_of, ApplyRequest, Applied,
@@ -17,13 +17,13 @@ use crate::cli::PlanFlags;
 use crate::presentation::color::Stream;
 use crate::commands::build_one;
 use crate::presentation::confirm;
-use crate::db;
+use crate::adapters::db;
 use crate::presentation::humanize::format_date;
 use crate::presentation::humanize::format_duration;
 use crate::presentation::humanize::format_size;
 use crate::groups;
 use crate::install;
-use crate::pathutil::is_archive_arg;
+use crate::adapters::pathutil::is_archive_arg;
 use crate::lock;
 use crate::plan;
 use crate::recovery;
@@ -514,7 +514,7 @@ pub(crate) fn cmd_autoremove(ctx: &Ctx, dry_run: bool, yes: bool, build_deps: bo
         &[],
     )?;
     for (i, n) in order.iter().enumerate() {
-        crate::interrupt::check()?;
+        crate::adapters::interrupt::check()?;
         crate::nawa_info!("[{}/{}] removing {n}", i + 1, order.len());
         let db = db::Db::new(&ctx.root);
         let before = db.entry(n)?;
@@ -583,7 +583,7 @@ pub(crate) fn install_archive_file(
     let pkg_name = archive_name_of(file)
         .ok_or_else(|| anyhow::anyhow!("cannot read package name from {}", file.display()))?;
     let before = db.entry(&pkg_name)?;
-    let target = install::inspect_archive_state(file, crate::db::InstallReason::Explicit, before.as_ref())?;
+    let target = install::inspect_archive_state(file, crate::adapters::db::InstallReason::Explicit, before.as_ref())?;
     let action = match &before {
         None => transaction::history::StepAction::Install,
         Some(old) if old.version != target.version.clone().unwrap_or_default()
@@ -604,7 +604,7 @@ pub(crate) fn install_archive_file(
     let file_journal = install::FileJournalId::for_step(recorder.tx(), step_no);
     let result = install::install_archive_pinned(
         file, &ctx.root,
-        install::InstallOpts { force, allow_unsigned, key: key.as_deref(), reason: crate::db::InstallReason::Explicit, pinned_sha: Some(&digest), file_journal },
+        install::InstallOpts { force, allow_unsigned, key: key.as_deref(), reason: crate::adapters::db::InstallReason::Explicit, pinned_sha: Some(&digest), file_journal },
     );
     install::record_install_outcome(
         &mut recorder,

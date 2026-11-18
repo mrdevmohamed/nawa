@@ -6,7 +6,7 @@ use std::process::Command;
 
 use super::BuildOpts;
 use crate::recipe::Recipe;
-use crate::buildenv::Isolation;
+use crate::build::buildenv::Isolation;
 use crate::build::cache::fetch_ecosystems;
 
 /// The layer cache root (§5.3 v2): `NAWA_LAYER_CACHE` or `<root>/var/cache/nawa`;
@@ -60,7 +60,7 @@ pub(crate) fn layer_paths_are_mountable(
     }
     for m in members {
         if let Some(r) = known.get(m) {
-            if !bad(&crate::closure::archive_for(r, outdir), "a closure archive") {
+            if !bad(&crate::build::closure::archive_for(r, outdir), "a closure archive") {
                 return false;
             }
         }

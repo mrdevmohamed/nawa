@@ -82,7 +82,7 @@ pub(crate) fn snapshot_file(
         .with_context(|| format!("open {}", source_path.display()))?;
     let mut created: Option<(File, PathBuf)> = None;
     for _ in 0..128 {
-        let sequence = crate::unique::next();
+        let sequence = crate::adapters::unique::next();
         let path = snapshot_dir.join(format!(
             "verified-{}-{sequence}.tmp",
             std::process::id()

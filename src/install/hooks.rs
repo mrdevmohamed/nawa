@@ -4,9 +4,9 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::archive;
-use crate::db::{Db, Entry};
-use crate::interrupt;
+use crate::adapters::archive;
+use crate::adapters::db::{Db, Entry};
+use crate::adapters::interrupt;
 
 pub(crate) fn hooks_path(db: &Db, name: &str) -> PathBuf {
     db.local_dir().join(name).join("hooks")
@@ -93,7 +93,7 @@ pub(crate) fn run_tracked_hook(db: &Db, entry: &Entry, label: &str, script: &str
             Ok(())
         }
         Err(error) => {
-            let failure_status = if crate::interrupt::is_interrupted() {
+            let failure_status = if crate::adapters::interrupt::is_interrupted() {
                 "interrupted"
             } else {
                 "failed"

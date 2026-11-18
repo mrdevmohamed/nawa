@@ -21,7 +21,7 @@ use crate::application::features::system::migrate_inspect as inspect;
 use crate::application::features::system::migrate_recover as recover;
 use crate::application::ports::user_interaction::UserInteraction;
 use crate::cli::{MigrateCmd, SystemCmd};
-use crate::ctx::Ctx;
+use crate::application::context::Ctx;
 use crate::domain::system::migration::{MigrationRecord, StepOutcome, StepRecord};
 use crate::migration_record::ActiveGate;
 

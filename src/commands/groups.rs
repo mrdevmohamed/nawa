@@ -4,10 +4,10 @@
 //! remaining explicit/group roots.
 
 use anyhow::{Context, Result};
-use crate::ctx::Ctx;
+use crate::application::context::Ctx;
 use crate::cli::PlanFlags;
 use crate::presentation::confirm;
-use crate::db;
+use crate::adapters::db;
 use crate::fetch;
 use crate::groups;
 use crate::install;

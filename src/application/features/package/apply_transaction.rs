@@ -16,8 +16,8 @@ use crate::application::features::package::plan_install::{Source, Sourcing};
 use crate::application::features::system::migrate_coordinator::MigrationPermit;
 use crate::application::ports::user_interaction::{PlanRow, PlanView, UserInteraction};
 use crate::config::InstallMode;
-use crate::ctx::Ctx;
-use crate::db;
+use crate::application::context::Ctx;
+use crate::adapters::db;
 use crate::install;
 use crate::lock;
 use crate::plan;
@@ -56,7 +56,7 @@ pub(crate) struct ApplyRequest<'a> {
 
 /// Details for one staged archive installation.
 struct InstallRequest<'a> {
-    reason: crate::db::InstallReason,
+    reason: crate::adapters::db::InstallReason,
     what: &'a str,
     number: usize,
     total: usize,
@@ -111,7 +111,7 @@ pub(crate) struct MigrationInstall<'a> {
     pub(crate) total: usize,
     /// the sha256 the approved plan pinned (installer-verified)
     pub(crate) expected_sha256: Option<&'a str>,
-    pub(crate) reason: crate::db::InstallReason,
+    pub(crate) reason: crate::adapters::db::InstallReason,
     pub(crate) force: bool,
     pub(crate) allow_unsigned: bool,
     /// provenance for the history record
@@ -191,7 +191,7 @@ pub(crate) fn apply_transaction(
     for (i, it) in plan.items.iter().enumerate() {
         // Ctrl+C during the previous install was deferred until that package
         // was complete; now that the system is consistent, stop here
-        crate::interrupt::check()?;
+        crate::adapters::interrupt::check()?;
         let n = i + 1;
         let id = it.rec.id();
         let mut step = || -> Result<()> {
@@ -232,7 +232,7 @@ pub(crate) fn apply_transaction(
         }
     }
     for (j, re) in extras.iter().enumerate() {
-        crate::interrupt::check()?;
+        crate::adapters::interrupt::check()?;
         let n = plan.items.len() + j + 1;
         let what = format!("{}-{}-{}", re.name, re.version, re.rel);
         let mut step = || -> Result<()> {
@@ -372,12 +372,12 @@ fn install_one(
     let before = db.entry(&package)?;
     // A package that was explicitly requested must stay explicit even when
     // a group later upgrades it. "keep" preserves the existing DB reason.
-    let effective_reason = if details.reason == crate::db::InstallReason::Group
+    let effective_reason = if details.reason == crate::adapters::db::InstallReason::Group
         && before
             .as_ref()
-            .is_some_and(|entry| entry.reason == crate::db::InstallReason::Explicit.as_str())
+            .is_some_and(|entry| entry.reason == crate::adapters::db::InstallReason::Explicit.as_str())
     {
-        crate::db::InstallReason::Keep
+        crate::adapters::db::InstallReason::Keep
     } else {
         details.reason
     };
@@ -509,8 +509,8 @@ pub(crate) fn install_for_migration(
 
 /// The package name inside an archive (from .PKGINFO), when readable.
 pub(crate) fn archive_name_of(archive: &Path) -> Option<String> {
-    let raw = crate::archive::read_pkginfo(archive).ok()?;
-    let info = crate::archive::parse_pkginfo(&raw).ok()?;
+    let raw = crate::adapters::archive::read_pkginfo(archive).ok()?;
+    let info = crate::adapters::archive::parse_pkginfo(&raw).ok()?;
     info.get("pkgname").cloned()
 }
 

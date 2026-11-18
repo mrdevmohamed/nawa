@@ -1,18 +1,31 @@
 //! Build engine: fetch -> verify -> extract -> [assemble build root] ->
 //! run build sections (optionally inside the sandbox) -> stage into pkgdir
 //! -> lint -> create archive.
+//!
+//! This namespace owns the whole build pipeline: isolation levels and the
+//! build environment, source/asset staging, dependency-closure assembly,
+//! slimming/splitting, build profiles and ecosystem (`go`/`cargo`) source
+//! staging. The recipe *schema* stays in `recipe`; this module owns only the
+//! machinery that consumes it.
+
+pub(crate) mod assets;
+pub(crate) mod buildenv;
+pub(crate) mod closure;
+pub(crate) mod fetchrun;
+pub(crate) mod profile;
+pub(crate) mod slim;
+pub(crate) mod sources;
 
 use anyhow::{bail, Context, Result};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use crate::buildenv::{self, Isolation};
+use crate::build::buildenv::Isolation;
 use crate::fetch;
 use crate::recipe::{ExpandCtx, Recipe};
-use crate::slim;
 
 
-pub(crate) use crate::buildenv::{BuildOpts, CheckMode};
+pub(crate) use crate::build::buildenv::{BuildOpts, CheckMode};
 
 
 /// How many trailing output lines are quoted when a section fails.
@@ -95,7 +108,7 @@ pub(crate) fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
 
     // In live/env modes the toolchain comes from the host root, not a pinned
     // closure archive. Capture the exact fetch PATH versions before cache lookup.
-    let toolchain_identity = crate::fetchrun::build_toolchain_identity(rec, opts.isolation)?;
+    let toolchain_identity = crate::build::fetchrun::build_toolchain_identity(rec, opts.isolation)?;
     // Cache-only identity (never part of the legacy `.PKGINFO build_id`):
     // the effective isolation level and, for host-root builds, the C/C++
     // toolchain the build sections will actually invoke.
@@ -109,10 +122,10 @@ pub(crate) fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
     if opts.use_cache && opts.isolation >= Isolation::Env {
         let closure_paths: Vec<PathBuf> = if opts.isolation == Isolation::Closure {
             let known = crate::recipe::load_all(&opts.recipes_root)?;
-            let paths = crate::closure::buildroot(rec, &known, opts.check != CheckMode::Off)
+            let paths = crate::build::closure::buildroot(rec, &known, opts.check != CheckMode::Off)
                 .context("compute build root")?
                 .iter()
-                .filter_map(|n| known.get(n).map(|r| crate::closure::archive_for(r, &opts.outdir)))
+                .filter_map(|n| known.get(n).map(|r| crate::build::closure::archive_for(r, &opts.outdir)))
                 .collect();
             closure_known = Some(known);
             paths
@@ -508,7 +521,7 @@ mod wipe_tests {
 #[cfg(test)]
 mod installed_sonames_tests {
     use super::sections::installed_sonames;
-    use crate::db::{Db, Entry};
+    use crate::adapters::db::{Db, Entry};
 
     fn entry(name: &str) -> Entry {
         Entry {

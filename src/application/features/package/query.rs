@@ -7,7 +7,7 @@ use anyhow::Result;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::db::{self, Entry};
+use crate::adapters::db::{self, Entry};
 use crate::recipe::Recipe;
 
 /// What `nawa why <name>` reports about the installed database.

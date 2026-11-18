@@ -35,7 +35,7 @@ fn default_priority() -> u32 {
 
 /// Validate a repository id: conservative identifier charset.
 pub(crate) fn check_repo_id(id: &str) -> Result<()> {
-    if !crate::db::valid_name(id) {
+    if !crate::adapters::db::valid_name(id) {
         bail!("invalid repository id {id:?} (letters, digits, + _ . - only)");
     }
     Ok(())
@@ -237,7 +237,7 @@ pub(crate) fn cmd_clean(ctx: &crate::Ctx, category: &str, dry_run: bool) -> Resu
         // mark: installed entries + history + legacy undo
         let root = &ctx.root;
         let mut keep = std::collections::BTreeSet::new();
-        for e in crate::db::Db::new(root).installed()? {
+        for e in crate::adapters::db::Db::new(root).installed()? {
             if !e.artifact_sha256.is_empty() {
                 keep.insert(e.artifact_sha256.clone());
             }
@@ -250,7 +250,7 @@ pub(crate) fn cmd_clean(ctx: &crate::Ctx, category: &str, dry_run: bool) -> Resu
         for digest in crate::transaction::history::referenced_artifacts(root)? {
             keep.insert(digest);
         }
-        let store = crate::artifact::store_dir(root);
+        let store = crate::adapters::artifact::store_dir(root);
         if store.exists() {
             for fan in std::fs::read_dir(&store)?.filter_map(|e| e.ok()) {
                 let fan_dir = fan.path();

@@ -4,8 +4,8 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-use crate::db::{self, Entry};
-use crate::atomic;
+use crate::adapters::db::{self, Entry};
+use crate::adapters::atomic;
 
 pub(crate) const SCHEMA_VERSION: u32 = 1;
 
@@ -305,7 +305,7 @@ fn a_artifact_ok(s: Option<&PackageState>) -> bool {
     match s {
         None => true,
         Some(st) if st.artifact_sha256.is_empty() => true,
-        Some(st) => crate::artifact::validate_digest(&st.artifact_sha256).is_ok(),
+        Some(st) => crate::adapters::artifact::validate_digest(&st.artifact_sha256).is_ok(),
     }
 }
 
@@ -438,7 +438,7 @@ pub(crate) fn undo_restored_original(root: &Path, original_id: u64, undo_id: u64
         return Ok(false);
     }
     let original = load_record(root, original_id)?;
-    let db = crate::db::Db::new(root);
+    let db = crate::adapters::db::Db::new(root);
     for change in original.package_changes.iter().filter(|change| {
         change.status == "committed" || change.status == "committed-hook-failed"
     }) {
@@ -695,7 +695,7 @@ mod tests {
 
     #[test]
     fn state_comparison_uses_artifact_digest_and_install_reason() {
-        let mut e = crate::db::Entry {
+        let mut e = crate::adapters::db::Entry {
             name: "x".into(),
             version: "1.0".into(),
             rel: 1,

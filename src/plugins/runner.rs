@@ -217,7 +217,7 @@ impl PluginProcess {
             "run-{}-{}-{}",
             std::process::id(),
             self.hello.plugin_id,
-            crate::unique::next()
+            crate::adapters::unique::next()
         );
         let request = RunRequest {
             protocol: protocol::PROTOCOL_NAME,
@@ -241,7 +241,7 @@ impl PluginProcess {
             "event-{}-{}-{}",
             std::process::id(),
             self.hello.plugin_id,
-            crate::unique::next()
+            crate::adapters::unique::next()
         );
         let request = EventRequest {
             protocol: protocol::PROTOCOL_NAME,

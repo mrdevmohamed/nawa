@@ -6,5 +6,6 @@
 pub(crate) mod color;
 pub(crate) mod confirm;
 pub(crate) mod diag;
+pub(crate) mod error;
 pub(crate) mod humanize;
 pub(crate) mod output;

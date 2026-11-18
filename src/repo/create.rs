@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use super::model::*;
 use super::update::load_locations;
 use super::pack::{pack_groups, pack_recipes};
-use crate::archive;
+use crate::adapters::archive;
 
 /// Build a legacy v1 index from a directory containing package archives.
 #[cfg(test)]
@@ -242,7 +242,7 @@ pub(crate) fn create_index_with_locations_and_groups(
 /// and a crash cannot lose the directory entry.
 pub(crate) fn write_index_atomic(index: &Index, out: &Path) -> Result<()> {
     let raw = toml::to_string_pretty(index)?;
-    crate::atomic::write_atomic(out, raw.as_bytes(), 0o644)
+    crate::adapters::atomic::write_atomic(out, raw.as_bytes(), 0o644)
         .with_context(|| format!("activate index {}", out.display()))
 }
 

@@ -6,7 +6,7 @@
 //!
 //! # Durability policy (Step 3)
 //!
-//! Use [`crate::atomic::write_atomic`] (this module's `write_atomic`)
+//! Use [`crate::adapters::atomic::write_atomic`] (this module's `write_atomic`)
 //! when a crash must not leave a torn or missing file that a later start would
 //! treat as authoritative:
 //!
@@ -202,7 +202,7 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     for attempt in 0..32u32 {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH)
             .unwrap_or_default().as_nanos();
-        let sequence = crate::unique::next();
+        let sequence = crate::adapters::unique::next();
         let temporary = parent.join(format!(
             ".{name}.{}.{}.{sequence}.{attempt}.tmp", std::process::id(), nanos
         ));
@@ -253,7 +253,7 @@ mod tests {
     fn temp_dir() -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "nawa-atomic-{}-{}", std::process::id(),
-            crate::unique::next()
+            crate::adapters::unique::next()
         ));
         fs::create_dir_all(&path).unwrap();
         path

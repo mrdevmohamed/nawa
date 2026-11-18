@@ -24,7 +24,6 @@
 //! build profile or `NAWA_SLIM=0` turns the whole thing off.
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -33,6 +32,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::presentation::humanize::format_size;
+use crate::recipe::model::Slim;
 
 /// Bumped whenever the slimming rules change. It is part of the build id, so
 /// `--use-cache` never serves an archive made by older rules.
@@ -42,26 +42,8 @@ pub(crate) const VERSION: u32 = 1;
 /// them (`<name>-doc`, `<name>-lang`).
 pub(crate) const SUFFIXES: [&str; 2] = ["doc", "lang"];
 
-fn yes() -> bool {
-    true
-}
-
-/// The recipe's `[slim]` table: every pass is on unless the recipe says no.
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct Slim {
-    #[serde(default = "yes")]
-    pub strip: bool,
-    #[serde(default = "yes")]
-    pub cleanup: bool,
-    #[serde(default = "yes")]
-    pub split: bool,
-}
-
-impl Default for Slim {
-    fn default() -> Self {
-        Slim { strip: true, cleanup: true, split: true }
-    }
-}
+// The `[slim]` recipe table is defined with the rest of the recipe schema
+// (`recipe::model::Slim`); this module owns only the size-reduction passes.
 
 /// A sub-package staged in its own directory, ready to be archived.
 #[derive(Debug)]
@@ -169,7 +151,7 @@ pub(crate) fn run(pkgdir: &Path, splitdir: &Path, policy: &Slim) -> Result<Repor
 /// Remove files that are never needed at run time. Returns how many.
 pub(crate) fn cleanup(pkgdir: &Path) -> usize {
     let mut n = 0;
-    for e in crate::fswalk::entries_sorted_ok(pkgdir) {
+    for e in crate::adapters::fswalk::entries_sorted_ok(pkgdir) {
         // symlinks are not `is_file()` here: a link is never junk
         if !e.file_type().is_file() {
             continue;
@@ -269,10 +251,10 @@ pub(crate) fn split(pkgdir: &Path, splitdir: &Path) -> Result<Vec<SubPackage>> {
                 continue;
             }
             // never walk out of the package through a symlinked parent
-            if !crate::pathutil::is_under_root(pkgdir, &root).unwrap_or(false) {
+            if !crate::adapters::pathutil::is_under_root(pkgdir, &root).unwrap_or(false) {
                 continue;
             }
-            for e in crate::fswalk::entries_sorted(&root) {
+            for e in crate::adapters::fswalk::entries_sorted(&root) {
                 let e = e?;
                 if e.file_type().is_dir() {
                     continue;
@@ -328,7 +310,7 @@ pub(crate) fn split(pkgdir: &Path, splitdir: &Path) -> Result<Vec<SubPackage>> {
 }
 
 fn count_non_dirs(root: &Path) -> usize {
-    crate::fswalk::entries_sorted_ok(root)
+    crate::adapters::fswalk::entries_sorted_ok(root)
         .iter()
         .filter(|e| !e.file_type().is_dir())
         .count()
@@ -539,7 +521,7 @@ fn strip_group(files: &[PathBuf], flag: &str) -> Option<(usize, u64)> {
 fn strip(pkgdir: &Path, rep: &mut Report) {
     let mut linked: Vec<PathBuf> = Vec::new();
     let mut debug_only: Vec<PathBuf> = Vec::new();
-    for e in crate::fswalk::entries_sorted_ok(pkgdir) {
+    for e in crate::adapters::fswalk::entries_sorted_ok(pkgdir) {
         if !e.file_type().is_file() {
             continue;
         }

@@ -249,13 +249,13 @@ mod tests {
     #[test]
     fn trusted_v2_index_authenticates_recipe_tree() {
         let e = env("trusted-v2");
-        let (secret, public) = crate::sign::keygen(&e.base.join("publisher-keys")).unwrap();
-        crate::sign::trust(&public, &e.root).unwrap();
+        let (secret, public) = crate::adapters::sign::keygen(&e.base.join("publisher-keys")).unwrap();
+        crate::adapters::sign::trust(&public, &e.root).unwrap();
 
         let first_tree = tree(&e.base, "v2-one", "v2-one");
         let index_path = e.repo.join("index.toml");
         repo::create_index_with_version(&e.repo, &index_path, Some((&first_tree, "aaa111")), 2).unwrap();
-        crate::sign::sign(&index_path, &secret).unwrap();
+        crate::adapters::sign::sign(&index_path, &secret).unwrap();
         run(&e).unwrap();
         assert_eq!(
             std::fs::read_to_string(e.dest.join("base/hello/recipe.toml")).unwrap(),
@@ -264,7 +264,7 @@ mod tests {
 
         let second_tree = tree(&e.base, "v2-two", "v2-two");
         repo::create_index_with_version(&e.repo, &index_path, Some((&second_tree, "bbb222")), 2).unwrap();
-        crate::sign::sign(&index_path, &secret).unwrap();
+        crate::adapters::sign::sign(&index_path, &secret).unwrap();
         let archive = e.repo.join("recipes-bbb222.recipes.tar.zst");
         let mut bytes = std::fs::read(&archive).unwrap();
         let last = bytes.len() - 1;

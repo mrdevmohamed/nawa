@@ -132,7 +132,7 @@ pub(crate) fn migrate_install_dates(root: &Path) -> Result<Vec<String>> {
         let mut e = entry.clone();
         e.install_date = fixed;
         let new = toml::to_string_pretty(&e)?;
-        crate::atomic::write_atomic(&desc, new.as_bytes(), 0o644)?;
+        crate::adapters::atomic::write_atomic(&desc, new.as_bytes(), 0o644)?;
         changed.push(format!(
             "{}: install date migrated from nanoseconds to seconds",
             e.name
@@ -269,8 +269,8 @@ impl Db {
         // `write_atomic` creates parent directories durably, so no
         // separate `create_dir_all` is needed here.
         let desc = toml::to_string_pretty(e)?;
-        crate::atomic::write_atomic(&dir.join("desc"), desc.as_bytes(), 0o644)?;
-        crate::atomic::write_atomic(
+        crate::adapters::atomic::write_atomic(&dir.join("desc"), desc.as_bytes(), 0o644)?;
+        crate::adapters::atomic::write_atomic(
             &dir.join("files"),
             (files.join("\n") + "\n").as_bytes(),
             0o644,
@@ -280,7 +280,7 @@ impl Db {
             .map(|(p, s)| format!("{s}  {p}"))
             .collect();
         h.sort();
-        crate::atomic::write_atomic(
+        crate::adapters::atomic::write_atomic(
             &dir.join("hashes"),
             (h.join("\n") + "\n").as_bytes(),
             0o644,

@@ -315,7 +315,7 @@ pub(crate) fn ensure_cargo_entry(r: &FetchRun, plan: &CargoPlan, key: &str) -> R
         "{}.tmp-{}-{}",
         key,
         std::process::id(),
-        crate::unique::next()
+        crate::adapters::unique::next()
     ));
     let _ = std::fs::remove_dir_all(&temp);
     std::fs::create_dir_all(&temp)
@@ -352,7 +352,7 @@ pub(crate) fn isolated_cargo_cwd() -> Result<PathBuf> {
     let cwd = std::env::temp_dir().join(format!(
         "nawa-cargo-cwd-{}-{}",
         std::process::id(),
-        crate::unique::next()
+        crate::adapters::unique::next()
     ));
     std::fs::create_dir(&cwd).with_context(|| format!("create isolated Cargo cwd {}", cwd.display()))?;
     std::fs::set_permissions(&cwd, std::fs::Permissions::from_mode(0o777))?;

@@ -1,56 +1,38 @@
 //! nawa — source-based package manager
 //! A source-based package manager for a from-scratch Linux distribution.
 
+// Layer roots and cohesive subsystems. Low-level I/O adapters live under
+// `adapters`; the build pipeline (including ecosystem source staging) under
+// `build`; every other subsystem keeps its own cohesive namespace.
+mod adapters;
 mod application;
-mod archive;
-mod artifact;
-mod assets;
-mod atomic;
 mod bootstrap;
 mod build;
-mod buildenv;
 mod cli;
-mod checksum;
-mod closure;
 mod commands;
 mod config;
-mod ctx;
-mod db;
 mod deps;
 mod domain;
-mod error;
 mod fetch;
-mod fetchrun;
-mod fswalk;
 mod glob;
 mod groups;
 mod install;
-mod interrupt;
 mod lint;
 mod lock;
 mod migration_record;
-mod pathutil;
 mod plan;
 mod plugins;
 mod presentation;
-mod profile;
 mod recipe;
 mod recovery;
 mod repo;
-mod repositories;
 mod revdep;
 mod sandbox;
-mod sign;
-mod slim;
-mod sources;
 mod suggest;
-mod sync;
-mod sys;
 #[cfg(test)]
 mod testutil;
 mod transaction;
 mod undo;
-mod unique;
 mod upgrade;
 mod version;
 
@@ -60,8 +42,8 @@ mod version;
 // explicitly.
 use clap::Parser;
 use commands::{run, should_run_post_transaction_hooks};
+use application::context::Ctx;
 use config::Overrides;
-use ctx::Ctx;
 
 // The cli items stay bound at the crate root (as before the cli module
 // split): `commands/fetching.rs` addresses `crate::default_jobs`, and the

@@ -25,7 +25,7 @@ pub(crate) fn exit_on_error(result: Result<()>) {
     if let Err(e) = result {
         // Ctrl+C: the current step was rolled back or finished, never left
         // half-done. Not an error to shout about; exit like a shell would.
-        if e.downcast_ref::<crate::interrupt::Interrupted>().is_some() {
+        if e.downcast_ref::<crate::adapters::interrupt::Interrupted>().is_some() {
             crate::nawa_note_stderr!("interrupted - system state is consistent");
             std::process::exit(130);
         }

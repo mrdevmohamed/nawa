@@ -5,7 +5,7 @@ use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
 use super::{grant_source_write, sandbox_inside_base, BuildOpts};
-use crate::buildenv::Isolation;
+use crate::build::buildenv::Isolation;
 use crate::fetch;
 use crate::recipe::{ExpandCtx, Recipe};
 
@@ -14,9 +14,9 @@ pub(super) struct StagedSource {
     /// The directory the build sections run in.
     pub(super) srcdir: PathBuf,
     /// The new-schema source workspace (`[[package.sources]]`), if any.
-    pub(super) sources: Option<crate::sources::SourcesStaged>,
+    pub(super) sources: Option<crate::build::sources::SourcesStaged>,
     /// The `[assets]` snapshot, if the recipe has any.
-    pub(super) assets: Option<crate::assets::AssetsStaged>,
+    pub(super) assets: Option<crate::build::assets::AssetsStaged>,
 }
 
 /// Download, verify and extract the recipe's sources (and snapshot its
@@ -43,20 +43,20 @@ pub(super) fn stage_source(
     };
 
     let source = &rec.package.source;
-    let mut staged: Option<crate::sources::SourcesStaged> = None;
-    let mut staged_assets: Option<crate::assets::AssetsStaged> = None;
+    let mut staged: Option<crate::build::sources::SourcesStaged> = None;
+    let mut staged_assets: Option<crate::build::assets::AssetsStaged> = None;
     let srcdir: PathBuf = if rec.is_new_schema() {
         // ---- new-schema staging (fetch-phase.md §4.2, §5, §6, §11) -------
         // §5.2: an unreadable/missing asset path fails BEFORE any download,
         // by the same sweep the snapshot will run (§16 Assets 3).
         if !rec.assets.include.is_empty() {
-            crate::assets::precheck(rec)?;
+            crate::build::assets::precheck(rec)?;
         }
         // All sources are downloaded, verified and extracted by the sources
         // engine; the workspace is `<work>/src` and `[package] workdir`
         // selects the section cwd through `staged.srcdir`.
         let cache_dir = crate::config::srccache_dir(&builddir, None);
-        let s = crate::sources::stage_sources(rec, &work, &src, &cache_dir, opts.jobs)?;
+        let s = crate::build::sources::stage_sources(rec, &work, &src, &cache_dir, opts.jobs)?;
         // normalise ownership/permissions for the sandbox's mapped identity
         grant_source_write(&s.srcroot);
         let sub_srcdir = s.srcdir.clone();
@@ -66,7 +66,7 @@ pub(super) fn stage_source(
         // (§3): the digest comes from the copy, and only the snapshot is
         // copied, never the checkout again
         if !rec.assets.include.is_empty() {
-            let a = crate::assets::snapshot(rec, &work)
+            let a = crate::build::assets::snapshot(rec, &work)
                 .with_context(|| format!("stage assets of recipe {}", name))?;
             staged_assets = Some(a);
         }

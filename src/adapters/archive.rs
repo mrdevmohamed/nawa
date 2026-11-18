@@ -123,7 +123,7 @@ fn create_with_normalisation(
     }
 
     // payload tree
-    for e in crate::fswalk::entries_sorted(pkgdir) {
+    for e in crate::adapters::fswalk::entries_sorted(pkgdir) {
         let e = e?;
         let rel = e.path().strip_prefix(pkgdir)?;
         if rel.as_os_str().is_empty() {
@@ -219,7 +219,7 @@ pub(crate) fn extract(archive: &Path, root: &Path) -> Result<Extracted> {
     for entry in ar.entries()? {
         // extraction only fills a private staging dir: abandoning it midway
         // when Ctrl+C arrives is always safe
-        crate::interrupt::check()?;
+        crate::adapters::interrupt::check()?;
         let mut entry = entry?;
         let p = entry.path()?.to_path_buf();
         let name = p.to_string_lossy().to_string();
@@ -326,10 +326,10 @@ pub(crate) fn parse_pkginfo(s: &str) -> Result<std::collections::HashMap<String,
     }
     match map.get("pkgname") {
         None => anyhow::bail!(".PKGINFO missing pkgname"),
-        Some(n) => crate::db::check_name(n)?,
+        Some(n) => crate::adapters::db::check_name(n)?,
     }
     if let Some(v) = map.get("pkgver") {
-        if !crate::db::valid_version(v) {
+        if !crate::adapters::db::valid_version(v) {
             anyhow::bail!(".PKGINFO has an invalid pkgver `{}`", v.escape_debug());
         }
     }

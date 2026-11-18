@@ -10,7 +10,7 @@
 //! well-known failure kinds get a one-line, actionable hint.
 
 use crate::presentation::color::Palette;
-use crate::error::Class;
+use crate::presentation::error::Class;
 use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;

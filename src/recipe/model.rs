@@ -34,9 +34,10 @@ pub(crate) struct Recipe {
     #[serde(default)]
     pub sandbox: Sandbox,
     /// Per-recipe opt-outs of the post-install slimming passes
-    /// (`[slim] strip = false`, ...). See `slim.rs`.
+    /// (`[slim] strip = false`, ...). The model lives here with the rest of
+    /// the recipe schema; the passes themselves are in the build pipeline.
     #[serde(default)]
-    pub slim: crate::slim::Slim,
+    pub slim: Slim,
     /// The raw recipe.toml bytes, kept for the deterministic build id
     /// (§7 of docs/design/build-isolation.md). Not part of the TOML.
     #[serde(skip)]
@@ -212,6 +213,32 @@ fn default_rel() -> u32 {
 /// The additive `[capabilities]` table (B3 chain §3). `provides` is a list of
 /// `domain=identity` capabilities; unknown keys are an error, like the index
 /// v4 entry rules, so a future extension cannot be silently misread.
+fn yes() -> bool {
+    true
+}
+
+/// The recipe's `[slim]` table: every pass is on unless the recipe says no.
+/// This is recipe schema, not build logic, so it lives with the other tables.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct Slim {
+    #[serde(default = "yes")]
+    pub strip: bool,
+    #[serde(default = "yes")]
+    pub cleanup: bool,
+    #[serde(default = "yes")]
+    pub split: bool,
+}
+
+impl Default for Slim {
+    fn default() -> Self {
+        Slim {
+            strip: true,
+            cleanup: true,
+            split: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Capabilities {

@@ -44,15 +44,15 @@ LEGACY_PRESENTATION_IMPORTS = {
     # undo prompts inside the compensation flow; moves behind the user
     # interaction port with the history use cases
     ("undo", "presentation"),
-    # fetch/fetchrun/install/plugins/repositories/slim/upgrade print progress
-    # notes and format sizes inline; those notes move out with the build,
-    # repository and plugin use-case extractions
+    # fetch/build (incl. ecosystem source staging and slimming)/install/
+    # plugins/upgrade print progress notes and format sizes inline; those
+    # notes move out with the remaining use-case extractions. `repositories`
+    # and `fetchrun` used to be top-level modules and are now under
+    # `commands` / `build`, so their entries were removed, not renamed.
     ("fetch", "presentation"),
-    ("fetchrun", "presentation"),
+    ("build", "presentation"),
     ("install", "presentation"),
     ("plugins", "presentation"),
-    ("repositories", "presentation"),
-    ("slim", "presentation"),
     ("upgrade", "presentation"),
 }
 

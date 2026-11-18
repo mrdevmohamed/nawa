@@ -32,7 +32,7 @@ mod tests {
     use super::*;
     #[cfg(test)]
     use std::path::{Path, PathBuf};
-    use crate::archive;
+    use crate::adapters::archive;
 
     #[test]
     fn index_keeps_only_the_newest_version_per_package() {

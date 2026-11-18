@@ -1,6 +1,6 @@
 //! Shared test helpers: one temp dir + db entry builder for all unit tests.
 
-use crate::db::Entry;
+use crate::adapters::db::Entry;
 use std::path::PathBuf;
 
 /// A fresh, empty temp directory unique per tag + process.

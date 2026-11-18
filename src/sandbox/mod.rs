@@ -31,7 +31,7 @@ pub(crate) mod mounts;
 mod probe;
 pub(crate) mod spec;
 
-use crate::sys;
+use crate::adapters::sys;
 
 pub(crate) use init::{first_untraversable_ancestor, init, parent_sync, spawn_init};
 pub(crate) use probe::{probe, PROBES};

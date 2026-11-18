@@ -5,8 +5,9 @@
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
-use crate::ctx::Ctx;
-use crate::{repo, sign};
+use crate::application::context::Ctx;
+use crate::adapters::sign;
+use crate::repo;
 
 /// `nawa repo-create`: index a directory of archives, optionally signed.
 #[allow(clippy::too_many_arguments)]

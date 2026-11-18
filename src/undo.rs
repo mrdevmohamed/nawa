@@ -63,7 +63,7 @@ pub(crate) fn plan_undo(root: &Path, id: u64) -> Result<UndoPlan> {
         bail!("transaction {id} has no committed package changes to compensate");
     }
 
-    let db = crate::db::Db::new(root);
+    let db = crate::adapters::db::Db::new(root);
     let prior_undos: Vec<_> = crate::transaction::history::list_records(root)?
         .into_iter()
         .filter(|candidate| candidate.undoes == Some(id))
@@ -116,7 +116,7 @@ fn load_undoable_record(root: &Path, id: u64) -> Result<TransactionRecord> {
 /// operation and when the archived original cannot be verified.
 fn plan_step(
     root: &Path,
-    db: &crate::db::Db,
+    db: &crate::adapters::db::Db,
     id: u64,
     change: &crate::transaction::history::PackageChange,
     prior_undos: &[TransactionRecord],
@@ -187,7 +187,7 @@ fn plan_step(
     // preflight every required archive object right here, before the
     // first mutation (roadmap §5.9 step 8)
     if let UndoAction::RestorePrevious { digest } | UndoAction::Reinstall { digest } = &action {
-        crate::artifact::verify_stored(root, digest).with_context(|| {
+        crate::adapters::artifact::verify_stored(root, digest).with_context(|| {
             format!(
                 "cannot undo transaction {id}: the archived original of `{}` \
                  is missing or fails verification",
@@ -207,7 +207,7 @@ fn plan_step(
 /// Preserve dependency-first order for upgrades. Undoing removals
 /// reinstalls dependencies first (reverse original removal order).
 /// Undoing new installs removes dependents first using the shared planner.
-fn order_steps(db: &crate::db::Db, steps: Vec<UndoStep>) -> Result<Vec<UndoStep>> {
+fn order_steps(db: &crate::adapters::db::Db, steps: Vec<UndoStep>) -> Result<Vec<UndoStep>> {
     let mut restore_previous = Vec::new();
     let mut reinstall = Vec::new();
     let mut remove = Vec::new();
@@ -251,7 +251,7 @@ pub(crate) fn apply_undo(
     root: &Path, plan: &UndoPlan,
     recorder: &mut crate::transaction::context::RecorderHandle<'_>, force: bool,
 ) -> Result<Vec<AppliedStep>> {
-    let db = crate::db::Db::new(root);
+    let db = crate::adapters::db::Db::new(root);
     let mut applied = Vec::new();
     for step in &plan.steps {
         let before_entry = db.entry(&step.package)?;
@@ -290,11 +290,11 @@ pub(crate) fn apply_undo(
                 }
             }
             UndoAction::RestorePrevious { digest } | UndoAction::Reinstall { digest } => {
-                if let Err(error) = crate::artifact::verify_stored(root, digest)
+                if let Err(error) = crate::adapters::artifact::verify_stored(root, digest)
                     .map_err(|error| anyhow::anyhow!("object verification failed: {error:#}"))
                     .and_then(|object| {
-                        let reason = crate::db::InstallReason::parse(&step.reason)
-                            .unwrap_or(crate::db::InstallReason::Explicit);
+                        let reason = crate::adapters::db::InstallReason::parse(&step.reason)
+                            .unwrap_or(crate::adapters::db::InstallReason::Explicit);
                         restore_object(root, &object, digest, reason, file_journal)
                     })
                 {
@@ -334,10 +334,10 @@ fn restore_object(
     root: &Path,
     object: &Path,
     digest: &str,
-    reason: crate::db::InstallReason,
+    reason: crate::adapters::db::InstallReason,
     file_journal: Option<crate::install::FileJournalId>,
 ) -> Result<()> {
-    let prov = crate::artifact::load_provenance(root, digest)?;
+    let prov = crate::adapters::artifact::load_provenance(root, digest)?;
     match prov.as_ref().map(|p| p.authentication.as_str()) {
         Some("signed-index") => {
             crate::install::verify_retained_index_proof(root, digest)?;
@@ -418,7 +418,7 @@ pub(crate) fn history_undo(root: &Path, id: u64, yes: bool) -> Result<()> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use crate::db::Db;
+    use crate::adapters::db::Db;
     use crate::testutil::{entry, tmpdir};
     use crate::transaction::context::{begin_operation, OperationCommand};
     use crate::transaction::history::{PackageChange, PackageState, StepStatus, SCHEMA_VERSION};
@@ -431,7 +431,7 @@ mod tests {
             "pkgname = {name}\npkgver = {version}\npkgrel = 1\narch = any\nrundeps = \nsize = 1\n"
         );
         let out = dir.join(format!("{name}-{version}-1.nawa.tar.zst"));
-        crate::archive::create(&staging, &pkginfo, &out).unwrap();
+        crate::adapters::archive::create(&staging, &pkginfo, &out).unwrap();
         out
     }
 
@@ -475,7 +475,7 @@ mod tests {
 
         // The recorded transaction installed the package explicitly.
         let after = entry("demo", "1.0", &digest);
-        crate::db::Db::new(&root)
+        crate::adapters::db::Db::new(&root)
             .add(&after, &[], &Default::default())
             .unwrap();
 
@@ -551,7 +551,7 @@ mod tests {
         crate::transaction::history::write_record(&root, &original).unwrap();
 
         // Simulate a first undo that removed curl and then failed before zlib.
-        crate::db::Db::new(&root).remove("curl").unwrap();
+        crate::adapters::db::Db::new(&root).remove("curl").unwrap();
         crate::transaction::history::write_record(&root,
             &crate::transaction::history::TransactionRecord {
                 schema: SCHEMA_VERSION, id: 2, command: "history-undo".into(), status: "partial".into(),
@@ -578,7 +578,7 @@ mod tests {
         let base = tmpdir("rm");
         let root = base.join("root");
         let v1 = make_pkg(&base, "demo", "1.0", b"one");
-        crate::install::install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+        crate::install::install_archive(&v1, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
         let digest = crate::fetch::sha256_of_file(&v1).unwrap();
         let db = Db::new(&root);
         let installed = db.entry("demo").unwrap().unwrap();
@@ -619,7 +619,7 @@ mod tests {
         let base = tmpdir("removed-dependency-reason");
         let root = base.join("root");
         let archive = make_pkg(&base, "demo", "1.0", b"dependency package");
-        crate::install::install_archive(&archive, &root, false, true, None, crate::db::InstallReason::Dependency).unwrap();
+        crate::install::install_archive(&archive, &root, false, true, None, crate::adapters::db::InstallReason::Dependency).unwrap();
         let before = Db::new(&root).entry("demo").unwrap().unwrap();
         assert_eq!(before.reason, "dependency");
         crate::install::remove_with("demo", &root, false).unwrap();
@@ -657,9 +657,9 @@ mod tests {
         let root = base.join("root");
         let v1 = make_pkg(&base, "demo", "1.0", b"one");
         let v2 = make_pkg(&base, "demo", "2.0", b"two");
-        crate::install::install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+        crate::install::install_archive(&v1, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
         let before = Db::new(&root).entry("demo").unwrap().unwrap();
-        crate::install::install_archive(&v2, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+        crate::install::install_archive(&v2, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
         let after = Db::new(&root).entry("demo").unwrap().unwrap();
 
         let mut op = begin_operation(&root, OperationCommand::Upgrade, &[], &[]).unwrap();
@@ -692,9 +692,9 @@ mod tests {
         let v1 = make_pkg(&base, "demo", "1.0", b"one");
         let v2 = make_pkg(&base, "demo", "2.0", b"two");
         let v3 = make_pkg(&base, "demo", "3.0", b"three");
-        crate::install::install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+        crate::install::install_archive(&v1, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
         let b1 = Db::new(&root).entry("demo").unwrap().unwrap();
-        crate::install::install_archive(&v2, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+        crate::install::install_archive(&v2, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
         let b2 = Db::new(&root).entry("demo").unwrap().unwrap();
 
         // transaction 1: upgrade 1.0 -> 2.0
@@ -709,7 +709,7 @@ mod tests {
         let tx1 = crate::transaction::history::list_records(&root).unwrap().last().unwrap().id;
 
         // a LATER transaction upgrades 2.0 -> 3.0
-        crate::install::install_archive(&v3, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+        crate::install::install_archive(&v3, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
         let b3 = Db::new(&root).entry("demo").unwrap().unwrap();
         let mut op = begin_operation(&root, OperationCommand::Upgrade, &[], &[]).unwrap();
         {
@@ -732,12 +732,12 @@ mod tests {
         let root = base.join("root");
         let v1 = make_pkg(&base, "demo", "1.0", b"one");
         let v2 = make_pkg(&base, "demo", "2.0", b"two");
-        crate::install::install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+        crate::install::install_archive(&v1, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
         let b1 = Db::new(&root).entry("demo").unwrap().unwrap();
-        crate::install::install_archive(&v2, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+        crate::install::install_archive(&v2, &root, false, true, None, crate::adapters::db::InstallReason::Explicit).unwrap();
         let b2 = Db::new(&root).entry("demo").unwrap().unwrap();
         // destroy the old object so restoration is impossible
-        let obj = crate::artifact::object_path(&root, &b1.artifact_sha256).unwrap();
+        let obj = crate::adapters::artifact::object_path(&root, &b1.artifact_sha256).unwrap();
         std::fs::remove_file(&obj).unwrap();
 
         let mut op = begin_operation(&root, OperationCommand::Upgrade, &[], &[]).unwrap();

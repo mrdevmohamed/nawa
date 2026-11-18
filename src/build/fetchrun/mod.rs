@@ -66,7 +66,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 
-use crate::buildenv::BuildOpts;
+use crate::build::buildenv::BuildOpts;
 use crate::recipe::Recipe;
 
 use self::cargo::isolated_cargo_paths;
@@ -119,7 +119,7 @@ pub(crate) struct FetchRun<'a> {
     pub whitelist_home: &'a str,
     /// The assembled closure root at `closure` isolation — the fetch
     /// sandbox mounts the same tree (the toolchain lives in it).
-    pub assembled: Option<&'a crate::closure::AssembledRoot>,
+    pub assembled: Option<&'a crate::build::closure::AssembledRoot>,
 }
 
 
@@ -146,9 +146,9 @@ pub(crate) fn run(r: &FetchRun<'_>) -> Result<Vec<(String, String)>> {
 /// PATH used by the fetch runner.
 pub(crate) fn build_toolchain_identity(
     rec: &Recipe,
-    isolation: crate::buildenv::Isolation,
+    isolation: crate::build::buildenv::Isolation,
 ) -> Result<Vec<(&'static str, String)>> {
-    if isolation == crate::buildenv::Isolation::Closure {
+    if isolation == crate::build::buildenv::Isolation::Closure {
         return Ok(Vec::new());
     }
     let mut identity = Vec::new();
@@ -165,7 +165,7 @@ pub(crate) fn build_toolchain_identity(
             let probe_root = std::env::temp_dir().join(format!(
                 "nawa-toolchain-id-{}-{}",
                 std::process::id(),
-                crate::unique::next()
+                crate::adapters::unique::next()
             ));
             std::fs::create_dir(&probe_root)
                 .with_context(|| format!("create toolchain identity scratch {}", probe_root.display()))?;
@@ -193,7 +193,7 @@ pub(crate) fn build_toolchain_identity(
             let cwd = std::env::temp_dir().join(format!(
                 "nawa-go-version-{}-{}",
                 std::process::id(),
-                crate::unique::next()
+                crate::adapters::unique::next()
             ));
             std::fs::create_dir(&cwd)
                 .with_context(|| format!("create Go version probe cwd {}", cwd.display()))?;
@@ -298,7 +298,7 @@ mod resolver_path_tests {
         let root = std::env::temp_dir().join(format!(
             "nawa-resolver-path-{}-{}",
             std::process::id(),
-            crate::unique::next()
+            crate::adapters::unique::next()
         ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("etc")).unwrap();

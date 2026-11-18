@@ -19,7 +19,7 @@
 //! fail the build). The checks that need the downloaded source are §14C
 //! and are not repeated here.
 use crate::cli::RecipeCmd;
-use crate::ctx::Ctx;
+use crate::application::context::Ctx;
 use crate::presentation::humanize;
 use crate::recipe;
 

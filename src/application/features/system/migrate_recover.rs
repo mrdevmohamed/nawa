@@ -116,15 +116,15 @@ pub(crate) enum ResumeOutcome {
 ///
 /// A record that cannot be read fails the whole pass closed: recovery must
 /// never guess past a corrupt state and silently clear a gate (§10.3).
-pub(crate) fn recover(ctx: &crate::ctx::Ctx, ui: &UserInteraction) -> Result<RecoveryReport> {
+pub(crate) fn recover(ctx: &crate::application::context::Ctx, ui: &UserInteraction) -> Result<RecoveryReport> {
     let _guard = lock::acquire_for_migration(&ctx.root, lock::migration_authority())?
         .ok_or_else(|| anyhow!("internal: the exclusive package database lock is required to recover a migration"))?;
-    let _interrupt = crate::interrupt::Guard::new();
+    let _interrupt = crate::adapters::interrupt::Guard::new();
 
     let ids = store::record_ids(&ctx.root)?;
     let mut report = RecoveryReport::default();
     for id in ids {
-        if crate::interrupt::check().is_err() {
+        if crate::adapters::interrupt::check().is_err() {
             bail!("interrupted while recovering migration records — the durable state is unchanged");
         }
         let Some(record) = store::load(&ctx.root, &id)? else {
@@ -165,7 +165,7 @@ pub(crate) fn recover(ctx: &crate::ctx::Ctx, ui: &UserInteraction) -> Result<Rec
 /// transaction: preparation began only if it recorded a committed package
 /// change. If there is none, discarding is safe; re-read to prove removal.
 fn recover_planned(
-    ctx: &crate::ctx::Ctx,
+    ctx: &crate::application::context::Ctx,
     record: &MigrationRecord,
     ui: &UserInteraction,
 ) -> Result<RecoveryAction> {
@@ -211,7 +211,7 @@ fn recover_planned(
 }
 
 fn discard_planned(
-    ctx: &crate::ctx::Ctx,
+    ctx: &crate::application::context::Ctx,
     record: &MigrationRecord,
     ui: &UserInteraction,
 ) -> Result<RecoveryAction> {
@@ -235,7 +235,7 @@ fn discard_planned(
 /// ones, and (re)publish the conclusion. A `Verifying` or `RollbackRequired`
 /// record with no verified rollback is ambiguous and keeps the gate.
 fn recover_gate_active(
-    ctx: &crate::ctx::Ctx,
+    ctx: &crate::application::context::Ctx,
     record: &MigrationRecord,
     ui: &UserInteraction,
 ) -> Result<RecoveryAction> {
@@ -351,7 +351,7 @@ fn recover_gate_active(
                 // no package journal for this step: the only safe conclusion
                 // is that no observable side effect happened. A package that
                 // *is* present cannot be attributed to this step.
-                let db = crate::db::Db::new(&ctx.root);
+                let db = crate::adapters::db::Db::new(&ctx.root);
                 let present = db.installed().is_ok_and(|entries| {
                     entries
                         .iter()
@@ -421,7 +421,7 @@ fn recover_gate_active(
 /// migration record (the authoritative outcome) untouched. A discrepancy is
 /// reported honestly, never silently "fixed" by changing the migration.
 fn finalize_history(
-    ctx: &crate::ctx::Ctx,
+    ctx: &crate::application::context::Ctx,
     record: &MigrationRecord,
     ui: &UserInteraction,
 ) -> Result<RecoveryAction> {
@@ -463,7 +463,7 @@ fn finalize_history(
 /// preflight happens once, before any record is touched. Read-only inspection
 /// commands never call this.
 pub(crate) fn recover_and_resume(
-    ctx: &crate::ctx::Ctx,
+    ctx: &crate::application::context::Ctx,
     ui: &UserInteraction,
 ) -> Result<(RecoveryReport, Option<ResumeOutcome>)> {
     require_live_host(ctx, Path::new("/proc"))?;
@@ -475,7 +475,7 @@ pub(crate) fn recover_and_resume(
     }
 }
 
-fn require_live_host(ctx: &crate::ctx::Ctx, proc: &Path) -> Result<()> {
+fn require_live_host(ctx: &crate::application::context::Ctx, proc: &Path) -> Result<()> {
     let observed = detect::observe(&ctx.root, proc);
     match observed.context {
         ExecContext::LiveHost { .. } => Ok(()),
@@ -511,7 +511,7 @@ fn has_reboot_pending(root: &Path) -> Result<bool> {
 /// and published durably here because this is an imperative use case over
 /// the durable store.
 pub(crate) fn resume(
-    ctx: &crate::ctx::Ctx,
+    ctx: &crate::application::context::Ctx,
     ui: &UserInteraction,
 ) -> Result<ResumeOutcome> {
     // `observe` enforces the canonical-root rule: an explicit non-canonical
@@ -526,7 +526,7 @@ pub(crate) fn resume(
 /// every actual verification rule is the production one.
 #[cfg(test)]
 pub(crate) fn resume_with(
-    ctx: &crate::ctx::Ctx,
+    ctx: &crate::application::context::Ctx,
     proc: &Path,
     ui: &UserInteraction,
 ) -> Result<ResumeOutcome> {
@@ -534,7 +534,7 @@ pub(crate) fn resume_with(
 }
 
 fn resume_inner(
-    ctx: &crate::ctx::Ctx,
+    ctx: &crate::application::context::Ctx,
     proc: &Path,
     ui: &UserInteraction,
     require_root: bool,
@@ -559,7 +559,7 @@ fn resume_inner(
             "system migrate resume is refused: the execution context cannot be verified ({reason})"
         ),
     }
-    if require_root && crate::sys::geteuid() != 0 {
+    if require_root && crate::adapters::sys::geteuid() != 0 {
         bail!("system migrate resume requires root privileges to verify the boot/init state");
     }
 
@@ -772,7 +772,7 @@ fn change_status_matches_db(
     root: &Path,
     change: &history::PackageChange,
 ) -> bool {
-    let current = match crate::db::Db::new(root).entry(&change.name) {
+    let current = match crate::adapters::db::Db::new(root).entry(&change.name) {
         Ok(entry) => entry,
         Err(_) => return false, // unreadable database fails closed
     };
@@ -787,7 +787,7 @@ fn before_state_matches_db(
     root: &Path,
     change: &history::PackageChange,
 ) -> bool {
-    let current = match crate::db::Db::new(root).entry(&change.name) {
+    let current = match crate::adapters::db::Db::new(root).entry(&change.name) {
         Ok(entry) => entry,
         Err(_) => return false,
     };
@@ -845,8 +845,8 @@ mod tests {
         .unwrap()
     }
 
-    fn ctx_with(root: &Path) -> crate::ctx::Ctx {
-        crate::ctx::Ctx::from_config(&crate::config::Config {
+    fn ctx_with(root: &Path) -> crate::application::context::Ctx {
+        crate::application::context::Ctx::from_config(&crate::config::Config {
             root: root.to_path_buf(),
             recipes: root.join("recipes"),
             builddir: root.join("build"),
@@ -892,9 +892,9 @@ mod tests {
     }
 
     fn entry(root: &Path, name: &str, version: &str, digest: &str) {
-        crate::db::Db::new(root)
+        crate::adapters::db::Db::new(root)
             .add(
-                &crate::db::Entry {
+                &crate::adapters::db::Entry {
                     name: name.to_string(),
                     version: version.to_string(),
                     rel: 1,
@@ -1056,7 +1056,7 @@ mod tests {
         assert_eq!(record.steps[0].outcome, Some(StepOutcome::Succeeded));
         assert_eq!(record.state, MigrationState::AwaitingReboot);
         // the package is still there — recovery never removed/reinstalled it
-        assert!(crate::db::Db::new(&root).entry("sysd").unwrap().is_some());
+        assert!(crate::adapters::db::Db::new(&root).entry("sysd").unwrap().is_some());
     }
 
     #[test]

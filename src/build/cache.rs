@@ -4,10 +4,10 @@ use anyhow::Result;
 use std::path::{Path, PathBuf};
 
 use super::{BuildOpts, BuildResult};
-use crate::buildenv::{self, Isolation};
+use crate::build::buildenv::{self, Isolation};
 use crate::recipe::Recipe;
-use crate::archive;
-use crate::slim;
+use crate::adapters::archive;
+use crate::build::slim;
 
 /// Version tag of the `--use-cache` sidecar id. The tag is also part of the
 /// hash domain, so bumping it deliberately invalidates every existing sidecar
@@ -55,10 +55,10 @@ pub(crate) fn build_id_for(
         .map(|d| vec![("assets", d)])
         .unwrap_or_default();
     if rec.fetch.go.is_some() {
-        extras.push(("fetch-go", crate::fetchrun::FETCH_GO_SCHEMA_VERSION));
+        extras.push(("fetch-go", crate::build::fetchrun::FETCH_GO_SCHEMA_VERSION));
     }
     if rec.fetch.cargo.is_some() {
-        extras.push(("fetch-cargo", crate::fetchrun::FETCH_CARGO_SCHEMA_VERSION));
+        extras.push(("fetch-cargo", crate::build::fetchrun::FETCH_CARGO_SCHEMA_VERSION));
     }
     if let Some((_, version)) = toolchain_identity.iter().find(|(name, _)| *name == "go") {
         extras.push(("toolchain-go", version.as_str()));
@@ -209,7 +209,7 @@ pub(crate) fn try_cache_hit(
     let asset_digest: Option<String> = if rec.assets.include.is_empty() {
         None
     } else {
-        crate::assets::probe_digest(rec).ok()
+        crate::build::assets::probe_digest(rec).ok()
     };
     let bid = build_id_for(rec, opts, closure_archives, asset_digest.as_deref(), toolchain_identity);
     let cache_id = cache_id_for(&bid, opts.isolation, host_toolchain);
