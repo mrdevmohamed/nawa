@@ -64,7 +64,7 @@ struct Manifest {
 #[serde(deny_unknown_fields)]
 struct Entry {
     path: String,
-    /// absent | file | symlink
+    /// absent | file | symlink | directory
     kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     mode: Option<u32>,
@@ -1017,6 +1017,11 @@ mod tests {
             b"#!/bin/sh\nexec getty 38400 tty1\n",
         )
         .unwrap();
+        symlink(
+            "../agetty-tty1",
+            root.join("etc/runit/runsvdir/default/networking/agetty-link"),
+        )
+        .unwrap();
         fs::write(root.join("boot/grub/grub.cfg"), b"old grub config\n").unwrap();
         fs::write(root.join("boot/vmlinuz-6.10.5"), b"old kernel bytes").unwrap();
         fs::write(
@@ -1071,6 +1076,10 @@ mod tests {
         fs::remove_file(&service_run).unwrap();
         fs::write(&agetty_run, b"changed service definition\n").unwrap();
         fs::remove_dir(root.join("etc/runit/runsvdir/default/empty-service")).unwrap();
+        fs::remove_file(
+            root.join("etc/runit/runsvdir/default/networking/agetty-link"),
+        )
+        .unwrap();
 
         restore(&root, "faseela-runit-to-systemd-v1").unwrap();
         assert_eq!(
@@ -1087,7 +1096,11 @@ mod tests {
             fs::metadata(empty_service).unwrap().permissions().mode() & 0o777,
             0o750
         );
-        assert!(info.entries >= FIXED_PATHS.len() + 7);
+        assert_eq!(
+            fs::read_link(root.join("etc/runit/runsvdir/default/networking/agetty-link")).unwrap(),
+            PathBuf::from("../agetty-tty1")
+        );
+        assert!(info.entries >= FIXED_PATHS.len() + 8);
     }
 
     #[test]
