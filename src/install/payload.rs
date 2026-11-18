@@ -638,3 +638,55 @@ pub(crate) fn contents_differ(staged: &Path, dest: &Path) -> bool {
     }
 }
 
+
+
+#[cfg(test)]
+mod legacy_init_conflict_tests {
+    use super::check_file_conflicts;
+    use std::collections::HashMap;
+    use std::os::unix::fs::symlink;
+    use std::path::PathBuf;
+
+    #[test]
+    fn systemd_payload_cannot_silently_take_legacy_runit_init() {
+        let root = crate::testutil::tmpdir("legacy-runit-init-root");
+        let staged = crate::testutil::tmpdir("legacy-runit-init-stage");
+        let root_init = root.join("usr/bin/init");
+        let staged_init = staged.join("usr/bin/init");
+
+        std::fs::create_dir_all(root_init.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(staged_init.parent().unwrap()).unwrap();
+
+        // Historical runit-services payload: /usr/bin/init -> /usr/bin/runit.
+        symlink("/usr/bin/runit", &root_init).unwrap();
+        // Current systemd payload wants a different owner and target.
+        symlink("../lib/systemd/systemd", &staged_init).unwrap();
+
+        let owners = HashMap::from([(
+            "/usr/bin/init".to_string(),
+            "runit-services".to_string(),
+        )]);
+        let staged_files = vec!["/usr/bin/init".to_string()];
+
+        let error = check_file_conflicts(
+            &staged,
+            &root,
+            "systemd",
+            &staged_files,
+            &owners,
+        )
+        .expect_err("a legacy package owner must block an unapproved init handoff");
+
+        assert!(error.to_string().contains("/usr/bin/init"));
+        assert!(error.to_string().contains("runit-services"));
+        assert_eq!(
+            std::fs::read_link(&root_init).unwrap(),
+            PathBuf::from("/usr/bin/runit"),
+            "the old init entry point must remain unchanged after rejection",
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+        // check_file_conflicts removes the staging tree on conflict.
+        assert!(!staged.exists());
+    }
+}
