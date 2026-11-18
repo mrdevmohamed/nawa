@@ -103,12 +103,12 @@ impl SystemProfile {
     ) -> Result<SystemProfile, String> {
         for key in scalars.keys() {
             if !matches!(key.as_str(), "schema" | "distribution" | "profile" | "architecture") {
-                return Err(format!("unknown profile key {key:?}"));
+                return Err(format!("unknown profile key `{key}`"));
             }
         }
         let schema_raw = scalars
             .get("schema")
-            .ok_or("profile has no schema key: the schema version must be declared")?;
+            .ok_or("profile has no `schema` key: the schema version must be declared")?;
         let schema: u32 = schema_raw.trim().parse()
             .map_err(|_| format!("profile schema is not a number: {schema_raw:?}"))?;
         if schema != LEGACY_SCHEMA && schema != SCHEMA {

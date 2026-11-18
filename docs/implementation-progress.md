@@ -233,6 +233,13 @@ used Rust's reserved word `override`, and the advisory mismatch arm returned
 `Option<Preview>` from a match that must return the observation tuple. Both
 are fixed in the follow-up commit, together with the corresponding preview
 assertion. The original run is a failed compile and does not verify this slice.
+The retry on `09816cc` passed Build, Clippy, all isolation modes and static
+musl, but six legacy unit assertions failed after schema 2 changed error text
+and made schema 2 valid. The implementation now preserves the historical
+backtick-style diagnostics, the legacy invalid-override test uses unsupported
+schema 3, and the apply refusal still says a required target must come from a
+system profile. No policy behavior was relaxed.
+
 The full CI retry on `bed79b1` compiled the library and binaries, but
 Clippy rejected two new patterns under `-D warnings`: `filter_map_bool_then`
 and `question_mark`. The follow-up replaces the boolean `filter_map` with

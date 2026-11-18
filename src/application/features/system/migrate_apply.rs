@@ -153,7 +153,7 @@ fn preflight_inner(root: &Path, proc: &Path, require_root: bool) -> Result<detec
             definition.to.to_key()
         ),
         detect::DesiredInit::NotDeclared => bail!(
-            "no required init-system target is declared — preferred/forbidden policy alone cannot authorize migration apply (§7)"
+            "no system profile declares a required init-system target — preferred/forbidden policy alone cannot authorize migration apply (§7)"
         ),
         detect::DesiredInit::Invalid { reason } => bail!(
             "the system profile is invalid ({reason}) — refusing to apply against a broken desired state"

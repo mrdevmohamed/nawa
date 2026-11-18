@@ -226,7 +226,7 @@ fn parse_doc(
             continue;
         }
 
-        let scalar = scalar_str(value, &format!("profile key {key:?}"))?;
+        let scalar = scalar_str(value, &format!("profile key `{key}`"))?;
         scalars.insert(key.clone(), scalar);
     }
     Ok((scalars, providers, policies))
@@ -521,10 +521,10 @@ init-system = \"systemd\"
         // favor of the valid defaults
         let f = Fixture::new("bad-override");
         write(&f.defaults, DESKTOP);
-        write(&f.overrides, "schema = 2\n");
+        write(&f.overrides, "schema = 3\n");
         let e = load_effective_at(&f.defaults, &f.overrides).unwrap_err();
         let msg = format!("{e:#}");
-        assert!(msg.contains("unknown profile schema 2"), "{msg}");
+        assert!(msg.contains("unknown profile schema 3"), "{msg}");
         assert!(msg.contains("overrides.toml"), "{msg}");
     }
 
