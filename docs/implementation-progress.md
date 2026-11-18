@@ -150,26 +150,30 @@ supported legacy installations.
 
 * Init identity detection now matches exact executable basenames only:
   `systemd`, `runit`, and `runit-init`. Provider words in parent paths
-  or lookalike executable names are retained as another/unknown identity,
-  never promoted to a supported init. Regression coverage lives in
-  `domain/system/identity.rs`.
-* Installed-init observation now resolves each candidate's parent path and
-  verifies that it remains below the canonical selected target root before
-  inspecting the final entry. This prevents an Offline root such as
+  or lookalike executable names remain another/unknown identity, never a
+  supported init. Regression coverage is in `domain/system/identity.rs`
+  (commit `6933f9baa1a12c66ece6e185ec7a9530ae0b1be8`).
+* Installed-init observation resolves each candidate's parent and verifies
+  that it remains below the canonical selected target root before inspecting
+  the final entry. This prevents an Offline root such as
   `<root>/usr -> /host/usr` from leaking host-side provider evidence.
   In-root merged-`usr` ancestor links remain accepted; the final entry is
   still checked with `symlink_metadata`, preserving broken-link evidence.
-  Escape and in-root-link regressions live in
-  `application/features/system/detect.rs`.
-* Commits: `6933f9baa1a12c66ece6e185ec7a9530ae0b1be8` and
-  `b482a2bd284a0cd4b0b23ac788ff940e9eef7a19`.
+  Escape and in-root-link regressions are in
+  `application/features/system/detect.rs`
+  (commit `b482a2bd284a0cd4b0b23ac788ff940e9eef7a19`).
+* `nawa system plan` now advertises a transition or built-in migration
+  candidate only when PID 1 has `Proven` evidence from both readable
+  sources. An `Indicated` identity is explicitly unresolved, matching the
+  stricter authenticated transition preview. Both indicated/proven rendering
+  cases are covered in `commands/system.rs`
+  (commit `6ac21c75ff96ec8eec26f25165a629f756c8e431`).
 * Verification boundary: the last completed green CI before these changes is
   run [#44387912047](https://github.com/mrdevmohamed/nawa/actions/runs/44387912047)
-  on `fcddf56e6f2b876e8f691cb3c27dddb668eef91d`. Run [#44391778761](https://github.com/mrdevmohamed/nawa/actions/runs/44391778761)
-  was created for `6933f9baa1a12c66ece6e185ec7a9530ae0b1be8` and was still
-  in progress when the second change landed; it does not verify the current
-  branch head. Treat both new hardening changes as **awaiting CI** until a
-  workflow run for the current head succeeds.
+  on `fcddf56e6f2b876e8f691cb3c27dddb668eef91d`. Run [#44392392276](https://github.com/mrdevmohamed/nawa/actions/runs/44392392276)
+  was in progress on `30646d6923b26868ae4d83a0b6d570a3dbbd1d45`, before the
+  `system plan` confidence fix landed. Do not mark these changes verified
+  until a workflow run for the current branch head succeeds.
 
 ## Completed phases
 
