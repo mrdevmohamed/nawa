@@ -353,7 +353,7 @@ mod tests {
         .unwrap()
     }
 
-    fn entry(    fn entry(name: &str, ver: &str, reason: &str, run: &[&str]) -> Entry {
+    fn entry(name: &str, ver: &str, reason: &str, run: &[&str]) -> Entry {
         Entry {
             name: name.into(),
             version: ver.into(),
