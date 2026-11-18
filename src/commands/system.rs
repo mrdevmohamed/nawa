@@ -209,7 +209,9 @@ fn render_system_plan(observed: &detect::ObservedSystem) -> Vec<String> {
         detect::Context::Unknown { reason } => lines.push(format!("  Context: unknown ({reason})")),
     }
     let runtime = match &observed.runtime {
-        detect::RuntimeInit::Observed { kind, .. } => Some(kind.capability_identity()),
+        detect::RuntimeInit::Observed {
+            kind, confidence, ..
+        } => Some((kind.capability_identity(), *confidence)),
         detect::RuntimeInit::Unknown { .. } => None,
     };
     let desired = match &observed.desired {
@@ -217,13 +219,22 @@ fn render_system_plan(observed: &detect::ObservedSystem) -> Vec<String> {
         detect::DesiredInit::NotDeclared => { lines.push("  Desired init: not declared".to_string()); None }
         detect::DesiredInit::Invalid { reason } => { lines.push(format!("  Desired init: invalid ({reason})")); None }
     };
-    match (runtime.as_deref(), desired) {
-        (Some(running), Some(target)) if running == target => lines.push(format!("  Decision: runtime already matches init-system={target}.")),
-        (Some(running), Some(target)) => {
+    match (runtime, desired) {
+        (Some((running, detect::Confidence::Proven)), Some(target)) if running == target => {
+            lines.push(format!("  Decision: runtime already matches init-system={target}."));
+        }
+        (Some((running, detect::Confidence::Proven)), Some(target)) => {
             lines.push(format!("  Decision: transition required from init-system={running} to init-system={target}."));
             if running == "runit" && target == "systemd" {
                 lines.push("  Built-in candidate: faseela-runit-to-systemd-v1 (not executable yet; inspect with nawa system migrate plan).".to_string());
-            } else { lines.push("  No built-in migration handler supports this transition; no action is proposed.".to_string()); }
+            } else {
+                lines.push("  No built-in migration handler supports this transition; no action is proposed.".to_string());
+            }
+        }
+        (Some((running, detect::Confidence::Indicated)), Some(_)) => {
+            lines.push(format!(
+                "  Decision: unresolved — PID 1 identity is only indicated by one evidence source ({running}); proven runtime identity is required."
+            ));
         }
         (None, Some(_)) => lines.push("  Decision: unresolved — runtime PID 1 is unknown; the target profile is not proof of the running init.".to_string()),
         (_, None) => lines.push("  Decision: unresolved — a valid target init provider is not declared; no provider will be guessed.".to_string()),
@@ -646,6 +657,74 @@ mod tests {
 
     fn joined(lines: &[String]) -> String {
         lines.join("\n")
+    }
+
+    #[test]
+    fn system_plan_does_not_claim_a_transition_from_indicated_pid1_evidence() {
+        let observed = detect::ObservedSystem {
+            root: Path::new("/").to_path_buf(),
+            context: detect::Context::LiveHost { evidence: Vec::new() },
+            runtime: detect::RuntimeInit::Observed {
+                kind: crate::domain::system::identity::InitKind::Runit,
+                confidence: detect::Confidence::Indicated,
+                evidence: vec![detect::Evidence {
+                    source: "/proc/1/exe".to_string(),
+                    value: "/usr/bin/runit".to_string(),
+                }],
+            },
+            installed: detect::InstalledInit::default(),
+            desired: detect::DesiredInit::Declared {
+                identity: "systemd".to_string(),
+                source: "/usr/share/nawa/system-profile.toml".to_string(),
+            },
+            effective_profile: None,
+        };
+
+        let text = joined(&render_system_plan(&observed));
+        assert!(
+            text.contains("unresolved — PID 1 identity is only indicated"),
+            "the plan must expose the evidence limitation: {text}"
+        );
+        assert!(
+            !text.contains("transition required"),
+            "an indicated identity cannot authorize a transition decision: {text}"
+        );
+        assert!(
+            !text.contains("Built-in candidate"),
+            "a migration candidate must not be advertised without proven PID 1: {text}"
+        );
+    }
+
+    #[test]
+    fn system_plan_shows_a_candidate_only_for_proven_pid1_evidence() {
+        let observed = detect::ObservedSystem {
+            root: Path::new("/").to_path_buf(),
+            context: detect::Context::LiveHost { evidence: Vec::new() },
+            runtime: detect::RuntimeInit::Observed {
+                kind: crate::domain::system::identity::InitKind::Runit,
+                confidence: detect::Confidence::Proven,
+                evidence: vec![
+                    detect::Evidence {
+                        source: "/proc/1/exe".to_string(),
+                        value: "/usr/bin/runit".to_string(),
+                    },
+                    detect::Evidence {
+                        source: "/proc/1/comm".to_string(),
+                        value: "runit".to_string(),
+                    },
+                ],
+            },
+            installed: detect::InstalledInit::default(),
+            desired: detect::DesiredInit::Declared {
+                identity: "systemd".to_string(),
+                source: "/usr/share/nawa/system-profile.toml".to_string(),
+            },
+            effective_profile: None,
+        };
+
+        let text = joined(&render_system_plan(&observed));
+        assert!(text.contains("transition required from init-system=runit to init-system=systemd"), "{text}");
+        assert!(text.contains("Built-in candidate: faseela-runit-to-systemd-v1"), "{text}");
     }
 
     #[test]
