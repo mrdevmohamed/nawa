@@ -227,8 +227,14 @@ implementation slice:
   validation, domain-level override/clear behavior, source provenance,
   forbidden active init, advisory preference, and untrusted runtime evidence.
 
-The policy slice is prepared in the current working change set but has **not
-yet been pushed or CI-verified**. The latest green full CI run is
+The first CI run for the policy slice, [#44395869331](https://github.com/mrdevmohamed/nawa/actions/runs/44395869331),
+reached compilation and exposed two implementation errors: a local variable
+used Rust's reserved word `override`, and the advisory mismatch arm returned
+`Option<Preview>` from a match that must return the observation tuple. Both
+are fixed in the follow-up commit, together with the corresponding preview
+assertion. The original run is a failed compile and does not verify this slice.
+
+The policy implementation is pushed but still awaiting a successful CI run. The latest green full CI run is
 [#44393781539](https://github.com/mrdevmohamed/nawa/actions/runs/44393781539)
 on commit `cfcabfd14a758a54cfd9b56453a92645d34707f9`; that run verifies the
 preceding observation/profile path-hardening commits only.

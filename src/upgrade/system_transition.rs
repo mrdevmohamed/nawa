@@ -145,7 +145,7 @@ fn build_from_observation(
             if policy.preferred.is_empty() {
                 return None;
             }
-            Some(Preview::Unresolved {
+            return Some(Preview::Unresolved {
                 from: Some(active),
                 to: format!("preferred: {}", policy.preferred.join(", ")),
                 profile_source,
@@ -153,7 +153,7 @@ fn build_from_observation(
                     "the active init does not match the advisory preference [{}]; preferences do not authorize an automatic init transition",
                     policy.preferred.join(", ")
                 ),
-            })
+            });
         },
         DesiredInit::Invalid { reason } => {
             return Some(Preview::Unresolved {
@@ -781,7 +781,7 @@ mod tests {
         assert!(matches!(
             result,
             Preview::Unresolved { reason, to, .. }
-                if reason.contains("advisory init-system policy")
+                if reason.contains("advisory preference")
                     && to == "preferred: systemd"
         ));
         let _ = std::fs::remove_dir_all(root);

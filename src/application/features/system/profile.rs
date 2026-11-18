@@ -391,11 +391,11 @@ init-system = \"systemd\"
         assert_eq!(profile.provider("init-system"), None);
         assert_eq!(
             profile.provider_policy("init-system").unwrap().preferred,
-            ["runit"]
+            vec!["runit".to_string()]
         );
         assert_eq!(
             profile.provider_policy("network-stack").unwrap().preferred,
-            ["networkmanager", "connman"]
+            vec!["networkmanager".to_string(), "connman".to_string()]
         );
         assert_eq!(
             effective.policy_sources.get("init-system").map(|p| p.as_path()),

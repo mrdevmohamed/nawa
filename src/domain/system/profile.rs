@@ -414,8 +414,8 @@ mod tests {
         ).unwrap();
         assert_eq!(profile.provider("init-system"), None);
         let policy = profile.provider_policy("init-system").unwrap();
-        assert_eq!(policy.preferred, ["systemd", "runit"]);
-        assert_eq!(policy.forbidden, ["busybox"]);
+        assert_eq!(policy.preferred, vec!["systemd".to_string(), "runit".to_string()]);
+        assert_eq!(policy.forbidden, vec!["busybox".to_string()]);
         assert!(profile.init_capability().is_none());
     }
 
@@ -426,7 +426,7 @@ mod tests {
             &providers(&[("INIT-System", "SystemD")]),
         ).unwrap();
         assert_eq!(profile.provider("init-system"), Some("systemd"));
-        assert_eq!(profile.provider_policy("init-system").unwrap().required, ["systemd"]);
+        assert_eq!(profile.provider_policy("init-system").unwrap().required, vec!["systemd".to_string()]);
     }
 
     #[test]
@@ -502,7 +502,7 @@ mod tests {
                 }),
             ])),
         ).unwrap();
-        let override = SystemProfile::from_doc_with_policies(
+        let admin_override = SystemProfile::from_doc_with_policies(
             &doc(&[("schema", "2")]),
             &None,
             &Some(BTreeMap::from([("init-system".to_string(), ProviderPolicyDoc {
@@ -510,10 +510,10 @@ mod tests {
                 ..ProviderPolicyDoc::default()
             })])),
         ).unwrap();
-        let effective = SystemProfile::merge(Some(&defaults), Some(&override)).unwrap();
+        let effective = SystemProfile::merge(Some(&defaults), Some(&admin_override)).unwrap();
         assert_eq!(effective.provider("init-system"), None);
-        assert_eq!(effective.provider_policy("init-system").unwrap().preferred, ["runit"]);
-        assert_eq!(effective.provider_policy("network-stack").unwrap().preferred, ["networkmanager"]);
+        assert_eq!(effective.provider_policy("init-system").unwrap().preferred, vec!["runit".to_string()]);
+        assert_eq!(effective.provider_policy("network-stack").unwrap().preferred, vec!["networkmanager".to_string()]);
 
         let clear = SystemProfile::from_doc_with_policies(
             &doc(&[("schema", "2")]),
