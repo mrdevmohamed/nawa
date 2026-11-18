@@ -87,7 +87,8 @@ pub(crate) type ProvidersDoc = Option<BTreeMap<String, String>>;
 impl SystemProfile {
 
     /// Validate a legacy schema-1 profile or schema-2 policy profile.
-    /// Kept as a shorthand for callers that only supply [providers].
+    /// Kept as a shorthand for domain tests that supply only [providers].
+    #[cfg(test)]
     pub(crate) fn from_doc(
         scalars: &BTreeMap<String, String>,
         providers: &ProvidersDoc,
