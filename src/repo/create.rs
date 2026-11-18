@@ -204,7 +204,7 @@ pub(crate) fn create_index_with_locations_and_groups(
         match newest.get(&p.name) {
             Some(cur) => {
                 let cur_full = format!("{}-{}", cur.version, cur.rel);
-                if crate::version::vercmp(&full, &cur_full) == std::cmp::Ordering::Greater {
+                if crate::domain::package::version::vercmp(&full, &cur_full) == std::cmp::Ordering::Greater {
                     newest.insert(p.name.clone(), p);
                 }
             }

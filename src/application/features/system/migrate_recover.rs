@@ -54,8 +54,8 @@ use crate::domain::system::identity::InitKind;
 use crate::domain::system::migration::{
     transition, HandlerId, MigrationRecord, MigrationState, StepOutcome, Transition,
 };
-use crate::lock;
-use crate::migration_record as store;
+use crate::adapters::lock;
+use crate::adapters::migration_record as store;
 use crate::transaction::history::{self, TxStatus};
 use crate::transaction::recovery as wal;
 
@@ -846,14 +846,14 @@ mod tests {
     }
 
     fn ctx_with(root: &Path) -> crate::application::context::Ctx {
-        crate::application::context::Ctx::from_config(&crate::config::Config {
+        crate::application::context::Ctx::from_config(&crate::adapters::config::Config {
             root: root.to_path_buf(),
             recipes: root.join("recipes"),
             builddir: root.join("build"),
             profiles: root.join("profiles"),
             jobs: None,
             repo: None,
-            install_mode: crate::config::InstallMode::Auto,
+            install_mode: crate::adapters::config::InstallMode::Auto,
             downloads: 4,
             file: None,
             system_file: None,

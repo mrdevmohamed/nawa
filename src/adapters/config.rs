@@ -701,7 +701,7 @@ mod tests {
     #[test]
     fn shipped_dist_file_matches_the_system_template() {
         assert_eq!(
-            include_str!("../dist/nawa.toml"),
+            include_str!("../../dist/nawa.toml"),
             system_template(),
             "pkgmgr/dist/nawa.toml (installed as /etc/nawa/nawa.toml) drifted from config::system_template()"
         );

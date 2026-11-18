@@ -9,7 +9,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-use crate::config::Config;
+use crate::adapters::config::Config;
 use crate::fetch::RepoRef;
 
 /// One configured repository (roadmap §8.2).
@@ -224,7 +224,7 @@ pub(crate) fn cmd_clean(ctx: &crate::Ctx, category: &str, dry_run: bool) -> Resu
         removed += clean_dir(&dir, dry_run);
     }
     if cat == "sources" || cat == "all" {
-        let srccache = crate::config::srccache_dir(&ctx.builddir, None);
+        let srccache = crate::adapters::config::srccache_dir(&ctx.builddir, None);
         let (freed, kept) = clean_sources(&srccache, dry_run)?;
         removed += freed;
         retained += kept;

@@ -5,7 +5,7 @@ use crate::application::context::Ctx;
 use crate::presentation::color::Palette;
 use std::path::PathBuf;
 use crate::presentation::color::Stream;
-use crate::config;
+use crate::adapters::config;
 use crate::plugins;
 
 use anyhow::bail;

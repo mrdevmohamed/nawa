@@ -15,13 +15,13 @@ use crate::application::context::{resolve_mode, resolve_repo, Ctx};
 
 pub(crate) fn run(ctx: &Ctx, cmd: Cmd, track_package_changes: bool) -> (Result<()>, bool) {
     let mode = lock_need(&cmd.lock_request()).map(|need| match need {
-        LockNeed::Exclusive => crate::lock::Mode::Exclusive,
-        LockNeed::Shared => crate::lock::Mode::Shared,
+        LockNeed::Exclusive => crate::adapters::lock::Mode::Exclusive,
+        LockNeed::Shared => crate::adapters::lock::Mode::Shared,
     });
     let snapshot_needs_shared_lock = mode.is_none();
     // held until a whole-command transaction completes
     let _db_lock = match mode {
-        Some(mode) => match crate::lock::acquire(&ctx.root, mode) {
+        Some(mode) => match crate::adapters::lock::acquire(&ctx.root, mode) {
             Ok(guard) => guard,
             Err(error) => return (Err(error), false),
         },
@@ -31,8 +31,8 @@ pub(crate) fn run(ctx: &Ctx, cmd: Cmd, track_package_changes: bool) -> (Result<(
     // what a killed nawa left behind; holding the lock guarantees no live
     // transaction is mistaken for a dead one. Per-step-lock commands run the
     // same combined pass before `begin_operation` instead.
-    if mode == Some(crate::lock::Mode::Exclusive) {
-        crate::recovery::recover_and_report(&ctx.root);
+    if mode == Some(crate::adapters::lock::Mode::Exclusive) {
+        crate::application::recovery::recover_and_report(&ctx.root);
         // one-shot, idempotent migration of legacy nanosecond install dates
         // (roadmap §4.3): only clearly-nanosecond values are rewritten, each
         // with a .bak copy of the old desc
@@ -126,7 +126,7 @@ fn installed_package_payload_changed(before: &[crate::adapters::db::Entry], afte
 /// for this read.
 fn installed_snapshot(root: &Path, needs_shared_lock: bool) -> Result<Vec<crate::adapters::db::Entry>> {
     if needs_shared_lock {
-        let _snapshot_lock = crate::lock::acquire(root, crate::lock::Mode::Shared)?;
+        let _snapshot_lock = crate::adapters::lock::acquire(root, crate::adapters::lock::Mode::Shared)?;
         crate::adapters::db::Db::new(root).installed()
     } else {
         crate::adapters::db::Db::new(root).installed()

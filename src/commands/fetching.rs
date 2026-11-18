@@ -94,7 +94,7 @@ pub(crate) fn cmd_fetch(
     let builddir = std::fs::canonicalize(&builddir)
         .with_context(|| format!("resolve build directory {}", builddir.display()))?;
 
-    let srccache = crate::config::srccache_dir(&builddir, Some(&cwd));
+    let srccache = crate::adapters::config::srccache_dir(&builddir, Some(&cwd));
     info_mode(&recs, sources_only, offline);
 
     for rec in &recs {

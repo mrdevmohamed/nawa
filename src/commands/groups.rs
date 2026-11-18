@@ -11,8 +11,8 @@ use crate::adapters::db;
 use crate::fetch;
 use crate::groups;
 use crate::install;
-use crate::lock;
-use crate::plan;
+use crate::adapters::lock;
+use crate::application::features::package::plan;
 use crate::transaction;
 use crate::upgrade;
 

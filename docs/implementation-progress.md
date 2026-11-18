@@ -1301,17 +1301,24 @@ Nawa-independent slices landed:
   now uses the domain `InitProvider` classification (Single / Ambiguous /
   Absent) instead of re-deriving it. The profile's `init_capability()` is the
   single source of the declared decision.
-* **Git tree:** 147 Rust files, 35 directly under `src/` (down from 40);
-  cohesive subsystems (build/fetch/install/transaction/plugins/sandbox/
-  repo/groups/lint/upgrade/cli/domain/application) left intact.
-* **Verification:** check, clippy `-D warnings`, layering (52 modules, no
-  cycles) green; the new presentation-direction rule was negative-probed by
-  temporarily importing `presentation::color` from `version.rs` (rejected,
-  file restored); full battery green except the known toolchain-under-`/home`
-  env failure; both smoke suites pass; all touched files rustfmt-clean.
-* `docs/architecture-audit.md` gained a "current state" section and corrected
-  the stale service/CLI/module-ownership facts; §§1–17 remain the historical
-  Stage-0 snapshot for the behavior baseline.
+* **Git tree (final):** 149 Rust files, **7 directly under `src/`** (down from
+  35 at the start of Phase 7). `adapters/` now owns all 14 concrete I/O
+  mechanisms; the build pipeline (incl. `fetchrun/`) lives under `build/`;
+  `config`, `lock`, `migration_record` are adapters; `ctx`/`recovery` are
+  under `application/`; `plan`/`revdep`/`sync` are feature use cases;
+  `repositories` is a command handler; `version` is pure domain. The remaining
+  root files (`main`, `bootstrap`, `deps`, `glob`, `suggest`, `undo`,
+  `testutil`) each have one clear responsibility, documented in the audit.
+* **Verification:** check, clippy `-D warnings`, layering (**24 top-level
+  modules**, no cycles) green; presentation-direction and mint-authority
+  rules were negative-probed after every move (both rejected, files restored);
+  full battery green except the known toolchain-under-`/home` env failure;
+  both smoke suites pass; all touched files rustfmt-clean.
+* `docs/architecture-audit.md` §0 now contains the complete final-tree audit:
+  responsibility of every top-level module/directory, misplaced/obsolete/
+  duplicate findings and how each was resolved, cycle breaks, and verification
+  results. §§1–17 remain the historical Stage-0 snapshot for the behavior
+  baseline.
 
 ## Changed files (this phase, updated as work lands)
 
@@ -1518,16 +1525,28 @@ Nawa-independent slices landed:
     unchanged)
 
 * Phase 7 (in progress):
-  * `src/presentation/{mod,color,confirm,diag,humanize,output}.rs` (new home
-    for the five presentation modules; `git mv` + path updates)
+  * `src/presentation/{mod,color,confirm,diag,humanize,output,error}.rs` (new
+    home for the presentation modules; `git mv` + path updates)
+  * `src/adapters/{mod,archive,artifact,atomic,checksum,config,db,fswalk,
+    interrupt,lock,migration_record,pathutil,sign,sys,unique}.rs` (new home
+    for all 14 low-level I/O mechanisms)
+  * `src/build/` expanded with `assets,buildenv,closure,profile,slim,sources`
+    and the whole `fetchrun/` subsystem; `[slim]` recipe model moved to
+    `src/recipe/model.rs` (cycle break)
+  * `src/application/{context,recovery}.rs`,
+    `src/application/features/{repository/{mod,sync},package/{plan,revdep}}.rs`
+    (use cases moved from the root)
+  * `src/commands/repositories.rs` (command handler moved from the root)
+  * `src/domain/package/version.rs` (pure utility moved from the root)
   * `src/main.rs`, `src/commands/installing.rs` (module registration,
-    `Notice::emit` moved here), all files with presentation paths updated
-  * `scripts/check-layering.py` (PRESENTATION set + allowlist updated)
-  * `src/domain/{system,planning}/*.rs`, `src/migration_record.rs`,
+    `Notice::emit` moved here), all files with moved-module paths updated
+  * `scripts/check-layering.py` (PRESENTATION set + allowlist + mint-path
+    update; stale entries for moved modules removed)
+  * `src/domain/{system,planning}/*.rs`, `src/adapters/migration_record.rs`,
     `src/application/features/system/detect.rs` (obsolete `dead_code` removed)
-  * `src/plan.rs`, `src/domain/planning/install.rs`,
-    `src/application/features/package/plan_install.rs` (provider explanation)
-  * `docs/architecture-audit.md` (current-state section + corrected facts)
+  * `src/application/features/package/{plan,plan_install}.rs`,
+    `src/domain/planning/install.rs` (provider explanation)
+  * `docs/architecture-audit.md` §0 (complete final-tree audit)
 * Phase 6 preflight (in progress):
   * `src/application/features/system/migrate_apply.rs` (new — built-in
     definition, read-only `plan`, live-host `preflight`, explicit

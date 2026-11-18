@@ -40,7 +40,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crate::migration_record as migrate;
+use crate::adapters::migration_record as migrate;
 
 /// Set in the environment of hooks so nested nawa *read-only* calls skip
 /// locking. It is process state inherited by children and forgeable at

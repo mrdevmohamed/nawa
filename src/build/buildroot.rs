@@ -141,7 +141,7 @@ pub(super) fn run_fetch_phase(
     assembled: Option<&AssembledRoot>,
 ) -> Result<Vec<(String, String)>> {
     let fetch_env: Vec<(String, String)> = if rec.fetch.any() {
-        let srccache = crate::config::srccache_dir(builddir, None);
+        let srccache = crate::adapters::config::srccache_dir(builddir, None);
         // GOCACHE lives "under the HOME scratch" (§7): inside the sandbox
         // that is the mounted per-build home; at `env` the build runs on
         // the host and sees host paths (like NAWA_SRCDIR), so the scratch

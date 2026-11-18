@@ -10,7 +10,6 @@ mod bootstrap;
 mod build;
 mod cli;
 mod commands;
-mod config;
 mod deps;
 mod domain;
 mod fetch;
@@ -18,15 +17,10 @@ mod glob;
 mod groups;
 mod install;
 mod lint;
-mod lock;
-mod migration_record;
-mod plan;
 mod plugins;
 mod presentation;
 mod recipe;
-mod recovery;
 mod repo;
-mod revdep;
 mod sandbox;
 mod suggest;
 #[cfg(test)]
@@ -34,7 +28,6 @@ mod testutil;
 mod transaction;
 mod undo;
 mod upgrade;
-mod version;
 
 // Items moved out of this file: the command-line definition (`cli`), the
 // top-level command orchestration and dispatch (`commands::dispatch`) and
@@ -42,8 +35,9 @@ mod version;
 // explicitly.
 use clap::Parser;
 use commands::{run, should_run_post_transaction_hooks};
+use adapters::{config, lock};
+use adapters::config::Overrides;
 use application::context::Ctx;
-use config::Overrides;
 
 // The cli items stay bound at the crate root (as before the cli module
 // split): `commands/fetching.rs` addresses `crate::default_jobs`, and the

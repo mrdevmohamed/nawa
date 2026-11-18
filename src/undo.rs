@@ -222,7 +222,7 @@ fn order_steps(db: &crate::adapters::db::Db, steps: Vec<UndoStep>) -> Result<Vec
     reinstall.reverse();
     let installed = db.installed()?;
     let names: Vec<String> = remove.iter().map(|step| step.package.clone()).collect();
-    let ordered_names = crate::plan::removal_order(&names, &installed);
+    let ordered_names = crate::application::features::package::plan::removal_order(&names, &installed);
     let mut by_name: BTreeMap<String, UndoStep> =
         remove.into_iter().map(|step| (step.package.clone(), step)).collect();
     let mut ordered = restore_previous;

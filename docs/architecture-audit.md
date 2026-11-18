@@ -8,44 +8,77 @@
 > system-intelligence stages that follow. The design specification is
 > `docs/design/system-intelligence-and-migrations.md`.
 
-## 0. Current state (post Phase 5–7 implementation)
+## 0. Final source-tree audit (Phase 7 acceptance)
 
 > This section reflects the **shipped code** on
 > `feature/system-intelligence-migration`; §§1–17 below remain the historical
 > Stage-0 audit of `master` and are kept for the behavior baseline.
 
-* **Source tree:** 146 Rust files, 35 directly under `src/`. `main.rs` is a
-  minimal process entry (parse → overrides → config → ctx → `commands::run`
-  → post-transaction triggers → plugin events → exit); `bootstrap.rs` owns
-  error rendering and exit codes. Cohesive subsystems stay intact: `build/`,
-  `fetch/`, `install/`, `transaction/`, `plugins/`, `sandbox/`, `repo/`,
-  `groups/`, `lint/`, `upgrade/`, `cli/`, `domain/`, `application/`.
-* **Presentation layer:** `color`, `confirm`, `diag`, `humanize` and `output`
-  now live under `src/presentation/` (a single top-level module in the
-  layering gate). `Notice::emit` was moved to `commands` so presentation never
-  imports application and the graph stays acyclic.
-* **Application / Domain:** feature use cases under
-  `application/features/{package,system}/`, ports under `application/ports/`,
-  lifecycle lock policy in `application/lifecycle.rs`. Pure rules under
-  `domain/{package,planning,system}/`; the B3 metadata model is wired and has
-  no `dead_code` allowance.
-* **Migration subsystem:** `migration_record.rs` (durable store) plus
-  `migrate_coordinator.rs`, `migrate_recover.rs`, `migrate_apply.rs` and
-  `migrate_inspect.rs` under `application/features/system/`.
-  `lock::MigrationAuthority` is the lock-defined, unforgeable gate-crossing
-  capability, mintable only from the migration subtree (layering-enforced).
-* **Dependency direction:** `python3 scripts/check-layering.py` reports
-  **52 modules, no cycles, no crate-root globs**; the legacy presentation
-  allowlist now names only `presentation` and shrinks as use cases land.
-  Domain/Application never import presentation; a negative probe (a
-  `version.rs` import of `presentation::color`) is rejected.
-* **Verification:** `cargo check`/`clippy -D warnings`/layering green; full
-  battery green except the pre-existing toolchain-under-`/home` sandbox
-  test; both smoke suites pass; touched files rustfmt-clean.
-* **External Phase 6 status:** Faseela HEAD already uses systemd, so B2 is
-  resolved; B1/B4/B5/B6/B7 remain and are documented with owners/files and
-  acceptance tests in `docs/implementation-progress.md`. No external repo
-  was modified and no real boot verification was performed.
+### 0.1 Tree and responsibility of every top-level module/directory
+
+149 Rust files; **7 `.rs` files directly under `src/`** (down from 35 at the
+start of Phase 7). Each root file has one clear responsibility:
+
+| Root file | Responsibility | Verdict |
+|---|---|---|
+| `main.rs` | Minimal process entry: parse → config → ctx → `commands::run` → triggers/events → exit | correct (kept) |
+| `bootstrap.rs` | Error rendering + exit codes (the imperative shell's exit path) | correct (kept) |
+| `deps.rs` | Pure DFS build-order resolution over the recipe graph with cycle detection | cohesive utility (kept) |
+| `glob.rs` | Tiny case-insensitive glob matcher shared by search/revdep | cohesive utility (kept) |
+| `suggest.rs` | Levenshtein "did you mean?" suggestions | cohesive utility (kept) |
+| `undo.rs` | Compensating-transaction planning and application (links history, prompts) | cohesive subsystem; still prints/prompts, so it cannot move under `application/features` (kept, documented) |
+| `testutil.rs` | `#[cfg(test)]` temp-dir/db helpers | test support (kept) |
+
+Directories, with their single ownership each:
+
+| Directory | Responsibility | Phase 7 change |
+|---|---|---|
+| `adapters/` | Concrete I/O mechanisms: `db` (package persistence), `archive`, `artifact` (content-addressed store), `sign`, `checksum`, `atomic`, `fswalk`, `pathutil`, `unique`, `sys`, `interrupt`, `lock` (flock + gate check), `migration_record` (durable store), `config` (layered configuration) | **new** — 14 previously root-level adapter files grouped here; `lock`/`migration_record` moved despite their "policy" flavour because they are the durable/OS mechanisms the gate runs on |
+| `application/` | Composition/lifecycle: `context.rs` (per-command ctx, moved from root), `lifecycle.rs` (lock policy), `recovery.rs` (crash recovery entry, moved from root), `ports/`, `features/` | gained `context`, `recovery`, `features/repository/sync`; `features/package` gained `plan` and `revdep` (moved from root) |
+| `build/` | Whole build pipeline: isolation env, closure assembly, source/asset staging, slimming/splitting, build profiles, and `fetchrun/` (Go/Cargo source staging) | **expanded** — 6 root files + `fetchrun/` moved in; the `[slim]` *schema* moved the other way into `recipe/model.rs` so recipe never depends on build (cycle break) |
+| `cli/` | Clap argument/subcommand definitions and three shell completion scripts | unchanged; lock policy already moved out to `application/lifecycle` |
+| `commands/` | Presentation handlers (`dispatch`, package/build/repository/history/query/…) | gained `repositories.rs` (was a root-level command handler) |
+| `domain/` | Pure rules: `package/{metadata,version}`, `planning/{install,removal}`, `system/{identity,capability,profile,migration}` | gained `package/version.rs` (moved from root); no `dead_code` allowance |
+| `fetch/`, `repo/`, `install/`, `transaction/`, `groups/`, `lint/`, `plugins/`, `sandbox/`, `upgrade/` | Cohesive existing subsystems, left intact by design (fetch pipeline, signed index, installer, WAL/history, groups, ELF/layout lint, plugin isolation, build sandbox, upgrade flow) | unchanged |
+| `presentation/` | Terminal output, diagnostics, confirmation, formatting, error classifier | gained `error.rs` (moved from root); `Notice::emit` lives in `commands` to keep presentation → application edges out of the graph |
+
+### 0.2 Misplaced, duplicated and obsolete items found and resolved
+
+* **Misplaced:** 14 low-level I/O modules at the root (db, archive, artifact,
+  sign, checksum, atomic, walkers, sys/interrupt, lock, migration record,
+  config) → `adapters/`; five presentation modules → `presentation/`;
+  `repositories.rs` (a command handler) → `commands/`; `sync.rs` and `revdep.rs`
+  (use cases) → `application/features/`; `ctx`/`recovery` → `application/`;
+  `version.rs` (pure) → `domain/package/`; the build-pipeline files → `build/`.
+* **Cycle risk resolved:** `recipe` used `crate::slim::Slim` while `build`
+  depends on `recipe`; moving `slim` into `build` would close a cycle. The
+  `[slim]` TOML *model* now lives in `recipe/model.rs` with the rest of the
+  recipe schema; `build/slim.rs` owns only the size-reduction passes.
+  Likewise `fetchrun` moved into `build` to avoid `build → fetchrun → build`
+  through the isolation types.
+* **Obsolete/duplicate:** the historical Stage-0 `service.rs`, its command
+  handler and the `keep_disabled` installer hook were already removed in
+  Phase 1b; no service-management code remains. The old root `cli.rs` was
+  already split into `cli/`. No duplicate implementation was created by this
+  reorganization — every move is a `git mv` plus path/declaration updates.
+* **Dead-code allowances:** module-level allowances were removed once their
+  consumers landed; only two justified item-level allowances remain (the
+  future verified-rollback transitions, blocked on external B5).
+* **No giant files / tiny dirs:** cohesive subsystems were moved whole rather
+  than split; each new directory holds a family of related modules (11+ files
+  in `adapters/`, 16 in the expanded `build/`); no one-file directories were
+  created just to lower a count.
+
+### 0.3 Verification of the reorganization
+
+`cargo check --all-targets --offline`, `cargo clippy --all-targets --offline
+-- -D warnings`, `python3 scripts/check-layering.py` (**24 top-level modules,
+no cycles, no crate-root globs**), the full test battery (819 passed / 2
+ignored / 1 pre-existing environment failure), release build, both smoke
+suites, and rustfmt on every touched file all pass. Negative probes confirm
+that a `deps.rs → presentation::color` import and a non-migration mint call to
+`migration_authority()` are both rejected by the layering gate. CLI help,
+completions and package behavior are unchanged by the moves.
 
 ## 1. Scope and method
 

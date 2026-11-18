@@ -11,11 +11,11 @@ use crate::build::buildenv;
 use crate::adapters::db;
 use crate::cli::default_jobs;
 use crate::install;
-use crate::lock;
-use crate::plan;
+use crate::adapters::lock;
+use crate::application::features::package::plan;
 use crate::build::profile;
 use crate::recipe;
-use crate::recovery;
+use crate::application::recovery;
 use crate::transaction;
 
 

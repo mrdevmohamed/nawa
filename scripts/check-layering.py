@@ -195,7 +195,7 @@ def main():
             for n, line in enumerate(strip_tests(open(p).read()), 1):
                 if MIGRATION_MINT in line:
                     rel = os.path.relpath(p, SRC).replace(os.sep, "/")
-                    if rel != "lock.rs" and not rel.startswith(MIGRATION_MINT_ALLOWED):
+                    if rel not in ("lock.rs", "adapters/lock.rs") and not rel.startswith(MIGRATION_MINT_ALLOWED):
                         failed = True
                         print(
                             "error: only migration feature code may mint the "

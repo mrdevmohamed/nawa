@@ -15,12 +15,12 @@ use std::path::{Path, PathBuf};
 use crate::application::features::package::plan_install::{Source, Sourcing};
 use crate::application::features::system::migrate_coordinator::MigrationPermit;
 use crate::application::ports::user_interaction::{PlanRow, PlanView, UserInteraction};
-use crate::config::InstallMode;
+use crate::adapters::config::InstallMode;
 use crate::application::context::Ctx;
 use crate::adapters::db;
 use crate::install;
-use crate::lock;
-use crate::plan;
+use crate::adapters::lock;
+use crate::application::features::package::plan;
 use crate::repo;
 use crate::transaction;
 use crate::upgrade;
@@ -623,7 +623,7 @@ mod tests {
     }
 
     fn ctx_with(root: &Path) -> Ctx {
-        Ctx::from_config(&crate::config::Config {
+        Ctx::from_config(&crate::adapters::config::Config {
             root: root.to_path_buf(),
             recipes: root.join("recipes"),
             builddir: root.join("build"),

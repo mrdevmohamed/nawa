@@ -14,11 +14,11 @@ use anyhow::{bail, Context, Result};
 use std::collections::{BTreeMap, HashMap};
 
 use crate::application::features::system::profile::EffectiveProfile;
-use crate::config::InstallMode;
+use crate::adapters::config::InstallMode;
 use crate::application::context::Ctx;
 use crate::adapters::db::Entry;
 use crate::fetch::RepoRef;
-use crate::plan::{self, Why};
+use crate::application::features::package::plan::{self, Why};
 use crate::recipe::Recipe;
 use crate::repo::RepoEntry;
 use crate::upgrade::OpenRepo;
@@ -95,7 +95,7 @@ impl Sourcing {
             Some(re) => {
                 let theirs = format!("{}-{}", re.version, re.rel);
                 let ours = format!("{}-{}", rec.package.version, rec.package.rel);
-                let older = crate::version::vercmp(&theirs, &ours) == std::cmp::Ordering::Less;
+                let older = crate::domain::package::version::vercmp(&theirs, &ours) == std::cmp::Ordering::Less;
                 if older && !strict {
                     // the recipe tree is newer than the repository: honour the recipe
                     Ok((Source::Build, None))
@@ -200,7 +200,7 @@ pub(crate) fn init_note(profile: &EffectiveProfile, init: &plan::InitSelection) 
 /// package without `[capabilities]` is never guessed into the role. Returns
 /// nothing when no profile decision was declared, so legacy behavior is
 /// byte-identical.
-pub(crate) fn provider_note(plan: &crate::plan::Plan) -> Option<Notice> {
+pub(crate) fn provider_note(plan: &crate::application::features::package::plan::Plan) -> Option<Notice> {
     let plan::InitSelection::Declared { identity } = &plan.init else {
         return None;
     };
@@ -283,7 +283,7 @@ pub(crate) fn plan(
         match sourcing.entry(t) {
             Some(re) => match installed.get(t) {
                 Some(cur)
-                    if crate::version::vercmp(
+                    if crate::domain::package::version::vercmp(
                         &format!("{}-{}", cur.version, cur.rel),
                         &format!("{}-{}", re.version, re.rel),
                     ) != std::cmp::Ordering::Less =>
@@ -617,7 +617,7 @@ mod tests {
     }
 
     fn ctx_with(root: &std::path::Path) -> Ctx {
-        Ctx::from_config(&crate::config::Config {
+        Ctx::from_config(&crate::adapters::config::Config {
             root: root.to_path_buf(),
             recipes: root.join("recipes"),
             builddir: root.join("build"),
@@ -694,9 +694,9 @@ mod tests {
 
     #[test]
     fn provider_note_explains_which_planned_package_provides_the_selected_init() {
-        use crate::plan::InitSelection;
+        use crate::application::features::package::plan::InitSelection;
 
-        let mut plain = crate::plan::Plan::default();
+        let mut plain = crate::application::features::package::plan::Plan::default();
         assert!(provider_note(&plain).is_none(), "no profile decision — no note");
 
         plain.init = InitSelection::Declared {
@@ -709,9 +709,9 @@ mod tests {
         provider.capabilities = Some(crate::recipe::model::Capabilities {
             provides: vec!["init-system=systemd".to_string()],
         });
-        plain.items.push(crate::plan::Item {
+        plain.items.push(crate::application::features::package::plan::Item {
             rec: provider,
-            why: crate::plan::Why::Explicit,
+            why: crate::application::features::package::plan::Why::Explicit,
             replaces: None,
         });
         let explained = provider_note(&plain).expect("the provider is named");

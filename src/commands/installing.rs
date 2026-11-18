@@ -3,7 +3,7 @@
 use anyhow::{bail, Result};
 use crate::suggest;
 use crate::application::context::Ctx;
-use crate::config::InstallMode;
+use crate::adapters::config::InstallMode;
 use crate::application::features::package::apply_transaction::{
     apply_transaction, archive_name_of, ApplyRequest, Applied,
 };
@@ -24,12 +24,12 @@ use crate::presentation::humanize::format_size;
 use crate::groups;
 use crate::install;
 use crate::adapters::pathutil::is_archive_arg;
-use crate::lock;
-use crate::plan;
-use crate::recovery;
-use crate::revdep;
+use crate::adapters::lock;
+use crate::application::features::package::plan;
+use crate::application::recovery;
+use crate::application::features::package::revdep;
 use crate::transaction;
-use crate::version;
+use crate::domain::package::version;
 use crate::commands::warn_revdep;
 
 pub(crate) fn cmd_install(

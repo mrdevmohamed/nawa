@@ -87,7 +87,7 @@ pub(crate) fn update_index(
             Some(cur) => {
                 let new_full = format!("{}-{}", e.version, e.rel);
                 let cur_full = format!("{}-{}", cur.version, cur.rel);
-                if crate::version::vercmp(&new_full, &cur_full) == std::cmp::Ordering::Greater {
+                if crate::domain::package::version::vercmp(&new_full, &cur_full) == std::cmp::Ordering::Greater {
                     map.insert(e.name.clone(), e);
                 }
             }

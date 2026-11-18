@@ -22,7 +22,7 @@ use crate::recipe;
 use crate::repo;
 #[cfg(test)]
 use crate::adapters::sign;
-use crate::version::vercmp;
+use crate::domain::package::version::vercmp;
 
 mod source;
 

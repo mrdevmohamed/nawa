@@ -118,8 +118,8 @@ use crate::domain::system::migration::{
     transition, MigrationDefinition, MigrationRecord, MigrationState, StepOutcome, StepRecord,
     Transition,
 };
-use crate::lock;
-use crate::migration_record as store;
+use crate::adapters::lock;
+use crate::adapters::migration_record as store;
 use crate::transaction::{self, context as tx_context};
 
 /// Unforgeable in-process proof that this coordinator run may continue
@@ -844,14 +844,14 @@ mod tests {
     }
 
     fn ctx_with(root: &std::path::Path) -> Ctx {
-        Ctx::from_config(&crate::config::Config {
+        Ctx::from_config(&crate::adapters::config::Config {
             root: root.to_path_buf(),
             recipes: root.join("recipes"),
             builddir: root.join("build"),
             profiles: root.join("profiles"),
             jobs: None,
             repo: None,
-            install_mode: crate::config::InstallMode::Auto,
+            install_mode: crate::adapters::config::InstallMode::Auto,
             downloads: 4,
             file: None,
             system_file: None,

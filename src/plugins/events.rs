@@ -70,7 +70,7 @@ pub(crate) fn dispatch_pending(
     system_config: Option<&Path>,
 ) {
     let dir = outbox_dir(root);
-    if !dir.is_dir() || std::env::var_os(crate::lock::HELD_ENV).is_some() {
+    if !dir.is_dir() || std::env::var_os(crate::adapters::lock::HELD_ENV).is_some() {
         return;
     }
     let _dispatch_lock = match acquire_dispatch_lock(&dir) {

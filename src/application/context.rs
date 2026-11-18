@@ -4,7 +4,7 @@
 use anyhow::{bail, Result};
 use std::path::PathBuf;
 
-use crate::config::{Config, InstallMode};
+use crate::adapters::config::{Config, InstallMode};
 
 pub(crate) struct Ctx {
     pub(crate) root: PathBuf,

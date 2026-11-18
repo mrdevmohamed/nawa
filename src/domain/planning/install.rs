@@ -34,7 +34,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::domain::system::capability::Provides;
 use crate::domain::system::profile::SystemProfile;
 use crate::suggest;
-use crate::version::vercmp;
+use crate::domain::package::version::vercmp;
 
 /// Why a package is part of a plan (the `reason` recorded in the database).
 /// The database mapping lives with the application layer (`plan.rs`).

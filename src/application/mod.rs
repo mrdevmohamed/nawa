@@ -22,3 +22,4 @@ pub(crate) mod context;
 pub(crate) mod features;
 pub(crate) mod lifecycle;
 pub(crate) mod ports;
+pub(crate) mod recovery;

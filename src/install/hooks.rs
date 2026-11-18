@@ -191,7 +191,7 @@ fn transaction_trigger_scripts(root: &Path) -> Result<Vec<(String, PathBuf)>> {
 /// to the caller, which reports a warning; the next package transaction
 /// retries the trigger.
 pub(crate) fn run_post_transaction_hooks(root: &Path) -> Result<()> {
-    let _lock = crate::lock::acquire(root, crate::lock::Mode::Exclusive)?;
+    let _lock = crate::adapters::lock::acquire(root, crate::adapters::lock::Mode::Exclusive)?;
     let scripts = transaction_trigger_scripts(root)?;
     let mut failures = Vec::new();
 
@@ -328,7 +328,7 @@ pub(crate) fn run_hook(label: &str, script: &str, root: &Path) -> Result<()> {
             .args(["-e", "-c", script])
             .env("LD_LIBRARY_PATH", ld_path)
             .env("NAWA_ROOT", root)
-            .env(crate::lock::HELD_ENV, "1") // we hold the db lock; nested nawa must not wait for it
+            .env(crate::adapters::lock::HELD_ENV, "1") // we hold the db lock; nested nawa must not wait for it
             .status()?
     } else {
         let shell = ["/bin/bash", "/bin/sh"]
@@ -368,7 +368,7 @@ pub(crate) fn chroot_command(root: &Path, sh: &str, script: &str) -> Result<std:
         Command::new(sh)
             .args(["-e", "-c", script])
             .env("NAWA_ROOT", "/")
-            .env(crate::lock::HELD_ENV, "1") // we hold the db lock; nested nawa must not wait
+            .env(crate::adapters::lock::HELD_ENV, "1") // we hold the db lock; nested nawa must not wait
             .pre_exec(move || {
                 rustix::process::chroot(&root_c).map_err(std::io::Error::from)?;
                 rustix::process::chdir(c"/").map_err(std::io::Error::from)?;

@@ -12,7 +12,7 @@ use crate::deps;
 use crate::presentation::humanize::format_date;
 use crate::presentation::humanize::format_size;
 use crate::recipe;
-use crate::revdep;
+use crate::application::features::package::revdep;
 
 pub(crate) fn cmd_search(ctx: &Ctx, term: &str, glob: bool) -> Result<()> {
     let all = ctx.load_all()?;

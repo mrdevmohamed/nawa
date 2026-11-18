@@ -55,7 +55,7 @@ pub(super) fn stage_source(
         // All sources are downloaded, verified and extracted by the sources
         // engine; the workspace is `<work>/src` and `[package] workdir`
         // selects the section cwd through `staged.srcdir`.
-        let cache_dir = crate::config::srccache_dir(&builddir, None);
+        let cache_dir = crate::adapters::config::srccache_dir(&builddir, None);
         let s = crate::build::sources::stage_sources(rec, &work, &src, &cache_dir, opts.jobs)?;
         // normalise ownership/permissions for the sandbox's mapped identity
         grant_source_write(&s.srcroot);
@@ -90,7 +90,7 @@ pub(super) fn stage_source(
         // persistent, content-keyed cache instead ($NAWA_SRCCACHE, default
         // <builddir>/distfiles). A hit is re-verified against the recipe's
         // sha256, so a corrupt/truncated entry is re-downloaded.
-        let cache_dir = crate::config::srccache_dir(&builddir, None);
+        let cache_dir = crate::adapters::config::srccache_dir(&builddir, None);
         std::fs::create_dir_all(&cache_dir)
             .with_context(|| format!("create source cache {}", cache_dir.display()))?;
         let sha = rec.package.sha256.as_str();

@@ -23,7 +23,7 @@ use crate::application::ports::user_interaction::UserInteraction;
 use crate::cli::{MigrateCmd, SystemCmd};
 use crate::application::context::Ctx;
 use crate::domain::system::migration::{MigrationRecord, StepOutcome, StepRecord};
-use crate::migration_record::ActiveGate;
+use crate::adapters::migration_record::ActiveGate;
 
 /// `nawa system migrate [list|show|status|resume]`
 pub(crate) fn cmd_system(ctx: &Ctx, action: SystemCmd) -> Result<()> {
@@ -139,7 +139,7 @@ fn print_list(root: &Path) -> Result<()> {
         // records would still be listed here)
         crate::nawa_info!(
             "no migration record exists under {} — no migration has ever been started under this root",
-            crate::migration_record::migrations_dir(root).display()
+            crate::adapters::migration_record::migrations_dir(root).display()
         );
         return Ok(());
     }
