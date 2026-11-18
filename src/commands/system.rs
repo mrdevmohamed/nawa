@@ -77,7 +77,15 @@ fn print_system_plan(ctx: &Ctx) -> Result<()> {
         println!("  Repository plan: unresolved — no repository is configured; no package provider was selected.");
         return Ok(());
     };
-    let repo_ref = crate::fetch::RepoRef::parse(repository)?;
+    let repo_ref = match crate::fetch::RepoRef::parse(repository) {
+        Ok(repo_ref) => repo_ref,
+        Err(error) => {
+            println!(
+                "  Repository plan: unresolved — repository configuration is invalid: {error:#}"
+            );
+            return Ok(());
+        }
+    };
     match crate::upgrade::preview_system_transition(
         &ctx.root,
         &repo_ref,
