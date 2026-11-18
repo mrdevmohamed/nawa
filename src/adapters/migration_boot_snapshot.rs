@@ -748,7 +748,7 @@ fn collect_runit_service_paths(root: &Path) -> Result<Vec<String>> {
     Ok(paths)
 }
 
-fn allowed_path(path: &Path) {
+fn allowed_path(path: &Path) -> bool {
     if !path.is_relative()
         || path
             .components()
