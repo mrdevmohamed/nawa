@@ -816,6 +816,9 @@ pub(crate) enum MigrateCmd {
         /// the exact target capability being migrated to
         #[arg(long)]
         to: String,
+        /// the SystemPlan identity shown by nawa system plan
+        #[arg(long, value_name = "sp-<sha256>")]
+        plan_id: String,
         /// acknowledge that the migration needs a reboot boundary
         #[arg(long)]
         acknowledge_reboot: bool,
@@ -875,6 +878,22 @@ mod tests {
                 "{args:?} is a read-only system inspection",
             );
         }
+    }
+
+    #[test]
+    fn migration_apply_requires_an_explicit_system_plan_identity() {
+        let base = [
+            "nawa", "system", "migrate", "apply", "faseela-runit-to-systemd-v1",
+            "--from", "init-system=runit",
+            "--to", "init-system=systemd",
+            "--acknowledge-reboot",
+            "--acknowledge-recovery",
+        ];
+        assert!(Cli::try_parse_from(base).is_err());
+        let mut approved = base.to_vec();
+        let plan_id = format!("sp-{}", "a".repeat(64));
+        approved.extend(["--plan-id", plan_id.as_str()]);
+        assert!(Cli::try_parse_from(approved).is_ok());
     }
 
     #[test]

@@ -160,6 +160,7 @@ fn cmd_migrate(ctx: &Ctx, action: MigrateCmd) -> Result<()> {
             id,
             from,
             to,
+            plan_id,
             acknowledge_reboot,
             acknowledge_recovery,
         } => print_apply(
@@ -167,6 +168,7 @@ fn cmd_migrate(ctx: &Ctx, action: MigrateCmd) -> Result<()> {
             &id,
             &from,
             &to,
+            &plan_id,
             acknowledge_reboot,
             acknowledge_recovery,
         ),
@@ -408,9 +410,21 @@ fn print_apply(
     id: &str,
     from: &str,
     to: &str,
+    plan_id: &str,
     acknowledge_reboot: bool,
     acknowledge_recovery: bool,
 ) -> Result<()> {
+    let repository = ctx.repo.as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow!("migration apply requires a configured trusted repository"))?;
+    let reviewed = system_plan::build(&ctx.root, Path::new("/proc"), Some(repository));
+    if reviewed.identity != plan_id {
+        return Err(anyhow!(
+            "the SystemPlan changed or --plan-id does not match; current plan is {}. Re-run nawa system plan, review it, and approve that exact identity",
+            reviewed.identity
+        ));
+    }
+    let pin = reviewed.approval_pin(id)?;
     let source = crate::domain::system::capability::Capability::parse(from)
         .map_err(anyhow::Error::msg)?;
     let target = crate::domain::system::capability::Capability::parse(to)
@@ -421,8 +435,9 @@ fn print_apply(
         &target,
         acknowledge_reboot,
         acknowledge_recovery,
+        pin,
     )?;
-    match apply_use::apply(&ctx.root, Path::new("/proc"), approval)? {
+    match apply_use::apply(&ctx.root, Path::new("/proc"), repository, approval)? {
         apply_use::ApplyRefusal::HandlerBlocked(blockers) => {
             for line in render_apply_refusal(&blockers) {
                 println!("{line}");
