@@ -497,21 +497,24 @@ fn plan_refuses_an_unknown_built_in_id() {
 fn apply_refuses_an_offline_root_before_any_mutation() {
     let root = scratch("apply-offline");
     let before = record_snapshot(&root);
-    let (stdout, stderr, ok) = run(
-        &root,
-        &[
-            "system",
-            "migrate",
-            "apply",
-            "faseela-runit-to-systemd-v1",
-            "--from",
-            "init-system=runit",
-            "--to",
-            "init-system=systemd",
-            "--acknowledge-reboot",
-            "--acknowledge-recovery",
-        ],
-    );
+    // Supply the newly required identity so this test reaches the live-host
+    // preflight boundary instead of stopping in the CLI argument parser.
+    let plan_id = format!("sp-{}", "0".repeat(64));
+    let args = [
+        "system",
+        "migrate",
+        "apply",
+        "faseela-runit-to-systemd-v1",
+        "--from",
+        "init-system=runit",
+        "--to",
+        "init-system=systemd",
+        "--plan-id",
+        plan_id.as_str(),
+        "--acknowledge-reboot",
+        "--acknowledge-recovery",
+    ];
+    let (stdout, stderr, ok) = run(&root, &args);
     assert!(!ok, "apply is live-host only: {stdout}");
     let combined = format!("{stdout}{stderr}");
     assert!(combined.contains("offline root"), "{combined}");
