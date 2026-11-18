@@ -244,6 +244,11 @@ pub(crate) fn restore(root: &Path, migration_id: &str) -> Result<SnapshotInfo> {
     // Destination-parent checks are completed before applying any entry. A
     // symlinked directory such as /boot or /usr/bin must never redirect restore
     // outside the selected root.
+    // Reconciliation runs after the restore writes. Validate the entire live
+    // service tree now as well, so a special file or unreadable subtree cannot
+    // make reconciliation fail only after boot files have already changed.
+    preflight_runit_reconciliation(&root)?;
+
     for entry in &validated {
         // Preflight is read-only: missing parents are created only after every
         // destination has passed validation.
@@ -699,6 +704,31 @@ fn valid_blob_name(name: &str) -> bool {
         && bytes.starts_with(b"entry-")
         && bytes.ends_with(b".bin")
         && bytes[6..9].iter().all(u8::is_ascii_digit)
+}
+
+/// Validate the current service tree before restore mutates any destination.
+/// A missing tree is recoverable from the manifest; an existing tree must be
+/// traversable and contain only supported leaf types.
+fn preflight_runit_reconciliation(root: &Path) -> Result<()> {
+    let service_root = root.join("etc/runit/runsvdir/default");
+    match fs::symlink_metadata(&service_root) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            bail!(
+                "required runit service directory {} is not a real directory",
+                service_root.display()
+            )
+        }
+        Ok(_) => {
+            let _ = collect_runit_service_paths(root)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("inspect required runit service directory {}", service_root.display())
+            })
+        }
+    }
+    Ok(())
 }
 
 /// Remove entries created under the runit service tree after capture. The
@@ -1312,6 +1342,24 @@ mod tests {
 
         let _ = fs::remove_file(root.join("usr/bin"));
         let _ = fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn unsupported_untracked_service_entry_is_rejected_before_restore_mutates_boot_files() {
+        use std::os::unix::net::UnixListener;
+
+        let root = fixture("special-untracked-service-entry");
+        make_snapshot(&root);
+        fs::write(root.join("boot/grub/grub.cfg"), b"new config\n").unwrap();
+        let socket_path = root.join("etc/runit/runsvdir/default/unexpected.sock");
+        let _socket = UnixListener::bind(&socket_path).unwrap();
+
+        assert!(restore(&root, "faseela-runit-to-systemd-v1").is_err());
+        assert_eq!(
+            fs::read(root.join("boot/grub/grub.cfg")).unwrap(),
+            b"new config\n",
+            "preflight must reject the unsupported service entry before restoring any boot path"
+        );
     }
 
     #[test]
