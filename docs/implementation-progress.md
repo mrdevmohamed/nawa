@@ -1681,6 +1681,23 @@ untouched pre-existing red** |
   the maintainer may delete that entry before the next release.
 * No `Cargo.lock` change needed so far.
 
+## Phase 7 update — system-transition preview wired into `nawa upgrade` (2026-11-18)
+
+The last preview integration was repaired without weakening the module-layering gate:
+
+* `src/domain/system/observation.rs` owns the pure, source-attributed snapshot types. Runtime PID 1, installed candidates, desired policy, execution context, and the validated effective profile remain distinct facts.
+* `application/features/system/detect.rs` reads the runtime and profile once and returns the snapshot. `commands/dispatch.rs` composes that observation before calling the upgrade feature.
+* `upgrade/system_transition.rs` consumes the domain snapshot and has no dependency on `application`; it no longer reopens profile files while planning.
+* The built-in Faseela runit-to-systemd migration definition now lives in `domain/system/migration.rs`. The application migration coordinator delegates to that definition.
+* `repo::INDEX_SCHEMA_V4` is exposed through the repository facade rather than duplicated as a magic number.
+* The normal test-facing/package-upgrade path remains available without fabricating a runtime observation; the CLI-only `upgrade_with_observation` path is the one that adds the separate transition preview.
+
+**Verified:** commit `f79f82181f8581594e1bed08d3fc6198107bc492`; Actions run [44248582860](https://github.com/mrdevmohamed/nawa/actions/runs/44248582860) completed with `success`. The run includes build + Clippy + tests, Ubuntu 22.04/24.04 root/user coverage, CLI smoke, none/env/sandbox/closure build levels and the static musl build.
+
+**Scope:** this is a read-only runtime-dependency-closure preview, not a complete migration solver or a boot transition. Index v4 still has no version ranges, conflicts, replacements or complete dependent-impact model. It must not be described as an executable migration plan. `--yes` remains limited to the ordinary package upgrade.
+
+**External policy finding:** B7 is broader than the previous single-recipe note. The current Faseela Repo has service-preset invocations in five package hooks, and both its developer guide and systemd-core test currently endorse the pattern. The policy change must therefore be repository-wide and paired with a distribution-owned provisioning step; deleting only the `systemd-units` hook would leave the trust boundary inconsistent.
+
 ## Unresolved external dependencies (blockers)
 
 | ID | Blocker | Owner | Affects |
@@ -1691,7 +1708,7 @@ untouched pre-existing red** |
 | B4 | **System profile location — RE-INSPECTED, STILL OPEN**: Faseela `42dec56` has `profiles/x86_64.toml` with `init = "systemd"` (a *build* profile) but no Nawa `system-profile.toml` at either `<root>/usr/share/nawa/system-profile.toml` or `<root>/etc/nawa/system-profile.toml`. Required: Faseela publishes those files with the agreed keys/precedence (or confirms Nawa's loader reads its existing profile). Acceptance: `nawa system migrate apply` preflight finds a declared systemd target on a provisioned root. | Faseela agreement | Phase 6 apply preflight |
 | B5 | **Bootloader/initramfs + recovery contract — RE-INSPECTED, PARTIALLY RESOLVED**: grub (BIOS MBR + UEFI removable ESP) and saq-generated initramfs are in place; Faseela already `switch_root`s to systemd. Missing: the *migration* contract — which artifacts are retained, how the old boot entry is restored, and the documented external rescue path. Required: written boot/recovery contract owned by Faseela. Acceptance: a failed verification can be rolled back to a bootable runit/old-kernel route. | Faseela | Phase 6 handler |
 | B6 | **VM boot-test harness — RE-INSPECTED, PARTIALLY RESOLVED**: Faseela has `scripts/qemu-boot-test.sh` (BIOS ISO boot, serial login, KVM/TCG) but no migration disk-image harness with snapshots and no UEFI path. Required: disposable VM harness with snapshots for both BIOS and UEFI running the real saq. Acceptance: all §14.3 scenarios pass on the real implementation. | Nawa/infra + Faseela | Phase 6 acceptance |
-| B7 | **Hook/trigger trust policy — RE-INSPECTED, STILL OPEN**: faseela-repo `3f3cf60` `recipes/system/systemd-units/recipe.toml:158-162` has a `post_install` hook running `systemctl preset`. Required: documented policy + CI guard that package hooks/triggers never activate services as migration handlers (Faseela), and Nawa docs stating hooks are privileged code, not handlers. | Faseela (+ Nawa docs) | Phase 6 trust boundary |
+| B7 | **Hook/trigger trust policy — RE-INSPECTED, OPEN ACROSS THE RECIPE TREE**: direct `systemctl preset` calls exist in `systemd-units`, `bluez`, `polkit`, `seatd-systemd`, and `network-manager` post-install hooks. `DEVELOPER-EDITION.md` explicitly recommends presetting from hooks, and `scripts/test-systemd-core.py` requires it. Preset files themselves can remain package payload, but service activation policy must be applied by a distribution-owned provisioning step, not privileged archive hooks. Add a recipe-wide CI guard and revise the developer guidance/test. | Faseela Repo + Faseela provisioning | Phase 6 trust boundary |
 
 ## Exact next task
 
@@ -1713,5 +1730,11 @@ distribution-owned contracts are resolved:
 Do not invoke the migration coordinator, remove runit, edit boot configuration
 or claim a successful transition while these conditions are unresolved.
 Continue read-only inspection and package-planning work independently. The
-feature-branch CI workflow is now enabled; record its result after the
-current run completes.
+feature-branch CI workflow passed on 2026-11-18 at commit
+`f79f82181f8581594e1bed08d3fc6198107bc492` (Actions run
+[44248582860](https://github.com/mrdevmohamed/nawa/actions/runs/44248582860)).
+The source-layering failure and schema-v4 facade export are fixed; the
+upgrade preview now receives a single immutable `ObservedSystem` snapshot
+from command composition, and its effective target profile is not reread
+inside `upgrade`. This verifies Nawa preview code only; it does not resolve
+Faseela/SAQ boot blockers.

@@ -671,3 +671,25 @@ mutations — read-only commands are unaffected by the gate.
 
 *End of audit. Next: Stage 1 (structural refactor + service removal) — see
 `docs/implementation-progress.md` for the live task list.*
+
+
+## 18. 2026-11-18 follow-up — current system-intelligence integration
+
+The Phase 0–7 notes above are historical audit material, not a current absence
+claim. The current feature branch contains the system identity/profile/
+capability model, authenticated package capability metadata, migration
+records/gate/coordinator, system inspection commands, and a read-only init
+transition preview. The preview's application-to-upgrade dependency cycle was
+removed by moving its observation DTOs and built-in migration definition to
+`domain/system`; command composition now passes the observation snapshot
+downward. CI passed on commit
+`f79f82181f8581594e1bed08d3fc6198107bc492` (run
+[44248582860](https://github.com/mrdevmohamed/nawa/actions/runs/44248582860)).
+
+This does **not** change the remaining security findings: package hooks and
+transaction triggers remain privileged shell code. They are not authenticated
+migration handlers, may not implement service transitions, and may not be
+used to bypass the migration coordinator, mutation gate or explicit approval.
+The Faseela Repo currently still contains direct service-preset operations in
+package hooks; B7 therefore remains open until its policy and CI guard are
+implemented across the recipe tree.
