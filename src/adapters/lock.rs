@@ -116,13 +116,22 @@ pub(crate) fn acquire_for_migration(
     root: &Path,
     _authority: MigrationAuthority,
 ) -> Result<Option<DbLock>> {
-    if std::env::var_os(HELD_ENV).is_some() {
+    reject_nested_marker(std::env::var_os(HELD_ENV).is_some())?;
+    acquire_unchecked(root, Mode::Exclusive)
+}
+
+/// Reject a nested-process marker before a migration authority can cross the
+/// gate. Kept as a pure input check so tests never mutate process-global
+/// environment while other Rust tests are running in parallel.
+pub(crate) fn reject_nested_marker(marker_present: bool) -> Result<()> {
+    if marker_present {
         bail!(
             "a nested nawa process ({HELD_ENV} is set) cannot cross the migration \
              mutation gate: recovery runs in the coordinator process only"
         );
     }
-    acquire_unchecked(root, Mode::Exclusive)
+    Ok(())
+}
 }
 
 /// The gate-free inner acquisition used only by `acquire_for_migration`.
