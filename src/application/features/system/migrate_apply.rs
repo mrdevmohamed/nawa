@@ -181,14 +181,15 @@ impl MigrationApproval {
     }
 }
 
-/// The exact external blockers that keep the built-in boot handler from
-/// running (re-inspected against Faseela/SAQ HEAD on 2026-11-18).
+/// Blockers are evaluated against the default branches. Companion changes
+/// may be ready in PRs, but they do not alter the installed distribution until
+/// merged and accepted by the relevant boot tests.
 const HANDLER_BLOCKERS: &[&str] = &[
-    "B1: saq disk-boot selects /usr/bin/runit before /sbin/init; the disk grub.cfg passes no init= (Faseela/SAQ)",
-    "B4: Faseela has no Nawa system-profile.toml at the loader's agreed paths (Faseela)",
-    "B5: no migration-specific bootloader/initramfs + recovery contract is agreed (Faseela)",
-    "B6: no BIOS+UEFI disk-migration VM harness with snapshots exists (Nawa/infra)",
-    "B7: systemd-units ships a post_install hook that runs systemctl preset (Faseela)",
+    "B1: Faseela PR #59 adds init=/usr/lib/systemd/systemd to installed-disk GRUB but is not merged; real BIOS and UEFI boots through SAQ must still verify PID 1",
+    "B4: Faseela Repo PR #203 adds /usr/share/nawa/system-profile.toml but is not merged and no installed-root acceptance test has verified the effective profile",
+    "B5: no migration-specific boot artifact retention, old-entry restoration, or tested external rescue contract exists",
+    "B6: no disposable BIOS+UEFI installed-disk migration harness with snapshots and real SAQ/PID 1 verification exists",
+    "B7: Faseela Repo PR #203 removes service-manager mutations from five package hooks and adds a recipe guard, but it is not merged; current main still has the old hook behavior",
 ];
 
 /// How an apply attempt ended before any package mutation.
@@ -338,8 +339,11 @@ mod tests {
             MigrationApproval::explicit(&d.id, &d.from, &d.to, true, true).unwrap();
         match apply_for_tests(&root, &proc, approval).unwrap() {
             ApplyRefusal::HandlerBlocked(blockers) => {
-                assert!(blockers.iter().any(|b| b.contains("B1")));
+                assert!(blockers.iter().any(|b| b.contains("B1") && b.contains("PR #59")));
+                assert!(blockers.iter().any(|b| b.contains("B4") && b.contains("PR #203")));
                 assert!(blockers.iter().any(|b| b.contains("B5")));
+                assert!(blockers.iter().any(|b| b.contains("B6")));
+                assert!(blockers.iter().any(|b| b.contains("B7") && b.contains("PR #203")));
             }
         }
         assert!(
