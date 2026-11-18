@@ -90,8 +90,11 @@ fn system_plan_keeps_an_offline_runtime_unresolved_and_is_explicitly_read_only()
     assert!(stdout.contains("System plan (read-only"), "{stdout}");
     assert!(stdout.contains("Decision: unresolved"), "{stdout}");
     assert!(stdout.contains("runtime PID 1 is unknown"), "{stdout}");
-    assert!(stdout.contains("Package actions: resolved separately from authenticated repository metadata"), "{stdout}");
-    assert!(stdout.contains("Repository plan: unresolved — no repository is configured"), "{stdout}");
+    assert!(stdout.contains("Exact repository provenance, transition decision and artifact pins"), "{stdout}");
+    assert!(stdout.contains("Unified SystemPlan (read-only"), "{stdout}");
+    assert!(stdout.contains("Plan identity: sp-"), "{stdout}");
+    assert!(stdout.contains("Repository: not configured"), "{stdout}");
+    assert!(stdout.contains("Transition: unresolved — no repository is configured"), "{stdout}");
     let _ = fs::remove_dir_all(root);
 }
 
@@ -118,10 +121,12 @@ init-system = "systemd"
     assert!(output.status.success(), "system plan is an inspection report: {stdout}");
     assert!(stdout.contains("System plan (read-only"), "{stdout}");
     assert!(
-        stdout.contains("installed package inventory could not be read"),
+        stdout.contains("installed package inventory is unavailable"),
         "{stdout}"
     );
     assert!(stdout.contains("corrupt db entry"), "{stdout}");
+    assert!(stdout.contains("Repository: not inspected"), "{stdout}");
+    assert!(stdout.contains("Transition: unresolved — installed package inventory is unavailable"), "{stdout}");
     let _ = fs::remove_dir_all(root);
 }
 
@@ -155,8 +160,9 @@ init-system = "systemd"
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "system plan is an inspection report: {stdout}");
     assert!(stdout.contains("Decision: unresolved"), "{stdout}");
+    assert!(stdout.contains("Repository: unavailable"), "{stdout}");
     assert!(
-        stdout.contains("Repository plan: unresolved — authenticated repository metadata could not be loaded or verified"),
+        stdout.contains("Transition: unresolved — authenticated repository metadata could not be loaded or verified"),
         "{stdout}"
     );
     assert!(stdout.contains("not valid TOML"), "{stdout}");
