@@ -167,7 +167,7 @@ fn cmd_migrate(ctx: &Ctx, action: MigrateCmd) -> Result<()> {
         MigrateCmd::List => print_list(&ctx.root),
         MigrateCmd::Show { id } => print_show(&ctx.root, &id),
         MigrateCmd::Status => print_status(&ctx.root),
-        MigrateCmd::Plan { id } => print_plan(&ctx.root, &id),
+        MigrateCmd::Plan { id } => print_plan(ctx, &id),
         MigrateCmd::Apply {
             id,
             from,
@@ -484,7 +484,7 @@ fn render_system_explanation(observed: &detect::ObservedSystem) -> Vec<String> {
     lines.extend(render_system_status(observed).into_iter().skip(1));
     lines
 }
-fn print_plan(root: &Path, id: &str) -> Result<()> {
+fn print_plan(ctx: &Ctx, id: &str) -> Result<()> {
     let definition = apply_use::builtin_definition();
     if id != definition.id {
         return Err(anyhow!(
@@ -492,8 +492,12 @@ fn print_plan(root: &Path, id: &str) -> Result<()> {
             definition.id
         ));
     }
-    let plan = apply_use::plan(root, Path::new("/proc"));
+    let plan = apply_use::plan(&ctx.root, Path::new("/proc"));
     for line in render_plan(&plan) {
+        println!("{line}");
+    }
+    let system = system_plan::build(&ctx.root, Path::new("/proc"), ctx.repo.as_deref());
+    for line in render_unified_system_plan(&system) {
         println!("{line}");
     }
     Ok(())
@@ -536,14 +540,37 @@ fn print_apply(
         acknowledge_recovery,
         pin,
     )?;
-    match apply_use::apply(&ctx.root, Path::new("/proc"), repository, approval)? {
+    match apply_use::apply(
+        ctx,
+        Path::new("/proc"),
+        repository,
+        approval,
+        &recovery_ui(),
+    )? {
         apply_use::ApplyRefusal::HandlerBlocked(blockers) => {
             for line in render_apply_refusal(&blockers) {
                 println!("{line}");
             }
+            anyhow::bail!("migration apply refused: boot/recovery acceptance requirements are unresolved (no migration started)");
+        }
+        apply_use::ApplyRefusal::Prepared(outcome) => {
+            use crate::application::features::system::migrate_coordinator::PreparationOutcome;
+            match *outcome {
+                PreparationOutcome::Committed(record) => anyhow::bail!(
+                    "migration {} is awaiting-reboot; run system migrate resume after reboot",
+                    record.id
+                ),
+                PreparationOutcome::Compensated(record) => anyhow::bail!(
+                    "migration {} preparation failed before package changes",
+                    record.id
+                ),
+                PreparationOutcome::Ambiguous(record) => anyhow::bail!(
+                    "migration {} needs-recovery; the mutation gate remains active",
+                    record.id
+                ),
+            }
         }
     }
-    Ok(())
 }
 
 /// Presentation adapter for the recovery use case. Recovery never prompts,
@@ -565,6 +592,11 @@ fn recovery_ui() -> UserInteraction {
 fn print_resume(ctx: &Ctx) -> Result<()> {
     let ui = recovery_ui();
     let (report, outcome) = recover::recover_and_resume(ctx, &ui)?;
+    let needs_recovery = report
+        .notes
+        .iter()
+        .any(|note| matches!(note.action, recover::RecoveryAction::NeedsRecovery(_)))
+        || matches!(outcome, Some(recover::ResumeOutcome::NeedsRecovery(_, _)));
     if report.notes.is_empty() {
         crate::nawa_info!("no interrupted migration needed recovery");
     }
@@ -575,6 +607,9 @@ fn print_resume(ctx: &Ctx) -> Result<()> {
         for line in render_resume_outcome(&outcome) {
             println!("{line}");
         }
+    }
+    if needs_recovery {
+        anyhow::bail!("migration recovery is unresolved; the mutation gate and recovery artifacts are retained");
     }
     Ok(())
 }

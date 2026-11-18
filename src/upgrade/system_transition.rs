@@ -42,6 +42,7 @@ pub(crate) struct PackageAction {
     pub(crate) current: Option<String>,
     pub(crate) target: String,
     pub(crate) reason: String,
+    pub(crate) install_reason: Why,
     /// The action is pinned to an archive entry in the authenticated index.
     pub(crate) source: PackageActionSource,
     pub(crate) archive: String,
@@ -50,17 +51,7 @@ pub(crate) struct PackageAction {
     pub(crate) download_url: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PackageActionKind {
-    Install,
-    Upgrade,
-    Keep,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PackageActionSource {
-    AuthenticatedRepository,
-}
+pub(crate) use crate::domain::system::plan::{PackageActionKind, PackageActionSource};
 
 pub(crate) fn plan(
     observed: &ObservedSystem,
@@ -418,6 +409,7 @@ fn build_from_observation(
                 };
                 PackageAction {
                     kind: PackageActionKind::Upgrade,
+                    install_reason: Why::Update,
                     name: item.name,
                     current: Some(current),
                     target: target_version,
@@ -443,6 +435,7 @@ fn build_from_observation(
                 };
                 PackageAction {
                     kind: PackageActionKind::Install,
+                    install_reason: item.why,
                     name: item.name,
                     current: None,
                     target: target_version,
@@ -471,6 +464,7 @@ fn build_from_observation(
             };
             package_actions.push(PackageAction {
                 kind: PackageActionKind::Keep,
+                install_reason: Why::Update,
                 name: name.clone(),
                 current: installed.get(&name).cloned(),
                 target: install::version_rel(&candidate.version, candidate.rel),

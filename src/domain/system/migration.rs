@@ -6,7 +6,7 @@
 //! [`MigrationDefinition`], the trusted built-in [`HandlerId`] allowlist
 //! (§10.2), the durable [`MigrationState`] state machine with its legal
 //! [`Transition`]s, and the [`MigrationRecord`] model that persists it. No
-//! I/O, no serde, no adapter types: the record's TOML text format and the
+//! I/O or adapter types: the record's TOML text format and the
 //! directory layout belong to the record store (`migration_record`, a
 //! top-level module — see its header for the placement rationale; the
 //! durable record lives under the selected target root's state directory).
@@ -464,6 +464,16 @@ pub(crate) struct MigrationRecord {
     pub(crate) state: MigrationState,
     /// ordered write-ahead steps (§10.3: intent before, result after)
     pub(crate) steps: Vec<StepRecord>,
+    /// Schema 1 has no pinned evidence and is inspection/recovery only.
+    pub(crate) approval: Option<super::plan::SystemPlanPin>,
+    pub(crate) snapshot: Option<SnapshotPin>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SnapshotPin {
+    pub(crate) identity: String,
+    pub(crate) manifest_sha256: String,
 }
 
 impl MigrationRecord {
@@ -478,6 +488,8 @@ impl MigrationRecord {
             handler: definition.handler,
             state: MigrationState::Planned,
             steps: Vec::new(),
+            approval: None,
+            snapshot: None,
         }
     }
 

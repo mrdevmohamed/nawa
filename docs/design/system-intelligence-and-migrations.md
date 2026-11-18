@@ -7,6 +7,28 @@
 
 ## 1. Product definition
 
+### Implemented integration contract (2026-11-19)
+
+The application chain is `SystemPlan` → explicit `MigrationApproval` → verified
+`SystemPlanPin` → exact archive staging → `ApprovedPlan` → coordinator → existing
+`MigrationInstall`/installer/WAL/history. The coordinator owns the exclusive lock
+and private permit. Staging authenticates every exact index entry and archive
+before that lock, with no second solve or build fallback; local observations and
+inventory identities are checked again under the lock before durable intent.
+
+Plan identity v2 includes ordered artifact/source/version/size/hash/reason
+evidence, the observation digest and installed identities. Durable migration
+schema 2 retains it; schema 1 remains legacy evidence and cannot authorize
+completion. Snapshot schema 3 binds capture to the selected root device/inode.
+Capture has write-ahead intent before packages, and the resulting manifest digest
+is retained in the record. Recovery checks that manifest, all payloads and staged
+archives; restoration validates the pinned evidence before touching targets.
+
+Production apply and resume remain blocked on firmware/initramfs, installed-disk
+and external rescue acceptance. Filesystem snapshots are retained indefinitely;
+cleanup and old-provider retirement require a separately approved recovery window.
+No rollback or rescue-rebinding policy is inferred from successful adapter tests.
+
 System Intelligence is Nawa's system-aware decision and reconciliation layer. It observes a target system, interprets its installed and desired state, resolves package and provider choices against authenticated metadata, explains the resulting plan, and coordinates approved changes through Nawa's existing transaction machinery.
 
 Migration is one high-risk feature built on these shared capabilities. The runit-to-systemd transition is the first migration vertical slice, not the definition of the product.

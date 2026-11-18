@@ -56,6 +56,7 @@ use crate::domain::system::identity::InitKind;
 use crate::domain::system::migration::{
     transition, HandlerId, MigrationRecord, MigrationState, StepOutcome, Transition,
 };
+use crate::domain::system::observation::Confidence;
 use crate::transaction::history::{self, TxStatus};
 use crate::transaction::recovery as wal;
 
@@ -287,12 +288,54 @@ fn recover_gate_active(
     };
 
     let mut amended = record.clone();
+    if record.approval.is_some() {
+        if let Err(error) = verify_retained_evidence(&ctx.root, record) {
+            amended.state =
+                transition(amended.state, Transition::Ambiguous).map_err(anyhow::Error::msg)?;
+            persist(&ctx.root, &amended)?;
+            return Ok(RecoveryAction::NeedsRecovery(format!(
+                "retained approval/snapshot evidence is invalid: {error:#}"
+            )));
+        }
+    }
     let mut reconciled_any = Vec::new();
     let mut ambiguous: Option<String> = None;
     let mut committed_any = false;
     let mut failed_steps = 0usize;
 
-    for (index, step) in amended.steps.iter_mut().enumerate() {
+    let mut package_index = 0;
+    let expected_actions: Vec<_> = record
+        .approval
+        .iter()
+        .flat_map(|pin| pin.artifacts.iter())
+        .filter(|a| a.kind != crate::domain::system::plan::PackageActionKind::Keep)
+        .collect();
+    for step in amended.steps.iter_mut() {
+        if record.approval.is_some() && step.id == "capture-boot-snapshot" {
+            if step.outcome != Some(StepOutcome::Succeeded) {
+                ambiguous = Some("snapshot capture was interrupted; retained publication needs explicit inspection".into());
+                break;
+            }
+            continue;
+        }
+        let index = package_index;
+        package_index += 1;
+        if record.approval.is_some() {
+            let expected = expected_actions.get(index);
+            let change = reconciled
+                .as_ref()
+                .and_then(|r| r.package_changes.get(index));
+            if !expected.is_some_and(|artifact| {
+                step.id == format!("install-{}", artifact.name)
+                    && change.is_some_and(|c| change_matches_pin(c, artifact))
+            }) {
+                ambiguous = Some(format!(
+                    "step {} cannot be attributed to its exact approved artifact and package WAL",
+                    step.id
+                ));
+                break;
+            }
+        }
         if step.outcome.is_some() {
             // Case C: a resolved step still has to hold in the database —
             // a success claim is not proof (§10.3 verify postconditions).
@@ -301,7 +344,7 @@ fn recover_gate_active(
                     .as_ref()
                     .and_then(|r| r.package_changes.get(index))
                     .is_some_and(|change| {
-                        change.status == "committed" || change.status == "committed-hook-failed"
+                        change.status == "committed" && change_status_matches_db(&ctx.root, change)
                     });
                 if !holds {
                     ambiguous = Some(format!(
@@ -324,9 +367,7 @@ fn recover_gate_active(
             .as_ref()
             .and_then(|r| r.package_changes.get(index));
         let outcome = match change {
-            Some(change)
-                if change.status == "committed" || change.status == "committed-hook-failed" =>
-            {
+            Some(change) if change.status == "committed" => {
                 if change_status_matches_db(&ctx.root, change) {
                     StepOutcome::Succeeded
                 } else {
@@ -365,6 +406,13 @@ fn recover_gate_active(
                 // is that no observable side effect happened. A package that
                 // *is* present cannot be attributed to this step.
                 let db = crate::adapters::db::Db::new(&ctx.root);
+                if db.installed().is_err() {
+                    ambiguous = Some(
+                        "package inventory is unreadable for an interrupted step without WAL"
+                            .into(),
+                    );
+                    break;
+                }
                 let present = db.installed().is_ok_and(|entries| {
                     entries
                         .iter()
@@ -411,7 +459,14 @@ fn recover_gate_active(
     // Re-conclude from the durable outcomes (Case C). A failure with no
     // committed step is trivially compensated; a failure after a commit has
     // no verified compensation (§10.5), so it must keep the gate.
-    let ending = if failed_steps == 0 {
+    let ending = if record.approval.is_some()
+        && (package_index != expected_actions.len()
+            || !super::migrate_apply::handler_blockers().is_empty())
+    {
+        // A prefix of the plan is never the complete operation. External boot
+        // preparation also cannot be reconstructed from package outcomes.
+        Transition::PreparationAmbiguous
+    } else if failed_steps == 0 {
         Transition::PreparationCommitted
     } else if committed_any {
         Transition::PreparationAmbiguous
@@ -585,6 +640,11 @@ fn resume_inner(
                 "internal: the exclusive package database lock is required to resume a migration"
             )
         })?;
+    // The authoritative observation must be fresh under the lock too.
+    let observed = detect::observe_canonical(&ctx.root, proc);
+    if !matches!(observed.context, ExecContext::LiveHost { .. }) {
+        bail!("live-host attribution changed before post-boot verification");
+    }
 
     let ids = store::record_ids(&ctx.root)?;
     let mut candidates = Vec::new();
@@ -631,7 +691,11 @@ fn resume_inner(
 
     let mut failures = Vec::new();
     match &observed.runtime {
-        RuntimeInit::Observed { kind, .. } if *kind == expected_target => {
+        RuntimeInit::Observed {
+            kind,
+            confidence: Confidence::Proven,
+            ..
+        } if *kind == expected_target => {
             (ui.info)(&format!(
                 "migration {}: PID 1 is verified as {}",
                 record.id,
@@ -647,6 +711,25 @@ fn resume_inner(
             failures.push(format!("PID 1 identity is unknown: {reason}"))
         }
     }
+
+    match &observed.desired {
+        detect::DesiredInit::Declared { identity, .. } if identity == &record.to.identity => {}
+        _ => failures
+            .push("effective system profile does not require the approved target init".into()),
+    }
+    if let Err(error) = verify_retained_evidence(&ctx.root, &record) {
+        failures.push(format!("retained migration evidence: {error:#}"));
+    }
+    if let Err(error) = verify_approved_inventory(&ctx.root, &record) {
+        failures.push(format!("approved installed identities: {error:#}"));
+    }
+    // Firmware/initramfs and Live-ISO acceptance are not established by the
+    // presence of files or by PID 1 alone. This boundary also applies to resume.
+    failures.extend(
+        super::migrate_apply::handler_blockers()
+            .iter()
+            .map(|s| s.to_string()),
+    );
 
     for postcondition in verify_boot_postconditions(&ctx.root, &expected_target) {
         if !postcondition.satisfied {
@@ -672,17 +755,107 @@ fn resume_inner(
         return Ok(ResumeOutcome::NeedsRecovery(record, failures));
     }
 
+    // Resolve package history *before* clearing the authoritative gate.
+    if matches!(
+        finalize_history(ctx, &record, ui)?,
+        RecoveryAction::NeedsRecovery(_)
+    ) {
+        bail!("package transaction history could not be reconciled; mutation gate retained");
+    }
     record.state =
         transition(record.state, Transition::VerificationSucceeded).map_err(anyhow::Error::msg)?;
     persist(&ctx.root, &record)?;
     // Finalization does *not* remove the old provider: retiring runit needs
     // its own verified rollback window (B2/B5) and its own package plan.
-    finalize_history(ctx, &record, ui)?;
     (ui.info)(&format!(
         "migration {}: target init verified; the record is completed and the mutation gate is clear (old-provider cleanup is a separate, explicitly authorized action)",
         record.id
     ));
     Ok(ResumeOutcome::Verified(record))
+}
+
+fn verify_retained_evidence(root: &Path, record: &MigrationRecord) -> Result<()> {
+    let pin = record.approval.as_ref().ok_or_else(|| {
+        anyhow!("legacy schema-1 record has no pinned SystemPlan; it cannot authorize completion")
+    })?;
+    pin.validate().map_err(anyhow::Error::msg)?;
+    let snapshot = record
+        .snapshot
+        .as_ref()
+        .ok_or_else(|| anyhow!("no durable snapshot binding was captured"))?;
+    crate::adapters::migration_boot_snapshot::verify_pinned(root, &record.id, snapshot)?;
+    for artifact in &pin.artifacts {
+        let object = crate::adapters::artifact::object_path(root, &artifact.sha256)?;
+        crate::adapters::artifact::verify_object_file(&object, &artifact.sha256)?;
+        if std::fs::metadata(object)?.len() != artifact.size {
+            bail!(
+                "retained staged archive size mismatch for {}",
+                artifact.name
+            );
+        }
+    }
+    Ok(())
+}
+
+fn change_matches_pin(
+    change: &history::PackageChange,
+    pin: &crate::domain::system::plan::ArtifactPin,
+) -> bool {
+    change.name == pin.name
+        && change.after.as_ref().is_some_and(|after| {
+            after
+                .version
+                .as_ref()
+                .zip(after.rel)
+                .is_some_and(|(v, r)| format!("{v}-{r}") == pin.target)
+                && after.artifact_sha256 == pin.sha256
+        })
+}
+
+fn verify_approved_inventory(root: &Path, record: &MigrationRecord) -> Result<()> {
+    let pin = record
+        .approval
+        .as_ref()
+        .ok_or_else(|| anyhow!("no approved package inventory"))?;
+    let actual = super::observation::observe(root, Path::new("/proc"));
+    let mut expected: std::collections::BTreeMap<_, _> = pin
+        .installed_identities
+        .iter()
+        .map(|i| (i.name.clone(), i.clone()))
+        .collect();
+    for artifact in &pin.artifacts {
+        if artifact.kind == crate::domain::system::plan::PackageActionKind::Keep {
+            continue;
+        }
+        let reason = if artifact.install_reason == crate::domain::planning::install::Why::Update {
+            expected
+                .get(&artifact.name)
+                .map(|i| i.reason.clone())
+                .unwrap_or_default()
+        } else {
+            artifact.install_reason.db_reason().as_str().to_string()
+        };
+        expected.insert(
+            artifact.name.clone(),
+            crate::domain::system::plan::InstalledIdentity {
+                name: artifact.name.clone(),
+                version: artifact.target.clone(),
+                sha256: artifact.sha256.clone(),
+                reason,
+            },
+        );
+        if crate::install::hook_needs_retry(root, &artifact.name)? {
+            bail!("{} has an unverified post-install hook", artifact.name);
+        }
+    }
+    if !matches!(
+        actual.packages,
+        super::observation::PackageInventory::Available(_)
+    ) || actual.installed_identities != expected.into_values().collect::<Vec<_>>()
+    {
+        bail!("installed package state does not match the exact approved changes; the old provider must be retained");
+    }
+    Ok(())
 }
 
 /// One checkable boot/init postcondition, reported with its source so the
@@ -704,43 +877,40 @@ pub(crate) fn verify_boot_postconditions(root: &Path, target: &InitKind) -> Vec<
     let mut out = Vec::new();
 
     // 1. the generic init entry point must explicitly select the target
-    let mut selected = None;
+    let mut selected = Vec::new();
+    let mut invalid = Vec::new();
     for rel in ["sbin/init", "usr/sbin/init", "usr/bin/init"] {
-        let path = root.join(rel);
-        let Ok(meta) = std::fs::symlink_metadata(&path) else {
-            continue;
-        };
-        if !meta.file_type().is_symlink() {
-            continue;
-        }
-        let Ok(link) = std::fs::read_link(&path) else {
-            continue;
-        };
-        if crate::domain::system::identity::identify(&link.to_string_lossy())
-            == Some(target.clone())
-        {
-            selected = Some((rel, link.to_string_lossy().into_owned()));
-            break;
+        match resolve_target_file(root, rel) {
+            Ok(None) => {}
+            Ok(Some(path))
+                if ["usr/lib/systemd/systemd", "lib/systemd/systemd"]
+                    .iter()
+                    .any(|p| path == Path::new(p)) =>
+            {
+                selected.push(rel);
+            }
+            Ok(Some(_)) | Err(_) => invalid.push(rel),
         }
     }
-    out.push(match selected {
-        Some((rel, link)) => Postcondition {
+    out.push(if !selected.is_empty() && invalid.is_empty() {
+        Postcondition {
             name: "init-entry-point-selects-target",
             satisfied: true,
-            detail: format!("{rel} is a symlink to {link} ({target_name})"),
-        },
-        None => Postcondition {
+            detail: format!("{} resolve to the executable {target_name} payload under the selected root", selected.join(", ")),
+        }
+    } else {
+        Postcondition {
             name: "init-entry-point-selects-target",
             satisfied: false,
-            detail: format!("no target-root init entry point explicitly selects {target_name}"),
-        },
+            detail: format!("init selection is missing, contradictory or unsafe for {target_name}; invalid entries: {}", invalid.join(", ")),
+        }
     });
 
     // 2. the target provider's payload must be staged in the target root
     let target_paths = ["usr/lib/systemd/systemd", "lib/systemd/systemd"];
     let staged = target_paths
         .iter()
-        .find(|p| std::fs::symlink_metadata(root.join(p)).is_ok());
+        .find(|p| resolve_target_file(root, p).is_ok_and(|p| p.is_some()));
     out.push(match staged {
         Some(path) => Postcondition {
             name: "target-provider-staged",
@@ -756,10 +926,10 @@ pub(crate) fn verify_boot_postconditions(root: &Path, target: &InitKind) -> Vec<
 
     // 3. the documented recovery route: the old provider's artifacts must be
     // retained until the new init has booted and passed verification (§10.5).
-    let old_paths = ["etc/runit/2", "usr/bin/runit", "sbin/runit-init"];
+    let old_paths = ["usr/bin/runit", "sbin/runit-init"];
     let retained = old_paths
         .iter()
-        .find(|p| std::fs::symlink_metadata(root.join(p)).is_ok());
+        .find(|p| resolve_target_file(root, p).is_ok_and(|p| p.is_some()));
     out.push(match retained {
         Some(path) => Postcondition {
             name: "old-provider-retained-for-recovery",
@@ -775,6 +945,64 @@ pub(crate) fn verify_boot_postconditions(root: &Path, target: &InitKind) -> Vec<
     });
 
     out
+}
+
+/// Resolve selected-root paths with root-relative absolute symlinks and a
+/// bounded no-follow walk. Never canonicalize an absolute offline-root link
+/// against the developer's host filesystem.
+fn resolve_target_file(root: &Path, relative: &str) -> Result<Option<std::path::PathBuf>> {
+    use std::collections::VecDeque;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Component, PathBuf};
+    let mut pending: VecDeque<_> = Path::new(relative)
+        .components()
+        .map(|c| c.as_os_str().to_os_string())
+        .collect();
+    let mut resolved = PathBuf::new();
+    let mut links = 0;
+    while let Some(part) = pending.pop_front() {
+        if part == "." {
+            continue;
+        }
+        if part == ".." {
+            if !resolved.pop() {
+                bail!("init path escapes selected root");
+            }
+            continue;
+        }
+        resolved.push(part);
+        let meta = match std::fs::symlink_metadata(root.join(&resolved)) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        if meta.file_type().is_symlink() {
+            links += 1;
+            if links > 32 {
+                bail!("init symlink loop");
+            }
+            let link = std::fs::read_link(root.join(&resolved))?;
+            resolved.pop();
+            if link.is_absolute() {
+                resolved.clear();
+            }
+            let parts: Vec<_> = link
+                .components()
+                .filter(|c| !matches!(c, Component::RootDir))
+                .map(|c| c.as_os_str().to_os_string())
+                .collect();
+            for part in parts.into_iter().rev() {
+                pending.push_front(part);
+            }
+        } else if pending.is_empty() {
+            if !meta.is_file() || meta.permissions().mode() & 0o111 == 0 || meta.len() == 0 {
+                bail!("init payload is not a nonempty executable regular file");
+            }
+        } else if !meta.is_dir() {
+            bail!("init path ancestor is not a directory");
+        }
+    }
+    Ok(Some(resolved))
 }
 
 /// The transaction whose `requested_packages` names this migration, created
@@ -1319,12 +1547,23 @@ mod tests {
     }
 
     fn bootable_target_root(root: &Path) {
+        use std::os::unix::fs::PermissionsExt;
         file(root, "usr/lib/systemd/systemd", "staged systemd");
+        std::fs::set_permissions(
+            root.join("usr/lib/systemd/systemd"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
         symlink("../usr/lib/systemd/systemd", root.join("sbin/init")).ok();
         std::fs::create_dir_all(root.join("sbin")).ok();
         std::fs::remove_file(root.join("sbin/init")).ok();
         symlink("/usr/lib/systemd/systemd", root.join("sbin/init")).unwrap();
         file(root, "usr/bin/runit", "retained runit");
+        std::fs::set_permissions(
+            root.join("usr/bin/runit"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1357,7 +1596,7 @@ mod tests {
     }
 
     #[test]
-    fn resume_verifies_systemd_as_pid1_and_completes_the_record() {
+    fn pid1_and_payload_alone_cannot_complete_a_legacy_unpinned_record() {
         let root = tmpdir("migrate-recover-resume-ok");
         seed_record(&root, MigrationState::AwaitingReboot, vec![]);
         bootable_target_root(&root);
@@ -1370,11 +1609,18 @@ mod tests {
         let recorder = Recorder::default();
         let outcome = resume_with(&ctx_with(&root), &proc, &recorder.ui()).unwrap();
         match outcome {
-            ResumeOutcome::Verified(record) => assert_eq!(record.state, MigrationState::Completed),
-            other => panic!("expected Verified, got {other:?}"),
+            ResumeOutcome::NeedsRecovery(record, failures) => {
+                assert_eq!(record.state, MigrationState::NeedsRecovery);
+                assert!(failures.iter().any(|f| f.contains("legacy schema-1")));
+                assert!(failures.iter().any(|f| f.contains("B5")));
+            }
+            other => panic!("expected NeedsRecovery, got {other:?}"),
         }
-        assert_eq!(on_disk(&root).state, MigrationState::Completed);
-        assert!(!gate_active(&root), "verified completion clears the gate");
+        assert_eq!(on_disk(&root).state, MigrationState::NeedsRecovery);
+        assert!(
+            gate_active(&root),
+            "unverified boot/recovery must retain the gate"
+        );
         assert!(recorder
             .infos
             .borrow()

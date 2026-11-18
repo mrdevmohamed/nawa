@@ -93,9 +93,6 @@ pub(crate) enum LockOwnership<'a> {
     /// cannot be constructed without a real acquisition) and the permit
     /// proves §10.3 authorization; together they are the only legitimate
     /// way past the active mutation gate
-    #[allow(dead_code)] // constructed by the migration coordinator, whose own
-    // consumer (the apply command) is a later slice — the compiler cannot
-    // see that edge yet
     Coordinator {
         guard: &'a lock::DbLock,
         permit: &'a MigrationPermit,
@@ -105,8 +102,8 @@ pub(crate) enum LockOwnership<'a> {
 /// One staged-install request from the migration coordinator:
 /// everything [`install_for_migration`] needs beside the shared
 /// handles.
-#[allow(dead_code)] // same reason as LockOwnership::Coordinator
 pub(crate) struct MigrationInstall<'a> {
+    pub(crate) repository: Option<&'a upgrade::OpenRepo>,
     pub(crate) archive: &'a Path,
     /// the planned package name, for display
     pub(crate) what: &'a str,
@@ -372,7 +369,10 @@ fn install_one(
         LockOwnership::PerStep => Some(lock::acquire(&ctx.root, lock::Mode::Exclusive)?),
         // the coordinator's own guard covers this install: no second
         // acquire (§10.3 — it would deadlock, and the gate is active)
-        LockOwnership::Coordinator { .. } => None,
+        LockOwnership::Coordinator { guard, permit } => {
+            let _proof_of_ownership = (guard, permit);
+            None
+        }
     };
     // keep the guard alive for the whole install
     let _held = per_step_lock;
@@ -429,18 +429,37 @@ fn install_one(
                 index_bytes: Some(&open.index_bytes),
                 index_signature: open.index_signature.as_deref(),
                 signer_public: open.signer_public.as_deref(),
-                repo_id: open.base_url.as_deref(),
+                // Repository URLs can contain credentials; durable migration
+                // provenance lives in the plan's source fingerprint instead.
+                repo_id: if details.legacy_init_handoff.is_some() {
+                    None
+                } else {
+                    open.base_url.as_deref()
+                },
                 metadata: metadata.as_ref(),
             });
-            install::install_archive_from_index_proof(
-                archive,
-                &ctx.root,
-                details.force,
-                expected,
-                effective_reason,
-                proof,
-                file_journal,
-            )
+            match (details.legacy_init_handoff, proof) {
+                (Some(authority), Some(proof)) => {
+                    install::install_archive_from_index_proof_for_migration(
+                        archive,
+                        &ctx.root,
+                        expected,
+                        effective_reason,
+                        proof,
+                        file_journal,
+                        authority,
+                    )
+                }
+                (_, proof) => install::install_archive_from_index_proof(
+                    archive,
+                    &ctx.root,
+                    details.force,
+                    expected,
+                    effective_reason,
+                    proof,
+                    file_journal,
+                ),
+            }
         }
         pinned => {
             let expected = pinned.unwrap_or(target.artifact_sha256.as_str());
@@ -487,8 +506,6 @@ fn install_one(
 /// presents the unforgeable permit (§10.3). The coordinator's staged
 /// artifacts are verified before the mutation phase (§10.4 stage 4), so
 /// nothing is fetched or built here.
-#[allow(dead_code)] // the coordinator's consumer (the `nawa system migrate apply`
-                    // command, §12.2) is a later slice; the use case itself is complete and tested
 pub(crate) fn install_for_migration(
     ctx: &Ctx,
     request: MigrationInstall<'_>,
@@ -499,6 +516,10 @@ pub(crate) fn install_for_migration(
 ) -> Result<()> {
     if request.force {
         bail!("migration package steps cannot use generic --force; the typed legacy-init handoff is the only permitted conflict exception");
+    }
+    #[cfg(not(test))]
+    if request.repository.is_none() || request.expected_sha256.is_none() || request.allow_unsigned {
+        bail!("migration install requires the approved trusted index proof and exact archive pin");
     }
     install_one(
         ctx,
@@ -511,13 +532,12 @@ pub(crate) fn install_for_migration(
             force: request.force,
             allow_unsigned: request.allow_unsigned,
             index_sha256: request.expected_sha256,
-            // the plan pins the artifact hash directly (staged before the
-            // mutation phase); no repository index proof is involved
-            signed_index: false,
+            // Retain the exact authenticated index proof from staging.
+            signed_index: request.repository.is_some(),
             source: request.source,
             legacy_init_handoff: Some(request.legacy_init_handoff),
         },
-        None,
+        request.repository,
         op,
         ui,
         LockOwnership::Coordinator { guard, permit },

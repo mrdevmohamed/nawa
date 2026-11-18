@@ -127,7 +127,7 @@ Repository creation has schema-specific requirements. Index schema v2 and later 
 | nawa system migrate show ID | Show one migration record in full, including every step's intent and outcome. |
 | nawa system migrate status | Show whether the mutation gate is held and which migrations are in progress. |
 | nawa system migrate plan ID | Show the read-only plan for a built-in migration (works on an offline root; persists nothing). |
-| nawa system migrate apply ID --from CAP --to CAP --acknowledge-reboot --acknowledge-recovery | Apply a migration: live host only, with explicit per-migration authorization (a generic `--yes` is never enough). Currently refuses at the boot-handler boundary until the external Faseela/SAQ blockers are resolved. |
+| nawa system migrate apply ID --plan-id sp-HASH --from CAP --to CAP --acknowledge-reboot --acknowledge-recovery | Approve the exact displayed SystemPlan: live host only (a generic `--yes` is never enough). Currently refuses at the boot-handler boundary with exit 1 until external Faseela/SAQ acceptance is proven. |
 | nawa system migrate resume | Reconcile an interrupted migration and, after reboot, verify the target init and finalize the record (live host only). |
 | nawa completions SHELL | Print shell completion scripts for bash, zsh, or fish. |
 
@@ -138,6 +138,16 @@ Repository creation has schema-specific requirements. Index schema v2 and later 
 **Upgrade/system-transition behavior:** `nawa upgrade` can display a separate migration candidate only when the running PID 1 is proven, the effective target profile declares a different supported init, and a trusted schema-v4 repository identifies exactly one provider. It shows the provider package and its authenticated runtime-dependency closure. This is a preview, not an executable migration transaction: the current index does not encode version ranges, conflicts or replacements. Ordinary `upgrade` and `--yes` never apply the transition, remove the current init provider, or change boot configuration. The migration still requires its own explicit authorization and the external Faseela/SAQ boot and recovery contracts.
 
 **Migration commands:** `list`, `show`, `status` and `plan` are read-only (a shared lock gives one coherent snapshot; offline roots are supported) and never create records, change migration state, or run handlers. `apply` and `resume` are live-host only: they reject offline roots, chroots, containers and unverified hosts. `apply` requires the exact migration id, source/target capabilities and explicit acknowledgements of the reboot and recovery requirements. The real boot transition is still blocked on external Faseela/SAQ dependencies, so `apply` currently performs the preflight and then refuses with the precise blockers — it never claims a successful migration or modifies the machine. `resume` reconciles interrupted records and verifies actual PID 1 and boot postconditions before clearing the gate.
+
+Copy `Plan identity: sp-…` from `system plan` or `system migrate plan ID` into
+`apply --plan-id`. Both display the same approval identity. Changed observations,
+inventory digests/reasons, source, index, signer, archive identity or action order
+require a newly reviewed plan. Staging and package execution never solve again.
+Refused/blocked apply and unresolved resume return **exit 1**, Nawa's normal
+operation-error status. Inspection commands keep their documented report-only
+status. Resume cannot complete a legacy unpinned record or an operation without
+verified snapshot, package, firmware/initramfs and rescue evidence. A pending
+reboot is also not a completed migration; Nawa never reboots automatically.
 
 ## Common examples
 

@@ -59,7 +59,7 @@ pub(crate) use http::{
 };
 pub(crate) use http::{download, download_opt, offline, set_offline};
 pub(crate) use local::copy_local;
-pub(crate) use snapshot::snapshot_file;
+pub(crate) use snapshot::{snapshot_file, VerifiedSnapshot};
 
 #[cfg(test)]
 mod tests {

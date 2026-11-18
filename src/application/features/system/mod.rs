@@ -14,3 +14,6 @@ pub(crate) mod migrate_recover;
 pub(crate) mod observation;
 pub(crate) mod plan;
 pub(crate) mod profile;
+
+#[cfg(test)]
+mod migrate_integration_tests;

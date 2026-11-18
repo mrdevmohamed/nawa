@@ -72,35 +72,18 @@ pub(crate) struct SystemPlan {
 
 /// Exact identities copied from the reviewed SystemPlan into migration approval.
 /// The ordered artifact vector is authoritative; execution must not re-solve.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SystemPlanPin {
-    pub(crate) identity: String,
-    pub(crate) migration_id: String,
-    pub(crate) source_fingerprint: String,
-    pub(crate) index_sha256: String,
-    pub(crate) signer_sha256: String,
-    pub(crate) observed_sha256: String,
-    pub(crate) installed_packages: Vec<(String, String)>,
-    pub(crate) artifacts: Vec<ArtifactPin>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ArtifactPin {
-    pub(crate) kind: PackageActionKind,
-    pub(crate) source: PackageActionSource,
-    pub(crate) name: String,
-    pub(crate) current: Option<String>,
-    pub(crate) target: String,
-    pub(crate) archive: String,
-    pub(crate) sha256: String,
-    pub(crate) size: u64,
-    pub(crate) download_url: Option<String>,
-}
+pub(crate) use crate::domain::system::plan::{ArtifactPin, SystemPlanPin};
 
 impl SystemPlan {
     /// Only a fully resolved transition backed by a trusted signed v4 index
     /// can be turned into an explicit migration approval.
     pub(crate) fn approval_pin(&self, expected_migration_id: &str) -> Result<SystemPlanPin> {
+        let pin = self.pin_evidence(expected_migration_id)?;
+        pin.validate().map_err(anyhow::Error::msg)?;
+        Ok(pin)
+    }
+
+    fn pin_evidence(&self, expected_migration_id: &str) -> Result<SystemPlanPin> {
         let (source_fingerprint, index_sha256, signer_sha256) = match &self.repository {
             RepositoryAssessment::Opened {
                 source_fingerprint,
@@ -118,12 +101,22 @@ impl SystemPlan {
             _ => bail!("migration approval requires a trusted signed schema-v4 repository index"),
         };
 
-        let actions = match &self.transition {
+        let (actions, version, from, to, provider_package) = match &self.transition {
             TransitionAssessment::Preview(SystemTransitionPreview::Candidate {
                 id,
                 package_actions,
+                version,
+                from,
+                to,
+                provider_package,
                 ..
-            }) if id == expected_migration_id => package_actions,
+            }) if id == expected_migration_id => (
+                package_actions,
+                *version,
+                from.clone(),
+                to.clone(),
+                provider_package.clone(),
+            ),
             TransitionAssessment::Preview(SystemTransitionPreview::Candidate { id, .. }) => {
                 bail!("the reviewed plan selects migration {id}, not {expected_migration_id}")
             }
@@ -152,18 +145,28 @@ impl SystemPlan {
                 archive: action.archive.clone(),
                 sha256: action.sha256.clone(),
                 size: action.size,
-                download_url: action.download_url.clone(),
+                download_url_sha256: action
+                    .download_url
+                    .as_deref()
+                    .map(|url| fingerprint(url.as_bytes())),
+                reason: action.reason.clone(),
+                install_reason: action.install_reason,
             })
             .collect();
 
         Ok(SystemPlanPin {
             identity: self.identity.clone(),
             migration_id: expected_migration_id.to_string(),
+            definition_version: version,
+            from,
+            to,
+            provider_package,
             source_fingerprint,
             index_sha256,
             signer_sha256,
             observed_sha256: fingerprint(format!("{:?}", self.snapshot.observed).as_bytes()),
             installed_packages,
+            installed_identities: self.snapshot.installed_identities.clone(),
             artifacts,
         })
     }
@@ -202,7 +205,10 @@ pub(crate) fn build(root: &Path, proc: &Path, repository: Option<&str>) -> Syste
                 ),
                 Ok(repo_ref) => {
                     let (kind, source_fingerprint) = repository_source(&repo_ref);
-                    match crate::upgrade::open_repo(root, &repo_ref, false, false) {
+                    if kind == RepositoryKind::Remote && !matches!(snapshot.observed.context, crate::domain::system::observation::Context::LiveHost { .. }) {
+                        let reason = "remote metadata refresh would write into an offline/container/chroot target; use a locally materialized signed repository for read-only planning".to_string();
+                        (RepositoryAssessment::NotInspected { reason: reason.clone() }, TransitionAssessment::NotEvaluated { reason })
+                    } else { match crate::upgrade::open_repo(root, &repo_ref, false, false) {
                         Err(error) => (
                             RepositoryAssessment::Unavailable {
                                 kind,
@@ -231,19 +237,27 @@ pub(crate) fn build(root: &Path, proc: &Path, repository: Option<&str>) -> Syste
                             };
                             (assessment, transition)
                         }
-                    }
+                    } }
                 }
             },
         },
     };
 
     let identity = plan_identity(&snapshot, &repository, &transition);
-    SystemPlan {
+    let mut plan = SystemPlan {
         snapshot,
         repository,
         transition,
         identity,
+    };
+    if let TransitionAssessment::Preview(SystemTransitionPreview::Candidate { id, .. }) =
+        &plan.transition
+    {
+        if let Ok(pin) = plan.pin_evidence(id) {
+            plan.identity = pin.computed_identity();
+        }
     }
+    plan
 }
 
 /// Verify an approved plan without running the dependency solver again.
@@ -254,18 +268,8 @@ pub(crate) fn verify_approval_pin(
     proc: &Path,
     repository: &str,
     pin: &SystemPlanPin,
-) -> Result<()> {
-    let digest = pin.identity.strip_prefix("sp-").unwrap_or_default();
-    if digest.len() != 64
-        || !digest
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        bail!("migration approval contains an invalid SystemPlan identity");
-    }
-    if pin.migration_id != crate::domain::system::migration::builtin_faseela_runit_to_systemd().id {
-        bail!("migration approval is bound to an unknown migration definition");
-    }
+) -> Result<OpenRepo> {
+    pin.validate().map_err(anyhow::Error::msg)?;
 
     let snapshot = observation::observe(root, proc);
     let current_observed = fingerprint(format!("{:?}", snapshot.observed).as_bytes());
@@ -274,6 +278,9 @@ pub(crate) fn verify_approval_pin(
     }
     if installed_packages(&snapshot)? != pin.installed_packages {
         bail!("installed package inventory changed after approval; create and review a new SystemPlan");
+    }
+    if snapshot.installed_identities != pin.installed_identities {
+        bail!("installed package identities changed after approval; create and review a new SystemPlan");
     }
 
     let repo_ref = RepoRef::parse(repository).context("parse approved repository source")?;
@@ -348,7 +355,11 @@ pub(crate) fn verify_approval_pin(
             || entry.file != artifact.archive
             || entry.sha256 != artifact.sha256
             || entry.size != artifact.size
-            || entry.download_url != artifact.download_url
+            || entry
+                .download_url
+                .as_deref()
+                .map(|url| fingerprint(url.as_bytes()))
+                != artifact.download_url_sha256
         {
             bail!(
                 "authenticated artifact for {} changed after approval; expected {} with sha256 {}",
@@ -357,6 +368,21 @@ pub(crate) fn verify_approval_pin(
                 artifact.sha256
             );
         }
+    }
+    Ok(open)
+}
+
+/// Run under the coordinator's lock immediately before creating durable intent.
+/// No repository access, networking or solver work occurs in this check.
+pub(crate) fn verify_local_pin(root: &Path, proc: &Path, pin: &SystemPlanPin) -> Result<()> {
+    let snapshot = observation::observe(root, proc);
+    if fingerprint(format!("{:?}", snapshot.observed).as_bytes()) != pin.observed_sha256
+        || installed_packages(&snapshot)? != pin.installed_packages
+        || snapshot.installed_identities != pin.installed_identities
+    {
+        bail!(
+            "approved system observations or installed package inventory changed before mutation"
+        );
     }
     Ok(())
 }
@@ -458,6 +484,12 @@ mod tests {
         use std::collections::BTreeMap;
 
         let snapshot = SystemSnapshot {
+            installed_identities: vec![crate::domain::system::plan::InstalledIdentity {
+                name: "runit".into(),
+                version: "2.1-1".into(),
+                sha256: String::new(),
+                reason: String::new(),
+            }],
             observed: crate::domain::system::observation::ObservedSystem {
                 root: std::path::PathBuf::from("/"),
                 context: Context::LiveHost {
@@ -502,12 +534,13 @@ mod tests {
             current: None,
             target: "1.0-1".to_string(),
             reason: "runtime dependency".to_string(),
+            install_reason: crate::domain::planning::install::Why::Dependency,
             archive: format!("{name}-1.0-1.nawa.tar.zst"),
             sha256: digest.to_string(),
             size: 123,
             download_url: Some(format!("https://example.test/{name}.tar.zst")),
         };
-        let plan = SystemPlan {
+        let mut plan = SystemPlan {
             snapshot,
             repository: RepositoryAssessment::Opened {
                 kind: RepositoryKind::Remote,
@@ -535,6 +568,10 @@ mod tests {
             identity: format!("sp-{}", "d".repeat(64)),
         };
 
+        plan.identity = plan
+            .pin_evidence("faseela-runit-to-systemd-v1")
+            .unwrap()
+            .computed_identity();
         let pin = plan.approval_pin("faseela-runit-to-systemd-v1").unwrap();
         assert_eq!(pin.identity, plan.identity);
         assert_eq!(
@@ -564,16 +601,11 @@ mod tests {
     fn verification_rejects_changed_observations_before_repository_access() {
         let root = root("system-plan-pin-stale-observation");
         let snapshot = observation::observe(&root, Path::new("/proc"));
-        let pin = SystemPlanPin {
-            identity: format!("sp-{}", "a".repeat(64)),
-            migration_id: "faseela-runit-to-systemd-v1".to_string(),
-            source_fingerprint: "b".repeat(64),
-            index_sha256: "c".repeat(64),
-            signer_sha256: "d".repeat(64),
-            observed_sha256: fingerprint(format!("{:?}", snapshot.observed).as_bytes()),
-            installed_packages: installed_packages(&snapshot).unwrap(),
-            artifacts: Vec::new(),
-        };
+        let mut pin = crate::domain::system::plan::fixture_pin();
+        pin.observed_sha256 = fingerprint(format!("{:?}", snapshot.observed).as_bytes());
+        pin.installed_packages = installed_packages(&snapshot).unwrap();
+        pin.installed_identities = snapshot.installed_identities.clone();
+        pin.identity = pin.computed_identity();
         let profile = root.join("usr/share/nawa/system-profile.toml");
         fs::create_dir_all(profile.parent().unwrap()).unwrap();
         fs::write(
@@ -582,8 +614,9 @@ mod tests {
         )
         .unwrap();
 
-        let error =
-            verify_approval_pin(&root, Path::new("/proc"), "unused-repository", &pin).unwrap_err();
+        let error = verify_approval_pin(&root, Path::new("/proc"), "unused-repository", &pin)
+            .err()
+            .unwrap();
         assert!(
             format!("{error:#}").contains("observed system facts changed"),
             "{error:#}"
@@ -610,6 +643,22 @@ mod tests {
         assert!(first.identity.starts_with("sp-"));
         assert_eq!(first.identity.len(), 67);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn offline_remote_plan_does_not_materialize_or_write_a_cache() {
+        let root = root("system-plan-offline-no-network");
+        let plan = build(
+            &root,
+            Path::new("/proc"),
+            Some("https://invalid.example.test/repo"),
+        );
+        assert!(matches!(
+            plan.repository,
+            RepositoryAssessment::NotInspected { .. }
+        ));
+        assert!(!root.join("var").exists());
+        assert!(!root.join(".nawa").exists());
     }
 
     #[test]

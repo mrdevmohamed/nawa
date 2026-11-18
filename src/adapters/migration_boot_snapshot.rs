@@ -17,21 +17,19 @@
 //! production migration handler until the complete BIOS/UEFI rollback
 //! contract and external rescue path are accepted.
 
-#![allow(dead_code)]
-
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::Read;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
 use crate::adapters::{atomic, unique};
 use crate::domain::system::migration::check_id;
 
-const SNAPSHOT_SCHEMA: u32 = 2;
+const SNAPSHOT_SCHEMA: u32 = 3;
 const MAX_SNAPSHOT_ENTRIES: usize = 999;
 const FIXED_PATHS: &[&str] = &[
     "boot/grub/grub.cfg",
@@ -50,6 +48,8 @@ pub(crate) struct SnapshotInfo {
     pub(crate) entries: usize,
     pub(crate) bytes: u64,
     pub(crate) directory: PathBuf,
+    pub(crate) identity: String,
+    pub(crate) manifest_sha256: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -57,6 +57,8 @@ pub(crate) struct SnapshotInfo {
 struct Manifest {
     schema: u32,
     migration_id: String,
+    root_device: u64,
+    root_inode: u64,
     entries: Vec<Entry>,
 }
 
@@ -174,6 +176,8 @@ pub(crate) fn capture(root: &Path, migration_id: &str) -> Result<SnapshotInfo> {
         let manifest = Manifest {
             schema: SNAPSHOT_SCHEMA,
             migration_id: migration_id.to_string(),
+            root_device: fs::metadata(&root)?.dev(),
+            root_inode: fs::metadata(&root)?.ino(),
             entries,
         };
         let bytes = toml::to_string_pretty(&manifest)?.into_bytes();
@@ -186,6 +190,8 @@ pub(crate) fn capture(root: &Path, migration_id: &str) -> Result<SnapshotInfo> {
             entries: entry_count,
             bytes: total_bytes,
             directory: directory.clone(),
+            identity: format!("boot-{}", hash_bytes(&bytes)),
+            manifest_sha256: hash_bytes(&bytes),
         })
     })();
 
@@ -206,6 +212,8 @@ pub(crate) fn verify(root: &Path, migration_id: &str) -> Result<SnapshotInfo> {
     let root = fs::canonicalize(root)?;
     let directory = snapshot_dir(&root, migration_id)?;
     let validated = load_validated(&root, migration_id, &directory)?;
+    let (manifest, _) = read_regular_file_nofollow(&directory.join("manifest.toml"))?;
+    let manifest_sha256 = hash_bytes(&manifest);
     let bytes = validated.iter().fold(0u64, |sum, entry| {
         sum.saturating_add(match &entry.state {
             Restorable::File { bytes, .. } => bytes.len() as u64,
@@ -217,6 +225,8 @@ pub(crate) fn verify(root: &Path, migration_id: &str) -> Result<SnapshotInfo> {
         entries: validated.len(),
         bytes,
         directory,
+        identity: format!("boot-{manifest_sha256}"),
+        manifest_sha256,
     })
 }
 
@@ -225,7 +235,39 @@ pub(crate) fn verify(root: &Path, migration_id: &str) -> Result<SnapshotInfo> {
 /// Re-running
 /// restore after interruption is safe; already-restored entries are simply
 /// written to the same captured state again.
-pub(crate) fn restore(root: &Path, migration_id: &str) -> Result<SnapshotInfo> {
+#[cfg(test)]
+fn restore(root: &Path, migration_id: &str) -> Result<SnapshotInfo> {
+    restore_inner(root, migration_id)
+}
+
+/// Restore only the manifest explicitly bound into the durable migration record.
+/// This is filesystem compensation, never proof of BIOS/EFI boot recovery.
+#[allow(dead_code)] // external rescue caller blocked by B5/B6; not an automatic rollback
+pub(crate) fn restore_pinned(
+    root: &Path,
+    migration_id: &str,
+    pin: &crate::domain::system::migration::SnapshotPin,
+) -> Result<SnapshotInfo> {
+    verify_pinned(root, migration_id, pin)?;
+    let info = restore_inner(root, migration_id)?;
+    verify_pinned(root, migration_id, pin)?;
+    Ok(info)
+}
+
+pub(crate) fn verify_pinned(
+    root: &Path,
+    migration_id: &str,
+    pin: &crate::domain::system::migration::SnapshotPin,
+) -> Result<SnapshotInfo> {
+    let info = verify(root, migration_id)?;
+    if info.identity != pin.identity || info.manifest_sha256 != pin.manifest_sha256 {
+        bail!("retained boot snapshot manifest does not match the approved migration record");
+    }
+    Ok(info)
+}
+
+#[allow(dead_code)] // reached only by explicitly authorized rescue, see restore_pinned
+fn restore_inner(root: &Path, migration_id: &str) -> Result<SnapshotInfo> {
     let root = fs::canonicalize(root)?;
     let directory = snapshot_dir(&root, migration_id)?;
     let validated = load_validated(&root, migration_id, &directory)?;
@@ -317,18 +359,16 @@ pub(crate) fn restore(root: &Path, migration_id: &str) -> Result<SnapshotInfo> {
 
     remove_untracked_runit_entries(&root, &validated)?;
 
-    Ok(SnapshotInfo {
-        migration_id: migration_id.to_string(),
-        entries: validated.len(),
-        bytes,
-        directory,
-    })
+    let _ = bytes;
+    verify(&root, migration_id)
 }
 
 /// Remove a retained snapshot only after the caller has recorded a successful
 /// migration or an operator explicitly authorizes cleanup. This function
 /// never participates in capture/restore itself.
-pub(crate) fn discard(root: &Path, migration_id: &str) -> Result<()> {
+#[cfg(test)] // retained indefinitely in production until a separately approved recovery window exists
+#[allow(dead_code)] // test utility for explicit cleanup, never lifecycle-driven
+fn discard(root: &Path, migration_id: &str) -> Result<()> {
     let root = fs::canonicalize(root)?;
     check_real_dir_chain(&root, Path::new("var/lib/nawa/migrations"))?;
     let directory = snapshot_dir(&root, migration_id)?;
@@ -545,6 +585,10 @@ fn load_validated(
             "boot recovery snapshot id {:?} does not match requested migration {migration_id:?}",
             manifest.migration_id
         );
+    }
+    let root_metadata = fs::metadata(root)?;
+    if manifest.root_device != root_metadata.dev() || manifest.root_inode != root_metadata.ino() {
+        bail!("boot recovery snapshot root identity mismatch");
     }
     if manifest.entries.len() > MAX_SNAPSHOT_ENTRIES {
         bail!(
@@ -1356,7 +1400,9 @@ mod tests {
     fn unsupported_untracked_service_entry_is_rejected_before_restore_mutates_boot_files() {
         use std::os::unix::net::UnixListener;
 
-        let root = fixture("special-untracked-service-entry");
+        // Linux sockaddr_un paths have a small fixed byte limit. Keep this
+        // fixture short even when the test process has a large PID.
+        let root = fixture("socket");
         make_snapshot(&root);
         fs::write(root.join("boot/grub/grub.cfg"), b"new config\n").unwrap();
         let socket_path = root.join("etc/runit/runsvdir/default/unexpected.sock");
@@ -1389,6 +1435,41 @@ mod tests {
         assert_eq!(
             fs::read(root.join("boot/grub/grub.cfg")).unwrap(),
             b"new config\n"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_copied_to_a_different_root_cannot_authorize_restore() {
+        let root = fixture("root-binding");
+        let info = make_snapshot(&root);
+        let other = fixture("other-root");
+        let destination = snapshot_dir(&other, "faseela-runit-to-systemd-v1").unwrap();
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        // Move only the retained snapshot; the selected filesystem root has a
+        // different inode and must not inherit its authority.
+        fs::rename(info.directory, destination).unwrap();
+        assert!(verify(&other, "faseela-runit-to-systemd-v1").is_err());
+    }
+
+    #[test]
+    fn pinned_manifest_modification_is_rejected_before_restore() {
+        let root = fixture("pinned-manifest");
+        let info = make_snapshot(&root);
+        let pin = crate::domain::system::migration::SnapshotPin {
+            identity: info.identity,
+            manifest_sha256: info.manifest_sha256,
+        };
+        let manifest = info.directory.join("manifest.toml");
+        let mut text = fs::read_to_string(&manifest).unwrap();
+        // Valid TOML and unchanged payloads are insufficient: the exact
+        // captured manifest bytes are pinned into the migration record.
+        text.push('\n');
+        fs::write(manifest, text).unwrap();
+        fs::write(root.join("boot/grub/grub.cfg"), "do not change").unwrap();
+        assert!(restore_pinned(&root, "faseela-runit-to-systemd-v1", &pin).is_err());
+        assert_eq!(
+            fs::read_to_string(root.join("boot/grub/grub.cfg")).unwrap(),
+            "do not change"
         );
     }
 

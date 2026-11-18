@@ -173,6 +173,9 @@ pub(crate) struct MigrationApproval {
 }
 
 impl MigrationApproval {
+    pub(super) fn into_pin(self) -> SystemPlanPin {
+        self.plan
+    }
     pub(crate) fn explicit(
         id: &str,
         from: &Capability,
@@ -193,10 +196,10 @@ impl MigrationApproval {
         if !acknowledge_reboot || !acknowledge_recovery {
             bail!("migration authorization must acknowledge the reboot boundary and the documented recovery path (§12.4)");
         }
-        if plan.migration_id != id || !plan.identity.starts_with("sp-") || plan.identity.len() != 67
-        {
+        if plan.migration_id != id {
             bail!("migration approval requires the exact reviewed SystemPlan identity (§12.4)");
         }
+        plan.validate().map_err(anyhow::Error::msg)?;
         Ok(MigrationApproval { _private: (), plan })
     }
 }
@@ -213,12 +216,17 @@ const HANDLER_BLOCKERS: &[&str] = &[
     "B7: Faseela Repo PR #203 is merged; recipe CI rejects direct service-state mutations in privileged hooks and transaction-trigger sources, and Faseela applies vendor presets during image provisioning. Installed-package runtime acceptance remains required; the static guard is not a shell sandbox",
 ];
 
+pub(super) fn handler_blockers() -> &'static [&'static str] {
+    HANDLER_BLOCKERS
+}
+
 /// How an apply attempt ended before any package mutation.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub(crate) enum ApplyRefusal {
     /// the host passed preflight and authorization, but the built-in boot
     /// handler is not yet safe to run (external blockers)
     HandlerBlocked(Vec<&'static str>),
+    Prepared(Box<super::migrate_coordinator::PreparationOutcome>),
 }
 
 /// Apply the built-in migration. Live-host preflight and explicit approval
@@ -226,18 +234,31 @@ pub(crate) enum ApplyRefusal {
 /// The boot/initramfs handler is currently blocked on external decisions, so
 /// this returns a documented refusal instead of pretending to migrate.
 pub(crate) fn apply(
-    root: &Path,
+    ctx: &crate::application::context::Ctx,
     proc: &Path,
     repository: &str,
     approval: MigrationApproval,
+    ui: &crate::application::ports::user_interaction::UserInteraction,
 ) -> Result<ApplyRefusal> {
     // Recheck only the approved observations and signed artifact identities.
     // The solver is deliberately not invoked again: approved order and pins
     // remain authoritative and a different artifact cannot be substituted.
-    plan::verify_approval_pin(root, proc, repository, &approval.plan)
+    plan::verify_approval_pin(&ctx.root, proc, repository, &approval.plan)
         .context("migration SystemPlan approval verification")?;
-    preflight(root, proc).context("migration apply preflight")?;
-    Ok(ApplyRefusal::HandlerBlocked(HANDLER_BLOCKERS.to_vec()))
+    preflight(&ctx.root, proc).context("migration apply preflight")?;
+    if !HANDLER_BLOCKERS.is_empty() {
+        return Ok(ApplyRefusal::HandlerBlocked(HANDLER_BLOCKERS.to_vec()));
+    }
+    let plan = super::migrate_coordinator::ApprovedPlan::stage(ctx, proc, repository, approval)?;
+    let outcome = super::migrate_coordinator::prepare(
+        ctx,
+        super::migrate_coordinator::PreparationRequest {
+            definition: &builtin_definition(),
+            plan,
+            ui,
+        },
+    )?;
+    Ok(ApplyRefusal::Prepared(Box::new(outcome)))
 }
 
 /// Test-only variant that skips only the real-uid check (a fake `/proc` is
@@ -358,16 +379,10 @@ mod tests {
     }
 
     fn test_plan_pin(migration_id: &str) -> SystemPlanPin {
-        SystemPlanPin {
-            identity: format!("sp-{}", "0".repeat(64)),
-            migration_id: migration_id.to_string(),
-            source_fingerprint: "1".repeat(64),
-            index_sha256: "2".repeat(64),
-            signer_sha256: "3".repeat(64),
-            observed_sha256: "4".repeat(64),
-            installed_packages: Vec::new(),
-            artifacts: Vec::new(),
-        }
+        let mut pin = crate::domain::system::plan::fixture_pin();
+        pin.migration_id = migration_id.to_string();
+        pin.identity = pin.computed_identity();
+        pin
     }
 
     #[test]
@@ -423,6 +438,7 @@ mod tests {
             MigrationApproval::explicit(&d.id, &d.from, &d.to, true, true, test_plan_pin(&d.id))
                 .unwrap();
         match apply_for_tests(&root, &proc, approval).unwrap() {
+            ApplyRefusal::Prepared(_) => panic!("a blocked handler cannot prepare"),
             ApplyRefusal::HandlerBlocked(blockers) => {
                 assert!(blockers.iter().any(|b| {
                     b.contains("B1")

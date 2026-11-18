@@ -10,6 +10,24 @@
 
 ## 0. Final source-tree audit (Phase 7 acceptance)
 
+### November 19 integration delta
+
+`domain/system/plan.rs` now owns immutable approval evidence and its deterministic
+identity. The application consumes one `MigrationApproval` into a privately
+constructed `ApprovedPlan`; the coordinator's independent generic `Approval` has
+been removed. Package execution still belongs to `apply_transaction` and the
+existing installer/history/WAL. The migration package boundary exports
+`MigrationInstall` and `install_for_migration`; no installer or recovery engine
+has been added.
+
+The record adapter reads legacy unpinned schema 1 and pinned schema 2 explicitly.
+The snapshot adapter captures before packages, binds root identity and manifest,
+and remains a filesystem mechanism. Post-boot recovery cannot clear the gate
+without approval, exact installed identities, retained snapshots and external
+boot/recovery acceptance. Module-wide dead-code allowances on connected
+coordinator and snapshot code were removed. Filesystem restore remains blocked
+from automatic execution; it cannot establish BIOS sectors or EFI NVRAM recovery.
+
 > This section reflects the **shipped code** on
 > `feature/system-intelligence-migration`; §§1–17 below remain the historical
 > Stage-0 audit of `master` and are kept for the behavior baseline.

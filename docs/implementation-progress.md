@@ -13,13 +13,54 @@
 | 1 — Structural refactor + service removal | **DONE** (1a, 1b, 1c, 1d, 1e — 1e is the deferred apply-transaction extraction) |
 | 2 — Init identity & capability foundation | **GENERIC DECLARATION LOOKUP + INIT-SYSTEM POLICY** (the pure planner now finds providers by arbitrary normalized capability domain and preserves ambiguous/unknown candidates; only init-system has actionable policy and migration semantics) |
 | 3 — Metadata & capability resolution | **SOURCE-AWARE PACKAGE RESOLUTION CORE IMPLEMENTED; GENERIC SOLVER INCOMPLETE** (recipe and authenticated binary candidates now share one dependency graph for install/update planning; v4 runtime dependencies and capabilities are consumed; version ranges, conflicts, replacements and broader capability constraints remain open) |
-| 4 — System profiles & planning | **SYSTEMPLAN + MIGRATION APPROVAL PIN VERIFICATION** (typed immutable plan, deterministic identity, exact ordered artifact pins, required `--plan-id`, and fresh snapshot/inventory/index/signer/artifact revalidation without a second solve; pinned transaction execution and non-init policy semantics remain open) |
-| 5 — Migration engine | **PREPARATION FRAMEWORK PRESENT; RECOVERY/BOOT EXECUTION BLOCKED**: typed state machine, durable journal, mutation gate, preparation coordinator and recovery inspection exist; snapshot is not wired to coordinator/recovery and post-boot finalization is absent. |
+| 4 — System profiles & planning | **PINNED TRANSACTION INTEGRATION IMPLEMENTED**: one explicit approval, v2 ordered evidence identity, exact staging, signed-index proof retained by the existing installer, inventory revalidated under the coordinator lock. Non-init policy semantics remain open. |
+| 5 — Migration engine | **INTEGRATED; PRODUCTION BOOT EXECUTION BLOCKED**: schema-2 pinned records, pre-package write-ahead snapshot capture, manifest/root binding and recovery evidence checks are implemented. Firmware/initramfs preparation and rescue acceptance remain blocked; apply and resume fail closed. |
 | 6 — Faseela runit→systemd migration | **BLOCKED** (current Faseela HEAD already uses systemd; the legacy runit migration is for older installations. Real BIOS/UEFI boot acceptance and rescue/recovery contracts remain open.) |
-| 7 — Platform verification | **IN PROGRESS**: observation hardening, schema-2 policy, source-aware package planning and the initial SystemPlan slice are CI-verified; migration approval pinning and stale-evidence verification are implemented in the current slice and await CI; pinned transaction execution, generic solver constraints, snapshot/recovery integration and real BIOS/UEFI acceptance remain open. |
+| 7 — Platform verification | **IN PROGRESS**: reviewed baseline including approval pinning passed all 11 jobs on `c5ff1c5` ([run 44405161087](https://github.com/mrdevmohamed/nawa/actions/runs/44405161087)). The integration work below is locally tested; branch-head CI and real BIOS/UEFI acceptance are tracked separately. |
 | System Intelligence platform | **IN PROGRESS** — accepted direction: System Intelligence is the umbrella; migration is one high-risk feature within it. |
 
 ## Accepted platform direction (2026-11-18)
+
+## Integration execution update (2026-11-19)
+
+* **Implemented:** `MigrationApproval` is consumed into `ApprovedPlan`; the
+  disconnected coordinator `Approval` was removed. Exact signed entries are
+  reopened, verified and staged before lock acquisition; the coordinator uses
+  `MigrationInstall`, its own lock/permit, existing installer, history and WAL.
+  The signed-index path now carries the typed legacy-init ownership exception.
+* **Implemented:** approval identity v2 covers definition/source/target,
+  target provider, observation digest, inventory versions/digests/reasons and
+  ordered artifacts including source fingerprint, location digest and install
+  reason. Reordering or changing any of this evidence invalidates approval.
+* **Implemented:** durable record schema 2 retains this evidence and the boot
+  snapshot identity/manifest digest. Schema 1 remains explicitly unpinned;
+  it cannot authorize post-boot completion. Unknown fields/schemas and missing
+  schema-2 approval fail closed. Publication still uses the shared atomic store.
+* **Implemented:** snapshot schema 3 binds the selected root's device/inode.
+  Capture intent precedes snapshot side effects and all package changes;
+  recovery verifies the pinned manifest and every staged archive. Production
+  retains snapshots indefinitely: no cleanup window or automatic rollback is
+  invented. Copying a snapshot to a different root needs a future explicit
+  rescue/rebinding contract and currently fails closed.
+* **Implemented:** post-boot verification additionally requires proven PID 1,
+  matching effective profile and exact approved installed identities, with old
+  providers retained. The external firmware/initramfs/recovery blocker applies
+  to resume as well as apply. A systemd file alone cannot clear the gate.
+  Refused apply and unresolved resume now return the normal non-success CLI
+  exit (1). `system migrate plan` displays the same SystemPlan identity as
+  `system plan`. Offline remote planning does not create a cache or write.
+* **Unit/application integration tested:** 771 passing unit tests, zero
+  failures; one pre-existing ignored toolchain-dependent test is not counted
+  as acceptance. Release Clippy with all targets and `-D warnings` passed.
+  Real signed repositories and package installs run only under disposable
+  roots. Remaining full-suite/smoke/isolation/static checks and branch-head CI
+  will be recorded after the next milestones.
+* **External integration inspected, not accepted:** Faseela master
+  `26deba1` includes PR #60; its latest published ISO is November 16, 2026,
+  before that November 18 merge. No installed-disk acceptance is inferred.
+  Production `HANDLER_BLOCKERS` remain in place.
+
+### Earlier execution history
 
 The selected product direction is to complete **System Intelligence as a coherent
 system-aware planning and reconciliation layer**, with migration as one feature
@@ -2101,10 +2142,10 @@ BIOS/UEFI rescue acceptance remain open.
   migration approval. Stale observations, installed state, repository indexes,
   signing keys, action/current-version relationships or archive records reject
   the approval.
-* This is approval verification only. The transaction executor does not yet
-  consume the approved action list, and the boot-changing handler remains
-  blocked. No migration record, package transaction or boot change is created.
-* The preceding fully successful CI run is
-  [#44401478331](https://github.com/mrdevmohamed/nawa/actions/runs/44401478331)
-  on commit `8762f07507e17b9436cbcc33b4e329c31ad38b33`. The current approval
-  pinning implementation is awaiting its branch-head checks.
+* This historical slice initially provided approval verification only. The
+  November 19 integration update above records its transaction, durable-record
+  and snapshot consumers. Production boot execution remains blocked.
+* Approval pinning passed all 11 CI jobs on
+  [#44405161087](https://github.com/mrdevmohamed/nawa/actions/runs/44405161087),
+  commit `c5ff1c5ea2936c4df6357dbd40e1f30b7c896447`. This verifies the reviewed
+  baseline, not subsequent integration changes.

@@ -217,6 +217,7 @@ fn check_no_follow(path: &Path) -> Result<()> {
 /// fail closed (unknown schema/state/handler/capability is an error
 /// naming the file, never silently misread).
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RecordDoc {
     schema: u32,
     id: String,
@@ -227,15 +228,21 @@ struct RecordDoc {
     state: String,
     #[serde(default)]
     steps: Vec<StepDoc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    approval: Option<crate::domain::system::plan::SystemPlanPin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    snapshot: Option<crate::domain::system::migration::SnapshotPin>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CapabilityDoc {
     domain: String,
     identity: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StepDoc {
     id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -259,6 +266,8 @@ impl RecordDoc {
             to: CapabilityDoc::from(&record.to),
             handler: record.handler.as_str().to_string(),
             state: record.state.as_str().to_string(),
+            approval: record.approval.clone(),
+            snapshot: record.snapshot.clone(),
             steps: record
                 .steps
                 .iter()
@@ -282,9 +291,9 @@ impl RecordDoc {
     /// single `.with_context` at the `load` boundary names it exactly
     /// once for every failure below (§10.3 fail closed).
     fn into_record(self) -> Result<MigrationRecord> {
-        if self.schema != SCHEMA_VERSION {
+        if self.schema != SCHEMA_VERSION && self.schema != 2 {
             bail!(
-                "unsupported migration record schema {} (this nawa understands schema {SCHEMA_VERSION})",
+                "unsupported migration record schema {} (this nawa understands legacy schema 1 and pinned schema 2)",
                 self.schema
             );
         }
@@ -293,6 +302,35 @@ impl RecordDoc {
         }
         if self.definition_version == 0 {
             bail!("migration record has definition_version 0");
+        }
+        check_id(&self.id).map_err(anyhow::Error::msg)?;
+        if self.schema == 1 && (self.approval.is_some() || self.snapshot.is_some()) {
+            bail!("schema-1 migration records cannot contain pinned approval or snapshot evidence");
+        }
+        if self.schema == 2 {
+            let pin = self
+                .approval
+                .as_ref()
+                .context("schema-2 migration record has no pinned approval")?;
+            pin.validate().map_err(anyhow::Error::msg)?;
+            if pin.migration_id != self.id
+                || pin.definition_version != self.definition_version
+                || pin.from != format!("{}={}", self.from.domain, self.from.identity)
+                || pin.to != format!("{}={}", self.to.domain, self.to.identity)
+                || self.handler
+                    != crate::domain::system::migration::builtin_faseela_runit_to_systemd()
+                        .handler
+                        .as_str()
+            {
+                bail!("record definition contradicts its approved SystemPlan");
+            }
+            if let Some(snapshot) = &self.snapshot {
+                if !crate::domain::system::plan::is_sha256(&snapshot.manifest_sha256)
+                    || snapshot.identity != format!("boot-{}", snapshot.manifest_sha256)
+                {
+                    bail!("invalid pinned boot snapshot identity");
+                }
+            }
         }
         let state = MigrationState::parse(&self.state).map_err(anyhow::Error::msg)?;
         let handler = HandlerId::parse(&self.handler).map_err(anyhow::Error::msg)?;
@@ -339,6 +377,8 @@ impl RecordDoc {
             handler,
             state,
             steps,
+            approval: self.approval,
+            snapshot: self.snapshot,
         })
     }
 }
@@ -384,9 +424,16 @@ pub(crate) fn load(root: &Path, id: &str) -> Result<Option<MigrationRecord>> {
     // every validation failure names the exact file (§10.3 fail closed):
     // the doc header promises "an error naming the file" for unknown
     // schema/state/handler/capability and invalid steps alike
-    doc.into_record()
-        .with_context(|| format!("system migration record {}", path.display()))
-        .map(Some)
+    let record = doc
+        .into_record()
+        .with_context(|| format!("system migration record {}", path.display()))?;
+    if record.id != id {
+        bail!(
+            "system migration record {} has a different migration id",
+            path.display()
+        );
+    }
+    Ok(Some(record))
 }
 
 /// Durably publish `record` (§10.3: atomic publication, restrictive
@@ -399,6 +446,8 @@ pub(crate) fn save(root: &Path, record: &MigrationRecord) -> Result<()> {
     let path = dir.join(format!("{}.toml", record.id));
     check_no_follow(&path)?;
     let doc = RecordDoc::from_record(record);
+    // Validate writers as strictly as readers before replacing authoritative state.
+    RecordDoc::from_record(record).into_record()?;
     atomic::write_atomic(&path, toml::to_string_pretty(&doc)?.as_bytes(), 0o600)
         .with_context(|| format!("publish migration record {}", path.display()))
 }
@@ -417,7 +466,7 @@ pub(crate) fn remove(root: &Path, id: &str) -> Result<()> {
     let path = dir.join(format!("{id}.toml"));
     check_no_follow(&path)?;
     match std::fs::remove_file(&path) {
-        Ok(()) => Ok(()),
+        Ok(()) => atomic::sync_directory(&dir),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e).with_context(|| format!("remove migration record {}", path.display())),
     }
@@ -870,5 +919,66 @@ mod tests {
             std::fs::remove_file(root.join(format!("var/lib/nawa/migrations/{}.toml", record.id)))
                 .unwrap();
         }
+    }
+}
+#[cfg(test)]
+mod pinned_tests {
+    use super::*;
+    use crate::domain::system::migration::builtin_faseela_runit_to_systemd as definition;
+
+    #[test]
+    fn schema_two_roundtrips_the_exact_approval_and_snapshot_binding() {
+        let root = crate::testutil::tmpdir("migration-record-pinned-roundtrip");
+        let mut record = MigrationRecord::new(&definition());
+        record.schema = 2;
+        record.approval = Some(crate::domain::system::plan::fixture_pin());
+        record.snapshot = Some(crate::domain::system::migration::SnapshotPin {
+            identity: format!("boot-{}", "a".repeat(64)),
+            manifest_sha256: "a".repeat(64),
+        });
+        save(&root, &record).unwrap();
+        assert_eq!(load(&root, &record.id).unwrap().unwrap(), record);
+        let text = std::fs::read_to_string(record_path(&root, &record.id).unwrap()).unwrap();
+        assert!(!text.contains("https://"));
+        let tampered = text.replace("size = 123", "size = 124");
+        assert_ne!(tampered, text);
+        std::fs::write(record_path(&root, &record.id).unwrap(), tampered).unwrap();
+        assert!(load(&root, &record.id).is_err());
+        assert!(active_gates(&root).is_err());
+    }
+
+    #[test]
+    fn legacy_records_are_not_promoted_or_silently_given_pins() {
+        let root = crate::testutil::tmpdir("migration-record-legacy");
+        let record = MigrationRecord::new(&definition());
+        save(&root, &record).unwrap();
+        let loaded = load(&root, &record.id).unwrap().unwrap();
+        assert_eq!(loaded.schema, 1);
+        assert!(loaded.approval.is_none());
+        let mut invalid = loaded;
+        invalid.schema = 2;
+        assert!(save(&root, &invalid).is_err());
+        assert_eq!(load(&root, &record.id).unwrap().unwrap(), record);
+        invalid.schema = 1;
+        invalid.approval = Some(crate::domain::system::plan::fixture_pin());
+        assert!(save(&root, &invalid).is_err());
+    }
+
+    #[test]
+    fn interrupted_publication_cannot_replace_the_last_complete_pinned_record() {
+        let root = crate::testutil::tmpdir("migration-record-interrupted-pinned");
+        let mut record = MigrationRecord::new(&definition());
+        record.schema = 2;
+        record.approval = Some(crate::domain::system::plan::fixture_pin());
+        record.state = MigrationState::Preparing;
+        save(&root, &record).unwrap();
+        std::fs::write(
+            migrations_dir(&root).join(".publication.tmp"),
+            "schema = 2\n[approval]\nidentity =",
+        )
+        .unwrap();
+        assert_eq!(load(&root, &record.id).unwrap().unwrap(), record);
+        assert_eq!(record_ids(&root).unwrap(), [record.id.clone()]);
+        assert_eq!(active_gates(&root).unwrap().len(), 1);
     }
 }

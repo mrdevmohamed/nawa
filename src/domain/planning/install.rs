@@ -38,7 +38,8 @@ use crate::suggest;
 
 /// Why a package is part of a plan (the `reason` recorded in the database).
 /// The database mapping lives with the application layer (`plan.rs`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub(crate) enum Why {
     /// named on the command line
     Explicit,

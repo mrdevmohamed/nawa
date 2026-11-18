@@ -10,6 +10,14 @@
 
 ## 1. Summary
 
+Migration execution now retains the authenticated index proof through the
+existing package installer, including the narrowly typed legacy-init handoff.
+The private staged copy is checked against both the signed archive identity and
+the duplicated solving metadata. Durable plan evidence stores source/location
+fingerprints rather than secret-bearing repository URLs. This does not add
+version constraints, conflicts or replacements to schema 4; that requires an
+explicit later schema contract.
+
 The design's capability model (§6) needs one place where each package declares
 *what it provides* (`init-system=runit`) and *what it needs at runtime*
 (`rundeps`). This proposal fixes that metadata as a single chain of three

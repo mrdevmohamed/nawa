@@ -31,14 +31,11 @@
 //!   otherwise `needs-recovery` (gate active; explicit recovery, later
 //!   slice).
 //!
-//! What this slice deliberately does *not* contain: the live-host
-//! preflight and the plan presentation (the future `apply` command's job,
-//! §12.2 — its refusal of offline roots/chroots belongs there), the real
-//! runit→systemd handler and its boot/initramfs steps (Phase 6, blocked
-//! on B1/B2/B5), automatic compensation of committed steps (the recovery
-//! slice: until then a mid-plan failure is fail-safe `needs-recovery`),
-//! and the post-reboot resume/verify/finalize path (also the recovery
-//! slice). The state machine itself is domain code and already complete.
+//! Apply owns live-host preflight and explicit SystemPlan approval. This
+//! coordinator consumes exact staged artifacts and captures the old boot state
+//! before packages. Recovery verifies the persisted evidence. The actual
+//! firmware/initramfs handler and external rescue contract remain blocked by
+//! B1/B5/B6; neither this module nor a filesystem restore invents them.
 //!
 //! # The durable lifecycle and its crash boundaries (Phase 5B)
 //!
@@ -101,25 +98,22 @@
 //! every persistence error is reported through the interaction port —
 //! the gate is never cleared to make a failed operation look successful.
 
-// Everything in this module awaits its production consumer: the
-// `nawa system migrate apply` command (§12.2) — which also brings the
-// live-host preflight (§10.4 stage 2) and the real handler's boot steps
-// (Phase 6). The use case itself is complete and driven by tests.
-#![allow(dead_code)]
-
 use anyhow::{anyhow, bail, Context, Result};
 use std::path::{Path, PathBuf};
 
+use super::migrate_apply::MigrationApproval;
+use super::plan::{self, SystemPlanPin};
 use crate::adapters::db::InstallReason;
 use crate::adapters::lock;
 use crate::adapters::migration_record as store;
 use crate::application::context::Ctx;
-use crate::application::features::package::apply_transaction::install_for_migration;
+use crate::application::features::package::{install_for_migration, MigrationInstall};
 use crate::application::ports::user_interaction::UserInteraction;
 use crate::domain::system::migration::{
     transition, MigrationDefinition, MigrationRecord, MigrationState, StepOutcome, StepRecord,
     Transition,
 };
+use crate::domain::system::plan::PackageActionKind;
 use crate::transaction::{self, context as tx_context};
 
 /// Unforgeable in-process proof that this coordinator run may continue
@@ -138,35 +132,6 @@ pub(crate) struct MigrationPermit {
 /// Private to this module; nothing outside can name a value of it.
 #[derive(Debug)]
 struct Seal;
-
-impl MigrationPermit {
-    /// Test seam for unit tests in other modules (store, apply path).
-    /// Production code mints the permit inside `prepare` and passes it
-    /// by reference only.
-    #[cfg(test)]
-    pub(crate) fn mint_for_tests() -> Self {
-        Self { _seal: Seal }
-    }
-}
-
-/// The caller's statement that the live-host preflight passed and the
-/// plan was shown and explicitly approved (§10.4 stages 2–3; §12.4: not
-/// a generic auto-confirm flag). The type pins the call-site order —
-/// approval is constructed by whoever displayed the plan, *before*
-/// `prepare` runs, and is consumed by it. What counts as "shown and
-/// approved" for the future `apply` command is that command's policy.
-#[derive(Debug)]
-pub(crate) struct Approval {
-    _private: (),
-}
-
-impl Approval {
-    /// Record an explicit approval (the user answered yes to the
-    /// displayed plan of this exact migration).
-    pub(crate) fn explicit() -> Self {
-        Self { _private: () }
-    }
-}
 
 /// One approved preparation step (§10.4 stage 3→5): a stable id, the
 /// §11 write-ahead intent, and the operation to execute. The only
@@ -206,21 +171,138 @@ pub(crate) enum PackageOperation {
 /// The approved plan: the exact steps the coordinator may execute, in
 /// order (§10.3: the coordinator performs *only* the operations in its
 /// approved plan).
-#[derive(Debug)]
 pub(crate) struct ApprovedPlan {
-    pub(crate) steps: Vec<PreparationStep>,
+    steps: Vec<PreparationStep>,
+    pin: Option<SystemPlanPin>,
+    repository: Option<crate::upgrade::OpenRepo>,
+    // Own the verified copies until the coordinator has finished. Rejection
+    // drops every private copy, including a partially staged plan.
+    staged: Vec<crate::fetch::VerifiedSnapshot>,
+    proc: PathBuf,
 }
 
-/// Everything `prepare` needs. `approval` is consumed, so one prepared
-/// run consumes exactly one approval.
+impl ApprovedPlan {
+    /// Consume the migration-specific approval, authenticate the exact signed
+    /// entries again, then stage in approved order. No dependency solver or
+    /// package lock participates in this operation.
+    pub(crate) fn stage(
+        ctx: &Ctx,
+        proc: &Path,
+        repository: &str,
+        approval: MigrationApproval,
+    ) -> Result<Self> {
+        let pin = approval.into_pin();
+        let open = plan::verify_approval_pin(&ctx.root, proc, repository, &pin)?;
+        let mut staged = Vec::new();
+        let mut steps = Vec::new();
+        for artifact in &pin.artifacts {
+            crate::adapters::interrupt::check()?;
+            let entry = open
+                .index
+                .find(&artifact.name)
+                .context("approved index entry disappeared")?;
+            let fetched = crate::upgrade::fetch_entry(&ctx.root, &open, entry, false)
+                .with_context(|| {
+                    format!(
+                        "approved artifact {} is unavailable or invalid",
+                        artifact.name
+                    )
+                })?;
+            let copy = crate::fetch::snapshot_file(
+                &fetched,
+                Some(&artifact.sha256),
+                &ctx.root.join(".nawa"),
+            )?;
+            if std::fs::metadata(copy.path())?.len() != artifact.size {
+                bail!("approved archive size mismatch for {}", artifact.name);
+            }
+            // Authenticate .PKGINFO against the signed entry using the copied
+            // bytes as well; do not retain a mutable repository path.
+            let raw = crate::adapters::archive::read_pkginfo(copy.path())?;
+            let info = crate::adapters::archive::parse_pkginfo(&raw)?;
+            let metadata = crate::domain::package::metadata::PkgMetadata::from_pkginfo_map(&info)
+                .map_err(anyhow::Error::msg)?;
+            let expected = open
+                .metadata_for(&artifact.name)
+                .context("approved solving metadata is unavailable")?;
+            crate::domain::package::metadata::check_chain(&expected, &metadata)
+                .map_err(anyhow::Error::msg)?;
+            let target = crate::install::inspect_archive_state(
+                copy.path(),
+                artifact.install_reason.db_reason(),
+                None,
+            )?;
+            if info.get("pkgname") != Some(&artifact.name)
+                || target
+                    .version
+                    .as_ref()
+                    .zip(target.rel)
+                    .map(|(v, r)| crate::domain::planning::install::version_rel(v, r))
+                    .as_ref()
+                    != Some(&artifact.target)
+            {
+                bail!(
+                    "staged archive identity does not match the approved package {}",
+                    artifact.name
+                );
+            }
+            // Reuse the durable content-addressed archive store. Recovery can
+            // authenticate all staged archives after process death, including
+            // packages whose install step was never reached. Shared verified
+            // cache objects are retained; private copies are cleanup-on-drop.
+            crate::adapters::artifact::store_verified_copy(
+                &ctx.root,
+                copy.path(),
+                Some(&artifact.sha256),
+            )?;
+            if artifact.kind != PackageActionKind::Keep {
+                steps.push(PreparationStep {
+                    id: format!("install-{}", artifact.name),
+                    intent: format!(
+                        "install {} {} sha256 {}",
+                        artifact.name, artifact.target, artifact.sha256
+                    ),
+                    operation: PackageOperation::Install {
+                        archive: copy.path().to_path_buf(),
+                        package: artifact.name.clone(),
+                        expected_sha256: Some(artifact.sha256.clone()),
+                        reason: artifact.install_reason.db_reason(),
+                        force: false,
+                        allow_unsigned: false,
+                        source: format!("repository:{}", pin.source_fingerprint),
+                    },
+                });
+            }
+            staged.push(copy);
+        }
+        Ok(Self {
+            steps,
+            pin: Some(pin),
+            repository: Some(open),
+            staged,
+            proc: proc.to_path_buf(),
+        })
+    }
+
+    #[cfg(test)]
+    fn fixture(steps: Vec<PreparationStep>) -> Self {
+        Self {
+            steps,
+            pin: None,
+            repository: None,
+            staged: Vec::new(),
+            proc: PathBuf::from("/proc"),
+        }
+    }
+}
+
+/// Everything `prepare` needs. Constructing `plan` consumed the exact explicit
+/// migration approval; there is no second generic confirmation authority.
 pub(crate) struct PreparationRequest<'a> {
     /// the validated migration definition (its id names the record)
     pub(crate) definition: &'a MigrationDefinition,
     pub(crate) plan: ApprovedPlan,
-    /// §10.4: the durable planned record exists only after this
-    pub(crate) approval: Approval,
-    /// progress output (the future `apply` command supplies the real
-    /// presentation adapter)
+    /// Progress output through the application interaction boundary.
     pub(crate) ui: &'a UserInteraction,
 }
 
@@ -256,7 +338,6 @@ pub(crate) fn prepare(ctx: &Ctx, request: PreparationRequest<'_>) -> Result<Prep
     let PreparationRequest {
         definition,
         plan,
-        approval: Approval { _private: () },
         ui,
     } = request;
 
@@ -267,6 +348,16 @@ pub(crate) fn prepare(ctx: &Ctx, request: PreparationRequest<'_>) -> Result<Prep
     let guard = lock::acquire(&ctx.root, lock::Mode::Exclusive)?.ok_or_else(|| {
         anyhow!("internal: the exclusive package database lock is required to prepare a migration")
     })?;
+    if let Some(pin) = &plan.pin {
+        pin.validate().map_err(anyhow::Error::msg)?;
+        plan::verify_local_pin(&ctx.root, &plan.proc, pin)?;
+        for (artifact, copy) in pin.artifacts.iter().zip(&plan.staged) {
+            crate::fetch::verify_sha256(copy.path(), &artifact.sha256)?;
+            if std::fs::metadata(copy.path())?.len() != artifact.size {
+                bail!("staged artifact size changed before mutation");
+            }
+        }
+    }
     // the permit lives exactly as long as this coordinator run
     let permit = MigrationPermit { _seal: Seal };
     let legacy_init_handoff = definition.legacy_init_handoff().ok_or_else(|| {
@@ -296,6 +387,10 @@ pub(crate) fn prepare(ctx: &Ctx, request: PreparationRequest<'_>) -> Result<Prep
     // explicit approval (the consumed `Approval` proves the caller's
     // order) and immediately before the gate is taken (§10.3).
     let mut record = MigrationRecord::new(definition);
+    if let Some(pin) = &plan.pin {
+        record.schema = 2;
+        record.approval = Some(pin.clone());
+    }
     persist(&ctx.root, &record).with_context(|| {
         format!(
             "migration {}: the planned record could not be created",
@@ -355,6 +450,43 @@ pub(crate) fn prepare(ctx: &Ctx, request: PreparationRequest<'_>) -> Result<Prep
             )),
             ui,
         ));
+    }
+
+    if plan.pin.is_some() {
+        record.steps.push(StepRecord {
+            id: "capture-boot-snapshot".into(),
+            intent: Some(
+                "capture the original boot/init and runit service tree before package mutation"
+                    .into(),
+            ),
+            outcome: None,
+        });
+        persist(&ctx.root, &record)?;
+        let captured = crate::adapters::migration_boot_snapshot::capture(&ctx.root, &definition.id)
+            .and_then(|info| {
+                let pin = crate::domain::system::migration::SnapshotPin {
+                    identity: info.identity,
+                    manifest_sha256: info.manifest_sha256,
+                };
+                crate::adapters::migration_boot_snapshot::verify_pinned(
+                    &ctx.root,
+                    &definition.id,
+                    &pin,
+                )?;
+                record.snapshot = Some(pin);
+                Ok(())
+            });
+        if let Err(error) = captured {
+            // Publication might have crossed a durable boundary. Preserve the
+            // intent, gate and any recovery data; never infer compensation.
+            return conclude(ctx, record, op, Some(&error), true, ui);
+        }
+        record
+            .steps
+            .last_mut()
+            .expect("snapshot intent exists")
+            .outcome = Some(StepOutcome::Succeeded);
+        persist(&ctx.root, &record)?;
     }
 
     // Write-ahead step loop (§10.3). Every failure — side effect, record
@@ -438,7 +570,8 @@ pub(crate) fn prepare(ctx: &Ctx, request: PreparationRequest<'_>) -> Result<Prep
                 ));
                 install_for_migration(
                     ctx,
-                    crate::application::features::package::apply_transaction::MigrationInstall {
+                    MigrationInstall {
+                        repository: plan.repository.as_ref(),
                         archive,
                         what: package,
                         number: index + 1,
@@ -466,13 +599,26 @@ pub(crate) fn prepare(ctx: &Ctx, request: PreparationRequest<'_>) -> Result<Prep
             .expect("a step record was just pushed");
         match result {
             Ok(()) => {
-                if let Err(error) = verify_install_postcondition(ctx, &step.operation) {
+                let verified = verify_install_postcondition(ctx, &step.operation).and_then(|()| {
+                    if let Some(pin) = &plan.pin {
+                        let inventory = super::observation::observe(&ctx.root, &plan.proc);
+                        if !matches!(inventory.packages, super::observation::PackageInventory::Available(_))
+                            || inventory.installed_identities != pin.inventory_after(index + 1) {
+                            bail!("installed inventory does not match the exact approved package prefix and reasons");
+                        }
+                    }
+                    Ok(())
+                });
+                if let Err(error) = verified {
                     // the step claims success but the postcondition does
                     // not hold: the outcome records the failed
                     // verification, never a success, and the commit
                     // classification reads the actual database
                     let committed = step_committed(ctx, &step.operation, before.as_ref());
-                    committed_any |= committed;
+                    // The package DB alone cannot prove filesystem/hook
+                    // compensation. Pinned production runs retain the gate
+                    // after an attempted operation with ambiguous effects.
+                    committed_any |= committed || plan.pin.is_some();
                     last.outcome = Some(StepOutcome::Failed {
                         reason: format!("{error:#}"),
                     });
@@ -512,7 +658,7 @@ pub(crate) fn prepare(ctx: &Ctx, request: PreparationRequest<'_>) -> Result<Prep
                 // §10.3: never assume a failed command means that no side
                 // effect occurred — classify from the actual database
                 let committed = step_committed(ctx, &step.operation, before.as_ref());
-                committed_any |= committed;
+                committed_any |= committed || plan.pin.is_some();
                 last.outcome = Some(StepOutcome::Failed {
                     reason: reason.clone(),
                 });
@@ -538,6 +684,27 @@ pub(crate) fn prepare(ctx: &Ctx, request: PreparationRequest<'_>) -> Result<Prep
     // flock releases; if the migration is gate-active, every ordinary
     // package mutation is refused from now on (§10.3) until the record
     // reaches a terminal state through resume/recovery.
+    if failure.is_none() && plan.pin.is_some() {
+        let verification = (|| -> Result<()> {
+            let snapshot = record
+                .snapshot
+                .as_ref()
+                .context("boot snapshot was not captured")?;
+            crate::adapters::migration_boot_snapshot::verify_pinned(
+                &ctx.root, &record.id, snapshot,
+            )?;
+            // Filesystem capture does not implement the distribution's boot
+            // handler. Never publish awaiting-reboot without that acceptance.
+            if !super::migrate_apply::handler_blockers().is_empty() {
+                bail!("boot/initramfs preparation and rescue contracts remain blocked; package changes require recovery");
+            }
+            Ok(())
+        })();
+        if let Err(error) = verification {
+            failure = Some(error);
+            committed_any = true;
+        }
+    }
     conclude(ctx, record, op, failure.as_ref(), committed_any, ui)
 }
 
@@ -937,8 +1104,7 @@ mod tests {
             ctx,
             PreparationRequest {
                 definition: &definition(),
-                plan: ApprovedPlan { steps },
-                approval: Approval::explicit(),
+                plan: ApprovedPlan::fixture(steps),
                 ui: &ui,
             },
         )
@@ -1249,8 +1415,7 @@ mod tests {
             ctx,
             PreparationRequest {
                 definition: &definition(),
-                plan: ApprovedPlan { steps },
-                approval: Approval::explicit(),
+                plan: ApprovedPlan::fixture(steps),
                 ui: &ui,
             },
         );

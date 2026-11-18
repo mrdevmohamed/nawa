@@ -23,27 +23,51 @@ pub(crate) enum PackageInventory {
 pub(crate) struct SystemSnapshot {
     pub(crate) observed: ObservedSystem,
     pub(crate) packages: PackageInventory,
+    pub(crate) installed_identities: Vec<crate::domain::system::plan::InstalledIdentity>,
 }
 
 pub(crate) fn observe(root: &Path, proc: &Path) -> SystemSnapshot {
     let observed = detect::observe(root, proc);
+    let mut installed_identities = Vec::new();
     let packages = match crate::adapters::db::Db::new(root).installed() {
-        Ok(entries) => PackageInventory::Available(
-            entries
-                .into_iter()
-                .map(|entry| {
-                    (
-                        entry.name,
-                        crate::domain::planning::install::version_rel(&entry.version, entry.rel),
-                    )
+        Ok(entries) => {
+            installed_identities = entries
+                .iter()
+                .map(|entry| crate::domain::system::plan::InstalledIdentity {
+                    name: entry.name.clone(),
+                    version: crate::domain::planning::install::version_rel(
+                        &entry.version,
+                        entry.rel,
+                    ),
+                    sha256: entry.artifact_sha256.clone(),
+                    reason: entry.reason.clone(),
                 })
-                .collect(),
-        ),
+                .collect();
+            installed_identities.sort_by(|a, b| a.name.cmp(&b.name));
+            PackageInventory::Available(
+                entries
+                    .into_iter()
+                    .map(|entry| {
+                        (
+                            entry.name,
+                            crate::domain::planning::install::version_rel(
+                                &entry.version,
+                                entry.rel,
+                            ),
+                        )
+                    })
+                    .collect(),
+            )
+        }
         Err(error) => PackageInventory::Unavailable {
             reason: format!("{error:#}"),
         },
     };
-    SystemSnapshot { observed, packages }
+    SystemSnapshot {
+        observed,
+        packages,
+        installed_identities,
+    }
 }
 
 #[cfg(test)]

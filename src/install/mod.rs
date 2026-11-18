@@ -194,6 +194,51 @@ pub(crate) fn install_archive_from_index_proof(
     proof: Option<IndexProof<'_>>,
     file_journal: Option<journal::FileJournalId>,
 ) -> Result<Entry> {
+    install_archive_from_index_proof_inner(
+        archive_path,
+        root,
+        force,
+        expected_sha256,
+        reason,
+        proof,
+        file_journal,
+        None,
+    )
+}
+
+/// The same authenticated installer, with the one typed init ownership handoff.
+pub(crate) fn install_archive_from_index_proof_for_migration(
+    archive_path: &Path,
+    root: &Path,
+    expected_sha256: &str,
+    reason: crate::adapters::db::InstallReason,
+    proof: IndexProof<'_>,
+    file_journal: Option<journal::FileJournalId>,
+    authority: &LegacyInitHandoff,
+) -> Result<Entry> {
+    install_archive_from_index_proof_inner(
+        archive_path,
+        root,
+        false,
+        expected_sha256,
+        reason,
+        Some(proof),
+        file_journal,
+        Some(authority),
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // shared installer; authority adds only the narrow handoff
+fn install_archive_from_index_proof_inner(
+    archive_path: &Path,
+    root: &Path,
+    force: bool,
+    expected_sha256: &str,
+    reason: crate::adapters::db::InstallReason,
+    proof: Option<IndexProof<'_>>,
+    file_journal: Option<journal::FileJournalId>,
+    authority: Option<&LegacyInitHandoff>,
+) -> Result<Entry> {
     let snapshot_dir = root.join(".nawa");
     let snapshot = crate::fetch::snapshot_file(archive_path, Some(expected_sha256), &snapshot_dir)?;
     // B3 chain §6 rule 3: after the digest verifies, compare every solved
@@ -240,7 +285,7 @@ pub(crate) fn install_archive_from_index_proof(
         false,
         auth,
         file_journal,
-        None,
+        authority,
     )
 }
 

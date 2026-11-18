@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased — pinned SystemPlan transaction and recovery integration
+
+- Bind explicit migration approval to definition, source/target, observation,
+  installed identities and ordered signed archive pins, including install reasons.
+- Stage exact archives before the coordinator acquires the package lock. Reuse
+  the existing signed-index installer, WAL and history with the typed init handoff.
+- Persist schema-2 pinned migration records and schema-3 boot snapshots bound to
+  the selected root and exact manifest. Legacy records remain explicitly unpinned.
+- Verify snapshot/staged evidence and approved installed identities during recovery;
+  require proven PID 1 and matching effective profile before considering completion.
+- Refused apply and unresolved resume return exit 1. Both plan commands display
+  the approval identity; offline remote planning does not write repository caches.
+- Keep production migration blocked pending real firmware/initramfs and rescue
+  acceptance. No reboot, old-provider removal or automatic rollback is introduced.
+
 ## Unreleased — removed: runit service subsystem (`nawa service`)
 
 - `nawa service` (list/status/enable/disable/start/stop/restart) is gone,
