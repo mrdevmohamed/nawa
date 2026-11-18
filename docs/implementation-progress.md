@@ -14,10 +14,10 @@
 | 1 — Structural refactor + service removal | **DONE** (1a, 1b, 1c, 1d, 1e — 1e is the deferred apply-transaction extraction) |
 | 2 — Init identity & capability foundation | **DONE** (detection + capability/identity domain model) |
 | 3 — Metadata & capability resolution | **DONE** (B3 proposal is now wired: recipe `[capabilities]` → `.PKGINFO provides` → signed index v4 → solver, legacy v1–v3 unchanged; the whole package planner — install, outdated, orphans, removal ordering — in `domain/planning/`) |
-| 4 — System profiles & planning | **DONE** (profile model + merge rules + loader §7; profile wired into plan generation §8.1–8.4 — install/update report the init decision, invalid profiles fail closed; byte-identity + probes verified. Stage-3 exit met: dry-run plans explain every init-provider and package decision without managing services. The candidate→provider capability comparison still awaits the B3 index schema — see blockers) |
-| 5 — Migration engine | in progress: the migration domain model (§10.1–§10.3) + the durable record store (top-level `migration_record.rs`) + the persistent mutation-gate check wired into every exclusive acquisition (§10.3, block-only) + the read-only `system migrate` inspection CLI (§12.2, slice 3) + the migration coordinator with the typed in-process permit and the `planned → preparing → awaiting-reboot / failed / needs-recovery` lifecycle (§10.3–§10.4, slice 4) + durable write-ahead/lifecycle hardening (5B) + crash recovery and explicit live-host resume (5C) + adversarial security verification (5D: §13 gates, lock ownership, no-follow/permissions, handler allowlist and plugin boundary, demonstrated by tests); next: metadata v4 wiring, Phase 6 blockers |
+| 4 — System profiles & planning | **DONE** (profile model + merge rules + loader §7; profile wired into plan generation §8.1–8.4 — install/update report the init decision, invalid profiles fail closed; byte-identity + probes verified. B3 signed-index v4 provider metadata is wired into candidate explanations; legacy v1–v3 remains explicitly unknown) |
+| 5 — Migration engine | **FRAMEWORK IMPLEMENTED**: typed migration model, durable record store, persistent exclusive-lock mutation gate, read-only inspection, coordinator/permit, write-ahead lifecycle, crash recovery, explicit live-host resume and adversarial security tests. The real distribution boot handler remains blocked by Phase 6 contracts; `apply` refuses before creating a record or changing packages. |
 | 6 — Faseela runit→systemd migration | **BLOCKED** (external re-inspection 2026-11-18: current Faseela has *already* moved to systemd — runit recipes removed, `init = "systemd"` profile — so the migration premise no longer matches current HEAD; B1/B4/B5/B6/B7 still open. Nawa-side preflight, explicit authorization, read-only plan and resume are implemented; real boot transition is not) |
-| 7 — Final verification | in progress: presentation modules consolidated under `src/presentation/`, obsolete `dead_code` allowances removed, provider-selection explanation wired through the solver, layering gate strengthened and negative-probed, architecture audit synchronized; final battery green |
+| 7 — Final verification | **IN PROGRESS**: Phase 7a/7b source ownership reorganization and audit are landed; the read-only system inspection CLI and integration coverage are now added. Feature-branch CI has been enabled; final post-change verification is pending. |
 
 ## Completed phases
 
@@ -401,18 +401,17 @@ the handlers own only parsing, rendering and prompts.
 
 ## Current task
 
-**Phase 5 — migration engine** (design §10–§12, Stage 4). Running log
-below ("Done within Phase 5 so far"): the gate is wired (slice 2), the
-read-only `system migrate` inspection CLI is landed (slice 3), the
-migration coordinator with the typed in-process permit is landed
-(slice 4 — the only legitimate way past the gate, but no production
-caller yet: the `apply` command is a later slice), and the durable
-write-ahead/lifecycle hardening (5B) is landed: one verified
-publication path with reload-verify, database-truth failure
-classification, gate/begin abandon, deferred interrupts, and the crash
-boundaries documented and pinned by tests. Next is crash recovery
-(5C, see "Exact next task"). Phase 3's planning work is complete and
-folded into Phases 4–5; its notes below are kept for the record.
+**Phase 7 — system inspection UX and final quality gate.** Phase 7a/7b
+reorganized the source tree and synchronized the architecture audit. This
+branch now includes read-only `system status`, `system profile show`,
+`system plan` and `system explain init-system` commands with integration
+coverage. The Nawa-side migration framework is implemented; the real Faseela
+boot transition remains blocked by the external contracts listed below.
+Historical Phase 3–6 notes are retained as an implementation log; later
+entries and the blocker table record the current state.
+
+> Historical Phase 3 notes below describe the proposal before B3 was wired.
+> See “B3 wiring — Metadata Index v4” for the completed metadata chain.
 
 ### Done within Phase 3 so far
 
@@ -1693,7 +1692,7 @@ untouched pre-existing red** |
 |---|---|---|---|
 | B1 | **saq init selection — RE-INSPECTED, STILL OPEN** (saq `f54918a`): `saq/share/saq/init:156` still iterates `$INIT_ARG /usr/bin/runit /sbin/init /usr/sbin/init`; `init=` *is* supported as the first candidate. Faseela `bootstrap/install.sh:455-466` disk grub.cfg passes no `init=`. Required change: the migration boot handler must write an explicit `init=/usr/lib/systemd/systemd` into the disk grub.cfg (or Faseela must adopt it in `install.sh`), while runit is retained. Acceptance: boot a disk image with runit installed and verify PID 1 is systemd through the real saq. | Faseela (grub.cfg) / SAQ (init contract) | Phase 6 apply-safety |
 | B2 | **`/usr/bin/init` payload conflict — RE-INSPECTED, RESOLVED in current HEAD**: faseela-repo `3f3cf60` has no runit/runit-services recipe; only `recipes/system/systemd/recipe.toml:177` ships the `/usr/bin/init` symlink. The original two-owner conflict no longer exists on current Faseela. Reopen only if migration of an older release with runit-services is required. | Faseela | none for current HEAD |
-| B3 | **Repository index v4 schema**: ~~needs a written schema proposal + tests~~ **proposal written** (`docs/design/package-metadata-chain.md` + unwired reference model `domain/package/metadata.rs`, 15 tests). Awaiting maintainer agreement before wiring (recipe/build/repo-create/validate/fetch changes listed in §10 of the proposal). | Nawa (this repo) | Phase 3 (proposal done; wiring when agreed) |
+| B3 | **Repository index v4 schema — RESOLVED (2026-11-18)**: recipe `[capabilities]` → archive `.PKGINFO` → authenticated signed index v4 → verified fetch comparison → solver provider explanation is wired and tested. Legacy v1–v3 remains readable and maps missing metadata to `Unknown`. | Nawa (this repo) | Phase 3 — complete |
 | B4 | **System profile location — RE-INSPECTED, STILL OPEN**: Faseela `42dec56` has `profiles/x86_64.toml` with `init = "systemd"` (a *build* profile) but no Nawa `system-profile.toml` at either `<root>/usr/share/nawa/system-profile.toml` or `<root>/etc/nawa/system-profile.toml`. Required: Faseela publishes those files with the agreed keys/precedence (or confirms Nawa's loader reads its existing profile). Acceptance: `nawa system migrate apply` preflight finds a declared systemd target on a provisioned root. | Faseela agreement | Phase 6 apply preflight |
 | B5 | **Bootloader/initramfs + recovery contract — RE-INSPECTED, PARTIALLY RESOLVED**: grub (BIOS MBR + UEFI removable ESP) and saq-generated initramfs are in place; Faseela already `switch_root`s to systemd. Missing: the *migration* contract — which artifacts are retained, how the old boot entry is restored, and the documented external rescue path. Required: written boot/recovery contract owned by Faseela. Acceptance: a failed verification can be rolled back to a bootable runit/old-kernel route. | Faseela | Phase 6 handler |
 | B6 | **VM boot-test harness — RE-INSPECTED, PARTIALLY RESOLVED**: Faseela has `scripts/qemu-boot-test.sh` (BIOS ISO boot, serial login, KVM/TCG) but no migration disk-image harness with snapshots and no UEFI path. Required: disposable VM harness with snapshots for both BIOS and UEFI running the real saq. Acceptance: all §14.3 scenarios pass on the real implementation. | Nawa/infra + Faseela | Phase 6 acceptance |
@@ -1701,22 +1700,23 @@ untouched pre-existing red** |
 
 ## Exact next task
 
-**Phase 7 — final architecture, source-tree and quality audit.** All
-Nawa-independent slices are implemented and verified; Phase 6 remains blocked
-by external Faseela/SAQ decisions (documented with owners/files/acceptance
-tests in the blocker table). The remaining work in this repository:
+**Phase 6 — external Faseela/SAQ integration and real boot acceptance.** The
+Nawa-side migration framework and safe preflight are implemented, but the
+real runit-to-systemd handler must remain fail-closed until the following
+distribution-owned contracts are resolved:
 
-* Audit the root-level `src/*.rs` modules against the desired ownership
-  (§7.1): move misplaced code into its proper layer incrementally, split
-  mixed-responsibility modules, remove obsolete `dead_code` allowances and
-  duplicated code, keep `main.rs` minimal — without a mechanical mass move.
-* Review and strengthen `scripts/check-layering.py`: no cycles, no
-  Domain/Application → Presentation edges, a documented and shrinking
-  allowlist; negative-probe each rule.
-* Synchronize `docs/architecture-audit.md` with the *actual* final module
-  structure and this tracker with the shipped behavior; run the complete
-  verification battery at the milestone and record exact results, separating
-  environment failures from code failures.
+* B1: make the real `saq` disk init selection choose systemd explicitly and
+  prove the result by observing PID 1 in a disposable disk image.
+* B4: publish the agreed Nawa system profile in the target root; the existing
+  Faseela build profile is not a substitute.
+* B5: document retained boot artifacts, restoration of the old boot route and
+  a tested external rescue path.
+* B6: add disposable BIOS and UEFI migration VM tests with snapshots.
+* B7: define and enforce the Faseela privileged-hook/trigger policy; hooks
+  must not be treated as trusted migration handlers.
 
-Phase 6 stays blocked until Faseela/SAQ resolve B1/B4/B5/B6/B7; no real boot
-verification has been performed and no external repository was modified.
+Do not invoke the migration coordinator, remove runit, edit boot configuration
+or claim a successful transition while these conditions are unresolved.
+Continue read-only inspection and package-planning work independently. The
+feature-branch CI workflow is now enabled; record its result after the
+current run completes.
