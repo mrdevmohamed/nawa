@@ -15,7 +15,7 @@
 | 2 — Init identity & capability foundation | **DONE** (detection + capability/identity domain model) |
 | 3 — Metadata & capability resolution | **DONE** (B3 proposal; the whole package planner — install, outdated, orphans, removal ordering — in `domain/planning/`, behavior verified byte-identical) |
 | 4 — System profiles & planning | **DONE** (profile model + merge rules + loader §7; profile wired into plan generation §8.1–8.4 — install/update report the init decision, invalid profiles fail closed; byte-identity + probes verified. Stage-3 exit met: dry-run plans explain every init-provider and package decision without managing services. The candidate→provider capability comparison still awaits the B3 index schema — see blockers) |
-| 5 — Migration engine | in progress: the migration domain model (§10.1–§10.3) + the durable record store (top-level `migration_record.rs`) + the persistent mutation-gate check wired into every exclusive acquisition (§10.3, block-only) + the read-only `system migrate` inspection CLI (§12.2, slice 3); next: the coordinator with the typed in-process permit (§10.3), then the durable lifecycle |
+| 5 — Migration engine | in progress: the migration domain model (§10.1–§10.3) + the durable record store (top-level `migration_record.rs`) + the persistent mutation-gate check wired into every exclusive acquisition (§10.3, block-only) + the read-only `system migrate` inspection CLI (§12.2, slice 3) + the migration coordinator with the typed in-process permit and the `planned → preparing → awaiting-reboot / failed / needs-recovery` lifecycle (§10.3–§10.4, slice 4); next: durable write-ahead hardening (5B), then recovery (5C) and security verification (5D) |
 | 6 — Faseela runit→systemd migration | **BLOCKED** (see blockers) |
 | 7 — Final verification | not started |
 
@@ -402,11 +402,14 @@ the handlers own only parsing, rendering and prompts.
 ## Current task
 
 **Phase 5 — migration engine** (design §10–§12, Stage 4). Running log
-below ("Done within Phase 5 so far"): the gate is wired (slice 2) and
-the read-only `system migrate` inspection CLI is landed (slice 3); the
-coordinator with the typed in-process permit is next (see "Exact next
-task"). Phase 3's planning work is complete and folded into Phases 4–5;
-its notes below are kept for the record.
+below ("Done within Phase 5 so far"): the gate is wired (slice 2), the
+read-only `system migrate` inspection CLI is landed (slice 3) and the
+migration coordinator with the typed in-process permit is landed
+(slice 4 — the only legitimate way past the gate, but no production
+caller yet: the `apply` command is a later slice); next is the durable
+write-ahead/lifecycle hardening (5B, see "Exact next task"). Phase 3's
+planning work is complete and folded into Phases 4–5; its notes below
+are kept for the record.
 
 ### Done within Phase 3 so far
 
@@ -882,6 +885,128 @@ Verification:
   suites (v05 + v06, which exercise real install/update/rollback
   transactions) pass on the new binary.
 
+### Done within Phase 5 so far (4): the migration coordinator and the typed in-process permit (§10.3–§10.4)
+
+The gate was block-only; this slice adds the *only* legitimate way past
+it and the first real lifecycle driver over the durable state machine.
+No CLI surface yet: the future `nawa system migrate apply` command
+(§12.2) owns preflight + plan presentation and is a later slice, so
+binary behavior is unchanged by construction.
+
+**The permit (`MigrationPermit`, inside `migrate_coordinator.rs`):**
+
+* Unforgeable in-process proof that this coordinator run may continue
+  its approved package operations while the mutation gate is active
+  (§10.3, §14.1). Zero-sized; the authority it proves is structural —
+  the holder is inside the coordinator's call path, beside the lock
+  guard that proves lock ownership. The `_seal` field is module-private,
+  so the compiler rejects construction anywhere else; there is no
+  `Clone`/`Copy`, no serde, no `FromStr`/`Display`, no environment
+  spelling that could impersonate one. A hook-spawned nested `nawa`
+  receives no permit and is still refused by the gate (`NAWA_LOCK_HELD`
+  stays forge-proof and never authorizes a mutation).
+* Placement finding: a top-level `migration_permit.rs` with a
+  `pub(in super::application::features::system)` minting function was
+  attempted first and rejected by rustc (E0742: visibility may only name
+  *ancestor* modules — a top-level module cannot restrict to a path
+  through its sibling `application`). The permit therefore lives inside
+  the coordinator module; the only cross-feature import is
+  `apply_transaction` naming the permit type (`features/package` →
+  `features/system`, an intended application-internal edge).
+* The durable record store is deliberately *not* permit-gated: the
+  top-level `migration_record` module cannot import from the application
+  layer (that would be an inversion; `migrate_inspect` already
+  constructs application types). `migration_record::save` keeps its
+  direct calls, with the coordinator as its only production caller.
+
+**Lock-ownership inversion (`apply_transaction.rs`):**
+
+* `install_one` gained an `ownership: LockOwnership<'_>` parameter —
+  `PerStep` acquires and releases the exclusive lock around that one
+  install exactly as before (every pre-existing call site passes it;
+  ordinary behavior is unchanged), while `Coordinator { guard, permit }`
+  performs *no* acquire at all: the flock is per open file description,
+  so reacquiring inside the coordinator's held lock would deadlock
+  against ourselves, and once the gate is active an ordinary acquire is
+  refused anyway.
+* `install_for_migration` is the coordinator's entry into the ordinary
+  verified installer: the same `install_one` path (artifact-hash
+  pinning, payload conflict checks, db update, WAL/history) with the
+  borrowed guard + permit as the authorization. `MigrationInstall` is
+  the request struct (staged archive, planned name, pinned sha256,
+  reason/force/allow-unsigned, provenance). Nothing is fetched or built
+  here — artifacts are staged before the mutation phase (§10.4 stage 4).
+
+**The coordinator (`prepare`, §10.3–§10.5):**
+
+* Signature pins the call-site order: `PreparationRequest` carries the
+  validated definition, the `ApprovedPlan` (the exact steps the
+  coordinator may perform, in order), the consumed `Approval::explicit()`
+  — the caller's statement that preflight passed and the plan was shown
+  and explicitly approved; what that means concretely is the future
+  `apply` command's policy (§12.4: not a generic auto-confirm) — and the
+  presentation port.
+* Sequence: ordinary `lock::acquire(Exclusive)` (the gate check rides
+  along: a pending migration's refusal names it precisely; a `None`
+  acquire under an inherited held marker is an internal error — the
+  coordinator requires the real lock); refusal when *any* record with
+  this id already exists (re-running a failed migration is a
+  recovery/re-plan decision, not a silent overwrite); the durable
+  `planned` record is saved; one real transaction is begun via
+  `begin_operation` with `OperationCommand::Migration` ("migrate") and
+  `requested = [migration id]` so history links the transaction to the
+  migration (§11); `BeginPreparation` under the held lock makes the gate
+  active (from here every *ordinary* exclusive acquisition under this
+  root is refused — ours continue through the held guard).
+* Write-ahead step discipline (§10.3): `interrupt::check()` between
+  steps (Ctrl+C was deferred until the previous side effect completed;
+  between steps the system is consistent), the step's intent is
+  persisted *before* the side effect and its outcome *after* — a crash
+  between the two leaves exactly the interrupted shape
+  (`intent` set, `outcome: None`) that the recovery slice reconciles.
+  The first failing step breaks the loop.
+* Failure split (§10.3's compensation rule): a failure with *no*
+  committed step before it → `PreparationCompensated` → `failed`
+  (nothing changed, compensation is trivially complete, the gate is
+  clear, a retry is a new re-approved plan); a failure *after* earlier
+  steps committed → `PreparationAmbiguous` → `needs-recovery` (the gate
+  stays active; there is no automatic compensation yet — that is the
+  fail-safe until the recovery slice adds verified compensation).
+  Success → `PreparationCommitted` → `awaiting-reboot` (the gate stays
+  active until the post-reboot resume; §10.4: Nawa exits with a
+  pending-migration status and never reboots by itself). `prepare` never
+  clears the gate on its own — only verified completion or a completed
+  verified rollback may (later slices).
+* The transaction ends through `op.finish` (Completed / Partial / Failed
+  from the step outcomes); the lock guard drops with the return, after
+  which a gate-active record refuses every ordinary package mutation.
+
+**Tests (7, all against real scratch roots and real installs):** full
+success (awaiting-reboot; the gate then refuses an ordinary exclusive
+acquire naming id + state; the package really is in the db; history
+shows command "migrate", requested = the migration id, status
+Completed), first-step failure (Compensated; gate clear; nothing
+installed; Failed transaction), mid-plan failure (Ambiguous;
+needs-recovery gate stays; the committed first package is real; Partial
+transaction), begin-refusal on an existing record (any state; the
+record is not modified), begin-refusal while another migration is
+pending (the gate refusal names *that* migration), an empty plan still
+walks the full lifecycle, and the interrupted-step crash-window shape
+round-tripping through the store. One fixture fix during bring-up: the
+staged-archive `.PKGINFO` needed `pkgrel = 1` — the verified installer's
+inspection requires a nonzero pkgrel, which the first test run caught.
+
+**Verification:** `cargo check --all-targets --offline`,
+`clippy --all-targets -- -D warnings`, layering (56 modules, no new
+edges), fmt (new file + touched files clean), full test battery
+(758 pass / 2 ignore / 1 known env-fail), release build + both smoke
+suites (real install/update/rollback over the changed install path).
+`main.rs` is byte-identical to HEAD (the attempted top-level
+`migration_permit` registration was fully reverted when the E0742
+approach died). No CLI surface change by construction — no `cli/`
+completions/help edits; ordinary install behavior is pinned by the
+pre-existing `apply_transaction` tests plus the smokes.
+
 ## Changed files (this phase, updated as work lands)
 
 * `docs/architecture-audit.md` (new, Phase 0)
@@ -1052,6 +1177,25 @@ Verification:
     commands, incl. the read-only proof and offline-root coverage)
   * `docs/commands.md` (the three commands documented, System and
     maintenance section)
+* Phase 5 (coordinator, in progress):
+  * `src/application/features/system/migrate_coordinator.rs` (new —
+    `MigrationPermit` (module-private seal, no Clone/serde/env spelling,
+    `#[cfg(test)] mint_for_tests()` seam), `Approval::explicit()`,
+    `PreparationStep`/`PackageOperation::Install`/`ApprovedPlan`/
+    `PreparationRequest`, `prepare()` (ordinary exclusive acquire with
+    the gate check, existing-record refusal, durable planned save,
+    `begin_operation` with the "migrate" command + requested list,
+    `BeginPreparation` under the held lock, write-ahead step loop,
+    the three-way failure split) + 7 tests; `#![allow(dead_code)]`
+    until the `apply` command lands)
+  * `src/application/features/system/mod.rs` (registration + doc)
+  * `src/application/features/package/apply_transaction.rs`
+    (`LockOwnership<'_>` with `PerStep`/`Coordinator { guard, permit }`,
+    `MigrationInstall`, `install_for_migration`, `install_one` gains the
+    ownership param — both pre-existing call sites pass `PerStep` so
+    ordinary behavior is unchanged; dead-code allows with justifications)
+  * `src/transaction/context.rs` (`OperationCommand::Migration` →
+    "migrate", the coordinator's preparation transaction in history)
 
 ## Tests actually executed
 
@@ -1073,12 +1217,16 @@ Verification:
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 5 migration-model tree) | 706 pass / 2 ignored / 3 env-failed (= 686 + 13 domain migration + 7 record-store tests; same 3 env failures) |
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 5 gate-wiring tree) | 714 pass / 2 ignored / 3 env-failed (= 706 + 4 lock unit + 4 lock integration tests; same 3 env failures) |
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 5 inspection tree) | 751 pass / 2 ignored / 1 env-failed (= 714 + 35 new: 9 inspection use case + 12 presentation + 13 `tests/migrate.rs` + 1 domain reboot-binding test; plus the 2 plugin tests that were env-blocked at the Phase-0 baseline passed this run — container permission state differs between sessions; the remaining env failure is the toolchain-under-`/home` sandbox test) |
-| `cargo clippy --all-targets --offline -- -D warnings` | pass (Phase 1a + 1b + 1c + 1d + 1e + 2 + 3/B3 + 3/solver + 3/removal + 4/profile + 4/wiring + 5/model + 5/gate + 5/inspection) |
-| `python3 scripts/check-layering.py` | pass (54 after 1a; 53 after 1b; 54 after 1c; 55 after 2 — the new `domain` layer; 55 after 3/B3, 3/solver, 3/removal and 4/profile — the count is top-level modules, the new `domain/package`, `domain/planning`, `domain/system/profile` + `features/system/profile` submodules are scanned; 55 after 4/wiring and 5/model — `domain/system/migration` + `features/system/migrate` are submodules of existing top-level modules; 56 after 5/gate — the record store moved to the top-level `migration_record` module; **56 after 5/inspection** — `features/system/migrate_inspect` and `commands/system` are submodules of existing top-level modules, no cycles: commands → application/features/system → migration_record → domain/atomic, lock untouched) |
+| `cargo test --all-targets --offline --no-fail-fast` (Phase 5 coordinator tree) | 758 pass / 2 ignored / 1 env-failed (= 751 + 7 new coordinator lifecycle tests; same 1 env failure. First run of the two install-driven lifecycle tests failed on the fixture — the staged `.PKGINFO` lacked `pkgrel`, which the verified installer requires nonzero — fixed in the fixture, re-run clean) |
+| `cargo test --offline` (bin only, coordinator iteration) | 629 pass / 1 ignored (the coordinator tests run here too: 622 → 629) |
+| `cargo clippy --all-targets --offline -- -D warnings` | pass (Phase 1a + 1b + 1c + 1d + 1e + 2 + 3/B3 + 3/solver + 3/removal + 4/profile + 4/wiring + 5/model + 5/gate + 5/inspection + 5/coordinator) |
+| `python3 scripts/check-layering.py` | pass (54 after 1a; 53 after 1b; 54 after 1c; 55 after 2 — the new `domain` layer; 55 after 3/B3, 3/solver, 3/removal and 4/profile — the count is top-level modules, the new `domain/package`, `domain/planning`, `domain/system/profile` + `features/system/profile` submodules are scanned; 55 after 4/wiring and 5/model — `domain/system/migration` + `features/system/migrate` are submodules of existing top-level modules; 56 after 5/gate — the record store moved to the top-level `migration_record` module; 56 after 5/inspection — `features/system/migrate_inspect` and `commands/system` are submodules of existing top-level modules, no cycles: commands → application/features/system → migration_record → domain/atomic, lock untouched; **56 after 5/coordinator** — `features/system/migrate_coordinator` is a submodule of an existing top-level module; the one new edge `features/package → features/system` (the permit type import) is an intended application-internal edge the checker's intra-application skip does not count) |
 | `bash scripts/smoke-v06.sh` (release build, Phases 1b + 1c + 1d + 2) | ALL V0.6 SMOKE TESTS PASSED |
 | `bash scripts/smoke-v05.sh` (release build, Phases 1d + 2) | ALL SMOKE TESTS PASSED |
 | `bash scripts/smoke-v05.sh` (release build, 5/inspection tree) | ALL SMOKE TESTS PASSED |
 | `bash scripts/smoke-v06.sh` (release build, 5/inspection tree) | ALL V0.6 SMOKE TESTS PASSED |
+| `bash scripts/smoke-v05.sh` (release build, 5/coordinator tree) | ALL SMOKE TESTS PASSED |
+| `bash scripts/smoke-v06.sh` (release build, 5/coordinator tree) | ALL V0.6 SMOKE TESTS PASSED |
 | HEAD-vs-1c behavior diff (`--help`, `--version`, completions × 3, isolated worktree build) | byte-identical |
 | HEAD-vs-1d behavior diff (`--help`, `--version`, completions × 3 + 12 read/planning commands, isolated worktree build) | byte-identical |
 | HEAD-vs-2 behavior diff (`--help`, `--version`, completions × 3, isolated worktree build) | byte-identical (detection adds no CLI surface) |
@@ -1111,7 +1259,11 @@ the gate tests, zero new violations; **5/inspection: the three new
 files (`migrate_inspect.rs`, `commands/system.rs`, `tests/migrate.rs`)
 are rustfmt-clean; the `manifest.rs` hunks are pre-existing at HEAD
 (12, verified against the pristine file — the one-line
-RESERVED_COMMANDS edit adds none)** |
+RESERVED_COMMANDS edit adds none)**; 5/coordinator: the new
+`migrate_coordinator.rs` and the three touched files
+(`apply_transaction.rs` incl. my hunks, `context.rs`, `system/mod.rs`)
+are rustfmt-clean (a stray `--edition 2024` rustfmt detour during
+bring-up was fully normalized back to the project's 2021 edition) |
 
 ## Known problems
 
@@ -1141,40 +1293,38 @@ RESERVED_COMMANDS edit adds none)** |
 
 ## Exact next task
 
-**Phase 5, fourth slice: the migration coordinator and the typed
-in-process permit (§10.3)** — the gate is currently block-only (no
-bypass exists); this slice adds the *only* legitimate way past it:
+**Phase 5B — durable lifecycle / write-ahead hardening (§10.3–§10.4)**
+— the coordinator's skeleton is landed; this slice hardens the parts
+the crash/edge review of slice 4 surfaced, before recovery (5C) builds
+on them:
 
-* A private, unforgeable permit type owned by the coordinator: it can
-  be neither constructed outside the coordinator module nor carried
-  across a process boundary — no environment variable, no CLI flag, no
-  plugin capability, no inherited child-process state. The gate check
-  in `lock::acquire` accepts authorization only through this type.
-* The coordinator holds the exclusive package-database lock itself
-  while a migration's package operations run, and invokes the
-  application package use cases in-process (no nested `nawa` CLI, no
-  re-entrant lock acquisition — the permit, not a second lock, is what
-  authorizes the inner operations). `BeginPreparation` requires the
-  coordinator to hold that lock (documented in `lock.rs` when the gate
-  landed).
-* No weakening of the gate: `NAWA_LOCK_HELD` stays forge-proof and
-  never authorizes a mutation; the permit dies with the coordinator's
-  verified completion or completed verified rollback.
-* Record creation and `Transition` application become real: the durable
-  `planned` record is written only after live-host preflight +
-  explicit approval (offline-root planning stays read-only), and state
-  transitions go through `domain::system::migration::transition` with
-  the write-ahead step discipline (§10.3) — step intent persisted
-  before the side effect, outcome after.
-* Scope discipline for this slice: coordinator skeleton + permit +
-  `planned → preparing → …` lifecycle plumbing with tests; the actual
-  runit→systemd handler body stays out (Phase 6, blocked on B1/B2/B5).
-* Tests: unit tests for the permit type (unconstructible outside,
-  non-serializable), coordinator lifecycle transitions against a
-  scratch root, gate-interaction tests (a permit-bearing in-process
-  operation proceeds; a forged marker still refuses). Gates as always;
-  commit and update this tracker.
+* Re-read design §10.3–§10.5 and §14.1–14.2 against the landed
+  coordinator and enumerate every gap between the spec text and the
+  skeleton (each gets an explicit "done / deferred with reason" verdict
+  in this tracker).
+* Harden the write-ahead discipline where a single process crash can
+  still leave ambiguity the recovery slice cannot reconcile: confirm
+  the record-save ordering (planned → gate-active → per-step
+  intent/effect/outcome → terminal) is crash-consistent under the store's
+  atomic-write guarantees, and pin it with a test per boundary
+  (incl. the existing interrupted-step window).
+* Gate/begin race audit: the begin path checks the gate through the
+  ordinary acquire; verify there is no window where a record is
+  published without the gate becoming active and vice versa
+  (`BeginPreparation` transition failure after the planned save must
+  not strand an ungated `planned` record — decide and document the
+  cleanup, likely best-effort remove of the just-written record).
+* `interrupt` handling audit: verify the deferred-Ctrl+C semantics
+  between steps and document what an interrupt *between* the planned
+  save and `BeginPreparation` leaves on disk.
+* Property: an empty/steps plan, a first-step failure and a mid-plan
+  failure already have tests; add the "op.finish error path" and
+  "record save fails mid-step" cases so the WAL never silently diverges
+  from the db.
+* No CLI surface, no real handler (Phase 6, blocked on B1/B2/B5), no
+  automatic compensation yet (5C decides the recovery route).
 
-Then: durable lifecycle/write-ahead steps hardening (5B), crash
-recovery (5C), security verification (5D), then Phase 6 (blocked on
+Then: crash recovery (5C — resume/verify/finalize, interrupted-step
+reconciliation, acquire-past-gate via a lock-defined trait the permit
+implements), security verification (5D), then Phase 6 (blocked on
 B1/B2/B5/B6/B7) and the §8 index-v4 metadata wiring.

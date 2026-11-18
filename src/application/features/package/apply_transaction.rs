@@ -13,6 +13,7 @@ use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
 use crate::application::features::package::plan_install::{Source, Sourcing};
+use crate::application::features::system::migrate_coordinator::MigrationPermit;
 use crate::application::ports::user_interaction::{PlanRow, PlanView, UserInteraction};
 use crate::config::InstallMode;
 use crate::ctx::Ctx;
@@ -70,6 +71,51 @@ struct InstallRequest<'a> {
     signed_index: bool,
     /// Where this archive comes from, for the history record.
     source: &'a str,
+}
+
+/// Lock ownership for one install step (§10.3). The ordinary path takes
+/// and releases the exclusive lock around the install only — never
+/// across a fetch or a build (the hold would starve readers for the
+/// whole download). The coordinator path carries its own guard instead:
+/// the migration coordinator holds the exclusive package-database lock
+/// for the whole preparation phase and passes both the guard and the
+/// typed permit through this internal call chain (§10.3: reacquiring
+/// would deadlock against its own flock, and an ordinary acquire would
+/// be refused by the now-active gate).
+pub(crate) enum LockOwnership<'a> {
+    /// acquire + release around this one install (every ordinary caller)
+    PerStep,
+    /// the caller holds the exclusive lock and is the migration
+    /// coordinator: the borrowed guard proves lock ownership (a `DbLock`
+    /// cannot be constructed without a real acquisition) and the permit
+    /// proves §10.3 authorization; together they are the only legitimate
+    /// way past the active mutation gate
+    #[allow(dead_code)] // constructed by the migration coordinator, whose own
+    // consumer (the apply command) is a later slice — the compiler cannot
+    // see that edge yet
+    Coordinator {
+        guard: &'a lock::DbLock,
+        permit: &'a MigrationPermit,
+    },
+}
+
+/// One staged-install request from the migration coordinator:
+/// everything [`install_for_migration`] needs beside the shared
+/// handles.
+#[allow(dead_code)] // same reason as LockOwnership::Coordinator
+pub(crate) struct MigrationInstall<'a> {
+    pub(crate) archive: &'a Path,
+    /// the planned package name, for display
+    pub(crate) what: &'a str,
+    pub(crate) number: usize,
+    pub(crate) total: usize,
+    /// the sha256 the approved plan pinned (installer-verified)
+    pub(crate) expected_sha256: Option<&'a str>,
+    pub(crate) reason: crate::db::InstallReason,
+    pub(crate) force: bool,
+    pub(crate) allow_unsigned: bool,
+    /// provenance for the history record
+    pub(crate) source: &'a str,
 }
 
 /// Show the plan, ask, then install every item in order — dependencies
@@ -172,6 +218,7 @@ pub(crate) fn apply_transaction(
                 sourcing.open.as_ref(),
                 op,
                 ui,
+                LockOwnership::PerStep,
             )
         };
         if let Err(e) = step() {
@@ -216,6 +263,7 @@ pub(crate) fn apply_transaction(
                 sourcing.open.as_ref(),
                 op,
                 ui,
+                LockOwnership::PerStep,
             )
         };
         if let Err(e) = step() {
@@ -290,8 +338,11 @@ fn acquire(
     Ok(acquired)
 }
 
-/// Install one ready archive. The library functions never lock; hold the db
-/// lock for this one install only, never through a build or a download.
+/// Install one ready archive. The library functions never lock; with
+/// [`LockOwnership::PerStep`] the db lock is held for this one install
+/// only, never through a build or a download. With
+/// [`LockOwnership::Coordinator`] the caller (the migration coordinator)
+/// already holds it, and no acquire happens at all.
 fn install_one(
     ctx: &Ctx,
     archive: &Path,
@@ -299,12 +350,20 @@ fn install_one(
     open_repo: Option<&upgrade::OpenRepo>,
     op: &mut transaction::OperationHandle,
     ui: &UserInteraction,
+    ownership: LockOwnership<'_>,
 ) -> Result<()> {
     (ui.info)(&format!(
         "[{}/{}] installing {}",
         details.number, details.total, details.what
     ));
-    let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
+    let per_step_lock = match ownership {
+        LockOwnership::PerStep => Some(lock::acquire(&ctx.root, lock::Mode::Exclusive)?),
+        // the coordinator's own guard covers this install: no second
+        // acquire (§10.3 — it would deadlock, and the gate is active)
+        LockOwnership::Coordinator { .. } => None,
+    };
+    // keep the guard alive for the whole install
+    let _held = per_step_lock;
     // Resolve the real package identity from .PKGINFO; archive filenames
     // are not authoritative package metadata.
     let package = archive_name_of(archive)
@@ -404,6 +463,46 @@ fn install_one(
         )
     })?;
     Ok(())
+}
+
+/// Install one staged archive as part of an approved migration plan
+/// (§10.3): the same verified install path as every ordinary install
+/// ([`install_one`]), but under the coordinator's lock ownership — the
+/// caller holds the exclusive lock (the borrowed guard proves it) and
+/// presents the unforgeable permit (§10.3). The coordinator's staged
+/// artifacts are verified before the mutation phase (§10.4 stage 4), so
+/// nothing is fetched or built here.
+#[allow(dead_code)] // the coordinator's consumer (the `nawa system migrate apply`
+                    // command, §12.2) is a later slice; the use case itself is complete and tested
+pub(crate) fn install_for_migration(
+    ctx: &Ctx,
+    request: MigrationInstall<'_>,
+    op: &mut transaction::OperationHandle,
+    ui: &UserInteraction,
+    guard: &lock::DbLock,
+    permit: &MigrationPermit,
+) -> Result<()> {
+    install_one(
+        ctx,
+        request.archive,
+        InstallRequest {
+            reason: request.reason,
+            what: request.what,
+            number: request.number,
+            total: request.total,
+            force: request.force,
+            allow_unsigned: request.allow_unsigned,
+            index_sha256: request.expected_sha256,
+            // the plan pins the artifact hash directly (staged before the
+            // mutation phase); no repository index proof is involved
+            signed_index: false,
+            source: request.source,
+        },
+        None,
+        op,
+        ui,
+        LockOwnership::Coordinator { guard, permit },
+    )
 }
 
 /// The package name inside an archive (from .PKGINFO), when readable.

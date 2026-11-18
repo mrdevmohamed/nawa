@@ -30,6 +30,11 @@ pub(crate) enum OperationCommand {
     GroupInstall,
     GroupRemove,
     HistoryUndo,
+    /// a system migration's preparation transaction (§10.3/§11): the
+    /// coordinator drives its approved package steps through it while it
+    /// holds the exclusive lock; the requested list names the migration
+    #[allow(dead_code)] // constructed by the migration coordinator (see its module header)
+    Migration,
     Rollback,
 }
 
@@ -46,6 +51,7 @@ impl OperationCommand {
             OperationCommand::GroupInstall => "group-install",
             OperationCommand::GroupRemove => "group-remove",
             OperationCommand::HistoryUndo => "history-undo",
+            OperationCommand::Migration => "migrate",
             OperationCommand::Rollback => "rollback",
         }
     }
