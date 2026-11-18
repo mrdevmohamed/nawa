@@ -11,7 +11,7 @@
 |---|---|
 | 0 — Source audit | **DONE** (baseline audit; refresh against the integrated platform before final acceptance) |
 | 1 — Structural refactor + service removal | **DONE** (1a, 1b, 1c, 1d, 1e — 1e is the deferred apply-transaction extraction) |
-| 2 — Init identity & capability foundation | **DONE FOR THE FIRST VERTICAL SLICE** (the generic model exists, but observed capabilities and providers currently cover init-system only) |
+| 2 — Init identity & capability foundation | **GENERIC DECLARATION LOOKUP + INIT-SYSTEM POLICY** (the pure planner now finds providers by arbitrary normalized capability domain and preserves ambiguous/unknown candidates; only init-system has actionable policy and migration semantics) |
 | 3 — Metadata & capability resolution | **INIT PROVIDER VERTICAL SLICE WORKS; PLATFORM SOLVER INCOMPLETE** (recipe → .PKGINFO → signed index v4 → provider selection is wired; version ranges, conflicts, replacements and broader capability constraints remain open) |
 | 4 — System profiles & planning | **PARTIAL PLATFORM** (profile precedence and read-only system plan exist; one immutable observation is used for the upgrade transition preview, but a single policy/solver/explanation flow is still incomplete) |
 | 5 — Migration engine | **PREPARATION FRAMEWORK PRESENT; RECOVERY/BOOT EXECUTION BLOCKED**: typed state machine, durable journal, mutation gate, preparation coordinator and recovery inspection exist; snapshot is not wired to coordinator/recovery and post-boot finalization is absent. |
@@ -100,6 +100,14 @@ supported legacy installations.
 * Do not wire snapshot execution into the boot-changing coordinator until the
   record-store and snapshot path contracts are hardened and their integration
   tests are passing.
+
+* Capability provider lookup is now a reusable pure-domain operation in
+  `domain/planning/install.rs`: it distinguishes exact matches, multiple
+  identities within one requested domain (ambiguous), and legacy candidates
+  whose declarations are unknown. The init-system transition preview now
+  consumes this shared lookup instead of maintaining its own provider scan.
+  Other domains remain non-actionable until their policy and compatibility
+  contracts are defined. This refactor is awaiting CI.
 
 * The latest completed CI run before the next planning change passed on
   commit `4ea357c30a0f216c91b74c75b40ba9107fad35be` (Actions
