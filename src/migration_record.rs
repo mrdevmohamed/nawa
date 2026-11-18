@@ -242,6 +242,21 @@ pub(crate) fn save(root: &Path, record: &MigrationRecord) -> Result<()> {
         .with_context(|| format!("publish migration record {}", path.display()))
 }
 
+/// Remove the record of `id`. A missing record is already removed
+/// (`Ok(())`). The id is validated like every other store entry, so the
+/// removal cannot escape the record directory. Production callers: the
+/// coordinator's abandon path (a planned record whose gate never became
+/// durable is removed, never left lying about) and the recovery slice's
+/// discard decision.
+pub(crate) fn remove(root: &Path, id: &str) -> Result<()> {
+    let path = record_path(root, id)?;
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("remove migration record {}", path.display())),
+    }
+}
+
 /// The ids of every record file under `root`, sorted. Directory absence
 /// is not an error (`Ok(vec![])`): no migration record exists yet. Only
 /// `*.toml` names count; a caller that needs the contents loads each id

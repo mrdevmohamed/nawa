@@ -44,7 +44,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum FailPoint { Wrote, Synced, Published }
+pub(crate) enum FailPoint {
+    Wrote,
+    Synced,
+    Published,
+}
 
 #[cfg(test)]
 thread_local! {
@@ -52,12 +56,93 @@ thread_local! {
 }
 
 #[cfg(test)]
-fn maybe_fail(point: FailPoint) -> Result<()> {
+fn maybe_fail(point: FailPoint, path: &Path) -> Result<()> {
     let hit = FAILPOINT.with(|slot| {
-        if slot.get() == Some(point) { slot.set(None); true } else { false }
-    });
-    if hit { bail!("injected atomic-write failure at {point:?}"); }
+        if slot.get() == Some(point) {
+            slot.set(None);
+            true
+        } else {
+            false
+        }
+    }) || failure_injection::consider(point, path);
+    if hit {
+        bail!("injected atomic-write failure at {point:?}");
+    }
     Ok(())
+}
+
+/// Test hooks for other modules' failure-boundary tests: arm the Nth
+/// `write_atomic` whose path contains `path_contains` to fail at `point`
+/// (one shot, consumed by the fire), or clear any pending injection. The
+/// migration coordinator's tests use this to pin the crash windows of the
+/// durable record saves (`Wrote`/`Synced` = nothing published, `Published`
+/// = renamed but the directory entry was not fsynced) without depending on
+/// unrelated atomic writes elsewhere in the run.
+#[cfg(test)]
+pub(crate) mod failure_injection {
+    use super::FailPoint;
+    use std::cell::Cell;
+    use std::path::Path;
+
+    struct Plan {
+        point: FailPoint,
+        nth: u32,
+        path_contains: &'static str,
+    }
+
+    thread_local! {
+        static PLAN: Cell<Option<Plan>> = const { Cell::new(None) };
+        /// Calls whose path matched, counted at the first failpoint
+        /// position of each call so every position of call N can fire.
+        static MATCHES: Cell<u32> = const { Cell::new(0) };
+    }
+
+    /// Arm `point` on the `nth` matching call. One shot.
+    pub(crate) fn arm_at(point: FailPoint, nth: u32, path_contains: &'static str) {
+        PLAN.with(|slot| {
+            slot.set(Some(Plan {
+                point,
+                nth,
+                path_contains,
+            }))
+        });
+        MATCHES.with(|slot| slot.set(0));
+    }
+
+    /// Drop any pending (fired or unfired) injection. Tests arm through a
+    /// guard so a failing assertion cannot leak the plan to the next test
+    /// on the same pooled thread.
+    pub(crate) fn clear() {
+        super::FAILPOINT.with(|slot| slot.set(None));
+        PLAN.with(|slot| slot.set(None));
+        MATCHES.with(|slot| slot.set(0));
+    }
+
+    /// Called from `maybe_fail` with the destination path.
+    pub(crate) fn consider(point: FailPoint, path: &Path) -> bool {
+        PLAN.with(|slot| {
+            let Some(plan) = slot.take() else {
+                return false;
+            };
+            if !path.to_string_lossy().contains(plan.path_contains) {
+                slot.set(Some(plan));
+                return false;
+            }
+            if point == FailPoint::Wrote {
+                let hits = MATCHES.with(Cell::get) + 1;
+                MATCHES.with(|cell| cell.set(hits));
+                if hits != plan.nth {
+                    slot.set(Some(plan));
+                    return false;
+                }
+            }
+            if point != plan.point {
+                slot.set(Some(plan));
+                return false;
+            }
+            true
+        })
+    }
 }
 
 /// Sync a directory so its current entries are durable.
@@ -132,11 +217,11 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
             file.write_all(bytes)
                 .with_context(|| format!("write temporary file {}", temporary.display()))?;
             #[cfg(test)]
-            maybe_fail(FailPoint::Wrote)?;
+            maybe_fail(FailPoint::Wrote, path)?;
             file.sync_all()
                 .with_context(|| format!("fsync temporary file {}", temporary.display()))?;
             #[cfg(test)]
-            maybe_fail(FailPoint::Synced)?;
+            maybe_fail(FailPoint::Synced, path)?;
             Ok(())
         })();
         if let Err(error) = written {
@@ -153,7 +238,7 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
         // Failure here means the new file is visible but its directory entry
         // was not confirmed durable. The transaction WAL resolves that case.
         #[cfg(test)]
-        maybe_fail(FailPoint::Published)?;
+        maybe_fail(FailPoint::Published, path)?;
         sync_directory(parent)?;
         return Ok(());
     }

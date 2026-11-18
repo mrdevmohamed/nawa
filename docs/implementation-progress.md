@@ -15,7 +15,7 @@
 | 2 — Init identity & capability foundation | **DONE** (detection + capability/identity domain model) |
 | 3 — Metadata & capability resolution | **DONE** (B3 proposal; the whole package planner — install, outdated, orphans, removal ordering — in `domain/planning/`, behavior verified byte-identical) |
 | 4 — System profiles & planning | **DONE** (profile model + merge rules + loader §7; profile wired into plan generation §8.1–8.4 — install/update report the init decision, invalid profiles fail closed; byte-identity + probes verified. Stage-3 exit met: dry-run plans explain every init-provider and package decision without managing services. The candidate→provider capability comparison still awaits the B3 index schema — see blockers) |
-| 5 — Migration engine | in progress: the migration domain model (§10.1–§10.3) + the durable record store (top-level `migration_record.rs`) + the persistent mutation-gate check wired into every exclusive acquisition (§10.3, block-only) + the read-only `system migrate` inspection CLI (§12.2, slice 3) + the migration coordinator with the typed in-process permit and the `planned → preparing → awaiting-reboot / failed / needs-recovery` lifecycle (§10.3–§10.4, slice 4); next: durable write-ahead hardening (5B), then recovery (5C) and security verification (5D) |
+| 5 — Migration engine | in progress: the migration domain model (§10.1–§10.3) + the durable record store (top-level `migration_record.rs`) + the persistent mutation-gate check wired into every exclusive acquisition (§10.3, block-only) + the read-only `system migrate` inspection CLI (§12.2, slice 3) + the migration coordinator with the typed in-process permit and the `planned → preparing → awaiting-reboot / failed / needs-recovery` lifecycle (§10.3–§10.4, slice 4) + durable write-ahead/lifecycle hardening (5B: single verified publication path with reload-verify, db-truth failure classification, gate/begin abandon, deferred interrupts, the seven crash boundaries documented and pinned by tests); next: recovery (5C), then security verification (5D) |
 | 6 — Faseela runit→systemd migration | **BLOCKED** (see blockers) |
 | 7 — Final verification | not started |
 
@@ -403,13 +403,16 @@ the handlers own only parsing, rendering and prompts.
 
 **Phase 5 — migration engine** (design §10–§12, Stage 4). Running log
 below ("Done within Phase 5 so far"): the gate is wired (slice 2), the
-read-only `system migrate` inspection CLI is landed (slice 3) and the
+read-only `system migrate` inspection CLI is landed (slice 3), the
 migration coordinator with the typed in-process permit is landed
 (slice 4 — the only legitimate way past the gate, but no production
-caller yet: the `apply` command is a later slice); next is the durable
-write-ahead/lifecycle hardening (5B, see "Exact next task"). Phase 3's
-planning work is complete and folded into Phases 4–5; its notes below
-are kept for the record.
+caller yet: the `apply` command is a later slice), and the durable
+write-ahead/lifecycle hardening (5B) is landed: one verified
+publication path with reload-verify, database-truth failure
+classification, gate/begin abandon, deferred interrupts, and the crash
+boundaries documented and pinned by tests. Next is crash recovery
+(5C, see "Exact next task"). Phase 3's planning work is complete and
+folded into Phases 4–5; its notes below are kept for the record.
 
 ### Done within Phase 3 so far
 
@@ -1007,6 +1010,110 @@ approach died). No CLI surface change by construction — no `cli/`
 completions/help edits; ordinary install behavior is pinned by the
 pre-existing `apply_transaction` tests plus the smokes.
 
+### Done within Phase 5 so far (5): durable lifecycle / write-ahead hardening (5B) (§10.3–§10.4)
+
+Gap analysis first: §10.3–§10.5 and §14.1–14.2 re-read against the
+landed slice-4 coordinator. The crash/edge review found six defects and
+one undocumented area, all fixed in this slice:
+
+* (A) a failed `begin_operation`/gate save *after* the planned record
+  was published stranded an ungated `planned` record plus an open
+  transaction, blocking every re-apply of the id;
+* (B) record-save failures inside the step loop propagated with `?` and
+  skipped the failure split — the record stayed `preparing` and the
+  transaction never finished;
+* (C) the crash windows around the gate save were unhandled and
+  undocumented — decisive case: a publish-only failure (rename done,
+  directory-entry fsync lost) returns Err from the save while the gate
+  IS durably active on disk, so deleting the record "on failure" would
+  clear a live gate;
+* (D) the committed-anything classification trusted step *outcomes*, so
+  an error after the database committed (failing post-install hook
+  class, or a failed outcome/history write) could conclude `failed`
+  with a cleared gate over a changed system;
+* (E) `interrupt::check()` errors also skipped the failure split;
+* (F) no interrupt guard was active during `prepare` — Ctrl+C killed
+  the process mid-step instead of deferring to a clean split.
+
+**Gap verdicts against the spec (each item explicit):**
+
+| §10.3–§14.2 item | Verdict |
+|---|---|
+| One record-save order per lifecycle step (persist intent → effect → verify postcondition → persist outcome) | **done** — every boundary goes through one `persist` helper; ordering pinned by tests |
+| Atomic-write durability of record saves incl. the publish-only window | **done** — save error is re-read: on-disk == intended ⇒ publication stands; anything else fails naming what is on disk; deletion is never used to "recover" a gate |
+| Gate/begin race: no ungated record stranded by an in-process begin failure | **done** — `abandon_planned`/`abandon_gate_failure` (best-effort remove, remove failure leaves the record for recovery and names it); kill-in-window documented as a 5C input |
+| Never trust the failing command's claim (failed command ≠ no side effect) | **done** — pre-step db snapshot + `step_committed` (identity + shared `committed_hook_failed` predicate); db unreadable is fail-safe `committed` |
+| Never trust a success claim either (verify postconditions before persisting success) | **done** — `verify_install_postcondition` (planned identity present + plan-pinned digest) before `Succeeded` is persisted |
+| Ending publication: an unpublishable conclusion is not a verified outcome | **done** — `conclude` escalates `Committed`/`Compensated` to `needs-recovery` re-declared from the still-durable `preparing` state; escalation failure keeps the previous gate-keeping state and is reported |
+| Transaction history finish failures never mask the migration outcome | **done** — `op.finish` best-effort + explicit warn; the record on disk is authoritative for the gate |
+| Deferred Ctrl+C semantics | **done** — coordinator holds its own `interrupt::Guard` (nests with the installer's payload guards); the deferred signal becomes the next between-steps failure and routes through the normal split; three signals still force-exit (documented crash window) |
+| Crash/interruption behavior documented at every boundary | **done** — module header carries the seven-boundary inventory (before planned save / after planned save / after gate save / between intent and outcome / after outcomes before conclusion / after conclusion before finish) |
+| Every crash-boundary shape pinned by a test (§14.1–14.2) | **done for preparation** — 14 new tests (list below); post-reboot shapes arrive with 5C |
+| Rollback route (§10.5) and automatic compensation of committed steps | **deferred to 5C with reason** — `rollback-required` exists in the state machine; `prepare` only ever lands `failed`/`needs-recovery`/`awaiting-reboot`, and recovery decides the compensation route |
+| Post-reboot resume/verify/finalize, interrupted-step reconciliation | **deferred to 5C with reason** — the exact on-disk shapes it must consume are now pinned by this slice's tests |
+| Package WAL recovery kept separate from boot recovery | **deferred to 5C with reason** — unchanged in this slice (the file journal is still recovered by the ordinary install recovery) |
+| Gate/permit security audit (§13) | **deferred to 5D** — slice 4's permit/lock surface unchanged here |
+
+**Implementation notes.** The `planned` record is deliberately not
+gate-active, so an abandoned one is removed rather than left lying
+about; a *process kill* in that window still leaves it (no gate, begin
+refuses to clobber) for 5C. History-status mapping stays honest: the
+conclusion escalation of a step-less transaction finishes its history
+Completed (no failing step); a failed step with recorded changes is
+Partial; a failure whose own recording failed leaves no change → the
+bare transaction is Failed — the migration record, not history, governs
+the gate, and the user is told which is authoritative when they differ.
+
+**Tests (14 new; 21 in the coordinator module, all against real
+scratch roots and real installs).** Cross-module crash-boundary testing
+needed an injector: `atomic::failure_injection::arm_at(point, nth,
+path_contains)` arms the nth atomic write whose path matches (record
+saves live under `migrations/`, history records under
+`history/transactions/`, journal step files under `history/journal/`),
+one-shot, RAII-cleared, with the three crash shapes (`Wrote`/`Synced` =
+nothing published, `Published` = renamed but directory entry unsynced):
+
+* publish-only failures stand: gate save `Published` → the run
+  completes with the gate active (the reload-verify keeps a durably
+  published gate from being deleted);
+* pre-rename failures fail closed: gate save `Wrote` → ungated planned
+  record abandoned, transaction finalized Failed, gate clear; planned
+  save `Wrote` → immediate failure, nothing on disk, a retry starts
+  clean;
+* conclusion escalation: awaiting-reboot save failure → needs-recovery
+  on disk, gate active, warn captured;
+* transaction finish failure → awaiting-reboot stands, gate active,
+  warn captured;
+* intent-save failure → the step fails *before* its side effect
+  (package absent), gate clear;
+* outcome-save failure after a committed install → needs-recovery, the
+  committed package stays, Partial transaction;
+* failure after the db commit (journal result-write failure — the same
+  shape as a failing post-install hook, which cannot run under a test
+  `--root` as a non-root user) → needs-recovery with the gate active,
+  never `failed` over a changed system;
+* interrupts: before the first step (nothing committed → `failed`, gate
+  clear) and after a commit (conclusion level → needs-recovery, gate
+  active);
+* crash-window gate consistency (seeded records): `planned` holds no
+  gate (mutations stay possible; begin still refuses to clobber);
+  `preparing` with an intent-without-outcome and `preparing` with every
+  step resolved both hold the gate;
+* unit level: `verify_install_postcondition` (missing entry / wrong
+  version / digest-pin mismatch fail; planned identity passes) and
+  `step_committed` (nothing-installed → not committed; installed-after-
+  error → committed without reading a missing archive; same state →
+  not committed; same state with a pending hook → committed).
+
+**Verification:** check, clippy (`-D warnings`), layering (56 modules,
+no new edges), fmt (coordinator 0 hunks, `migration_record.rs` clean;
+the `atomic.rs` regions this slice touched are canonicalized — its
+remaining hunks are untouched pre-existing red), full battery 772 pass
+/ 2 ignored / 1 known env-fail (three fetch/go tests failed transiently
+during iteration with "no space left on device" — the `/tmp` tmpfs was
+100% full of stale test scratch; after cleanup they pass, unchanged by
+this slice), release build + both smoke suites.
+
 ## Changed files (this phase, updated as work lands)
 
 * `docs/architecture-audit.md` (new, Phase 0)
@@ -1196,6 +1303,20 @@ pre-existing `apply_transaction` tests plus the smokes.
     ordinary behavior is unchanged; dead-code allows with justifications)
   * `src/transaction/context.rs` (`OperationCommand::Migration` →
     "migrate", the coordinator's preparation transaction in history)
+* Phase 5 (5B hardening, in progress):
+  * `src/application/features/system/migrate_coordinator.rs`
+    (durable lifecycle: `persist` with reload-verify publication,
+    `abandon_planned`/`abandon_gate_failure`, pre-step snapshots +
+    `step_committed`/`same_install_state`/`verify_install_postcondition`,
+    the `conclude` ending extraction, the coordinator's own
+    `interrupt::Guard`, the module-header crash-boundary inventory;
+    7 → 21 tests)
+  * `src/migration_record.rs` (`store::remove` — validated id, missing
+    is Ok; for the abandon path and the recovery slice)
+  * `src/atomic.rs` (test-only: `failure_injection` — path-filtered
+    one-shot failpoint arming for cross-module crash-boundary tests;
+    `FailPoint` is `pub(crate)` under `cfg(test)`; production paths
+    unchanged)
 
 ## Tests actually executed
 
@@ -1218,15 +1339,18 @@ pre-existing `apply_transaction` tests plus the smokes.
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 5 gate-wiring tree) | 714 pass / 2 ignored / 3 env-failed (= 706 + 4 lock unit + 4 lock integration tests; same 3 env failures) |
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 5 inspection tree) | 751 pass / 2 ignored / 1 env-failed (= 714 + 35 new: 9 inspection use case + 12 presentation + 13 `tests/migrate.rs` + 1 domain reboot-binding test; plus the 2 plugin tests that were env-blocked at the Phase-0 baseline passed this run — container permission state differs between sessions; the remaining env failure is the toolchain-under-`/home` sandbox test) |
 | `cargo test --all-targets --offline --no-fail-fast` (Phase 5 coordinator tree) | 758 pass / 2 ignored / 1 env-failed (= 751 + 7 new coordinator lifecycle tests; same 1 env failure. First run of the two install-driven lifecycle tests failed on the fixture — the staged `.PKGINFO` lacked `pkgrel`, which the verified installer requires nonzero — fixed in the fixture, re-run clean) |
-| `cargo test --offline` (bin only, coordinator iteration) | 629 pass / 1 ignored (the coordinator tests run here too: 622 → 629) |
-| `cargo clippy --all-targets --offline -- -D warnings` | pass (Phase 1a + 1b + 1c + 1d + 1e + 2 + 3/B3 + 3/solver + 3/removal + 4/profile + 4/wiring + 5/model + 5/gate + 5/inspection + 5/coordinator) |
-| `python3 scripts/check-layering.py` | pass (54 after 1a; 53 after 1b; 54 after 1c; 55 after 2 — the new `domain` layer; 55 after 3/B3, 3/solver, 3/removal and 4/profile — the count is top-level modules, the new `domain/package`, `domain/planning`, `domain/system/profile` + `features/system/profile` submodules are scanned; 55 after 4/wiring and 5/model — `domain/system/migration` + `features/system/migrate` are submodules of existing top-level modules; 56 after 5/gate — the record store moved to the top-level `migration_record` module; 56 after 5/inspection — `features/system/migrate_inspect` and `commands/system` are submodules of existing top-level modules, no cycles: commands → application/features/system → migration_record → domain/atomic, lock untouched; **56 after 5/coordinator** — `features/system/migrate_coordinator` is a submodule of an existing top-level module; the one new edge `features/package → features/system` (the permit type import) is an intended application-internal edge the checker's intra-application skip does not count) |
+| `cargo test --all-targets --offline --no-fail-fast` (Phase 5B tree) | 772 pass / 2 ignored / 1 env-failed (= 758 + 14 new 5B crash-boundary tests; same 1 env failure. During iteration 3 fetch/go tests failed transiently with "no space left on device" — the `/tmp` tmpfs was 100% full from stale test scratch dirs; after cleanup they pass, unchanged by this slice) |
+| `cargo test --offline` (bin only, 5B iteration) | 643 pass / 1 ignored (the coordinator module: 21 tests = 629 + 14) |
+| `cargo clippy --all-targets --offline -- -D warnings` | pass (Phase 1a + 1b + 1c + 1d + 1e + 2 + 3/B3 + 3/solver + 3/removal + 4/profile + 4/wiring + 5/model + 5/gate + 5/inspection + 5/coordinator + 5B) |
+| `python3 scripts/check-layering.py` | pass (54 after 1a; 53 after 1b; 54 after 1c; 55 after 2 — the new `domain` layer; 55 after 3/B3, 3/solver, 3/removal and 4/profile — the count is top-level modules, the new `domain/package`, `domain/planning`, `domain/system/profile` + `features/system/profile` submodules are scanned; 55 after 4/wiring and 5/model — `domain/system/migration` + `features/system/migrate` are submodules of existing top-level modules; 56 after 5/gate — the record store moved to the top-level `migration_record` module; 56 after 5/inspection — `features/system/migrate_inspect` and `commands/system` are submodules of existing top-level modules, no cycles: commands → application/features/system → migration_record → domain/atomic, lock untouched; **56 after 5/coordinator** — `features/system/migrate_coordinator` is a submodule of an existing top-level module; the one new edge `features/package → features/system` (the permit type import) is an intended application-internal edge the checker's intra-application skip does not count; **56 after 5B — no new modules or edges (the store `remove` and the test injector live in existing modules)**) |
 | `bash scripts/smoke-v06.sh` (release build, Phases 1b + 1c + 1d + 2) | ALL V0.6 SMOKE TESTS PASSED |
 | `bash scripts/smoke-v05.sh` (release build, Phases 1d + 2) | ALL SMOKE TESTS PASSED |
 | `bash scripts/smoke-v05.sh` (release build, 5/inspection tree) | ALL SMOKE TESTS PASSED |
 | `bash scripts/smoke-v06.sh` (release build, 5/inspection tree) | ALL V0.6 SMOKE TESTS PASSED |
 | `bash scripts/smoke-v05.sh` (release build, 5/coordinator tree) | ALL SMOKE TESTS PASSED |
 | `bash scripts/smoke-v06.sh` (release build, 5/coordinator tree) | ALL V0.6 SMOKE TESTS PASSED |
+| `bash scripts/smoke-v05.sh` (release build, 5B tree) | ALL SMOKE TESTS PASSED |
+| `bash scripts/smoke-v06.sh` (release build, 5B tree) | ALL V0.6 SMOKE TESTS PASSED |
 | HEAD-vs-1c behavior diff (`--help`, `--version`, completions × 3, isolated worktree build) | byte-identical |
 | HEAD-vs-1d behavior diff (`--help`, `--version`, completions × 3 + 12 read/planning commands, isolated worktree build) | byte-identical |
 | HEAD-vs-2 behavior diff (`--help`, `--version`, completions × 3, isolated worktree build) | byte-identical (detection adds no CLI surface) |
@@ -1263,7 +1387,13 @@ RESERVED_COMMANDS edit adds none)**; 5/coordinator: the new
 `migrate_coordinator.rs` and the three touched files
 (`apply_transaction.rs` incl. my hunks, `context.rs`, `system/mod.rs`)
 are rustfmt-clean (a stray `--edition 2024` rustfmt detour during
-bring-up was fully normalized back to the project's 2021 edition) |
+bring-up was fully normalized back to the project's 2021 edition)**;
+**5B: `migrate_coordinator.rs` is rustfmt-clean with the 14 new tests
+included (0 hunks), `migration_record.rs` clean, and every `atomic.rs`
+region this slice touched (the injector, `FailPoint`, `maybe_fail`)
+canonicalized — the file's remaining hunks (the import blank line,
+pre-existing one-liner regions, its own pre-existing tests) are
+untouched pre-existing red** |
 
 ## Known problems
 
@@ -1293,38 +1423,39 @@ bring-up was fully normalized back to the project's 2021 edition) |
 
 ## Exact next task
 
-**Phase 5B — durable lifecycle / write-ahead hardening (§10.3–§10.4)**
-— the coordinator's skeleton is landed; this slice hardens the parts
-the crash/edge review of slice 4 surfaced, before recovery (5C) builds
-on them:
+**Phase 5C — crash recovery / resume / verify / finalize (§10.3–§10.5,
+§14.1)** — 5B pinned the exact on-disk shapes a killed or failed
+preparation leaves; this slice builds the recovery lifecycle on them:
 
-* Re-read design §10.3–§10.5 and §14.1–14.2 against the landed
-  coordinator and enumerate every gap between the spec text and the
-  skeleton (each gets an explicit "done / deferred with reason" verdict
-  in this tracker).
-* Harden the write-ahead discipline where a single process crash can
-  still leave ambiguity the recovery slice cannot reconcile: confirm
-  the record-save ordering (planned → gate-active → per-step
-  intent/effect/outcome → terminal) is crash-consistent under the store's
-  atomic-write guarantees, and pin it with a test per boundary
-  (incl. the existing interrupted-step window).
-* Gate/begin race audit: the begin path checks the gate through the
-  ordinary acquire; verify there is no window where a record is
-  published without the gate becoming active and vice versa
-  (`BeginPreparation` transition failure after the planned save must
-  not strand an ungated `planned` record — decide and document the
-  cleanup, likely best-effort remove of the just-written record).
-* `interrupt` handling audit: verify the deferred-Ctrl+C semantics
-  between steps and document what an interrupt *between* the planned
-  save and `BeginPreparation` leaves on disk.
-* Property: an empty/steps plan, a first-step failure and a mid-plan
-  failure already have tests; add the "op.finish error path" and
-  "record save fails mid-step" cases so the WAL never silently diverges
-  from the db.
-* No CLI surface, no real handler (Phase 6, blocked on B1/B2/B5), no
-  automatic compensation yet (5C decides the recovery route).
+* Recovery use cases over the record store (the domain states already
+  exist): inspect incomplete migrations; reconcile an interrupted step
+  (intent without outcome) against the *actual* package-database state
+  — never re-run a non-idempotent step blindly, never treat a missing
+  outcome as success, never treat a failed command as "no side effect"
+  (5B's `step_committed`/`verify_install_postcondition` predicates are
+  the shared classification core); resume a `preparing` migration's
+  remaining approved steps; verify after reboot (`verifying` →
+  `completed`/`failed`); finalize the outstanding transaction history
+  (5B leaves it `preparing` when the finish failed); a documented
+  rollback route (`rollback-required` → verified compensation) and
+  `needs-recovery` when the state is genuinely ambiguous.
+* Shapes to consume (pinned by 5B tests): `planned` after a kill (no
+  gate — inspect and discard or re-plan); `preparing` with an
+  intent-without-outcome; `preparing` with every step resolved and the
+  conclusion unpublished (re-conclude); `awaiting-reboot` with the
+  history still `preparing` (finalize history).
+* Rules that stay binding: the mutation gate is never cleared without
+  verified completion or a completed verified rollback; package WAL
+  (file-journal) recovery stays separate from boot recovery; the
+  permit stays unforgeable — recovery acquires past the gate through
+  the lock-defined capability the permit implements (design §13), no
+  env bypass, no nested nawa processes.
+* CLI surface per §12.2 only if the design names recovery verbs —
+  check §12 before adding any command; otherwise the use cases are
+  application-internal like 5B.
 
-Then: crash recovery (5C — resume/verify/finalize, interrupted-step
-reconciliation, acquire-past-gate via a lock-defined trait the permit
-implements), security verification (5D), then Phase 6 (blocked on
-B1/B2/B5/B6/B7) and the §8 index-v4 metadata wiring.
+Then: security verification (5D — full §13 audit of the gate/permit/
+record surface plus security-focused integration tests), the
+`docs/design/package-metadata-chain.md` wiring (B3), Phase 6 blocker
+inspection (faseela/faseela-repo/saq repos for B1/B2/B5/B6/B7 — no
+external changes without authorization), Phase 7 final audit.
