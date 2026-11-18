@@ -30,9 +30,9 @@ use crate::domain::system::capability::Capability;
 use crate::domain::system::identity::InitKind;
 use crate::domain::system::migration::MigrationDefinition;
 
-/// The one built-in migration definition (§10.1). Constructed here, not read
-/// from a repository: its handler binding and reboot requirement are checked
-/// by the domain model at construction time.
+/// Expose the built-in domain migration definition to the application
+/// coordinator. The value is not read from a repository; its handler binding
+/// and reboot requirement are validated by the domain model.
 pub(crate) fn builtin_definition() -> MigrationDefinition {
     crate::domain::system::migration::builtin_faseela_runit_to_systemd()
 }

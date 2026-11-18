@@ -27,7 +27,7 @@
 
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::domain::system::identity::{classify_pid1, identify, InitKind, Pid1};
 
@@ -344,6 +344,7 @@ fn installed_init(root: &Path) -> InstalledInit {
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
+    use std::path::PathBuf;
 
     fn dir(base: &Path, rel: &str) -> PathBuf {
         let p = base.join(rel);
@@ -794,7 +795,8 @@ mod tests {
             "rootdir/etc/nawa/system-profile.toml",
             "schema = 1\n\nfuture-key = true\n",
         );
-        let desired = desired_init(&root);
+        let (desired, effective_profile) = desired_state(&root);
+        assert!(effective_profile.is_none());
         match &desired {
             DesiredInit::Invalid { reason } => {
                 assert!(
@@ -817,6 +819,8 @@ mod tests {
             "rootdir/usr/share/nawa/system-profile.toml",
             "schema = 1\n\n[providers]\nsession-manager = \"elogind\"\n",
         );
-        assert_eq!(desired_init(&root), DesiredInit::NotDeclared);
+        let (desired, effective_profile) = desired_state(&root);
+        assert_eq!(desired, DesiredInit::NotDeclared);
+        assert!(effective_profile.is_some());
     }
 }

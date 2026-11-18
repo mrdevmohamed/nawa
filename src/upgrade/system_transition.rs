@@ -403,6 +403,7 @@ pub(super) fn render(preview: &Preview) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::domain::system::identity::InitKind;
+    use crate::domain::system::observation::InstalledInit;
     use crate::domain::system::profile::SystemProfile;
     use std::path::{Path, PathBuf};
 

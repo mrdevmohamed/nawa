@@ -216,7 +216,7 @@ fn run_command(ctx: &Ctx, cmd: Cmd) -> Result<()> {
                 &ctx.root,
                 Path::new("/proc"),
             );
-            crate::upgrade::upgrade(
+            crate::upgrade::upgrade_with_observation(
                 &ctx.root,
                 &repo_ref,
                 &ctx.recipes,

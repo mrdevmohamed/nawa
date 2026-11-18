@@ -39,16 +39,37 @@ pub(crate) struct UpgradeOpts {
     pub yes: bool,
 }
 
-pub(crate) fn upgrade(
+#[cfg(test)]
+fn upgrade(
+    root: &Path,
+    repo_ref: &RepoRef,
+    recipes: &Path,
+    opts: &UpgradeOpts,
+) -> Result<()> {
+    upgrade_inner(root, repo_ref, recipes, None, opts)
+}
+
+pub(crate) fn upgrade_with_observation(
     root: &Path,
     repo_ref: &RepoRef,
     recipes: &Path,
     observed: &ObservedSystem,
     opts: &UpgradeOpts,
 ) -> Result<()> {
+    upgrade_inner(root, repo_ref, recipes, Some(observed), opts)
+}
+
+fn upgrade_inner(
+    root: &Path,
+    repo_ref: &RepoRef,
+    recipes: &Path,
+    observed: Option<&ObservedSystem>,
+    opts: &UpgradeOpts,
+) -> Result<()> {
     let open = open_repo(root, repo_ref, opts.allow_unsigned, opts.force)?;
     let mut plan = build_plan(root, &open.index, recipes)?;
-    plan.system_transition = system_transition::plan(observed, &open, &plan.installed);
+    plan.system_transition = observed
+        .and_then(|observed| system_transition::plan(observed, &open, &plan.installed));
 
     if plan.upgrades.is_empty() && plan.system_transition.is_none() {
         crate::nawa_info!("everything up to date ({} installed)", plan.installed.len());
