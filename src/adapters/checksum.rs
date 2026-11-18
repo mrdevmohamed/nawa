@@ -29,7 +29,10 @@ pub(crate) fn sha256_of_file(path: &Path) -> Result<String> {
 
 pub(crate) fn verify_sha256(path: &Path, expected: &str) -> Result<()> {
     if expected.trim().is_empty() {
-        bail!("missing sha256 for {} — refusing to build unverified source", path.display());
+        bail!(
+            "missing sha256 for {} — refusing to build unverified source",
+            path.display()
+        );
     }
     let got = sha256_of_file(path)?;
     if got != expected.trim().to_lowercase() {

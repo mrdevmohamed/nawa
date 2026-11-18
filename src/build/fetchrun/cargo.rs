@@ -1,13 +1,12 @@
 //! Cargo backend (§8).
 
 use anyhow::{bail, Context, Result};
-use std::path::{Path, PathBuf};
 use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 
 use super::common::{
-    ecosystem_key, eco_cache_dir, entry_complete, copy_into_view, publish_entry,
-    cleanup_failed_populate, spawn_fetch_child, fetch_timeout_secs, fetch_path,
-    stream_and_wait,
+    cleanup_failed_populate, copy_into_view, eco_cache_dir, ecosystem_key, entry_complete,
+    fetch_path, fetch_timeout_secs, publish_entry, spawn_fetch_child, stream_and_wait,
 };
 use super::FetchRun;
 use crate::recipe::FetchSpec;
@@ -26,7 +25,6 @@ pub(crate) struct CargoPlan {
     /// `source = "git+…"` values of the lock: warned about (§8/§10.2).
     git_deps: Vec<String>,
 }
-
 
 pub(crate) fn plan_cargo(r: &FetchRun<'_>, spec: &FetchSpec) -> Result<CargoPlan> {
     let dir = if spec.dir == "." || spec.dir.is_empty() {
@@ -68,12 +66,17 @@ pub(crate) fn plan_cargo(r: &FetchRun<'_>, spec: &FetchSpec) -> Result<CargoPlan
         .lines()
         .filter_map(|l| {
             let t = l.trim();
-            t.strip_prefix("source = \"git+").map(|s| s.trim_end_matches('"').to_string())
+            t.strip_prefix("source = \"git+")
+                .map(|s| s.trim_end_matches('"').to_string())
         })
         .collect();
-    Ok(CargoPlan { dir, vendored, lock, git_deps })
+    Ok(CargoPlan {
+        dir,
+        vendored,
+        lock,
+        git_deps,
+    })
 }
-
 
 /// The §8 config scan: from `dir` up to the workspace root, every
 /// `.cargo/config.toml` / `.cargo/config` that Cargo itself would load gets
@@ -109,7 +112,6 @@ pub(crate) fn scan_cargo_configs(r: &FetchRun, dir: &Path) -> Result<bool> {
     Ok(vendored)
 }
 
-
 /// The v1 rules for ONE config file (§8):
 ///
 /// * `[source.crates-io]` may only `replace-with` a `[source.X]` chain that
@@ -117,11 +119,7 @@ pub(crate) fn scan_cargo_configs(r: &FetchRun, dir: &Path) -> Result<bool> {
 /// * any other `[source.*]` shape — a registry redirect, a directory that
 ///   does not exist or escapes the tree, unused sources — is an error.
 /// * `[registries]`, `[http]`, `[net]` are refused.
-pub(crate) fn cargo_config_is_vendored(
-    r: &FetchRun,
-    cfg: &Path,
-    text: &str,
-) -> Result<bool> {
+pub(crate) fn cargo_config_is_vendored(r: &FetchRun, cfg: &Path, text: &str) -> Result<bool> {
     let name = &r.rec.package.name;
     // relative directory values resolve against the parent of the `.cargo`
     // directory that holds the config (probed: independent of the cwd)
@@ -243,7 +241,6 @@ pub(crate) fn cargo_config_is_vendored(
     Ok(false)
 }
 
-
 /// The `[fetch.cargo]` backend (§8): plan, populate-or-hit, expose the
 /// Cargo home. Build-time additions: `CARGO_HOME` (the per-build view)
 /// and `CARGO_NET_OFFLINE=true` — recipes keep their own commands, e.g.
@@ -266,7 +263,10 @@ pub(crate) fn run_cargo(r: &FetchRun<'_>, spec: &FetchSpec) -> Result<Vec<(Strin
         ensure_cargo_entry(r, &plan, &key)?;
         let entry = eco_cache_dir(r, "cargo").join(&key);
         copy_into_view(&entry, &view_host).with_context(|| {
-            format!("populate the per-build Cargo fetch view {}", view_host.display())
+            format!(
+                "populate the per-build Cargo fetch view {}",
+                view_host.display()
+            )
         })?;
     }
 
@@ -285,7 +285,6 @@ pub(crate) fn run_cargo(r: &FetchRun<'_>, spec: &FetchSpec) -> Result<Vec<(Strin
         ("CARGO_NET_OFFLINE".into(), "true".into()),
     ])
 }
-
 
 /// Populated-or-hit discipline for a Cargo key (§11), mirroring
 /// [`ensure_go_entry`]: marker fast path, offline guard before anything is
@@ -318,12 +317,10 @@ pub(crate) fn ensure_cargo_entry(r: &FetchRun, plan: &CargoPlan, key: &str) -> R
         crate::adapters::unique::next()
     ));
     let _ = std::fs::remove_dir_all(&temp);
-    std::fs::create_dir_all(&temp)
-        .with_context(|| format!("create {}", temp.display()))?;
+    std::fs::create_dir_all(&temp).with_context(|| format!("create {}", temp.display()))?;
     std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o777))?;
 
-    let outcome = run_populate_cargo(r, plan, &temp)
-        .and_then(|()| publish_entry(&temp, &entry));
+    let outcome = run_populate_cargo(r, plan, &temp).and_then(|()| publish_entry(&temp, &entry));
     if let Err(err) = outcome {
         cleanup_failed_populate(&temp);
         return Err(err.context("populating the Cargo fetch cache (fetch-phase.md §8, §11)"));
@@ -331,18 +328,15 @@ pub(crate) fn ensure_cargo_entry(r: &FetchRun, plan: &CargoPlan, key: &str) -> R
     Ok(())
 }
 
-
 /// The fixed command of the Cargo backend (§8): `--locked` must fail rather
 /// than update the lock (Cargo's own contract), and no `--target` filter —
 /// v1 fetches all targets of the lockfile.
 const CARGO_POPULATE_SCRIPT: &str = "cargo fetch --locked --manifest-path \"$NAWA_CARGO_MANIFEST\"";
 
-
 /// §8: git dependencies are pinned by commit but carry no registry
 /// checksums, and `cargo fetch` invokes `git` itself. Warn at fetch time,
 /// before the populate actually runs.
 const CARGO_VERSION_SCRIPT: &str = "cargo --version > \"$NAWA_CARGO_VER_OUT\"";
-
 
 /// Create an empty Cargo working directory under the system temp root and a
 /// fresh CARGO_HOME inside the output bind. Cargo searches cwd ancestors for
@@ -354,7 +348,8 @@ pub(crate) fn isolated_cargo_cwd() -> Result<PathBuf> {
         std::process::id(),
         crate::adapters::unique::next()
     ));
-    std::fs::create_dir(&cwd).with_context(|| format!("create isolated Cargo cwd {}", cwd.display()))?;
+    std::fs::create_dir(&cwd)
+        .with_context(|| format!("create isolated Cargo cwd {}", cwd.display()))?;
     std::fs::set_permissions(&cwd, std::fs::Permissions::from_mode(0o777))?;
     for parent in cwd.ancestors() {
         for name in [".cargo/config.toml", ".cargo/config"] {
@@ -371,7 +366,6 @@ pub(crate) fn isolated_cargo_cwd() -> Result<PathBuf> {
     Ok(cwd)
 }
 
-
 /// A fresh Cargo home is the output directory itself: the published entry is
 /// later mounted/copied as CARGO_HOME, so its git/ and registry/ directories
 /// must live at the entry root rather than one level below it.
@@ -381,7 +375,6 @@ pub(crate) fn isolated_cargo_paths(out_host: &Path) -> Result<(PathBuf, PathBuf)
     let cwd = isolated_cargo_cwd()?;
     Ok((out_host.to_path_buf(), cwd))
 }
-
 
 pub(crate) fn run_populate_cargo(r: &FetchRun, plan: &CargoPlan, temp: &Path) -> Result<()> {
     if !plan.git_deps.is_empty() {
@@ -394,7 +387,11 @@ pub(crate) fn run_populate_cargo(r: &FetchRun, plan: &CargoPlan, temp: &Path) ->
     let label = "fetch-cargo";
     let log_path = r.work.join(format!("{label}.log"));
     let script = format!("exec 2>&1\n{CARGO_POPULATE_SCRIPT}");
-    let manifest_rel = plan.dir.strip_prefix(r.src).unwrap_or(Path::new("")).join("Cargo.toml");
+    let manifest_rel = plan
+        .dir
+        .strip_prefix(r.src)
+        .unwrap_or(Path::new(""))
+        .join("Cargo.toml");
     let cwd_host = isolated_cargo_cwd()?;
     let result = (|| -> Result<()> {
         let mut child = if r.sandboxed {
@@ -405,32 +402,49 @@ pub(crate) fn run_populate_cargo(r: &FetchRun, plan: &CargoPlan, temp: &Path) ->
                     // fetch-out is the published cache entry and is exposed
                     // unchanged as CARGO_HOME during the offline build.
                     ("CARGO_HOME".into(), format!("{base}/fetch-out")),
-                    ("NAWA_CARGO_MANIFEST".into(), format!("{}/src/{}", base, manifest_rel.display())),
+                    (
+                        "NAWA_CARGO_MANIFEST".into(),
+                        format!("{}/src/{}", base, manifest_rel.display()),
+                    ),
                 ],
-            ].concat();
+            ]
+            .concat();
             spawn_fetch_child(r, &script, env, &cwd_host, Some(temp), timeout_secs)?
         } else {
             let home_host = r.work.join("sb").join("home");
-            std::fs::create_dir_all(&home_host).with_context(|| format!("create {}", home_host.display()))?;
+            std::fs::create_dir_all(&home_host)
+                .with_context(|| format!("create {}", home_host.display()))?;
             let env = [
                 cargo_fetch_base_env(&home_host.to_string_lossy()),
                 vec![
                     ("CARGO_HOME".into(), temp.to_string_lossy().into_owned()),
-                    ("NAWA_CARGO_MANIFEST".into(), plan.dir.join("Cargo.toml").to_string_lossy().into_owned()),
+                    (
+                        "NAWA_CARGO_MANIFEST".into(),
+                        plan.dir.join("Cargo.toml").to_string_lossy().into_owned(),
+                    ),
                 ],
-            ].concat();
+            ]
+            .concat();
             spawn_fetch_child(r, &script, env, &cwd_host, None, timeout_secs)?
         };
-        let status = stream_and_wait(&mut child, Some(&log_path), timeout_secs, label, !r.sandboxed)?;
+        let status = stream_and_wait(
+            &mut child,
+            Some(&log_path),
+            timeout_secs,
+            label,
+            !r.sandboxed,
+        )?;
         if !status.success() {
-            bail!("fetch run ({label}) failed with status {status} — log: {}", log_path.display());
+            bail!(
+                "fetch run ({label}) failed with status {status} — log: {}",
+                log_path.display()
+            );
         }
         Ok(())
     })();
     let _ = std::fs::remove_dir_all(&cwd_host);
     result
 }
-
 
 /// One cheap `cargo --version` in the fetch context (§11: the version
 /// string enters the ecosystem key). The script writes the version into
@@ -452,35 +466,56 @@ pub(crate) fn cargo_version_query(r: &FetchRun, _plan: &CargoPlan) -> Result<Str
                 cargo_fetch_base_env(&format!("{base}/home")),
                 vec![
                     ("CARGO_HOME".into(), format!("{base}/fetch-out")),
-                    ("NAWA_CARGO_VER_OUT".into(), format!("{base}/fetch-out/version")),
+                    (
+                        "NAWA_CARGO_VER_OUT".into(),
+                        format!("{base}/fetch-out/version"),
+                    ),
                 ],
-            ].concat();
+            ]
+            .concat();
             spawn_fetch_child(r, &script, env, &cwd_host, Some(&out_dir), timeout_secs)?
         } else {
             let home_host = r.work.join("sb").join("home");
-            std::fs::create_dir_all(&home_host).with_context(|| format!("create {}", home_host.display()))?;
+            std::fs::create_dir_all(&home_host)
+                .with_context(|| format!("create {}", home_host.display()))?;
             let env = [
                 cargo_fetch_base_env(&home_host.to_string_lossy()),
                 vec![
-                    ("CARGO_HOME".into(), cargo_home_host.to_string_lossy().into_owned()),
-                    ("NAWA_CARGO_VER_OUT".into(), out_host.to_string_lossy().into_owned()),
+                    (
+                        "CARGO_HOME".into(),
+                        cargo_home_host.to_string_lossy().into_owned(),
+                    ),
+                    (
+                        "NAWA_CARGO_VER_OUT".into(),
+                        out_host.to_string_lossy().into_owned(),
+                    ),
                 ],
-            ].concat();
+            ]
+            .concat();
             spawn_fetch_child(r, &script, env, &cwd_host, None, timeout_secs)?
         };
         let status = stream_and_wait(&mut child, None, timeout_secs, label, !r.sandboxed)
             .with_context(|| "the cargo --version probe failed (fetch-phase.md §11)")?;
-        if !status.success() { bail!("fetch run ({label}) failed with status {status}"); }
-        let version = std::fs::read_to_string(&out_host)
-            .with_context(|| format!("the cargo --version probe wrote no version file at {}", out_host.display()))?;
+        if !status.success() {
+            bail!("fetch run ({label}) failed with status {status}");
+        }
+        let version = std::fs::read_to_string(&out_host).with_context(|| {
+            format!(
+                "the cargo --version probe wrote no version file at {}",
+                out_host.display()
+            )
+        })?;
         let version = version.trim().to_string();
-        if version.is_empty() { bail!("the cargo --version probe produced an empty version string (fetch-phase.md §11)"); }
+        if version.is_empty() {
+            bail!(
+                "the cargo --version probe produced an empty version string (fetch-phase.md §11)"
+            );
+        }
         Ok(version)
     })();
     let _ = std::fs::remove_dir_all(&cwd_host);
     result
 }
-
 
 /// The §8 fetch base allowlist ("from scratch, same base as §7"): the Go
 /// names are absent by construction. The backend adds its own keys.
@@ -493,4 +528,3 @@ pub(crate) fn cargo_fetch_base_env(home: &str) -> Vec<(String, String)> {
         ("HOME".into(), home.into()),
     ]
 }
-

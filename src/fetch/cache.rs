@@ -6,8 +6,8 @@ use std::fs::{File, OpenOptions};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-use crate::adapters::checksum::verify_sha256;
 use super::http::{check_offline, download, offline};
+use crate::adapters::checksum::verify_sha256;
 
 pub(crate) fn digest_cache_dir(src_cache: &Path) -> PathBuf {
     src_cache.join("sha256")
@@ -133,14 +133,12 @@ pub(crate) fn download_content_addressed(
                     // `dest` is not atomic and fails with EACCES when a
                     // corrupt, read-only entry (0444) already sits there.
                     let part = unique_part_path(dest);
-                    let migrated = std::fs::copy(&legacy, &part)
-                        .and_then(|_| std::fs::rename(&part, dest));
+                    let migrated =
+                        std::fs::copy(&legacy, &part).and_then(|_| std::fs::rename(&part, dest));
                     if let Err(e) = migrated {
                         let _ = std::fs::remove_file(&part);
-                        return Err(anyhow::Error::new(e).context(format!(
-                            "migrate legacy cache entry {}",
-                            legacy.display()
-                        )));
+                        return Err(anyhow::Error::new(e)
+                            .context(format!("migrate legacy cache entry {}", legacy.display())));
                     }
                     strip_write_permission(dest);
                     crate::nawa_info!(
@@ -313,7 +311,10 @@ pub(crate) fn download_cached_with_mirrors(
                 if verify_sha256(dest, expected).is_ok() {
                     return Ok(()); // cache hit
                 }
-                crate::nawa_info_stderr!("cached {} failed sha256 — re-downloading", dest.display());
+                crate::nawa_info_stderr!(
+                    "cached {} failed sha256 — re-downloading",
+                    dest.display()
+                );
             }
             None => return Ok(()), // unpinned cache hit (index: signature checked separately)
         }

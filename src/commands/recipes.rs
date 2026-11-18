@@ -18,8 +18,8 @@
 //! hard counterparts are the parse/stage-time rules of §14A/§14C, which
 //! fail the build). The checks that need the downloaded source are §14C
 //! and are not repeated here.
-use crate::cli::RecipeCmd;
 use crate::application::context::Ctx;
+use crate::cli::RecipeCmd;
 use crate::presentation::humanize;
 use crate::recipe;
 
@@ -31,29 +31,49 @@ const ASSET_SIZE_WARN: u64 = 32 * 1024 * 1024;
 /// Every placeholder `Recipe::expand` substitutes today (`srcroot`/`assetsdir`
 /// join per table, §4.3/§5.3).
 const KNOWN_PLACEHOLDERS: &[&str] = &[
-    "name", "version", "rel", "arch", "jobs", "pkgdir", "srcdir", "srcroot", "assetsdir",
+    "name",
+    "version",
+    "rel",
+    "arch",
+    "jobs",
+    "pkgdir",
+    "srcdir",
+    "srcroot",
+    "assetsdir",
 ];
 
 /// The top-level tables `Recipe` declares (§14B: unknown ones warn).
-const KNOWN_TOP_TABLES: &[&str] =
-    &["package", "assets", "fetch", "depends", "build", "hooks", "sandbox", "slim"];
+const KNOWN_TOP_TABLES: &[&str] = &[
+    "package", "assets", "fetch", "depends", "build", "hooks", "sandbox", "slim",
+];
 
 /// The keys the `[package]` struct declares (§14B: unknown ones warn).
 const KNOWN_PACKAGE_KEYS: &[&str] = &[
-    "name", "version", "rel", "arch", "summary", "license", "source", "sha256", "mirrors",
-    "source_dir", "source_date_epoch", "sources", "workdir",
+    "name",
+    "version",
+    "rel",
+    "arch",
+    "summary",
+    "license",
+    "source",
+    "sha256",
+    "mirrors",
+    "source_dir",
+    "source_date_epoch",
+    "sources",
+    "workdir",
 ];
 
 pub(crate) fn cmd_recipe_check(ctx: &Ctx, name: Option<&str>, all: bool) -> Result<()> {
     let recs: Vec<recipe::Recipe> = if all {
-        let mut v: Vec<recipe::Recipe> = ctx.load_all()?
-            .values()
-            .cloned()
-            .collect();
+        let mut v: Vec<recipe::Recipe> = ctx.load_all()?.values().cloned().collect();
         v.sort_by(|a, b| a.package.name.cmp(&b.package.name));
         v
     } else {
-        vec![recipe::load_by_name(&ctx.recipes, name.expect("checked in main"))?]
+        vec![recipe::load_by_name(
+            &ctx.recipes,
+            name.expect("checked in main"),
+        )?]
     };
 
     let mut findings = 0usize;
@@ -158,9 +178,7 @@ fn check_recipe(rec: &recipe::Recipe) -> usize {
             .split(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_')
             .filter(|w| !w.is_empty())
             .collect();
-        let is_go_mod_download = words
-            .windows(3)
-            .any(|w| w == ["go", "mod", "download"]);
+        let is_go_mod_download = words.windows(3).any(|w| w == ["go", "mod", "download"]);
         let is_cargo_fetch = words.windows(2).any(|w| w == ["cargo", "fetch"]);
         if is_go_mod_download || is_cargo_fetch {
             warn(format!(
@@ -173,8 +191,11 @@ fn check_recipe(rec: &recipe::Recipe) -> usize {
 
     // ---- fetch table + sandbox network ----------------------------------
     if rec.fetch.any() && rec.sandbox.network {
-        warn("[fetch.*] together with [sandbox] network = true — the fetch \
-             backends populate the cache and build strictly offline".to_string());
+        warn(
+            "[fetch.*] together with [sandbox] network = true — the fetch \
+             backends populate the cache and build strictly offline"
+                .to_string(),
+        );
     }
     count
 }
@@ -249,7 +270,7 @@ pub(crate) fn cmd_recipe(ctx: &Ctx, action: RecipeCmd) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{KNOWN_PACKAGE_KEYS, KNOWN_TOP_TABLES, placeholders};
+    use super::{placeholders, KNOWN_PACKAGE_KEYS, KNOWN_TOP_TABLES};
 
     /// The §14B allow-lists must track the real structs: a renamed table or
     /// key would otherwise report false positives forever. This recipe

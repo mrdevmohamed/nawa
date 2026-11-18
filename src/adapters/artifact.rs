@@ -43,14 +43,18 @@ pub(crate) fn store_dir(root: &Path) -> PathBuf {
 pub(crate) fn object_path(root: &Path, sha256: &str) -> Result<PathBuf> {
     validate_digest(sha256)?;
     let fan = &sha256[..2];
-    Ok(store_dir(root).join(fan).join(format!("{sha256}.nawa.tar.zst")))
+    Ok(store_dir(root)
+        .join(fan)
+        .join(format!("{sha256}.nawa.tar.zst")))
 }
 
 /// A digest is 64 lowercase hex characters; it becomes path components, so
 /// anything else is rejected outright.
 pub(crate) fn validate_digest(sha256: &str) -> Result<()> {
     let ok = sha256.len() == 64
-        && sha256.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        && sha256
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
     if !ok {
         bail!("invalid object digest {sha256:?} (expected 64 lowercase hex characters)");
     }
@@ -110,22 +114,32 @@ impl StagedObject {
                 .open(&tmp)
             {
                 Ok(file) => {
-                    return Ok(StagedObject { root: root.to_path_buf(), tmp, file: Some(file), digest: None })
+                    return Ok(StagedObject {
+                        root: root.to_path_buf(),
+                        tmp,
+                        file: Some(file),
+                        digest: None,
+                    })
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(e) => return Err(e).with_context(|| format!("stage object {}", tmp.display())),
             }
         }
-        bail!("could not allocate a unique object staging file in {}", dir.display());
+        bail!(
+            "could not allocate a unique object staging file in {}",
+            dir.display()
+        );
     }
 
     /// Copy `source` into the staging file, hashing the bytes that will be
     /// stored. Rejects an expected-digest mismatch before anything is
     /// published.
     pub fn absorb(&mut self, source: &Path, expected: Option<&str>) -> Result<String> {
-        let mut src = File::open(source)
-            .with_context(|| format!("open {}", source.display()))?;
-        let (mut file, mut hasher) = (self.file.take().expect("staging file consumed twice"), Sha256::new());
+        let mut src = File::open(source).with_context(|| format!("open {}", source.display()))?;
+        let (mut file, mut hasher) = (
+            self.file.take().expect("staging file consumed twice"),
+            Sha256::new(),
+        );
         let result = (|| -> Result<()> {
             let mut buf = [0u8; 128 * 1024];
             loop {
@@ -217,9 +231,7 @@ pub(crate) fn verify_object_file(path: &Path, digest: &str) -> Result<()> {
     }
     let got = crate::adapters::checksum::sha256_of_file(path)?;
     if got != digest {
-        bail!(
-            "cached object {digest} is corrupt (actual digest {got}) — refusing to use it"
-        );
+        bail!("cached object {digest} is corrupt (actual digest {got}) — refusing to use it");
     }
     Ok(())
 }
@@ -227,7 +239,11 @@ pub(crate) fn verify_object_file(path: &Path, digest: &str) -> Result<()> {
 /// Stage + absorb + publish in one call. Used by the installer right after it
 /// has verified the archive bytes: the object becomes eligible for history
 /// references and later restoration.
-pub(crate) fn store_verified_copy(root: &Path, source: &Path, expected: Option<&str>) -> Result<(PathBuf, String)> {
+pub(crate) fn store_verified_copy(
+    root: &Path,
+    source: &Path,
+    expected: Option<&str>,
+) -> Result<(PathBuf, String)> {
     let mut staged = StagedObject::create(root)?;
     let digest = staged.absorb(source, expected)?;
     let path = staged.publish()?;
@@ -281,7 +297,10 @@ impl Authentication {
     /// True when the artifact carries cryptographic publisher proof.
     #[allow(dead_code)] // used by history/undo reporting in later phases
     pub fn is_authenticated(self) -> bool {
-        matches!(self, Authentication::SignedIndex | Authentication::DetachedSignature)
+        matches!(
+            self,
+            Authentication::SignedIndex | Authentication::DetachedSignature
+        )
     }
 
     pub fn as_str(self) -> &'static str {
@@ -466,7 +485,11 @@ pub(crate) fn save_provenance(root: &Path, prov: &Provenance) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_file_name(format!(".{}.{}.tmp", path.file_name().unwrap_or_default().to_string_lossy(), random_suffix()));
+    let tmp = path.with_file_name(format!(
+        ".{}.{}.tmp",
+        path.file_name().unwrap_or_default().to_string_lossy(),
+        random_suffix()
+    ));
     let write = (|| -> Result<()> {
         std::fs::write(&tmp, prov.to_toml()?)?;
         std::fs::rename(&tmp, &path)?;
@@ -601,7 +624,8 @@ pub(crate) fn verify_stored(root: &Path, digest: &str) -> Result<PathBuf> {
         if prov.archive_size != 0 && prov.archive_size != size {
             bail!(
                 "object {digest} size {} does not match its provenance record ({})",
-                size, prov.archive_size
+                size,
+                prov.archive_size
             );
         }
     }
@@ -673,7 +697,10 @@ mod tests {
         std::fs::write(&outside, b"outside").unwrap();
         std::fs::remove_file(&path).unwrap();
         std::os::unix::fs::symlink(&outside, &path).unwrap();
-        assert!(verify_stored(&root, &digest).is_err(), "must not follow a symlinked object");
+        assert!(
+            verify_stored(&root, &digest).is_err(),
+            "must not follow a symlinked object"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 

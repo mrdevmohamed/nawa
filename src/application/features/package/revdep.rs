@@ -23,14 +23,14 @@
 //! absolute symlinks relative to the root instead of the host.
 
 use anyhow::Result;
-use goblin::elf::header::{ELFCLASS64, EI_CLASS};
+use goblin::elf::header::{EI_CLASS, ELFCLASS64};
 use goblin::elf::Elf;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Read;
 use std::path::Path;
 
-use crate::glob::glob_match;
 use crate::adapters::db::Db;
+use crate::glob::glob_match;
 use crate::install::{exists_in_root, resolve_in_root};
 use crate::lint::{self, ElfInfo};
 
@@ -271,7 +271,10 @@ impl<'a> Scanner<'a> {
             return Lib::Missing;
         }
         match Elf::parse_header(&head) {
-            Ok(h) if (h.e_ident[EI_CLASS] == ELFCLASS64) == info.is_64 && h.e_machine == info.machine => {
+            Ok(h)
+                if (h.e_ident[EI_CLASS] == ELFCLASS64) == info.is_64
+                    && h.e_machine == info.machine =>
+            {
                 Lib::Found
             }
             Ok(_) => Lib::WrongArch,
@@ -347,13 +350,28 @@ impl<'a> Scanner<'a> {
             }
             match self.lookup(lib, &own, &info) {
                 Lib::Found => {}
-                Lib::WrongArch => missing.push(Missing { name: lib.clone(), wrong_arch: true }),
-                Lib::Missing => missing.push(Missing { name: lib.clone(), wrong_arch: false }),
+                Lib::WrongArch => missing.push(Missing {
+                    name: lib.clone(),
+                    wrong_arch: true,
+                }),
+                Lib::Missing => missing.push(Missing {
+                    name: lib.clone(),
+                    wrong_arch: false,
+                }),
             }
         }
-        let interp = info.interp.clone().filter(|i| !exists_in_root(self.root, i));
+        let interp = info
+            .interp
+            .clone()
+            .filter(|i| !exists_in_root(self.root, i));
         let broken = !missing.is_empty() || interp.is_some();
-        broken.then(|| Finding::Broken(BrokenFile { path: abs.to_string(), missing, interp }))
+        broken.then(|| {
+            Finding::Broken(BrokenFile {
+                path: abs.to_string(),
+                missing,
+                interp,
+            })
+        })
     }
 }
 
@@ -454,7 +472,9 @@ pub(crate) fn affected(db: &Db, changed: &[String]) -> Result<Vec<String>> {
 /// `pkgname` of a package archive (`.PKGINFO`), if it can be read.
 pub(crate) fn archive_name(archive: &Path) -> Option<String> {
     let info = crate::adapters::archive::read_pkginfo(archive).ok()?;
-    crate::adapters::archive::parse_pkginfo(&info).ok()?.remove("pkgname")
+    crate::adapters::archive::parse_pkginfo(&info)
+        .ok()?
+        .remove("pkgname")
 }
 
 // ---- which package provides a missing library ----------------------------------
@@ -502,9 +522,11 @@ pub(crate) fn suggest(
     for (lib, pkgs) in archive_providers(out_dir, missing) {
         for p in pkgs {
             let installed = installed.contains(&p);
-            sug.entry(lib.clone())
-                .or_default()
-                .push(Provider { package: p, source: Source::Archive, installed });
+            sug.entry(lib.clone()).or_default().push(Provider {
+                package: p,
+                source: Source::Archive,
+                installed,
+            });
         }
     }
     for lib in missing {
@@ -516,7 +538,11 @@ pub(crate) fn suggest(
                 let installed = installed.contains(&cand);
                 let v = sug.entry(lib.clone()).or_default();
                 if !v.iter().any(|p| p.package == cand) {
-                    v.push(Provider { package: cand, source: Source::Recipe, installed });
+                    v.push(Provider {
+                        package: cand,
+                        source: Source::Recipe,
+                        installed,
+                    });
                 }
             }
         }
@@ -628,7 +654,10 @@ fn jstr(s: &str) -> String {
 }
 
 fn jlist<T>(items: impl IntoIterator<Item = T>, f: impl Fn(T) -> String) -> String {
-    format!("[{}]", items.into_iter().map(f).collect::<Vec<_>>().join(","))
+    format!(
+        "[{}]",
+        items.into_iter().map(f).collect::<Vec<_>>().join(",")
+    )
 }
 
 fn json_file(f: &BrokenFile, sug: &Suggestions) -> String {
@@ -649,7 +678,10 @@ fn json_file(f: &BrokenFile, sug: &Suggestions) -> String {
         )
     });
     let interp = f.interp.as_deref().map_or("null".to_string(), jstr);
-    format!("{{\"path\":{},\"missing\":{missing},\"interp\":{interp}}}", jstr(&f.path))
+    format!(
+        "{{\"path\":{},\"missing\":{missing},\"interp\":{interp}}}",
+        jstr(&f.path)
+    )
 }
 
 impl Report {
@@ -724,7 +756,13 @@ mod tests {
     }
 
     fn opts<'a>(unowned: bool, scan_dirs: &'a [String]) -> Options<'a> {
-        Options { lib_dirs: &[], ignore: &[], symlinks: true, unowned, scan_dirs }
+        Options {
+            lib_dirs: &[],
+            ignore: &[],
+            symlinks: true,
+            unowned,
+            scan_dirs,
+        }
     }
 
     #[test]
@@ -736,8 +774,14 @@ mod tests {
             runpath: Some("$ORIGIN/../lib:/opt/x:$LIB/y:relative".into()),
             ..Default::default()
         };
-        assert_eq!(own_dirs(&info, "/usr/bin"), vec!["/usr/bin/../lib", "/opt/x"]);
-        let only_rpath = ElfInfo { rpath: Some("/a:/b".into()), ..Default::default() };
+        assert_eq!(
+            own_dirs(&info, "/usr/bin"),
+            vec!["/usr/bin/../lib", "/opt/x"]
+        );
+        let only_rpath = ElfInfo {
+            rpath: Some("/a:/b".into()),
+            ..Default::default()
+        };
         assert_eq!(own_dirs(&only_rpath, "/x"), vec!["/a", "/b"]);
     }
 
@@ -745,14 +789,29 @@ mod tests {
     fn ld_so_conf_and_musl_paths_come_before_defaults() {
         let root = tmp("ldconf");
         std::fs::create_dir_all(root.join("etc/ld.so.conf.d")).unwrap();
-        std::fs::write(root.join("etc/ld.so.conf"), "# c\ninclude ld.so.conf.d/*.conf\n/opt/base/lib\n").unwrap();
+        std::fs::write(
+            root.join("etc/ld.so.conf"),
+            "# c\ninclude ld.so.conf.d/*.conf\n/opt/base/lib\n",
+        )
+        .unwrap();
         std::fs::write(root.join("etc/ld.so.conf.d/a.conf"), "/opt/a/lib\n").unwrap();
         std::fs::write(root.join("etc/ld.so.conf.d/skip.txt"), "/never\n").unwrap();
-        std::fs::write(root.join("etc/ld-musl-x86_64.path"), "/opt/m1/lib:/opt/m2/lib\n/opt/m3/lib\n").unwrap();
+        std::fs::write(
+            root.join("etc/ld-musl-x86_64.path"),
+            "/opt/m1/lib:/opt/m2/lib\n/opt/m3/lib\n",
+        )
+        .unwrap();
         let d = system_dirs(&root, &["/extra".to_string()]);
         assert_eq!(
             &d[..6],
-            ["/extra", "/opt/a/lib", "/opt/base/lib", "/opt/m1/lib", "/opt/m2/lib", "/opt/m3/lib"]
+            [
+                "/extra",
+                "/opt/a/lib",
+                "/opt/base/lib",
+                "/opt/m1/lib",
+                "/opt/m2/lib",
+                "/opt/m3/lib"
+            ]
         );
         assert!(d.contains(&"/usr/lib".to_string()) && !d.contains(&"/never".to_string()));
         let _ = std::fs::remove_dir_all(&root);
@@ -767,10 +826,15 @@ mod tests {
         std::fs::write(root.join("usr/lib/libarm.so.1"), fake_header(true, 183)).unwrap(); // aarch64
         std::fs::write(root.join("usr/lib/libtext.so"), b"GROUP ( libgood.so.1 )").unwrap();
         // absolute symlink must resolve inside the root
-        std::os::unix::fs::symlink("/usr/lib/libgood.so.1", root.join("usr/lib/liblink.so.1")).unwrap();
+        std::os::unix::fs::symlink("/usr/lib/libgood.so.1", root.join("usr/lib/liblink.so.1"))
+            .unwrap();
         let o = opts(false, &[]);
         let mut sc = Scanner::new(&root, &o);
-        let me = ElfInfo { is_64: true, machine: 62, ..Default::default() };
+        let me = ElfInfo {
+            is_64: true,
+            machine: 62,
+            ..Default::default()
+        };
         assert_eq!(sc.lookup("libgood.so.1", &[], &me), Lib::Found);
         assert_eq!(sc.lookup("liblink.so.1", &[], &me), Lib::Found);
         assert_eq!(sc.lookup("lib32.so.1", &[], &me), Lib::WrongArch);
@@ -778,7 +842,11 @@ mod tests {
         assert_eq!(sc.lookup("libtext.so", &[], &me), Lib::Missing);
         assert_eq!(sc.lookup("libnope.so", &[], &me), Lib::Missing);
         // the same names for a 32-bit program flip the verdicts
-        let me32 = ElfInfo { is_64: false, machine: 3, ..Default::default() };
+        let me32 = ElfInfo {
+            is_64: false,
+            machine: 3,
+            ..Default::default()
+        };
         assert_eq!(sc.lookup("lib32.so.1", &[], &me32), Lib::Found);
         assert_eq!(sc.lookup("libgood.so.1", &[], &me32), Lib::WrongArch);
         let _ = std::fs::remove_dir_all(&root);
@@ -797,7 +865,11 @@ mod tests {
         let db = Db::new(&root);
         db.add(
             &entry("demo"),
-            &["/usr/bin/ok".to_string(), "/usr/bin/dead".to_string(), "/usr/lib/real".to_string()],
+            &[
+                "/usr/bin/ok".to_string(),
+                "/usr/bin/dead".to_string(),
+                "/usr/lib/real".to_string(),
+            ],
             &HashMap::new(),
         )
         .unwrap();
@@ -819,7 +891,10 @@ mod tests {
         let rep = scan(&root, &db, &[], &opts(false, &dirs)).unwrap();
         assert!(rep.unowned_checked && rep.unowned.is_clean());
 
-        let off = Options { symlinks: false, ..opts(true, &[]) };
+        let off = Options {
+            symlinks: false,
+            ..opts(true, &[])
+        };
         assert!(scan(&root, &db, &[], &off).unwrap().is_clean());
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -830,9 +905,33 @@ mod tests {
         let db = Db::new(&root);
         let files = vec!["/usr/share/x".to_string()];
         db.add(&entry("a"), &files, &HashMap::new()).unwrap();
-        db.add(&Entry { run: vec!["a".into()], ..entry("b") }, &files, &HashMap::new()).unwrap();
-        db.add(&Entry { run: vec!["b".into()], ..entry("c") }, &files, &HashMap::new()).unwrap();
-        db.add(&Entry { run: vec!["gone".into()], ..entry("d") }, &files, &HashMap::new()).unwrap();
+        db.add(
+            &Entry {
+                run: vec!["a".into()],
+                ..entry("b")
+            },
+            &files,
+            &HashMap::new(),
+        )
+        .unwrap();
+        db.add(
+            &Entry {
+                run: vec!["b".into()],
+                ..entry("c")
+            },
+            &files,
+            &HashMap::new(),
+        )
+        .unwrap();
+        db.add(
+            &Entry {
+                run: vec!["gone".into()],
+                ..entry("d")
+            },
+            &files,
+            &HashMap::new(),
+        )
+        .unwrap();
         assert_eq!(affected(&db, &["a".to_string()]).unwrap(), vec!["a", "b"]);
         // a removed package is no longer installed: only its dependents remain
         assert_eq!(affected(&db, &["gone".to_string()]).unwrap(), vec!["d"]);
@@ -843,8 +942,14 @@ mod tests {
     #[test]
     fn name_guesses_cover_common_library_names() {
         assert_eq!(name_guesses("libz.so.1"), vec!["z", "libz"]);
-        assert_eq!(name_guesses("libpng16.so.16"), vec!["png16", "libpng16", "png", "libpng"]);
-        assert_eq!(name_guesses("libglib-2.0.so.0"), vec!["glib-2.0", "libglib-2.0", "glib", "libglib"]);
+        assert_eq!(
+            name_guesses("libpng16.so.16"),
+            vec!["png16", "libpng16", "png", "libpng"]
+        );
+        assert_eq!(
+            name_guesses("libglib-2.0.so.0"),
+            vec!["glib-2.0", "libglib-2.0", "glib", "libglib"]
+        );
         assert!(name_guesses(".so").is_empty());
     }
 
@@ -858,20 +963,31 @@ mod tests {
         std::fs::write(st.join("usr/lib/libfoo.so.1"), b"x").unwrap();
         std::fs::write(st.join("usr/lib/other.txt"), b"x").unwrap();
         let pkginfo = "pkgname = foo\npkgver = 1.0\npkgrel = 1\narch = x86_64\nsize = 1\n";
-        crate::adapters::archive::create(&st, pkginfo, &out.join("foo-1.0-1.nawa.tar.zst")).unwrap();
+        crate::adapters::archive::create(&st, pkginfo, &out.join("foo-1.0-1.nawa.tar.zst"))
+            .unwrap();
 
-        let missing: BTreeSet<String> =
-            ["libfoo.so.1", "libbar.so.2", "libnope.so"].iter().map(|s| s.to_string()).collect();
+        let missing: BTreeSet<String> = ["libfoo.so.1", "libbar.so.2", "libnope.so"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let recipes = vec!["bar".to_string(), "zzz".to_string()];
         let installed: HashSet<String> = ["foo".to_string()].into_iter().collect();
         let sug = suggest(&missing, &out, &recipes, &installed);
         assert_eq!(
             sug["libfoo.so.1"],
-            vec![Provider { package: "foo".into(), source: Source::Archive, installed: true }]
+            vec![Provider {
+                package: "foo".into(),
+                source: Source::Archive,
+                installed: true
+            }]
         );
         assert_eq!(
             sug["libbar.so.2"],
-            vec![Provider { package: "bar".into(), source: Source::Recipe, installed: false }]
+            vec![Provider {
+                package: "bar".into(),
+                source: Source::Recipe,
+                installed: false
+            }]
         );
         assert!(!sug.contains_key("libnope.so"));
         let _ = std::fs::remove_dir_all(&base);
@@ -880,13 +996,20 @@ mod tests {
     #[test]
     fn json_output_is_escaped_and_complete() {
         assert_eq!(jstr("a\"b\\c\n\u{1}"), "\"a\\\"b\\\\c\\n\\u0001\"");
-        let mut rep = Report { scanned_packages: 2, elf_files: 5, ..Default::default() };
+        let mut rep = Report {
+            scanned_packages: 2,
+            elf_files: 5,
+            ..Default::default()
+        };
         rep.packages.insert(
             "curl".into(),
             PkgReport {
                 files: vec![BrokenFile {
                     path: "/usr/bin/curl".into(),
-                    missing: vec![Missing { name: "libz.so.1".into(), wrong_arch: false }],
+                    missing: vec![Missing {
+                        name: "libz.so.1".into(),
+                        wrong_arch: false,
+                    }],
                     interp: None,
                 }],
                 dead_links: vec![],
@@ -895,9 +1018,16 @@ mod tests {
         let mut sug = Suggestions::new();
         sug.insert(
             "libz.so.1".into(),
-            vec![Provider { package: "zlib".into(), source: Source::Recipe, installed: false }],
+            vec![Provider {
+                package: "zlib".into(),
+                source: Source::Recipe,
+                installed: false,
+            }],
         );
-        assert_eq!(rep.missing_libs().into_iter().collect::<Vec<_>>(), vec!["libz.so.1"]);
+        assert_eq!(
+            rep.missing_libs().into_iter().collect::<Vec<_>>(),
+            vec!["libz.so.1"]
+        );
         assert_eq!(
             rep.to_json(&sug),
             r#"{"ok":false,"scanned":{"packages":2,"elf_files":5,"unowned_files":0,"unparseable":0},"packages":[{"name":"curl","files":[{"path":"/usr/bin/curl","missing":[{"name":"libz.so.1","wrong_arch":false,"providers":[{"package":"zlib","source":"recipe","installed":false}]}],"interp":null}],"dead_links":[]}],"unowned":null,"rebuild":["curl"]}"#

@@ -21,8 +21,14 @@ pub(crate) fn resolve_ancestor_containing(path: &Path) -> Result<PathBuf> {
         match std::fs::canonicalize(cur) {
             Ok(p) => return Ok(p),
             Err(_) => {
-                if std::fs::symlink_metadata(cur).map(|m| m.is_symlink()).unwrap_or(false) {
-                    bail!("refusing to write through unresolvable symlink {}", cur.display());
+                if std::fs::symlink_metadata(cur)
+                    .map(|m| m.is_symlink())
+                    .unwrap_or(false)
+                {
+                    bail!(
+                        "refusing to write through unresolvable symlink {}",
+                        cur.display()
+                    );
                 }
                 match cur.parent() {
                     Some(p) => cur = p,
@@ -41,8 +47,8 @@ pub(crate) fn resolve_ancestor_containing(path: &Path) -> Result<PathBuf> {
 /// instead. Relative links that stay inside `root` (merged-usr `lib -> usr/lib`)
 /// are fine; with `root` = `/` everything is inside.
 pub(crate) fn ensure_inside_root(root: &Path, path: &Path) -> Result<()> {
-    let real_root = std::fs::canonicalize(root)
-        .with_context(|| format!("resolve root {}", root.display()))?;
+    let real_root =
+        std::fs::canonicalize(root).with_context(|| format!("resolve root {}", root.display()))?;
     let resolved = resolve_ancestor_containing(path).with_context(|| {
         format!(
             "refusing to write through unresolvable symlink {} (target root {})",
@@ -66,10 +72,10 @@ pub(crate) fn ensure_inside_root(root: &Path, path: &Path) -> Result<()> {
 /// Used by `slim::split` and `plugins::manifest` where the caller decides
 /// whether a failure is a skip (`continue`) or an error (`bail!`).
 pub(crate) fn is_under_root(root: &Path, path: &Path) -> Result<bool> {
-    let real_root = std::fs::canonicalize(root)
-        .with_context(|| format!("resolve root {}", root.display()))?;
-    let real_path = std::fs::canonicalize(path)
-        .with_context(|| format!("resolve path {}", path.display()))?;
+    let real_root =
+        std::fs::canonicalize(root).with_context(|| format!("resolve root {}", root.display()))?;
+    let real_path =
+        std::fs::canonicalize(path).with_context(|| format!("resolve path {}", path.display()))?;
     Ok(real_path.starts_with(&real_root))
 }
 

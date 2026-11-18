@@ -3,8 +3,8 @@
 use anyhow::{bail, Result};
 use std::path::Path;
 
-use crate::repo;
 use crate::adapters::sign;
+use crate::repo;
 
 pub(crate) fn require_trust_for_remote(root: &Path, url: &str, allow_unsigned: bool) -> Result<()> {
     if allow_unsigned {
@@ -91,10 +91,7 @@ pub(crate) fn check_index_freshness(
         }
     }
     if now > gen && now - gen > 30 * 24 * 3600 {
-        crate::nawa_warn!(
-            "repository index is {} days old",
-            (now - gen) / 86400
-        );
+        crate::nawa_warn!("repository index is {} days old", (now - gen) / 86400);
     }
     Ok(())
 }
@@ -113,7 +110,11 @@ pub(crate) fn check_archive_matches_index(
             Ok(value) if !strict_v2 || value > 0 => value,
             Ok(_) => bail!("archive {} has invalid pkgrel 0 in .PKGINFO", re.file),
             Err(_) if !strict_v2 => 1,
-            Err(_) => bail!("archive {} has invalid pkgrel {:?} in .PKGINFO", re.file, raw),
+            Err(_) => bail!(
+                "archive {} has invalid pkgrel {:?} in .PKGINFO",
+                re.file,
+                raw
+            ),
         },
         None if strict_v2 => bail!("archive {} is missing pkgrel in .PKGINFO", re.file),
         None => 1,
@@ -121,9 +122,13 @@ pub(crate) fn check_archive_matches_index(
     let arch = get("arch");
     let host = std::env::var("NAWA_ARCH").unwrap_or_else(|_| std::env::consts::ARCH.to_string());
     if !crate::adapters::sys::arch_fits(&arch) {
-        bail!("archive {} is built for {arch}, this system is {host}", re.file);
+        bail!(
+            "archive {} is built for {arch}, this system is {host}",
+            re.file
+        );
     }
-    if get("pkgname") != re.name || get("pkgver") != re.version || rel != re.rel || arch != re.arch {
+    if get("pkgname") != re.name || get("pkgver") != re.version || rel != re.rel || arch != re.arch
+    {
         bail!(
             "archive {} metadata does not match the index (archive: {}-{}-{} arch {}; index: {}-{}-{} arch {})",
             re.file,

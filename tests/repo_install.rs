@@ -29,9 +29,8 @@ fn recipe(dir: &Path, name: &str, version: &str) {
 
 /// A repository archive that installs `/usr/share/<name>` containing `body`.
 fn archive(out: &Path, name: &str, ver: &str, body: &str) {
-    let pkginfo = format!(
-        "pkgname = {name}\npkgver = {ver}\npkgrel = 1\narch = any\nrundeps = \nsize = 1\n"
-    );
+    let pkginfo =
+        format!("pkgname = {name}\npkgver = {ver}\npkgrel = 1\narch = any\nrundeps = \nsize = 1\n");
     let f = fs::File::create(out).unwrap();
     let enc = zstd::stream::write::Encoder::new(f, 3).unwrap();
     let mut tar = tar::Builder::new(enc);
@@ -39,13 +38,18 @@ fn archive(out: &Path, name: &str, ver: &str, body: &str) {
     hdr.set_size(pkginfo.len() as u64);
     hdr.set_mode(0o644);
     hdr.set_cksum();
-    tar.append_data(&mut hdr, ".PKGINFO", pkginfo.as_bytes()).unwrap();
+    tar.append_data(&mut hdr, ".PKGINFO", pkginfo.as_bytes())
+        .unwrap();
     let mut h2 = tar::Header::new_gnu();
     h2.set_size(body.len() as u64);
     h2.set_mode(0o644);
     h2.set_cksum();
-    tar.append_data(&mut h2, format!("payload/usr/share/{name}"), body.as_bytes())
-        .unwrap();
+    tar.append_data(
+        &mut h2,
+        format!("payload/usr/share/{name}"),
+        body.as_bytes(),
+    )
+    .unwrap();
     tar.into_inner().unwrap().finish().unwrap();
 }
 
@@ -92,7 +96,12 @@ fn ok(o: &Output) -> String {
 fn make_repo(d: &Path) -> PathBuf {
     let repo = d.join("repo");
     fs::create_dir_all(&repo).unwrap();
-    archive(&repo.join("hello-1-1.nawa.tar.zst"), "hello", "1", "from-repo\n");
+    archive(
+        &repo.join("hello-1-1.nawa.tar.zst"),
+        "hello",
+        "1",
+        "from-repo\n",
+    );
     let o = Command::new(nawa_bin())
         .args(["repo-create", repo.to_str().unwrap(), "--out", "index.toml"])
         .env("NAWA_SYSCONFDIR", d.join("no-sysconf"))
@@ -116,13 +125,25 @@ fn auto_installs_from_the_repo_and_builds_what_it_lacks() {
     let out = ok(&nawa(
         &d,
         &[
-            "install", "--yes", "--allow-unsigned",
-            "--repo", repo.to_str().unwrap(),
-            "hello", "other",
+            "install",
+            "--yes",
+            "--allow-unsigned",
+            "--repo",
+            repo.to_str().unwrap(),
+            "hello",
+            "other",
         ],
     ));
-    assert_eq!(installed(&d, "hello").as_deref(), Some("from-repo\n"), "{out}");
-    assert_eq!(installed(&d, "other").as_deref(), Some("other-1\n"), "built locally:\n{out}");
+    assert_eq!(
+        installed(&d, "hello").as_deref(),
+        Some("from-repo\n"),
+        "{out}"
+    );
+    assert_eq!(
+        installed(&d, "other").as_deref(),
+        Some("other-1\n"),
+        "built locally:\n{out}"
+    );
     assert!(out.contains("1 from the repository, 1 to build"), "{out}");
     let _ = fs::remove_dir_all(&d);
 }
@@ -135,7 +156,14 @@ fn build_flag_ignores_the_repository() {
 
     ok(&nawa(
         &d,
-        &["install", "--build", "--yes", "--repo", repo.to_str().unwrap(), "hello"],
+        &[
+            "install",
+            "--build",
+            "--yes",
+            "--repo",
+            repo.to_str().unwrap(),
+            "hello",
+        ],
     ));
     assert_eq!(installed(&d, "hello").as_deref(), Some("hello-1\n"));
     let _ = fs::remove_dir_all(&d);
@@ -151,14 +179,27 @@ fn from_repo_is_strict_and_fails_before_touching_anything() {
     let o = nawa(
         &d,
         &[
-            "install", "--from-repo", "--yes", "--allow-unsigned",
-            "--repo", repo.to_str().unwrap(),
-            "hello", "other",
+            "install",
+            "--from-repo",
+            "--yes",
+            "--allow-unsigned",
+            "--repo",
+            repo.to_str().unwrap(),
+            "hello",
+            "other",
         ],
     );
     assert!(!o.status.success(), "{}", stdout(&o));
-    assert!(stderr(&o).contains("not in the repository"), "{}", stderr(&o));
-    assert_eq!(installed(&d, "hello"), None, "nothing may be installed after a strict failure");
+    assert!(
+        stderr(&o).contains("not in the repository"),
+        "{}",
+        stderr(&o)
+    );
+    assert_eq!(
+        installed(&d, "hello"),
+        None,
+        "nothing may be installed after a strict failure"
+    );
     assert_eq!(installed(&d, "other"), None);
     let _ = fs::remove_dir_all(&d);
 }
@@ -171,9 +212,20 @@ fn a_repository_only_package_needs_no_recipe() {
 
     let out = ok(&nawa(
         &d,
-        &["install", "--yes", "--allow-unsigned", "--repo", repo.to_str().unwrap(), "hello"],
+        &[
+            "install",
+            "--yes",
+            "--allow-unsigned",
+            "--repo",
+            repo.to_str().unwrap(),
+            "hello",
+        ],
     ));
-    assert_eq!(installed(&d, "hello").as_deref(), Some("from-repo\n"), "{out}");
+    assert_eq!(
+        installed(&d, "hello").as_deref(),
+        Some("from-repo\n"),
+        "{out}"
+    );
     let _ = fs::remove_dir_all(&d);
 }
 
@@ -185,15 +237,35 @@ fn an_unusable_repository_falls_back_to_building_in_auto_mode() {
 
     let out = ok(&nawa(
         &d,
-        &["install", "--yes", "--repo", missing.to_str().unwrap(), "hello"],
+        &[
+            "install",
+            "--yes",
+            "--repo",
+            missing.to_str().unwrap(),
+            "hello",
+        ],
     ));
-    assert_eq!(installed(&d, "hello").as_deref(), Some("hello-1\n"), "{out}");
-    assert!(out.contains("not usable"), "one note line explains the fallback:\n{out}");
+    assert_eq!(
+        installed(&d, "hello").as_deref(),
+        Some("hello-1\n"),
+        "{out}"
+    );
+    assert!(
+        out.contains("not usable"),
+        "one note line explains the fallback:\n{out}"
+    );
 
     // ... but strict repo mode reports the problem instead of building
     let o = nawa(
         &d,
-        &["install", "--from-repo", "--yes", "--repo", missing.to_str().unwrap(), "other"],
+        &[
+            "install",
+            "--from-repo",
+            "--yes",
+            "--repo",
+            missing.to_str().unwrap(),
+            "other",
+        ],
     );
     assert!(!o.status.success());
     assert!(stderr(&o).contains("not usable"), "{}", stderr(&o));
@@ -236,7 +308,11 @@ fn install_mode_comes_from_the_system_config_and_flags_beat_it() {
     };
 
     ok(&run(&[]));
-    assert_eq!(installed(&d, "hello").as_deref(), Some("hello-1\n"), "system config: build");
+    assert_eq!(
+        installed(&d, "hello").as_deref(),
+        Some("hello-1\n"),
+        "system config: build"
+    );
 
     // the flag wins over the system file; the repo still comes from /etc
     let o = run(&["--from", "repo"]);
@@ -265,8 +341,14 @@ fn config_show_lists_repo_install_mode_and_system_file() {
         .unwrap();
     let out = ok(&o);
     // built-in default repository, install_mode from the system file
-    assert!(out.contains("mrdevmohamed/faseela-repo/releases/download/stable"), "{out}");
-    let line = out.lines().find(|l| l.starts_with("install_mode")).expect("install_mode line");
+    assert!(
+        out.contains("mrdevmohamed/faseela-repo/releases/download/stable"),
+        "{out}"
+    );
+    let line = out
+        .lines()
+        .find(|l| l.starts_with("install_mode"))
+        .expect("install_mode line");
     assert!(line.contains("ask") && line.contains("nawa.toml"), "{line}");
     assert!(out.contains("system"), "{out}");
     let _ = fs::remove_dir_all(&d);

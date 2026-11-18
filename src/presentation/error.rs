@@ -45,7 +45,10 @@ impl Class {
 
         // 2. Checksum / trust / offline / config via message hints.
         for m in &msgs {
-            if m.contains("sha256 mismatch") || m.contains("checksum") || m.contains("hash mismatch") {
+            if m.contains("sha256 mismatch")
+                || m.contains("checksum")
+                || m.contains("hash mismatch")
+            {
                 return Self::Checksum;
             }
             if m.contains("offline") {
@@ -54,13 +57,18 @@ impl Class {
             if m.contains("signature") || m.contains("trust") || m.contains("untrusted") {
                 return Self::Trust;
             }
-            if m.contains("config") || m.contains("invalid recipe") || m.contains("recipe not found") {
+            if m.contains("config")
+                || m.contains("invalid recipe")
+                || m.contains("recipe not found")
+            {
                 return Self::Config;
             }
         }
 
         // 3. Any io error in the chain → Io.
-        if e.chain().any(|c| c.downcast_ref::<std::io::Error>().is_some()) {
+        if e.chain()
+            .any(|c| c.downcast_ref::<std::io::Error>().is_some())
+        {
             return Self::Io;
         }
 

@@ -4,7 +4,7 @@
 //! in [`crate::sys`].
 
 use anyhow::{bail, Context, Result};
-use rustix::process::{chdir, setrlimit, umask, waitpid, Pid, Rlimit, Resource, WaitOptions};
+use rustix::process::{chdir, setrlimit, umask, waitpid, Pid, Resource, Rlimit, WaitOptions};
 use rustix::thread::{unshare_unsafe, UnshareFlags};
 use std::os::unix::io::AsRawFd;
 use std::os::unix::process::CommandExt;
@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use super::mounts;
 use super::spec::SandboxSpec;
 use super::sys;
-use super::{EXIT_TIMEOUT, EXEC_MUST_NOT_RETURN, PID1_SETUP_FAILED};
+use super::{EXEC_MUST_NOT_RETURN, EXIT_TIMEOUT, PID1_SETUP_FAILED};
 
 /// The sync fd the parent (build engine) passes pre_exec; see
 /// [sys::sync_announce] for the byte protocol.
@@ -63,7 +63,8 @@ pub(crate) fn init(path: &Path) -> Result<i32> {
     }
 
     // -- 2. the remaining namespaces --------------------------------------
-    let mut flags = UnshareFlags::NEWNS | UnshareFlags::NEWPID | UnshareFlags::NEWIPC | UnshareFlags::NEWUTS;
+    let mut flags =
+        UnshareFlags::NEWNS | UnshareFlags::NEWPID | UnshareFlags::NEWIPC | UnshareFlags::NEWUTS;
     if !spec.network {
         flags |= UnshareFlags::NEWNET;
     }
@@ -151,13 +152,22 @@ fn common_prep(spec: &SandboxSpec) -> Result<()> {
     }
     set_optional_limit(libc::RLIMIT_AS as libc::c_int, spec.memory_limit_bytes)?;
     set_optional_limit(libc::RLIMIT_NPROC as libc::c_int, spec.process_limit)?;
-    set_optional_limit(libc::RLIMIT_FSIZE as libc::c_int, spec.file_size_limit_bytes)?;
+    set_optional_limit(
+        libc::RLIMIT_FSIZE as libc::c_int,
+        spec.file_size_limit_bytes,
+    )?;
     set_optional_limit(libc::RLIMIT_NOFILE as libc::c_int, spec.open_files_limit)?;
 
     // umask 022 (§6): environment variables cannot carry it
     umask(rustix::fs::Mode::from_raw_mode(0o022));
     // RLIMIT_CORE = 0 (§4.5)
-    let _ = setrlimit(Resource::Core, Rlimit { current: Some(0), maximum: Some(0) });
+    let _ = setrlimit(
+        Resource::Core,
+        Rlimit {
+            current: Some(0),
+            maximum: Some(0),
+        },
+    );
     // PR_SET_NO_NEW_PRIVS: even a setuid binary inside cannot regain power
     sys::no_new_privs()?;
     // drop every capability (§4.1): builds and plugins need none
@@ -236,8 +246,7 @@ pub(crate) fn ensure_identity(euid: u32, egid: u32) -> Result<()> {
     let gid_line = format!("0 {egid} 1\n");
     std::fs::write("/proc/self/uid_map", uid_line)
         .context("write /proc/self/uid_map (single own-uid map)")?;
-    std::fs::write("/proc/self/gid_map", gid_line)
-        .context("write /proc/self/gid_map")?;
+    std::fs::write("/proc/self/gid_map", gid_line).context("write /proc/self/gid_map")?;
     Ok(())
 }
 

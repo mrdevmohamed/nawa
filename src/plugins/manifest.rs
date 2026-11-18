@@ -147,12 +147,49 @@ const MANIFEST_NAME: &str = "nawa-plugin.toml";
 /// (roadmap §6.6). Keep in sync with the Cmd enum — the
 /// `reserved_commands_cover_every_builtin_cli_command` test in `cli.rs` enforces it.
 pub(crate) const RESERVED_COMMANDS: &[&str] = &[
-    "build", "install", "outdated", "update", "autoremove", "search", "info",
-    "why", "deps", "deps-all", "remove", "query", "list", "files", "owner",
-    "revdep", "repo-create", "repo-update", "sync", "keygen", "sign", "verify", "trust",
-    "upgrade", "rollback", "repolist", "makecache", "repoquery", "clean",
-    "fetch", "recipe", "group", "history", "plugin", "config", "system", "migrate", "init",
-    "completions", "sandbox-init", "sandbox-probe", "__complete_pkgs", "help",
+    "build",
+    "install",
+    "outdated",
+    "update",
+    "autoremove",
+    "search",
+    "info",
+    "why",
+    "deps",
+    "deps-all",
+    "remove",
+    "query",
+    "list",
+    "files",
+    "owner",
+    "revdep",
+    "repo-create",
+    "repo-update",
+    "sync",
+    "keygen",
+    "sign",
+    "verify",
+    "trust",
+    "upgrade",
+    "rollback",
+    "repolist",
+    "makecache",
+    "repoquery",
+    "clean",
+    "fetch",
+    "recipe",
+    "group",
+    "history",
+    "plugin",
+    "config",
+    "system",
+    "migrate",
+    "init",
+    "completions",
+    "sandbox-init",
+    "sandbox-probe",
+    "__complete_pkgs",
+    "help",
 ];
 
 impl PluginManifest {
@@ -233,7 +270,11 @@ impl PluginManifest {
         let mut commands = m.commands.names;
         commands.sort();
         if let Some(duplicate) = commands.windows(2).find(|pair| pair[0] == pair[1]) {
-            bail!("plugin {} declares duplicate command name {:?}", p.id, duplicate[0]);
+            bail!(
+                "plugin {} declares duplicate command name {:?}",
+                p.id,
+                duplicate[0]
+            );
         }
         for c in &commands {
             if !crate::adapters::db::valid_name(c) {
@@ -258,7 +299,10 @@ impl PluginManifest {
             }
         }
         if !events.is_empty() && !caps.contains(&Capability::TransactionObserve) {
-            bail!("plugin {} subscribes to events but did not request transaction.observe", p.id);
+            bail!(
+                "plugin {} subscribes to events but did not request transaction.observe",
+                p.id
+            );
         }
 
         Ok(PluginManifest {
@@ -299,11 +343,15 @@ fn plugin_directory_is_root_safe(dir: &Path) -> bool {
     let start = if dir.is_absolute() {
         dir.to_path_buf()
     } else {
-        let Ok(cwd) = std::env::current_dir() else { return false };
+        let Ok(cwd) = std::env::current_dir() else {
+            return false;
+        };
         cwd.join(dir)
     };
     for ancestor in start.ancestors() {
-        let Ok(meta) = std::fs::symlink_metadata(ancestor) else { return false };
+        let Ok(meta) = std::fs::symlink_metadata(ancestor) else {
+            return false;
+        };
         if meta.file_type().is_symlink() || meta.uid() != 0 || meta.mode() & 0o022 != 0 {
             return false;
         }
@@ -320,10 +368,16 @@ fn validate_plugin_file(path: &Path, plugin_id: &str, kind: &str) -> Result<()> 
     let meta = std::fs::symlink_metadata(path)
         .with_context(|| format!("plugin {plugin_id} {kind} {} is missing", path.display()))?;
     if meta.file_type().is_symlink() {
-        bail!("plugin {plugin_id} {kind} {} is a symlink — refusing", path.display());
+        bail!(
+            "plugin {plugin_id} {kind} {} is a symlink — refusing",
+            path.display()
+        );
     }
     if !meta.is_file() {
-        bail!("plugin {plugin_id} {kind} {} is not a regular file", path.display());
+        bail!(
+            "plugin {plugin_id} {kind} {} is not a regular file",
+            path.display()
+        );
     }
     if crate::presentation::diag::is_root() {
         if meta.uid() != 0 {
@@ -411,7 +465,8 @@ subscribe = ["transaction.completed"]
     #[test]
     fn unknown_fields_are_rejected() {
         let (_base, plugins) = dir("unknown");
-        let raw = manifest(&plugins, "demo").replace("[commands]", "[extra]\nfoo = 1\n\n[commands]");
+        let raw =
+            manifest(&plugins, "demo").replace("[commands]", "[extra]\nfoo = 1\n\n[commands]");
         assert!(PluginManifest::parse(&raw, &plugins).is_err());
         let raw = manifest(&plugins, "demo").replace("description = \"demo\"", "surprise = true");
         assert!(PluginManifest::parse(&raw, &plugins).is_err());
@@ -421,15 +476,23 @@ subscribe = ["transaction.completed"]
     #[test]
     fn event_subscriptions_require_transaction_observe_and_known_events() {
         let (_base, plugins) = dir("events");
-        let raw = manifest(&plugins, "demo")
-            .replace("requested = [\"history.read\", \"transaction.observe\"]", "requested = [\"history.read\"]");
+        let raw = manifest(&plugins, "demo").replace(
+            "requested = [\"history.read\", \"transaction.observe\"]",
+            "requested = [\"history.read\"]",
+        );
         let error = PluginManifest::parse(&raw, &plugins).unwrap_err();
-        assert!(format!("{error:#}").contains("transaction.observe"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("transaction.observe"),
+            "{error:#}"
+        );
 
-        let raw = manifest(&plugins, "demo")
-            .replace("transaction.completed", "transaction.unknown");
+        let raw =
+            manifest(&plugins, "demo").replace("transaction.completed", "transaction.unknown");
         let error = PluginManifest::parse(&raw, &plugins).unwrap_err();
-        assert!(format!("{error:#}").contains("unsupported event"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("unsupported event"),
+            "{error:#}"
+        );
         let _ = std::fs::remove_dir_all(&_base);
     }
 
@@ -494,10 +557,16 @@ subscribe = ["transaction.completed"]
         let executable_c = std::ffi::CString::new(executable.as_os_str().as_bytes()).unwrap();
         // SAFETY: the path is a valid NUL-terminated CString; this test runs
         // only as root and changes ownership of its private fixture.
-        assert_eq!(unsafe { libc::chown(executable_c.as_ptr(), 65534, 65534) }, 0);
+        assert_eq!(
+            unsafe { libc::chown(executable_c.as_ptr(), 65534, 65534) },
+            0
+        );
         let error = PluginManifest::parse(&raw, &plugins).unwrap_err();
         assert!(format!("{error:#}").contains("executable"), "{error:#}");
-        assert!(format!("{error:#}").contains("not owned by root"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("not owned by root"),
+            "{error:#}"
+        );
         let _ = std::fs::remove_dir_all(&base);
 
         let (base, plugins) = dir("unowned-manifest");
@@ -508,24 +577,33 @@ subscribe = ["transaction.completed"]
         assert_eq!(unsafe { libc::chown(manifest_c.as_ptr(), 65534, 65534) }, 0);
         let error = PluginManifest::parse(&raw, &plugins).unwrap_err();
         assert!(format!("{error:#}").contains("manifest"), "{error:#}");
-        assert!(format!("{error:#}").contains("not owned by root"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("not owned by root"),
+            "{error:#}"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
     fn duplicate_command_names_are_rejected() {
         let (_base, plugins) = dir("duplicate-command");
-        let raw = manifest(&plugins, "demo")
-            .replace("names = [\"demo-test\"]", "names = [\"demo-test\", \"demo-test\"]");
+        let raw = manifest(&plugins, "demo").replace(
+            "names = [\"demo-test\"]",
+            "names = [\"demo-test\", \"demo-test\"]",
+        );
         let error = PluginManifest::parse(&raw, &plugins).unwrap_err();
-        assert!(format!("{error:#}").contains("duplicate command name"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("duplicate command name"),
+            "{error:#}"
+        );
         let _ = std::fs::remove_dir_all(&_base);
     }
 
     #[test]
     fn builtin_command_shadowing_is_refused() {
         let (_base, plugins) = dir("shadow");
-        let raw = manifest(&plugins, "demo").replace("names = [\"demo-test\"]", "names = [\"install\"]");
+        let raw =
+            manifest(&plugins, "demo").replace("names = [\"demo-test\"]", "names = [\"install\"]");
         let err = PluginManifest::parse(&raw, &plugins).unwrap_err();
         assert!(format!("{err:#}").contains("built-in"), "{err:#}");
         let _ = std::fs::remove_dir_all(&_base);
@@ -591,8 +669,8 @@ subscribe = ["transaction.completed"]
             "{error:#}"
         );
 
-        let raw = manifest(&plugins, "demo")
-            .replace("names = [\"demo-test\"]", "names = [\"system\"]");
+        let raw =
+            manifest(&plugins, "demo").replace("names = [\"demo-test\"]", "names = [\"system\"]");
         let error = PluginManifest::parse(&raw, &plugins).unwrap_err();
         assert!(
             format!("{error:#}").contains("shadows a built-in"),

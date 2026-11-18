@@ -96,7 +96,10 @@ struct State {
     previous: Vec<libc::sigaction>,
 }
 
-static STATE: Mutex<State> = Mutex::new(State { depth: 0, previous: Vec::new() });
+static STATE: Mutex<State> = Mutex::new(State {
+    depth: 0,
+    previous: Vec::new(),
+});
 
 extern "C" fn on_signal(_sig: libc::c_int) {
     // async-signal-safe only: atomics and write(2)/_exit(2)
@@ -112,7 +115,11 @@ extern "C" fn on_signal(_sig: libc::c_int) {
     if !msg.is_empty() {
         // SAFETY: write(2) on stderr with a valid static buffer.
         unsafe {
-            libc::write(libc::STDERR_FILENO, msg.as_ptr() as *const libc::c_void, msg.len());
+            libc::write(
+                libc::STDERR_FILENO,
+                msg.as_ptr() as *const libc::c_void,
+                msg.len(),
+            );
         }
     }
     if force {
@@ -194,11 +201,17 @@ mod tests {
         let outer = Guard::new();
         let inner = Guard::new();
         for sig in SIGNUMS {
-            assert_eq!(handler_of(sig), on_signal as *const () as libc::sighandler_t);
+            assert_eq!(
+                handler_of(sig),
+                on_signal as *const () as libc::sighandler_t
+            );
         }
         drop(inner);
         for sig in SIGNUMS {
-            assert_eq!(handler_of(sig), on_signal as *const () as libc::sighandler_t);
+            assert_eq!(
+                handler_of(sig),
+                on_signal as *const () as libc::sighandler_t
+            );
         }
         drop(outer);
     }

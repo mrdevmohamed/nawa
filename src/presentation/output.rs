@@ -52,12 +52,7 @@ fn color_choice<S: anstream::stream::RawStream>(raw: &S) -> ColorChoice {
     }
 }
 
-fn write_line<W: Write>(
-    stream: &mut W,
-    level: Level,
-    args: fmt::Arguments<'_>,
-    stderr: bool,
-) {
+fn write_line<W: Write>(stream: &mut W, level: Level, args: fmt::Arguments<'_>, stderr: bool) {
     let brand = crate::presentation::color::Palette::auto(if stderr {
         crate::presentation::color::Stream::Stderr
     } else {
@@ -69,10 +64,7 @@ fn write_line<W: Write>(
         let _ = writeln!(stream, "{brand} {args}");
     } else {
         let style = level.style();
-        let _ = writeln!(
-            stream,
-            "{brand} {style}{label}{style:#} {args}"
-        );
+        let _ = writeln!(stream, "{brand} {style}{label}{style:#} {args}");
     }
 }
 

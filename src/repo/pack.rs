@@ -16,7 +16,9 @@ pub(crate) fn validate_rev(rev: &str) -> Result<()> {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
     if !ok {
-        anyhow::bail!("invalid recipes revision `{rev}` (use a commit sha or tag: [A-Za-z0-9._-], max 64)");
+        anyhow::bail!(
+            "invalid recipes revision `{rev}` (use a commit sha or tag: [A-Za-z0-9._-], max 64)"
+        );
     }
     Ok(())
 }
@@ -54,19 +56,29 @@ pub(crate) fn pack_recipes(tree: &Path, out_dir: &Path, rev: &str) -> Result<Rec
                 count += 1;
             }
         } else {
-            anyhow::bail!("{}: symlinks and special files are not allowed in a recipe tree", entry.path().display());
+            anyhow::bail!(
+                "{}: symlinks and special files are not allowed in a recipe tree",
+                entry.path().display()
+            );
         }
     }
     if count == 0 {
-        anyhow::bail!("{} contains no recipe.toml — not a recipe tree", tree.display());
+        anyhow::bail!(
+            "{} contains no recipe.toml — not a recipe tree",
+            tree.display()
+        );
     }
     b.into_inner()?.finish()?;
     std::fs::rename(&part, &dest).with_context(|| format!("write {}", dest.display()))?;
     let sha256 = crate::fetch::sha256_of_file(&dest)?;
     crate::nawa_info!("index -> recipes {rev} ({count} recipes)");
-    Ok(RecipesEntry { rev: rev.to_string(), file, sha256, download_url: None })
+    Ok(RecipesEntry {
+        rev: rev.to_string(),
+        file,
+        sha256,
+        download_url: None,
+    })
 }
-
 
 /// Validate and copy a group catalog into the repository, then return the
 /// digest reference that the signed index will authenticate.
@@ -90,6 +102,10 @@ pub(crate) fn pack_groups(source: &Path, out_dir: &Path) -> Result<GroupsEntry> 
         bail!("group catalog {} is empty", source.display());
     }
     crate::nawa_success!("group metadata -> {} ({size} bytes)", dest.display());
-    Ok(GroupsEntry { schema: 1, file: "groups.toml".into(), sha256, size })
+    Ok(GroupsEntry {
+        schema: 1,
+        file: "groups.toml".into(),
+        sha256,
+        size,
+    })
 }
-

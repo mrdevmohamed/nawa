@@ -15,7 +15,8 @@ fn styled_prompt(prompt: &str) -> String {
     match prompt.strip_prefix("nawa:") {
         Some(rest) => format!(
             "{}{}",
-            crate::presentation::color::Palette::auto(crate::presentation::color::Stream::Stderr).brand("nawa:"),
+            crate::presentation::color::Palette::auto(crate::presentation::color::Stream::Stderr)
+                .brand("nawa:"),
             rest
         ),
         None => prompt.to_string(),
@@ -31,12 +32,7 @@ pub(crate) fn confirm(prompt: &str, yes: bool) -> Result<()> {
 /// The policy itself, with the terminal check and the input injected so the
 /// tests do not depend on how `cargo test` was launched (a real terminal
 /// vs. CI / a pipe).
-fn confirm_with(
-    prompt: &str,
-    yes: bool,
-    interactive: bool,
-    input: &mut dyn BufRead,
-) -> Result<()> {
+fn confirm_with(prompt: &str, yes: bool, interactive: bool, input: &mut dyn BufRead) -> Result<()> {
     if yes {
         return Ok(());
     }
@@ -63,7 +59,13 @@ fn confirm_with(
 /// two safe sources is not a destructive step). Prompt goes to stderr.
 pub(crate) fn choose(prompt: &str, default: char, allowed: &[char]) -> Result<char> {
     let interactive = std::io::stdin().is_terminal();
-    choose_with(prompt, default, allowed, interactive, &mut std::io::stdin().lock())
+    choose_with(
+        prompt,
+        default,
+        allowed,
+        interactive,
+        &mut std::io::stdin().lock(),
+    )
 }
 
 fn choose_with(

@@ -31,13 +31,20 @@ use super::spec::{ExtraBind, SandboxSpec};
 /// `mount --make-rprivate <what>`: propagation is turned private FIRST so
 /// nothing we mount later leaks back into the host namespace.
 pub(crate) fn mount_rprivate(what: &str) -> Result<()> {
-    mount_change(what, MountPropagationFlags::PRIVATE | MountPropagationFlags::REC)
-        .map_err(|e| anyhow::Error::msg(format!("mount --make-rprivate {what} failed: {e}")))
+    mount_change(
+        what,
+        MountPropagationFlags::PRIVATE | MountPropagationFlags::REC,
+    )
+    .map_err(|e| anyhow::Error::msg(format!("mount --make-rprivate {what} failed: {e}")))
 }
 
 /// A bind mount, optionally recursive.
 pub(crate) fn mbind(src: &str, dst: &str, rec: bool) -> Result<()> {
-    let r = if rec { mount_bind_recursive(src, dst) } else { mount_bind(src, dst) };
+    let r = if rec {
+        mount_bind_recursive(src, dst)
+    } else {
+        mount_bind(src, dst)
+    };
     r.map_err(|e| anyhow::Error::msg(format!("bind mount {src} -> {dst} failed: {e}")))
 }
 
@@ -106,8 +113,7 @@ pub(crate) fn cstr(s: &str) -> CString {
     // A Rust `String`'s pointer is NOT NUL-terminated, and rustix accepts
     // `&str` paths by conversion — the CString form is only needed for mount
     // *data* blobs; interior NULs are stripped like the original reader did.
-    std::ffi::CString::new(s.replace('\0', ""))
-        .unwrap_or_else(|_| std::ffi::CString::default())
+    std::ffi::CString::new(s.replace('\0', "")).unwrap_or_else(|_| std::ffi::CString::default())
 }
 
 // ---------------------------------------------------------------------------
@@ -215,22 +221,26 @@ fn remount_mount_tree_ro(spec: &SandboxSpec) -> Result<()> {
     let mut mounts = Vec::new();
     for line in mountinfo.lines() {
         let fields: Vec<&str> = line.split_whitespace().collect();
-        let Some(raw_path) = fields.get(4) else { continue };
+        let Some(raw_path) = fields.get(4) else {
+            continue;
+        };
         let path = unescape_mountinfo(raw_path);
         let mount = Path::new(&path);
         if !mount.is_absolute() || path == "/" {
             continue;
         }
-        let writable = spec.writable_paths.iter().any(|allowed| {
-            mount == Path::new(allowed) || mount.starts_with(allowed)
-        });
+        let writable = spec
+            .writable_paths
+            .iter()
+            .any(|allowed| mount == Path::new(allowed) || mount.starts_with(allowed));
         // Masked parents are covered by fresh tmpfs mounts. Their former
         // child mounts remain listed in mountinfo but are no longer reachable
         // by path; attempting to remount them would target the covering tmpfs
         // or fail. The covering tmpfs itself is already empty/unsearchable.
-        let hidden = spec.mask.iter().any(|masked| {
-            mount == Path::new(masked) || mount.starts_with(masked)
-        });
+        let hidden = spec
+            .mask
+            .iter()
+            .any(|masked| mount == Path::new(masked) || mount.starts_with(masked));
         // setup_dev() has replaced /dev and everything beneath it with
         // sandbox-private mounts. Keep /dev/null, devpts and shm writable;
         // these are ephemeral device interfaces, not host filesystem paths.
@@ -286,8 +296,9 @@ fn mountpoint_visible(exists: std::io::Result<bool>, path: &Path) -> Result<bool
             );
             Ok(false)
         }
-        Err(error) => Err(error)
-            .with_context(|| format!("inspect sandbox mount point {}", path.display())),
+        Err(error) => {
+            Err(error).with_context(|| format!("inspect sandbox mount point {}", path.display()))
+        }
     }
 }
 
@@ -335,10 +346,13 @@ pub(crate) fn mount_layers(spec: &SandboxSpec, root: &Path) -> Result<()> {
     // overlayfs splits its data string on ',' and delimits entries with
     // ':' — paths containing either cannot be expressed (no escaping); the
     // builder refuses them up front, this is the last line of defence
-    for p in lower
-        .iter()
-        .chain([upper.to_string_lossy().into_owned(), work.to_string_lossy().into_owned()].iter())
-    {
+    for p in lower.iter().chain(
+        [
+            upper.to_string_lossy().into_owned(),
+            work.to_string_lossy().into_owned(),
+        ]
+        .iter(),
+    ) {
         if p.contains(',') || p.contains(':') {
             bail!("path {} cannot be used in an overlayfs mount (, or :)", p);
         }
@@ -355,15 +369,21 @@ pub(crate) fn mount_layers(spec: &SandboxSpec, root: &Path) -> Result<()> {
     );
     let croot = cstr(&root.to_string_lossy());
     let cdata = cstr(&data);
-    mount(c"overlay", &*croot, c"overlay", MountFlags::empty(), Some(cdata.as_c_str()))
-        .map_err(|e| {
-            anyhow::Error::msg(format!(
-                "overlayfs build root mount failed: {e}\n\
+    mount(
+        c"overlay",
+        &*croot,
+        c"overlay",
+        MountFlags::empty(),
+        Some(cdata.as_c_str()),
+    )
+    .map_err(|e| {
+        anyhow::Error::msg(format!(
+            "overlayfs build root mount failed: {e}\n\
                  (the builder probed this before the build; a failure here means \
                  the kernel stopped allowing user-namespace overlays — rerun the \
                  build so nawa falls back to extract-per-build assembly)"
-            ))
-        })
+        ))
+    })
 }
 
 /// Overlay the §4.2 layout over the *current* root (`live` mode).
@@ -472,7 +492,10 @@ impl StagingHandles {
             let host = Path::new(&bind.host);
             let is_dir = bind.kind == "dir";
             if (is_dir && !host.is_dir()) || (!is_dir && !host.is_file()) {
-                bail!("sandbox extra bind source {} does not exist as a {is_dir}", bind.host);
+                bail!(
+                    "sandbox extra bind source {} does not exist as a {is_dir}",
+                    bind.host
+                );
             }
             let flags = if is_dir {
                 OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW
@@ -484,9 +507,15 @@ impl StagingHandles {
             let fd = rustix::fs::open(bind.host.as_str(), flags, Mode::empty()).map_err(|e| {
                 anyhow::Error::msg(format!("open sandbox extra bind {}: {e}", bind.host))
             })?;
-            extra.push(ExtraFd { fd, bind: bind.clone() });
+            extra.push(ExtraFd {
+                fd,
+                bind: bind.clone(),
+            });
         }
-        Ok(Self { fds: fds.map(Option::unwrap), extra })
+        Ok(Self {
+            fds: fds.map(Option::unwrap),
+            extra,
+        })
     }
 
     /// Create the three bind targets under `base` and bind the handles
@@ -523,20 +552,29 @@ impl StagingHandles {
                 match std::fs::symlink_metadata(&target) {
                     Ok(md) if md.file_type().is_file() => {}
                     Ok(md) if md.file_type().is_symlink() => {
-                        bail!("extra file bind target {} is still a symlink; refusing to follow it", target.display());
+                        bail!(
+                            "extra file bind target {} is still a symlink; refusing to follow it",
+                            target.display()
+                        );
                     }
-                    Ok(_) => bail!("extra file bind target {} is not a regular file", target.display()),
+                    Ok(_) => bail!(
+                        "extra file bind target {} is not a regular file",
+                        target.display()
+                    ),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                         std::fs::File::create(&target).with_context(|| {
                             format!("create extra bind placeholder {}", target.display())
                         })?;
                     }
-                    Err(e) => return Err(e).with_context(|| format!("inspect extra bind target {}", target.display())),
+                    Err(e) => {
+                        return Err(e).with_context(|| {
+                            format!("inspect extra bind target {}", target.display())
+                        })
+                    }
                 }
             } else if !target.is_dir() {
-                std::fs::create_dir_all(&target).with_context(|| {
-                    format!("create extra bind target {}", target.display())
-                })?;
+                std::fs::create_dir_all(&target)
+                    .with_context(|| format!("create extra bind target {}", target.display()))?;
             }
             let link = format!("/proc/self/fd/{}", x.fd.as_raw_fd());
             mbind(&link, &target.to_string_lossy(), false)
@@ -586,8 +624,7 @@ pub(crate) fn setup_dev(dev: &Path, scratch: &Path) -> Result<()> {
         let dst = dev.join(node);
         // bind targets must exist: create a placeholder file first
         if !dst.exists() {
-            std::fs::File::create(&dst)
-                .with_context(|| format!("create {}", dst.display()))?;
+            std::fs::File::create(&dst).with_context(|| format!("create {}", dst.display()))?;
         }
         mbind(&staged.to_string_lossy(), &dst.to_string_lossy(), false)?;
     }
@@ -607,7 +644,11 @@ pub(crate) fn setup_dev(dev: &Path, scratch: &Path) -> Result<()> {
     if !ptmx.exists() {
         std::fs::File::create(&ptmx)?;
     }
-    mbind(&pts.join("ptmx").to_string_lossy(), &ptmx.to_string_lossy(), false)?;
+    mbind(
+        &pts.join("ptmx").to_string_lossy(),
+        &ptmx.to_string_lossy(),
+        false,
+    )?;
     tmpfs_at(&dev.join("shm"), "size=64m,mode=1777")?;
     Ok(())
 }
@@ -728,11 +769,7 @@ mod tests {
         .unwrap());
 
         assert!(
-            mountpoint_visible(
-                Err(std::io::Error::other("I/O error")),
-                path,
-            )
-            .is_err(),
+            mountpoint_visible(Err(std::io::Error::other("I/O error")), path,).is_err(),
             "errors other than EACCES must still fail closed"
         );
     }
@@ -771,8 +808,8 @@ mod tests {
             open_files_limit: 0,
             readonly_paths: Vec::new(),
             extra_binds: Vec::new(),
-        strict_readonly_root: false,
-        writable_paths: Vec::new(),
+            strict_readonly_root: false,
+            writable_paths: Vec::new(),
         };
         let lower: Vec<String> = spec
             .root

@@ -112,7 +112,11 @@ impl Recipe {
             }
             seen.push(&src.name);
             if src.url.trim().is_empty() {
-                bail!("recipe {} source `{}` has no url", self.package.name, src.name);
+                bail!(
+                    "recipe {} source `{}` has no url",
+                    self.package.name,
+                    src.name
+                );
             }
             if !is_lower_hex64(&src.sha256) {
                 bail!(
@@ -130,23 +134,14 @@ impl Recipe {
                     src.name
                 );
             }
-            check_rel_path(
-                "[[package.sources]] into",
-                &src.into,
-            )
-            .with_context(|| {
-                format!("recipe {} source `{}`", self.package.name, src.name)
-            })?;
+            check_rel_path("[[package.sources]] into", &src.into)
+                .with_context(|| format!("recipe {} source `{}`", self.package.name, src.name))?;
         }
         check_rel_path("[package] workdir", &self.package.workdir)?;
         // a build whose every input is a stamped plain file has no
         // reproducible mtime to derive the epoch from (§6)
         if !self.package.sources.is_empty()
-            && self
-                .package
-                .sources
-                .iter()
-                .all(|s| s.unpack == Some(false))
+            && self.package.sources.iter().all(|s| s.unpack == Some(false))
             && self.package.source_date_epoch.is_none()
         {
             bail!(
@@ -189,11 +184,12 @@ impl Recipe {
             for p in &self.assets.include {
                 let kind = "[assets] include";
                 if p.trim().is_empty() {
-                    bail!("recipe {} has an empty entry in [assets] include", self.package.name);
+                    bail!(
+                        "recipe {} has an empty entry in [assets] include",
+                        self.package.name
+                    );
                 }
-                check_rel_path(kind, p).with_context(|| {
-                    format!("recipe {}", self.package.name)
-                })?;
+                check_rel_path(kind, p).with_context(|| format!("recipe {}", self.package.name))?;
             }
         }
         Ok(())
@@ -206,12 +202,16 @@ impl Recipe {
         // declare their own table (an implicit self-dependency).
         for (table, spec, toolchain, eco) in [
             ("[fetch.go]", self.fetch.go.as_ref(), GO_TOOLCHAIN, "go"),
-            ("[fetch.cargo]", self.fetch.cargo.as_ref(), CARGO_TOOLCHAIN, "cargo"),
+            (
+                "[fetch.cargo]",
+                self.fetch.cargo.as_ref(),
+                CARGO_TOOLCHAIN,
+                "cargo",
+            ),
         ] {
             let Some(spec) = spec else { continue };
-            check_rel_path(&format!("{table} dir"), &spec.dir).with_context(|| {
-                format!("recipe {}", self.package.name)
-            })?;
+            check_rel_path(&format!("{table} dir"), &spec.dir)
+                .with_context(|| format!("recipe {}", self.package.name))?;
             if self.package.name == toolchain {
                 bail!(
                     "recipe {} is the {eco} toolchain package and must not declare \
@@ -234,13 +234,15 @@ impl Recipe {
                 );
             }
             if self.package.mirrors.iter().any(|m| m.trim().is_empty()) {
-                bail!("recipe {} has an empty entry in package.mirrors", self.package.name);
+                bail!(
+                    "recipe {} has an empty entry in package.mirrors",
+                    self.package.name
+                );
             }
         }
         Ok(())
     }
 }
-
 
 /// Source names must match `[a-z0-9][a-z0-9._-]*` and are at most 64
 /// characters (§4.2). Hand-rolled — the name greps cleanly out of error
@@ -250,9 +252,7 @@ fn valid_source_name(name: &str) -> bool {
     let head_ok = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit();
     let tail_ok = |c: char| head_ok(c) || matches!(c, '.' | '_' | '-');
     match name.chars().next() {
-        Some(c) if head_ok(c) => {
-            name.chars().count() <= 64 && name.chars().skip(1).all(tail_ok)
-        }
+        Some(c) if head_ok(c) => name.chars().count() <= 64 && name.chars().skip(1).all(tail_ok),
         _ => false,
     }
 }
@@ -260,9 +260,7 @@ fn valid_source_name(name: &str) -> bool {
 /// Exactly 64 lowercase hex characters (§4.2): the digest doubles as a cache
 /// path component, so it must never carry `/` or `..` or any other shape.
 pub(crate) fn is_lower_hex64(s: &str) -> bool {
-    s.len() == 64
-        && s.bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// `into` / `workdir` are workspace-relative destinations (§4.2): never

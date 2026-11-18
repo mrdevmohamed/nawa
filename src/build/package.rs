@@ -5,12 +5,12 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use super::sections::installed_sonames;
-use super::{buildid_sidecar, build_id_for, cache_id_for, BuildOpts};
+use super::{build_id_for, buildid_sidecar, cache_id_for, BuildOpts};
 use crate::adapters::archive;
 use crate::build::buildenv::Isolation;
 use crate::build::closure::AssembledRoot;
-use crate::recipe::Recipe;
 use crate::build::slim;
+use crate::recipe::Recipe;
 
 /// Every staged path (sorted, rooted at `/`) and the total size of the
 /// regular files. An empty tree is a failed install section.
@@ -156,9 +156,7 @@ pub(super) fn package_archives(
         // deterministic inputs instead of a wall clock (§6): install time
         // lives in the database (install_date), not in the archive
         pkginfo.push_str(&format!("source_date_epoch = {sde}\n"));
-        let closure_shas: Vec<PathBuf> = assembled
-            .map(|a| a.archives.clone())
-            .unwrap_or_default();
+        let closure_shas: Vec<PathBuf> = assembled.map(|a| a.archives.clone()).unwrap_or_default();
         let bid = build_id_for(rec, opts, &closure_shas, assets_digest, toolchain_identity);
         pkginfo.push_str(&format!("build_id = {bid}\n"));
         cache_id = Some(cache_id_for(&bid, opts.isolation, host_toolchain_identity));
@@ -192,7 +190,9 @@ pub(super) fn package_archives(
             &pkginfo,
             Some(&hooks),
             &out_path,
-            &archive::Normalize { source_date_epoch: sde },
+            &archive::Normalize {
+                source_date_epoch: sde,
+            },
         )?;
         // the cache-hit sidecar (--use-cache): the versioned cache id this
         // archive was produced from, next to the archive itself. The
@@ -223,7 +223,9 @@ pub(super) fn package_archives(
                 &sub_info,
                 None,
                 &sub_path,
-                &archive::Normalize { source_date_epoch: sde },
+                &archive::Normalize {
+                    source_date_epoch: sde,
+                },
             )?;
         } else {
             archive::create_with_hooks(&sp.dir, &sub_info, None, &sub_path)?;
@@ -273,8 +275,14 @@ mod tests {
     #[test]
     fn a_legacy_recipe_writes_no_provides_line_and_an_empty_table_writes_an_empty_one() {
         let legacy = recipe(None);
-        assert!(!pkginfo_header(&legacy, "x86_64", 1).contains("provides"), "unknown");
+        assert!(
+            !pkginfo_header(&legacy, "x86_64", 1).contains("provides"),
+            "unknown"
+        );
         let empty = recipe(Some(&[]));
-        assert!(pkginfo_header(&empty, "x86_64", 1).contains("provides = \n"), "declared none");
+        assert!(
+            pkginfo_header(&empty, "x86_64", 1).contains("provides = \n"),
+            "declared none"
+        );
     }
 }

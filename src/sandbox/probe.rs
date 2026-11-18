@@ -28,7 +28,10 @@ pub(crate) const PROBES: &[&str] = &[
 pub(crate) fn probe(op: &str) -> Result<bool> {
     let euid = sys::geteuid();
     let egid = sys::getegid();
-    let userns = matches!(op, "userns" | "mounts" | "ro-bind" | "proc" | "pivot" | "netns-lo" | "overlay");
+    let userns = matches!(
+        op,
+        "userns" | "mounts" | "ro-bind" | "proc" | "pivot" | "netns-lo" | "overlay"
+    );
     if userns {
         // SAFETY: single-threaded probe process; nothing observes unshared
         // descriptors across threads (there are no other threads).
@@ -45,7 +48,8 @@ pub(crate) fn probe(op: &str) -> Result<bool> {
             if unsafe { unshare_unsafe(UnshareFlags::NEWNS) }.is_err() {
                 return Ok(false);
             }
-            mounts::mount_rprivate("/").is_ok() && mounts::tmpfs("/tmp/.nawa-probe", "size=1m").is_ok()
+            mounts::mount_rprivate("/").is_ok()
+                && mounts::tmpfs("/tmp/.nawa-probe", "size=1m").is_ok()
         }
         "ro-bind" => {
             // SAFETY: as above.
@@ -71,12 +75,14 @@ pub(crate) fn probe(op: &str) -> Result<bool> {
             if pid == 0 {
                 let ok = match op {
                     "proc" => {
-                        let d = std::env::temp_dir().join(format!("nawa-probe-proc-{}", std::process::id()));
+                        let d = std::env::temp_dir()
+                            .join(format!("nawa-probe-proc-{}", std::process::id()));
                         let _ = std::fs::create_dir_all(&d);
                         mounts::fresh_proc_or_mask(&probe_spec(""), &d).is_ok()
                     }
                     _ => {
-                        let d = std::env::temp_dir().join(format!("nawa-probe-pv-{}", std::process::id()));
+                        let d = std::env::temp_dir()
+                            .join(format!("nawa-probe-pv-{}", std::process::id()));
                         let _ = std::fs::create_dir_all(d.join("old"));
                         let s = d.to_string_lossy().into_owned();
                         let old = d.join("old").to_string_lossy().into_owned();

@@ -179,7 +179,10 @@ fn sweep(rec: &Recipe, stage_into: Option<&Path>) -> Result<Vec<Record>> {
     for w in records.windows(2) {
         if w[0].rel == w[1].rel {
             let shown = String::from_utf8_lossy(&w[0].rel);
-            bail!("recipe {} includes {shown} twice under [assets] include", rec.package.name);
+            bail!(
+                "recipe {} includes {shown} twice under [assets] include",
+                rec.package.name
+            );
         }
     }
     Ok(records)
@@ -238,11 +241,8 @@ pub(crate) fn snapshot(rec: &Recipe, work: &Path) -> Result<AssetsStaged> {
         for entry in walkdir::WalkDir::new(&dir).follow_links(false) {
             let entry = entry.with_context(|| format!("scan {}", dir.display()))?;
             if entry.file_type().is_dir() {
-                std::fs::set_permissions(
-                    entry.path(),
-                    std::fs::Permissions::from_mode(0o700),
-                )
-                .with_context(|| format!("chmod {}", entry.path().display()))?;
+                std::fs::set_permissions(entry.path(), std::fs::Permissions::from_mode(0o700))
+                    .with_context(|| format!("chmod {}", entry.path().display()))?;
             }
         }
         std::fs::remove_dir_all(&dir)
@@ -257,15 +257,17 @@ pub(crate) fn snapshot(rec: &Recipe, work: &Path) -> Result<AssetsStaged> {
     // bit); directory modes go last — a 0555 parent would block further
     // mkdir(2) — so every scratch dir of the copy ends at exactly 0555
     for entry in walkdir::WalkDir::new(&dir).follow_links(false) {
-        let entry = entry
-            .with_context(|| format!("walk {}", dir.display()))?;
+        let entry = entry.with_context(|| format!("walk {}", dir.display()))?;
         if entry.file_type().is_dir() {
             std::fs::set_permissions(entry.path(), std::fs::Permissions::from_mode(0o555))
                 .with_context(|| format!("chmod {}", entry.path().display()))?;
         }
     }
 
-    Ok(AssetsStaged { dir, digest: digest_of(&records) })
+    Ok(AssetsStaged {
+        dir,
+        digest: digest_of(&records),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -281,15 +283,13 @@ fn copy_hashed(src: &Path, dst: &Path, h: &mut Sha256) -> Result<u64> {
     // the parent of the copy does not exist in the snapshot yet (staging
     // copies whole trees, not per-directory)
     if let Some(parent) = dst.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
-    let src_md = std::fs::symlink_metadata(src)
-        .with_context(|| format!("stat {}", src.display()))?;
+    let src_md =
+        std::fs::symlink_metadata(src).with_context(|| format!("stat {}", src.display()))?;
     let exec = (src_md.permissions().mode() & 0o100) != 0;
     let mut r = open_nofollow(src)?;
-    let mut w = std::fs::File::create(dst)
-        .with_context(|| format!("create {}", dst.display()))?;
+    let mut w = std::fs::File::create(dst).with_context(|| format!("create {}", dst.display()))?;
     let mut buf = [0u8; 64 * 1024];
     let mut size: u64 = 0;
     loop {
@@ -301,8 +301,11 @@ fn copy_hashed(src: &Path, dst: &Path, h: &mut Sha256) -> Result<u64> {
         std::io::Write::write_all(&mut w, &buf[..n])?;
         size += n as u64;
     }
-    std::fs::set_permissions(dst, std::fs::Permissions::from_mode(if exec { 0o555 } else { 0o444 }))
-        .with_context(|| format!("chmod {}", dst.display()))?;
+    std::fs::set_permissions(
+        dst,
+        std::fs::Permissions::from_mode(if exec { 0o555 } else { 0o444 }),
+    )
+    .with_context(|| format!("chmod {}", dst.display()))?;
     Ok(size)
 }
 
@@ -403,7 +406,10 @@ install = "true"
             b"#!/bin/sh\n"
         );
         // undeclared neighbours are not visible
-        assert!(!staged.dir.join("other-prefix").exists(), "undeclared sibling");
+        assert!(
+            !staged.dir.join("other-prefix").exists(),
+            "undeclared sibling"
+        );
         // read-only: dirs 0555, files 0444 / 0555 by the exec bit
         assert_eq!(mode_of(&staged.dir), 0o555);
         assert_eq!(mode_of(&staged.dir.join("files")), 0o555);
@@ -420,8 +426,16 @@ install = "true"
     fn digest_uses_only_the_owner_execute_bit() {
         let d = scratch("modes");
         // the two checkouts differ in every mode bit except the owner-exec
-        let a = checkout(&d, "a", &[("f", b"one\n", 0o644), ("x.sh", b"run\n", 0o755)]);
-        let b = checkout(&d, "b", &[("f", b"one\n", 0o666), ("x.sh", b"run\n", 0o777)]);
+        let a = checkout(
+            &d,
+            "a",
+            &[("f", b"one\n", 0o644), ("x.sh", b"run\n", 0o755)],
+        );
+        let b = checkout(
+            &d,
+            "b",
+            &[("f", b"one\n", 0o666), ("x.sh", b"run\n", 0o777)],
+        );
         let rec_a = recipe_of(&a, &["f", "x.sh"]);
         let rec_b = recipe_of(&b, &["f", "x.sh"]);
         // synced tar mode vs git checkout: same digest
@@ -454,7 +468,10 @@ install = "true"
         let rec = recipe_of(&dir, &["files"]);
         let work = d.join("work");
         std::fs::create_dir_all(&work).unwrap();
-        assert_eq!(probe_digest(&rec).unwrap(), snapshot(&rec, &work).unwrap().digest);
+        assert_eq!(
+            probe_digest(&rec).unwrap(),
+            snapshot(&rec, &work).unwrap().digest
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -487,7 +504,10 @@ install = "true"
         // and an entirely symlinked include path
         std::os::unix::fs::symlink("files", dir.join("linkout")).unwrap();
         let root = recipe_of(&dir, &["linkout"]);
-        assert!(precheck(&root).is_err(), "a symlinked include root is refused");
+        assert!(
+            precheck(&root).is_err(),
+            "a symlinked include root is refused"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -516,7 +536,11 @@ install = "true"
     #[test]
     fn folded_includes_are_rejected() {
         let d = scratch("dupin");
-        let dir = checkout(&d, "asset", &[("f/a", b"x\n", 0o644), ("f/b", b"y\n", 0o644)]);
+        let dir = checkout(
+            &d,
+            "asset",
+            &[("f/a", b"x\n", 0o644), ("f/b", b"y\n", 0o644)],
+        );
         // `f` and `f/b` cover the same file in one sweep
         let rec = recipe_of(&dir, &["f", "f/b"]);
         assert!(

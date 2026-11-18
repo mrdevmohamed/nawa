@@ -35,8 +35,8 @@ pub(super) fn assemble_build_root(
             }
         };
         let with_check = opts.check != CheckMode::Off;
-        let members =
-            crate::build::closure::buildroot(rec, known, with_check).context("compute build root")?;
+        let members = crate::build::closure::buildroot(rec, known, with_check)
+            .context("compute build root")?;
         crate::nawa_info!(
             "closure: {} package(s) in the build root ({}{}): {}",
             members.len(),
@@ -97,7 +97,9 @@ pub(super) fn assemble_build_root(
                 ok
             };
         assembled = Some(if layered {
-            crate::nawa_info!("closure: assembling the build root from the layer cache (overlayfs)");
+            crate::nawa_info!(
+                "closure: assembling the build root from the layer cache (overlayfs)"
+            );
             let cache = layer_cache.expect("checked above");
             crate::build::closure::assemble_cached(
                 &members,
@@ -211,7 +213,10 @@ pub(super) fn build_env(
             // the build's frame by the fetch runner
             fetch_env: fetch_env.to_vec(),
         };
-        (buildenv::whitelist(&spec_env), opts.isolation.script_prefix())
+        (
+            buildenv::whitelist(&spec_env),
+            opts.isolation.script_prefix(),
+        )
     } else {
         // `none`: the build runs with the profile env as-is, but the fetch
         // phase's additions (CARGO_HOME, GOFLAGS, ...) still have to reach

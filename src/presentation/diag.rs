@@ -52,7 +52,9 @@ pub(crate) fn has_io_kind(e: &anyhow::Error, kind: ErrorKind) -> bool {
 }
 
 fn in_path(program: &str) -> bool {
-    let Some(path) = std::env::var_os("PATH") else { return false };
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
     std::env::split_paths(&path).any(|dir| is_executable(&dir.join(program)))
 }
 
@@ -73,7 +75,9 @@ fn strip_os_error(s: &str) -> &str {
 fn hint(e: &anyhow::Error, env: &Env) -> Option<String> {
     if !env.root && Class::of(e) == Class::Io && has_io_kind(e, ErrorKind::PermissionDenied) {
         let how = match env.privilege_helper {
-            Some(h) => format!("with: {h} nawa {}", env.args).trim_end().to_string(),
+            Some(h) => format!("with: {h} nawa {}", env.args)
+                .trim_end()
+                .to_string(),
             None => "as root".to_string(),
         };
         return Some(format!(
@@ -88,7 +92,12 @@ fn hint(e: &anyhow::Error, env: &Env) -> Option<String> {
 pub(crate) fn render_error(e: &anyhow::Error, p: &Palette, env: &Env) -> String {
     let mut chain = e.chain();
     let head = chain.next().map(|c| c.to_string()).unwrap_or_default();
-    let mut out = format!("{} {} {}\n", p.brand("nawa:"), p.err("error:"), strip_os_error(&head));
+    let mut out = format!(
+        "{} {} {}\n",
+        p.brand("nawa:"),
+        p.err("error:"),
+        strip_os_error(&head)
+    );
     for cause in chain {
         out.push_str(&format!(
             "  {} {}\n",
@@ -115,7 +124,11 @@ mod tests {
     }
 
     fn env(root: bool, helper: Option<&'static str>) -> Env<'static> {
-        Env { root, privilege_helper: helper, args: "upgrade" }
+        Env {
+            root,
+            privilege_helper: helper,
+            args: "upgrade",
+        }
     }
 
     #[test]
@@ -130,7 +143,10 @@ mod tests {
     #[test]
     fn permission_denied_for_a_normal_user_suggests_the_privilege_helper() {
         let text = render_error(&denied(), &Palette::new(false), &env(false, Some("doas")));
-        assert!(text.ends_with("run it again with: doas nawa upgrade\n"), "{text}");
+        assert!(
+            text.ends_with("run it again with: doas nawa upgrade\n"),
+            "{text}"
+        );
         assert!(text.contains("nawa: hint: "));
     }
 
@@ -142,7 +158,10 @@ mod tests {
 
     #[test]
     fn root_and_unrelated_errors_get_no_hint() {
-        assert!(!render_error(&denied(), &Palette::new(false), &env(true, Some("doas"))).contains("hint"));
+        assert!(
+            !render_error(&denied(), &Palette::new(false), &env(true, Some("doas")))
+                .contains("hint")
+        );
         let other = anyhow::anyhow!("package not found: foo");
         let text = render_error(&other, &Palette::new(false), &env(false, Some("doas")));
         assert_eq!(text, "nawa: error: package not found: foo\n");

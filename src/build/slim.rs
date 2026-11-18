@@ -191,7 +191,9 @@ fn is_junk(rel: &Path, abs: &Path) -> bool {
 
 /// `*.la` is only removed when it really is a libtool archive.
 fn is_libtool_archive(path: &Path) -> bool {
-    let Ok(mut f) = File::open(path) else { return false };
+    let Ok(mut f) = File::open(path) else {
+        return false;
+    };
     let mut head = [0u8; 1024];
     let n = read_head(&mut f, &mut head);
     String::from_utf8_lossy(&head[..n]).contains("libtool library file")
@@ -324,7 +326,9 @@ fn make_parents(
     rel: &Path,
     dir_modes: &mut Vec<(PathBuf, u32)>,
 ) -> Result<()> {
-    let Some(parent) = rel.parent() else { return Ok(()) };
+    let Some(parent) = rel.parent() else {
+        return Ok(());
+    };
     let mut cur = PathBuf::new();
     for comp in parent.components() {
         cur.push(comp);
@@ -417,8 +421,12 @@ fn classify(path: &Path) -> Option<Class> {
 }
 
 fn module_is_signed(path: &Path) -> bool {
-    let Ok(mut f) = File::open(path) else { return false };
-    if f.seek(SeekFrom::End(-(MODULE_SIG_MARKER.len() as i64))).is_err() {
+    let Ok(mut f) = File::open(path) else {
+        return false;
+    };
+    if f.seek(SeekFrom::End(-(MODULE_SIG_MARKER.len() as i64)))
+        .is_err()
+    {
         return false;
     }
     let mut tail = vec![0u8; MODULE_SIG_MARKER.len()];
@@ -447,7 +455,10 @@ enum Run {
 /// allocated in segment" on stderr, output segfaults on load), so ANY output on
 /// stderr counts as failure and the untouched original stays in place.
 fn strip_one(flag: &str, file: &Path) -> Run {
-    let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = file
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let tmp = file.with_file_name(format!(".{name}.nawa-strip"));
     let _ = std::fs::remove_file(&tmp);
     let out = Command::new("strip")
@@ -478,7 +489,10 @@ fn strip_one(flag: &str, file: &Path) -> Run {
         }
         Ok(o) => {
             let err = String::from_utf8_lossy(&o.stderr);
-            let first = err.lines().find(|l| !l.trim().is_empty()).unwrap_or("strip failed");
+            let first = err
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("strip failed");
             fail(format!("{first} (original kept)"))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -545,7 +559,10 @@ fn strip(pkgdir: &Path, rep: &mut Report) {
             None => {}
         }
     }
-    let groups = [(&linked, "--strip-unneeded"), (&debug_only, "--strip-debug")];
+    let groups = [
+        (&linked, "--strip-unneeded"),
+        (&debug_only, "--strip-debug"),
+    ];
     for (files, flag) in groups {
         match strip_group(files, flag) {
             Some((n, saved)) => {
@@ -619,7 +636,9 @@ mod tests {
     fn strip_skips_kernel_debug_and_rust_trees() {
         assert!(skip_strip(Path::new("boot/vmlinuz")));
         assert!(skip_strip(Path::new("usr/lib/debug/x.debug")));
-        assert!(skip_strip(Path::new("usr/lib/rustlib/x86_64/lib/libstd.rlib")));
+        assert!(skip_strip(Path::new(
+            "usr/lib/rustlib/x86_64/lib/libstd.rlib"
+        )));
         assert!(!skip_strip(Path::new("usr/bin/bash")));
         assert!(!skip_strip(Path::new("usr/lib/libz.so.1")));
     }
@@ -627,7 +646,11 @@ mod tests {
     #[test]
     fn cleanup_removes_junk_only() {
         let d = tmp("cleanup");
-        touch(&d, "usr/lib/libz.la", b"# libz.la - a libtool library file\n");
+        touch(
+            &d,
+            "usr/lib/libz.la",
+            b"# libz.la - a libtool library file\n",
+        );
         touch(&d, "usr/lib/other.la", b"not a libtool file\n");
         touch(&d, "usr/share/info/dir", b"x");
         touch(&d, "usr/share/info/bash.info", b"x");
@@ -668,7 +691,9 @@ mod tests {
         assert!(d.join("usr/share/locale/locale.alias").exists());
         assert!(d.join("usr/share/skeleton-dir").is_dir());
         assert!(s.join("doc/usr/share/man/man1/tool.1").is_file());
-        assert!(s.join("lang/usr/share/locale/de/LC_MESSAGES/tool.mo").is_file());
+        assert!(s
+            .join("lang/usr/share/locale/de/LC_MESSAGES/tool.mo")
+            .is_file());
     }
 
     #[test]
@@ -714,9 +739,18 @@ mod tests {
         let main = "pkgname = runit\npkgver = 2\npkgrel = 1\narch = x86_64\n\
                     rundeps = glibc\nsize = 900\nprovides = init-system=runit\n";
         let sub = derive_pkginfo(main, "runit", "runit-doc", 42);
-        assert!(sub.contains("provides = \n"), "explicit empty declaration: {sub}");
-        assert!(!sub.contains("init-system=runit"), "no inherited capability: {sub}");
-        assert!(sub.contains("rundeps = runit\n"), "still depends on main: {sub}");
+        assert!(
+            sub.contains("provides = \n"),
+            "explicit empty declaration: {sub}"
+        );
+        assert!(
+            !sub.contains("init-system=runit"),
+            "no inherited capability: {sub}"
+        );
+        assert!(
+            sub.contains("rundeps = runit\n"),
+            "still depends on main: {sub}"
+        );
     }
 
     #[test]

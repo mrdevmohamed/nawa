@@ -5,10 +5,10 @@ use serde::Deserialize;
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
-use super::model::*;
 use super::create::write_index_atomic;
-use super::validate::*;
+use super::model::*;
 use super::pack::pack_recipes;
+use super::validate::*;
 
 /// What changed since a base index (see `update_index`).
 #[derive(Debug, Default)]
@@ -60,7 +60,11 @@ pub(crate) fn update_index(
     let mut removed_names: HashSet<String> = HashSet::new();
     for file in &delta.remove_files {
         validate_plain_filename(file)?;
-        if let Some(name) = map.values().find(|p| &p.file == file).map(|p| p.name.clone()) {
+        if let Some(name) = map
+            .values()
+            .find(|p| &p.file == file)
+            .map(|p| p.name.clone())
+        {
             map.remove(&name);
             removed_names.insert(name);
         }
@@ -76,7 +80,12 @@ pub(crate) fn update_index(
     for e in delta.add {
         let expected = archive_file_name(&e);
         if e.file != expected {
-            bail!("entry for {} has file {:?}, expected {:?}", e.name, e.file, expected);
+            bail!(
+                "entry for {} has file {:?}, expected {:?}",
+                e.name,
+                e.file,
+                expected
+            );
         }
         match map.get(&e.name) {
             Some(cur) if cur.file == e.file => {
@@ -87,7 +96,9 @@ pub(crate) fn update_index(
             Some(cur) => {
                 let new_full = format!("{}-{}", e.version, e.rel);
                 let cur_full = format!("{}-{}", cur.version, cur.rel);
-                if crate::domain::package::version::vercmp(&new_full, &cur_full) == std::cmp::Ordering::Greater {
+                if crate::domain::package::version::vercmp(&new_full, &cur_full)
+                    == std::cmp::Ordering::Greater
+                {
                     map.insert(e.name.clone(), e);
                 }
             }
@@ -192,12 +203,21 @@ pub(crate) fn update_index_files(
         .unwrap_or(0);
     let index = update_index(
         base,
-        IndexDelta { add, remove_files, drop_packages },
+        IndexDelta {
+            add,
+            remove_files,
+            drop_packages,
+        },
         recipes_entry,
         now,
     )?;
     write_index_atomic(&index, out)?;
-    crate::nawa_info!("wrote index {} ({} packages, schema v{})", out.display(), index.packages.len(), schema);
+    crate::nawa_info!(
+        "wrote index {} ({} packages, schema v{})",
+        out.display(),
+        index.packages.len(),
+        schema
+    );
     Ok(index)
 }
 
@@ -217,12 +237,18 @@ pub(crate) fn load_locations(path: &Path) -> Result<LocationsFile> {
     let locations: LocationsFile = toml::from_str(&raw)
         .with_context(|| format!("parse archive locations {}", path.display()))?;
     if locations.schema != 1 {
-        bail!("unsupported archive locations schema {}; expected 1", locations.schema);
+        bail!(
+            "unsupported archive locations schema {}; expected 1",
+            locations.schema
+        );
     }
-    for (file, url) in locations.package_urls.iter().chain(locations.recipe_urls.iter()) {
+    for (file, url) in locations
+        .package_urls
+        .iter()
+        .chain(locations.recipe_urls.iter())
+    {
         validate_plain_filename(file)?;
         validate_download_url(url, &format!("archive {file}"))?;
     }
     Ok(locations)
 }
-

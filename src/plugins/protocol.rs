@@ -127,10 +127,16 @@ pub(crate) fn read_response(reader: &mut impl BufRead) -> Result<Envelope> {
     let env: Envelope = serde_json::from_str(text)
         .with_context(|| format!("plugin response is not valid protocol JSON: {text:?}"))?;
     if env.protocol != PROTOCOL_NAME {
-        bail!("plugin response announces protocol {:?}, expected {PROTOCOL_NAME:?}", env.protocol);
+        bail!(
+            "plugin response announces protocol {:?}, expected {PROTOCOL_NAME:?}",
+            env.protocol
+        );
     }
     if env.protocol_version != 1 {
-        bail!("plugin response uses protocol version {}", env.protocol_version);
+        bail!(
+            "plugin response uses protocol version {}",
+            env.protocol_version
+        );
     }
     Ok(env)
 }
@@ -140,7 +146,8 @@ pub(crate) fn expect_result(env: Envelope, request_id: &str) -> Result<serde_jso
     if env.request_id != request_id {
         bail!(
             "plugin answered request {:?} but the host asked {:?}",
-            env.request_id, request_id
+            env.request_id,
+            request_id
         );
     }
     if !env.ok {
@@ -149,14 +156,14 @@ pub(crate) fn expect_result(env: Envelope, request_id: &str) -> Result<serde_jso
             env.error.unwrap_or_else(|| "(no message)".into())
         );
     }
-    env.result.ok_or_else(|| anyhow::anyhow!("plugin response has no result"))
+    env.result
+        .ok_or_else(|| anyhow::anyhow!("plugin response has no result"))
 }
 
 /// Parse a validated `hello` result value.
 pub(crate) fn parse_hello(result: serde_json::Value) -> Result<HelloResponse> {
     serde_json::from_value(result).context("plugin hello result has unexpected fields")
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -220,7 +227,10 @@ mod tests {
     fn oversized_line_is_rejected() {
         let huge = "x".repeat(MAX_MESSAGE_BYTES + 10);
         let mut cursor = Cursor::new(huge.into_bytes());
-        assert!(read_response(&mut cursor).unwrap_err().to_string().contains("exceeds"));
+        assert!(read_response(&mut cursor)
+            .unwrap_err()
+            .to_string()
+            .contains("exceeds"));
     }
 
     #[test]

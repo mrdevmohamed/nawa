@@ -58,7 +58,9 @@ pub(crate) fn hook_needs_retry(root: &Path, name: &str) -> Result<bool> {
 /// downloaded, extracted, replaced, or re-registered.
 pub(crate) fn retry_pending_hook(name: &str, root: &Path) -> Result<()> {
     let db = Db::new(root);
-    let entry = db.entry(name)?.ok_or_else(|| anyhow::anyhow!("package {name} is not installed"))?;
+    let entry = db
+        .entry(name)?
+        .ok_or_else(|| anyhow::anyhow!("package {name} is not installed"))?;
     if !hook_needs_retry(root, name)? {
         return Ok(());
     }
@@ -77,7 +79,13 @@ pub(crate) fn retry_pending_hook(name: &str, root: &Path) -> Result<()> {
     run_tracked_hook(&db, &entry, &label, &hooks.post_install, root)
 }
 
-pub(crate) fn run_tracked_hook(db: &Db, entry: &Entry, label: &str, script: &str, root: &Path) -> Result<()> {
+pub(crate) fn run_tracked_hook(
+    db: &Db,
+    entry: &Entry,
+    label: &str,
+    script: &str,
+    root: &Path,
+) -> Result<()> {
     let mut state = HookStatus {
         version: entry.version_full(),
         label: label.to_string(),
@@ -88,8 +96,9 @@ pub(crate) fn run_tracked_hook(db: &Db, entry: &Entry, label: &str, script: &str
     match run_hook(label, script, root) {
         Ok(()) => {
             state.status = "completed".to_string();
-            save_hook_status(db, &entry.name, &state)
-                .with_context(|| format!("could not mark {label} hook complete for {}", entry.name))?;
+            save_hook_status(db, &entry.name, &state).with_context(|| {
+                format!("could not mark {label} hook complete for {}", entry.name)
+            })?;
             Ok(())
         }
         Err(error) => {
@@ -146,7 +155,10 @@ fn transaction_trigger_scripts(root: &Path) -> Result<Vec<(String, PathBuf)>> {
         }
         Err(error) => {
             return Err(error).with_context(|| {
-                format!("resolve transaction trigger directory {}", candidate.display())
+                format!(
+                    "resolve transaction trigger directory {}",
+                    candidate.display()
+                )
             });
         }
     };
@@ -200,7 +212,10 @@ pub(crate) fn run_post_transaction_hooks(root: &Path) -> Result<()> {
             Ok(script) if !script.trim().is_empty() => script,
             Ok(_) => continue,
             Err(error) => {
-                failures.push(format!("{name}: could not read {}: {error}", path.display()));
+                failures.push(format!(
+                    "{name}: could not read {}: {error}",
+                    path.display()
+                ));
                 continue;
             }
         };
@@ -208,7 +223,11 @@ pub(crate) fn run_post_transaction_hooks(root: &Path) -> Result<()> {
         // Prevent a trigger that invokes Nawa from recursively dispatching
         // the same system triggers again.
         let guarded_script = format!("export NAWA_POST_TRANSACTION_HOOKS_RUNNING=1\n{script}");
-        if let Err(error) = run_hook(&format!("transaction trigger {name}"), &guarded_script, root) {
+        if let Err(error) = run_hook(
+            &format!("transaction trigger {name}"),
+            &guarded_script,
+            root,
+        ) {
             failures.push(format!("{name}: {error:#}"));
         }
     }
@@ -222,7 +241,6 @@ pub(crate) fn run_post_transaction_hooks(root: &Path) -> Result<()> {
         ))
     }
 }
-
 
 /// Does `path` exist as seen from inside a chroot at `root`? Symlinks are
 /// resolved relative to `root` (an absolute target like `/usr/bin` means
@@ -359,7 +377,11 @@ pub(crate) fn run_hook(label: &str, script: &str, root: &Path) -> Result<()> {
 /// in the child's pre-exec hook — no dependence on the external coreutils
 /// `chroot` binary (which is exactly what gets upgraded/installed by the
 /// hooks this runs). (No /proc or /dev is mounted, same as before.)
-pub(crate) fn chroot_command(root: &Path, sh: &str, script: &str) -> Result<std::process::ExitStatus> {
+pub(crate) fn chroot_command(
+    root: &Path,
+    sh: &str,
+    script: &str,
+) -> Result<std::process::ExitStatus> {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::process::CommandExt;
     let root_c = std::ffi::CString::new(root.as_os_str().as_bytes())
@@ -397,7 +419,10 @@ mod transaction_trigger_tests {
 
         let found = transaction_trigger_scripts(&base).unwrap();
         let names: Vec<_> = found.into_iter().map(|(name, _)| name).collect();
-        assert_eq!(names, vec!["10-early.sh".to_string(), "20-late.sh".to_string()]);
+        assert_eq!(
+            names,
+            vec!["10-early.sh".to_string(), "20-late.sh".to_string()]
+        );
         let _ = std::fs::remove_dir_all(base);
     }
 
@@ -419,11 +444,7 @@ mod transaction_trigger_tests {
         std::fs::create_dir_all(root.join("usr/lib/nawa")).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(outside.join("evil.sh"), "true\\n").unwrap();
-        symlink(
-            &outside,
-            root.join("usr/lib/nawa/transaction-hooks.d"),
-        )
-        .unwrap();
+        symlink(&outside, root.join("usr/lib/nawa/transaction-hooks.d")).unwrap();
 
         let error = transaction_trigger_scripts(&root).unwrap_err();
         assert!(

@@ -12,7 +12,10 @@ pub(crate) enum Step {
     Replaced { dest: PathBuf, bak: PathBuf },
     /// The package's db directory. `backup` holds a complete copy of its
     /// previous contents (`None`: it did not exist before).
-    Db { dir: PathBuf, backup: Option<PathBuf> },
+    Db {
+        dir: PathBuf,
+        backup: Option<PathBuf>,
+    },
 }
 
 /// The logical transaction/step that owns a physical file journal.
@@ -89,7 +92,11 @@ pub(crate) struct Journal {
 }
 
 impl Journal {
-    pub(crate) fn create(path: PathBuf, bak_root: &Path, id: Option<FileJournalId>) -> Result<Self> {
+    pub(crate) fn create(
+        path: PathBuf,
+        bak_root: &Path,
+        id: Option<FileJournalId>,
+    ) -> Result<Self> {
         use std::io::Write;
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
@@ -112,7 +119,11 @@ impl Journal {
                 let _ = d.sync_all();
             }
         }
-        Ok(Journal { path, file, unsynced: 0 })
+        Ok(Journal {
+            path,
+            file,
+            unsynced: 0,
+        })
     }
 
     pub(crate) fn record(&mut self, step: &Step) -> Result<()> {
@@ -123,7 +134,10 @@ impl Journal {
             Step::Db { dir, backup } => format!(
                 "D\t{}\t{}\n",
                 enc(dir),
-                backup.as_deref().map(enc).unwrap_or_else(|| "-".to_string())
+                backup
+                    .as_deref()
+                    .map(enc)
+                    .unwrap_or_else(|| "-".to_string())
             ),
         };
         self.file
@@ -202,7 +216,12 @@ pub(crate) fn parse_journal(text: &str, fallback_bak: PathBuf) -> Parsed {
             _ => {}
         }
     }
-    Parsed { bak_root, steps, id, committed }
+    Parsed {
+        bak_root,
+        steps,
+        id,
+        committed,
+    }
 }
 
 /// Copy a (flat or nested) directory of small files.
@@ -266,13 +285,23 @@ pub(crate) struct Tx {
 }
 
 pub(crate) fn journal_path(root: &Path, bak_root: &Path) -> PathBuf {
-    let name = bak_root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let name = bak_root
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
     root.join(".nawa").join(format!("{name}.journal"))
 }
 
 impl Tx {
     pub(crate) fn new(root: &Path, bak_root: PathBuf) -> Self {
-        Tx { root: root.to_path_buf(), bak_root, journal: None, steps: Vec::new(), id: None, done: false }
+        Tx {
+            root: root.to_path_buf(),
+            bak_root,
+            journal: None,
+            steps: Vec::new(),
+            id: None,
+            done: false,
+        }
     }
 
     /// A journal linked to the logical transaction/step that owns it. The
@@ -315,12 +344,14 @@ impl Tx {
         if std::fs::symlink_metadata(to).is_ok() {
             let rel = to.strip_prefix(&self.root)?;
             let bak = self.bak_root.join(rel);
-            self.log(Step::Replaced { dest: to.to_path_buf(), bak: bak.clone() })?;
+            self.log(Step::Replaced {
+                dest: to.to_path_buf(),
+                bak: bak.clone(),
+            })?;
             if let Some(parent) = bak.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::rename(to, &bak)
-                .with_context(|| format!("back up {}", to.display()))?;
+            std::fs::rename(to, &bak).with_context(|| format!("back up {}", to.display()))?;
         } else {
             self.log(Step::Created(to.to_path_buf()))?;
         }
@@ -335,7 +366,10 @@ impl Tx {
         }
         let rel = path.strip_prefix(&self.root)?;
         let bak = self.bak_root.join(rel);
-        self.log(Step::Replaced { dest: path.to_path_buf(), bak: bak.clone() })?;
+        self.log(Step::Replaced {
+            dest: path.to_path_buf(),
+            bak: bak.clone(),
+        })?;
         if let Some(parent) = bak.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -348,7 +382,10 @@ impl Tx {
     /// the db entry back together with the files.
     pub(crate) fn snapshot_db(&mut self, dir: &Path) -> Result<()> {
         let backup = if dir.exists() {
-            let name = dir.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+            let name = dir
+                .file_name()
+                .map(|n| n.to_os_string())
+                .unwrap_or_default();
             let b = self.bak_root.join(".db").join(name);
             let _ = std::fs::remove_dir_all(&b);
             // complete the copy BEFORE journaling it: a crash mid-copy then
@@ -358,7 +395,10 @@ impl Tx {
         } else {
             None
         };
-        self.log(Step::Db { dir: dir.to_path_buf(), backup })
+        self.log(Step::Db {
+            dir: dir.to_path_buf(),
+            backup,
+        })
     }
 
     /// Restore the pre-install state (best effort, idempotent).
@@ -431,7 +471,9 @@ pub(crate) fn recover(root: &Path) -> Result<Vec<String>> {
             .unwrap_or_default();
         if parsed.committed {
             let _ = std::fs::remove_dir_all(&parsed.bak_root);
-            notes.push(format!("finished cleaning up a completed transaction ({name}{link})"));
+            notes.push(format!(
+                "finished cleaning up a completed transaction ({name}{link})"
+            ));
         } else if parsed.steps.is_empty() {
             let _ = std::fs::remove_dir_all(&parsed.bak_root);
         } else {

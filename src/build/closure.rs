@@ -51,7 +51,11 @@ pub(crate) fn closure_of(
 
 /// The packages whose archives make up the build root for `target`
 /// (§5.1). `with_check` adds `depends.check` (built with `--check`).
-pub(crate) fn buildroot(target: &Recipe, known: &BTreeMap<String, Recipe>, with_check: bool) -> Result<Vec<String>> {
+pub(crate) fn buildroot(
+    target: &Recipe,
+    known: &BTreeMap<String, Recipe>,
+    with_check: bool,
+) -> Result<Vec<String>> {
     let mut seeds: Vec<String> = Vec::new();
     if target.package.name == BASE_DEVEL {
         // base-devel DEFINES the base layer, so its own build root cannot
@@ -131,8 +135,7 @@ pub(crate) fn assemble(
     allow_unsigned: bool,
     progress: impl Fn(&str),
 ) -> Result<AssembledRoot> {
-    std::fs::create_dir_all(dir)
-        .with_context(|| format!("create build root {}", dir.display()))?;
+    std::fs::create_dir_all(dir).with_context(|| format!("create build root {}", dir.display()))?;
 
     let mut sonames: BTreeMap<String, String> = BTreeMap::new();
     let mut archives: Vec<PathBuf> = Vec::new();
@@ -183,8 +186,7 @@ pub(crate) fn assemble_cached(
     std::fs::create_dir_all(&layers_dir)
         .with_context(|| format!("create the layer cache {}", layers_dir.display()))?;
     // the mountpoint the sandbox will mount the layered root onto
-    std::fs::create_dir_all(dir)
-        .with_context(|| format!("create build root {}", dir.display()))?;
+    std::fs::create_dir_all(dir).with_context(|| format!("create build root {}", dir.display()))?;
 
     let mut ordered: Vec<&String> = members.iter().collect();
     ordered.sort();
@@ -195,8 +197,7 @@ pub(crate) fn assemble_cached(
 
     for name in ordered {
         let archive = verified_archive(name, known, outdir, root, allow_unsigned)?;
-        let sha = file_sha256(&archive)
-            .with_context(|| format!("hash {}", archive.display()))?;
+        let sha = file_sha256(&archive).with_context(|| format!("hash {}", archive.display()))?;
         let layer = layers_dir.join(&sha);
         if layer.is_dir() {
             crate::nawa_info!("closure: layer cache hit for {name}");
@@ -204,18 +205,23 @@ pub(crate) fn assemble_cached(
             progress(name);
             // extract next to the final name and rename: a half-written
             // layer must never be picked up by a parallel/failed run
-            let tmp = layers_dir.join(format!(".tmp-{}-{}", std::process::id(), &sha[..16.min(sha.len())]));
+            let tmp = layers_dir.join(format!(
+                ".tmp-{}-{}",
+                std::process::id(),
+                &sha[..16.min(sha.len())]
+            ));
             let _ = std::fs::remove_dir_all(&tmp);
-            std::fs::create_dir_all(&tmp)
-                .with_context(|| format!("create {}", tmp.display()))?;
+            std::fs::create_dir_all(&tmp).with_context(|| format!("create {}", tmp.display()))?;
             if let Err(e) = extract_and_index(&archive, &tmp, name, &mut BTreeMap::new()) {
                 let _ = std::fs::remove_dir_all(&tmp);
-                return Err(e).with_context(|| format!("extract {} into its layer", archive.display()));
+                return Err(e)
+                    .with_context(|| format!("extract {} into its layer", archive.display()));
             }
             if let Err(e) = std::fs::rename(&tmp, &layer) {
                 let _ = std::fs::remove_dir_all(&tmp);
-                return Err(anyhow::Error::new(e)
-                    .context(format!("publish layer {}", layer.display())));
+                return Err(
+                    anyhow::Error::new(e).context(format!("publish layer {}", layer.display()))
+                );
             }
         }
         index_layer_sonames(&layer, name, &mut sonames)?;
@@ -259,7 +265,9 @@ fn index_layer_sonames(
         };
         let rel_s = rel.to_string_lossy().into_owned();
         if soname_of(&rel_s).is_some() {
-            sonames.entry(owner_file_name(&rel_s)).or_insert_with(|| name.to_string());
+            sonames
+                .entry(owner_file_name(&rel_s))
+                .or_insert_with(|| name.to_string());
         }
     }
     Ok(())
@@ -278,7 +286,11 @@ fn extract_and_index(
     for entry in ar.entries()? {
         let mut entry = entry?;
         let p = entry.path()?.to_path_buf();
-        let Some(rel) = p.strip_prefix(crate::adapters::archive::PAYLOAD).ok().filter(|r| !r.as_os_str().is_empty()) else {
+        let Some(rel) = p
+            .strip_prefix(crate::adapters::archive::PAYLOAD)
+            .ok()
+            .filter(|r| !r.as_os_str().is_empty())
+        else {
             continue;
         };
         crate::adapters::archive::extract_entry_into(&mut entry, rel, dir)?;
@@ -287,7 +299,9 @@ fn extract_and_index(
         // object (libfoo.so[.1[.2...]])
         let rel_s = rel.to_string_lossy().into_owned();
         if soname_of(&rel_s).is_some() {
-            sonames.entry(owner_file_name(&rel_s)).or_insert_with(|| name.to_string());
+            sonames
+                .entry(owner_file_name(&rel_s))
+                .or_insert_with(|| name.to_string());
         }
     }
     Ok(())
@@ -313,7 +327,11 @@ pub(crate) fn soname_of(rel: &str) -> Option<String> {
         return None;
     }
     let base = owner_file_name(rel);
-    if base.starts_with("lib") && base.contains(".so") && !base.ends_with(".a") && !base.ends_with(".la") {
+    if base.starts_with("lib")
+        && base.contains(".so")
+        && !base.ends_with(".a")
+        && !base.ends_with(".la")
+    {
         Some(base)
     } else {
         None
@@ -338,14 +356,23 @@ mod tests {
             [build]
             install = "true"
             "#,
-            build.iter().map(|d| format!("{d:?}")).collect::<Vec<_>>().join(", "),
-            run.iter().map(|d| format!("{d:?}")).collect::<Vec<_>>().join(", ")
+            build
+                .iter()
+                .map(|d| format!("{d:?}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            run.iter()
+                .map(|d| format!("{d:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
         );
         toml::from_str(&toml_src).unwrap()
     }
 
     fn map(recs: Vec<Recipe>) -> BTreeMap<String, Recipe> {
-        recs.into_iter().map(|r| (r.package.name.clone(), r)).collect()
+        recs.into_iter()
+            .map(|r| (r.package.name.clone(), r))
+            .collect()
     }
 
     #[test]
@@ -359,10 +386,7 @@ mod tests {
         ]);
         // closure({base-devel}) = base-devel + its run deps, transitively
         let c = closure_of(&["base-devel".to_string()], &known).unwrap();
-        assert_eq!(
-            c,
-            vec!["base-devel", "gcc", "gmp", "mpfr", "zlib"]
-        );
+        assert_eq!(c, vec!["base-devel", "gcc", "gmp", "mpfr", "zlib"]);
     }
 
     #[test]
@@ -434,12 +458,18 @@ mod tests {
             soname_of("usr/lib/libz.so.1.3"),
             Some("libz.so.1.3".to_string())
         );
-        assert_eq!(soname_of("lib64/libssl.so.3"), Some("libssl.so.3".to_string()));
+        assert_eq!(
+            soname_of("lib64/libssl.so.3"),
+            Some("libssl.so.3".to_string())
+        );
         // static libs, libtool files and non-lib dirs are not sonames
         assert_eq!(soname_of("usr/lib/libz.a"), None);
         assert_eq!(soname_of("usr/lib/libz.la"), None);
         assert_eq!(soname_of("usr/bin/libz.so.1"), None);
         // versioned linker scripts (libfoo.so) still count
-        assert_eq!(soname_of("usr/lib/libfoo.so"), Some("libfoo.so".to_string()));
+        assert_eq!(
+            soname_of("usr/lib/libfoo.so"),
+            Some("libfoo.so".to_string())
+        );
     }
 }

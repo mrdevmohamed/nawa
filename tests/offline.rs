@@ -25,13 +25,23 @@ fn nawa_bin() -> PathBuf {
 fn nawa() -> Command {
     let mut c = Command::new(nawa_bin());
     for k in [
-        "NAWA_CONFIG", "NAWA_ROOT", "NAWA_RECIPES", "NAWA_BUILDDIR",
-        "NAWA_PROFILES", "NAWA_JOBS", "NAWA_REPO", "NAWA_INSTALL_MODE",
-        "NAWA_OFFLINE", "NAWA_SRCCACHE",
+        "NAWA_CONFIG",
+        "NAWA_ROOT",
+        "NAWA_RECIPES",
+        "NAWA_BUILDDIR",
+        "NAWA_PROFILES",
+        "NAWA_JOBS",
+        "NAWA_REPO",
+        "NAWA_INSTALL_MODE",
+        "NAWA_OFFLINE",
+        "NAWA_SRCCACHE",
     ] {
         c.env_remove(k);
     }
-    c.env("NAWA_SYSCONFDIR", std::env::temp_dir().join("nawa-test-no-sysconf"));
+    c.env(
+        "NAWA_SYSCONFDIR",
+        std::env::temp_dir().join("nawa-test-no-sysconf"),
+    );
     c.env("NAWA_INSTALL_MODE", "build");
     c.current_dir(std::env::temp_dir());
     c
@@ -69,7 +79,11 @@ fn fixture_tar_gz(top: &str) -> Vec<u8> {
             b.append_data(&mut h, name, data).unwrap();
         };
         dir(&mut b, top);
-        file(&mut b, &format!("{top}/hello.sh"), b"#!/bin/sh\necho offline-ok\n");
+        file(
+            &mut b,
+            &format!("{top}/hello.sh"),
+            b"#!/bin/sh\necho offline-ok\n",
+        );
         b.finish().unwrap();
     }
     let mut gz = Vec::new();
@@ -92,7 +106,9 @@ fn counting_listener() -> (std::net::SocketAddr, Arc<AtomicUsize>) {
         // would *succeed* over the network instead of failing loudly
         let body = fixture_tar_gz("example-1.0");
         loop {
-            let Ok((mut sock, _)) = l2.accept() else { break };
+            let Ok((mut sock, _)) = l2.accept() else {
+                break;
+            };
             counter.fetch_add(1, Ordering::SeqCst);
             let resp = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",

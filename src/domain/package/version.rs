@@ -83,7 +83,11 @@ fn core_cmp(a: &str, b: &str) -> Ordering {
         }
         // segments of different types: numeric is newer
         if j == qs {
-            return if numeric { Ordering::Greater } else { Ordering::Less };
+            return if numeric {
+                Ordering::Greater
+            } else {
+                Ordering::Less
+            };
         }
         let ord = if numeric {
             num_cmp(&a[ps..i], &b[qs..j])
@@ -183,7 +187,11 @@ mod tests {
             ("1.99999999999999999999", "1.100000000000000000000", Less),
             ("1.18446744073709551616", "1.18446744073709551615", Greater), // 2^64 vs 2^64-1
             ("1.00000000000000000000000001", "1.1", Equal),
-            ("99999999999999999999:1.0", "100000000000000000000:0.1", Less), // epochs
+            (
+                "99999999999999999999:1.0",
+                "100000000000000000000:0.1",
+                Less,
+            ), // epochs
         ]);
     }
 

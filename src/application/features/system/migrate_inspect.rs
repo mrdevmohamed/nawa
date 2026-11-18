@@ -30,8 +30,8 @@ use std::path::Path;
 
 use anyhow::anyhow;
 
-use crate::domain::system::migration::MigrationRecord;
 use crate::adapters::migration_record::{self, ActiveGate};
+use crate::domain::system::migration::MigrationRecord;
 
 /// One record under `root` that could not be read. `cause` is the full
 /// error chain, which names the record file and the exact validation

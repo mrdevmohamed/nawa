@@ -3,7 +3,6 @@
 //! Repository index creation and validation.
 use serde::{Deserialize, Serialize};
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RepoEntry {
     pub name: String,
@@ -52,7 +51,10 @@ pub(crate) struct RepositoryMeta {
     pub hash_algorithm: String,
     pub index_signature: String,
     /// How clients locate package and recipe archives.
-    #[serde(default = "default_archive_location", skip_serializing_if = "is_base_url")]
+    #[serde(
+        default = "default_archive_location",
+        skip_serializing_if = "is_base_url"
+    )]
     pub archive_location: String,
 }
 
@@ -143,4 +145,3 @@ pub(crate) struct Index {
 }
 
 pub(crate) const INDEX_VALIDITY_SECS: u64 = 90 * 24 * 3600;
-

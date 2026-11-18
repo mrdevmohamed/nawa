@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use super::model::*;
-use super::update::load_locations;
 use super::pack::{pack_groups, pack_recipes};
+use super::update::load_locations;
 use crate::adapters::archive;
 
 /// Build a legacy v1 index from a directory containing package archives.
@@ -60,7 +60,10 @@ pub(crate) fn create_index_with_locations_and_groups(
     locations_path: Option<&Path>,
     groups_path: Option<&Path>,
 ) -> Result<Index> {
-    if !matches!(index_version, 1 | INDEX_SCHEMA_V2 | INDEX_SCHEMA_V3 | INDEX_SCHEMA_V4) {
+    if !matches!(
+        index_version,
+        1 | INDEX_SCHEMA_V2 | INDEX_SCHEMA_V3 | INDEX_SCHEMA_V4
+    ) {
         bail!("unsupported repository index version {index_version} (supported: 1, 2, 3, 4)");
     }
     if (index_version == INDEX_SCHEMA_V3 || index_version == INDEX_SCHEMA_V4)
@@ -109,11 +112,15 @@ pub(crate) fn create_index_with_locations_and_groups(
         let name = info.get("pkgname").cloned().unwrap_or_default();
         let version = info.get("pkgver").cloned().unwrap_or_default();
         let rel: u32 = if index_version >= INDEX_SCHEMA_V2 {
-            let raw = info.get("pkgrel").with_context(|| {
-                format!("{} is missing pkgrel in .PKGINFO", path.display())
-            })?;
+            let raw = info
+                .get("pkgrel")
+                .with_context(|| format!("{} is missing pkgrel in .PKGINFO", path.display()))?;
             let parsed = raw.parse::<u32>().with_context(|| {
-                format!("{} has an invalid pkgrel {:?} in .PKGINFO", path.display(), raw)
+                format!(
+                    "{} has an invalid pkgrel {:?} in .PKGINFO",
+                    path.display(),
+                    raw
+                )
             })?;
             if parsed == 0 {
                 bail!("{} has invalid pkgrel 0 in .PKGINFO", path.display());
@@ -139,13 +146,16 @@ pub(crate) fn create_index_with_locations_and_groups(
                     path.display()
                 )
             })?;
-            let provides = crate::domain::package::metadata::split_flat_list(raw_provides, "provides")
-                .and_then(|values| crate::domain::package::metadata::normalize_provides(&values))
-                .map_err(anyhow::Error::msg)
-                .with_context(|| format!("{} has invalid provides metadata", path.display()))?;
-            let raw_rundeps = info.get("rundeps").with_context(|| {
-                format!("{} has no rundeps field in .PKGINFO", path.display())
-            })?;
+            let provides =
+                crate::domain::package::metadata::split_flat_list(raw_provides, "provides")
+                    .and_then(|values| {
+                        crate::domain::package::metadata::normalize_provides(&values)
+                    })
+                    .map_err(anyhow::Error::msg)
+                    .with_context(|| format!("{} has invalid provides metadata", path.display()))?;
+            let raw_rundeps = info
+                .get("rundeps")
+                .with_context(|| format!("{} has no rundeps field in .PKGINFO", path.display()))?;
             let rundeps = crate::domain::package::metadata::split_flat_list(raw_rundeps, "rundeps")
                 .and_then(|values| crate::domain::package::metadata::normalize_rundeps(&values))
                 .map_err(anyhow::Error::msg)
@@ -156,7 +166,9 @@ pub(crate) fn create_index_with_locations_and_groups(
         };
         crate::nawa_success!("index -> {}-{}-{}", name, version, rel);
         let file = path.file_name().unwrap().to_string_lossy().to_string();
-        let download_url = locations.as_ref().and_then(|loc| loc.package_urls.get(&file).cloned());
+        let download_url = locations
+            .as_ref()
+            .and_then(|loc| loc.package_urls.get(&file).cloned());
         packages.push(RepoEntry {
             name,
             version,
@@ -204,7 +216,9 @@ pub(crate) fn create_index_with_locations_and_groups(
         match newest.get(&p.name) {
             Some(cur) => {
                 let cur_full = format!("{}-{}", cur.version, cur.rel);
-                if crate::domain::package::version::vercmp(&full, &cur_full) == std::cmp::Ordering::Greater {
+                if crate::domain::package::version::vercmp(&full, &cur_full)
+                    == std::cmp::Ordering::Greater
+                {
                     newest.insert(p.name.clone(), p);
                 }
             }
@@ -233,7 +247,12 @@ pub(crate) fn create_index_with_locations_and_groups(
     };
     index.validate()?;
     write_index_atomic(&index, out)?;
-    crate::nawa_success!("wrote index {} ({} packages, schema v{})", out.display(), index.packages.len(), index_version);
+    crate::nawa_success!(
+        "wrote index {} ({} packages, schema v{})",
+        out.display(),
+        index.packages.len(),
+        index_version
+    );
     Ok(index)
 }
 
@@ -245,4 +264,3 @@ pub(crate) fn write_index_atomic(index: &Index, out: &Path) -> Result<()> {
     crate::adapters::atomic::write_atomic(out, raw.as_bytes(), 0o644)
         .with_context(|| format!("activate index {}", out.display()))
 }
-

@@ -66,18 +66,22 @@ pub(crate) fn effective(cfg: &Config) -> Result<Vec<RepoConfig>> {
     Ok(cfg
         .repo
         .as_ref()
-        .map(|url| vec![RepoConfig {
-            id: "default".into(),
-            name: "Default repository".into(),
-            url: url.clone(),
-            enabled: true,
-            priority: 50,
-        }])
+        .map(|url| {
+            vec![RepoConfig {
+                id: "default".into(),
+                name: "Default repository".into(),
+                url: url.clone(),
+                enabled: true,
+                priority: 50,
+            }]
+        })
         .unwrap_or_default())
 }
 
 fn parse_file_entries(cfg: &Config) -> Result<Vec<RepoConfig>> {
-    let Some(path) = cfg.file.as_deref() else { return Ok(Vec::new()) };
+    let Some(path) = cfg.file.as_deref() else {
+        return Ok(Vec::new());
+    };
     let raw = std::fs::read_to_string(path).unwrap_or_default();
     let doc: toml::Table = toml::from_str(&raw).unwrap_or_default();
     let Some(arr) = doc.get("repositories").and_then(|v| v.as_array()) else {
@@ -121,7 +125,12 @@ pub(crate) fn cmd_repolist(cfg: &Config, all: bool) -> Result<()> {
 
 /// `nawa makecache` — refresh enabled repositories' metadata through the
 /// existing authentication/freshness path (roadmap §8.10).
-pub(crate) fn cmd_makecache(cfg: &Config, root: &Path, allow_unsigned: bool, force: bool) -> Result<()> {
+pub(crate) fn cmd_makecache(
+    cfg: &Config,
+    root: &Path,
+    allow_unsigned: bool,
+    force: bool,
+) -> Result<()> {
     let repos = effective(cfg)?;
     let enabled: Vec<&RepoConfig> = repos.iter().filter(|r| r.enabled).collect();
     if enabled.is_empty() {
@@ -138,7 +147,11 @@ pub(crate) fn cmd_makecache(cfg: &Config, root: &Path, allow_unsigned: bool, for
                 r.id,
                 r.url,
                 open.index.packages.len(),
-                open.index.repository.as_ref().map(|m| m.schema).unwrap_or(1)
+                open.index
+                    .repository
+                    .as_ref()
+                    .map(|m| m.schema)
+                    .unwrap_or(1)
             ),
             Err(e) => {
                 failures += 1;
@@ -154,7 +167,13 @@ pub(crate) fn cmd_makecache(cfg: &Config, root: &Path, allow_unsigned: bool, for
 
 /// `nawa repoquery <name>` — query enabled repositories' cached metadata
 /// without downloading any archive (roadmap §8.9).
-pub(crate) fn cmd_repoquery(cfg: &Config, root: &Path, name: &str, repo_id: Option<&str>, info: bool) -> Result<()> {
+pub(crate) fn cmd_repoquery(
+    cfg: &Config,
+    root: &Path,
+    name: &str,
+    repo_id: Option<&str>,
+    info: bool,
+) -> Result<()> {
     let repos = effective(cfg)?;
     let enabled: Vec<&RepoConfig> = repos
         .iter()
@@ -176,19 +195,30 @@ pub(crate) fn cmd_repoquery(cfg: &Config, root: &Path, name: &str, repo_id: Opti
             continue;
         }
         let bytes = std::fs::read(&index_path).unwrap_or_default();
-        let Ok(index) = crate::repo::load_index_bytes(&bytes) else { continue };
+        let Ok(index) = crate::repo::load_index_bytes(&bytes) else {
+            continue;
+        };
         if let Some(e) = index.find(name) {
             found += 1;
             if info {
                 println!("Package   : {}-{}-{}", e.name, e.version, e.rel);
                 println!("Repository: {}", r.id);
                 println!("Arch      : {}", e.arch);
-                println!("Size      : {}", crate::presentation::humanize::format_size(e.size));
-                println!("Installed : {}", crate::presentation::humanize::format_size(e.installed_size));
+                println!(
+                    "Size      : {}",
+                    crate::presentation::humanize::format_size(e.size)
+                );
+                println!(
+                    "Installed : {}",
+                    crate::presentation::humanize::format_size(e.installed_size)
+                );
                 println!("SHA-256   : {}", e.sha256);
                 println!("File      : {}", e.file);
             } else {
-                println!("{:<12}  {}-{}-{}  {}", r.id, e.name, e.version, e.rel, e.arch);
+                println!(
+                    "{:<12}  {}-{}-{}  {}",
+                    r.id, e.name, e.version, e.rel, e.arch
+                );
             }
         }
     }
@@ -213,7 +243,10 @@ pub(crate) fn cmd_repoquery(cfg: &Config, root: &Path, name: &str, repo_id: Opti
 /// owner-write restored before removal.
 pub(crate) fn cmd_clean(ctx: &crate::Ctx, category: &str, dry_run: bool) -> Result<()> {
     let cat = category.to_ascii_lowercase();
-    if !matches!(cat.as_str(), "metadata" | "packages" | "sources" | "layers" | "all") {
+    if !matches!(
+        cat.as_str(),
+        "metadata" | "packages" | "sources" | "layers" | "all"
+    ) {
         bail!("unknown clean category {cat:?} (metadata | packages | sources | layers | all)");
     }
     let mut removed: u64 = 0;
@@ -242,7 +275,9 @@ pub(crate) fn cmd_clean(ctx: &crate::Ctx, category: &str, dry_run: bool) -> Resu
                 keep.insert(e.artifact_sha256.clone());
             }
             // legacy named caches of installed versions stay too
-            let legacy = root.join("var/cache/nawa").join(format!("{}.nawa.tar.zst", e.version_full()));
+            let legacy = root
+                .join("var/cache/nawa")
+                .join(format!("{}.nawa.tar.zst", e.version_full()));
             if let Ok(md) = std::fs::metadata(&legacy) {
                 retained += md.len();
             }
@@ -259,18 +294,34 @@ pub(crate) fn cmd_clean(ctx: &crate::Ctx, category: &str, dry_run: bool) -> Resu
                 }
                 for obj in std::fs::read_dir(&fan_dir)?.filter_map(|e| e.ok()) {
                     let p = obj.path();
-                    let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    let name = p
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
                     let Some(digest) = name
                         .strip_suffix(".nawa.tar.zst")
                         .map(str::to_string)
                         .and_then(|d| {
                             // reconstruct full digest from fan + file name
-                            d.strip_prefix(&fan_dir.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default()).map(str::to_string)
+                            d.strip_prefix(
+                                &fan_dir
+                                    .file_name()
+                                    .map(|f| f.to_string_lossy().to_string())
+                                    .unwrap_or_default(),
+                            )
+                            .map(str::to_string)
                         })
                     else {
                         continue;
                     };
-                    let full = format!("{}{}", fan_dir.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default(), name.strip_suffix(".nawa.tar.zst").unwrap_or(&name));
+                    let full = format!(
+                        "{}{}",
+                        fan_dir
+                            .file_name()
+                            .map(|f| f.to_string_lossy().to_string())
+                            .unwrap_or_default(),
+                        name.strip_suffix(".nawa.tar.zst").unwrap_or(&name)
+                    );
                     let _ = digest;
                     if keep.contains(&full) {
                         if let Ok(md) = std::fs::metadata(&p) {
@@ -282,26 +333,40 @@ pub(crate) fn cmd_clean(ctx: &crate::Ctx, category: &str, dry_run: bool) -> Resu
                         removed += md.len();
                     }
                     if !dry_run {
-                        std::fs::remove_file(&p).with_context(|| format!("remove {}", p.display()))?;
+                        std::fs::remove_file(&p)
+                            .with_context(|| format!("remove {}", p.display()))?;
                     }
                 }
             }
         }
     }
     if dry_run {
-        crate::nawa_info!("dry run — would free {}, retaining {}", crate::presentation::humanize::format_size(removed), crate::presentation::humanize::format_size(retained));
+        crate::nawa_info!(
+            "dry run — would free {}, retaining {}",
+            crate::presentation::humanize::format_size(removed),
+            crate::presentation::humanize::format_size(retained)
+        );
     } else {
-        crate::nawa_info!("cleaned {} (retained {} of referenced data)", crate::presentation::humanize::format_size(removed), crate::presentation::humanize::format_size(retained));
+        crate::nawa_info!(
+            "cleaned {} (retained {} of referenced data)",
+            crate::presentation::humanize::format_size(removed),
+            crate::presentation::humanize::format_size(retained)
+        );
     }
     Ok(())
 }
 
 fn clean_dir(dir: &Path, dry_run: bool) -> u64 {
     let mut freed = 0;
-    let Ok(rd) = std::fs::read_dir(dir) else { return 0 };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return 0;
+    };
     for e in rd.filter_map(|e| e.ok()) {
         let p = e.path();
-        let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
         // active .part files of live workers are never touched
         if name.ends_with(".part") {
             continue;
@@ -350,20 +415,21 @@ fn clean_sources(cache: &Path, dry_run: bool) -> Result<(u64, u64)> {
                 // belongs to a live worker and is kept
                 freed += md.len();
                 if !dry_run {
-                    std::fs::remove_file(&p)
-                        .with_context(|| format!("remove {}", p.display()))?;
+                    std::fs::remove_file(&p).with_context(|| format!("remove {}", p.display()))?;
                 }
             } else if legacy_cache_entry(&name) {
                 // the legacy pinned tarball cache: `<sha16>-<file name>` (§1.1)
                 freed += md.len();
                 if !dry_run {
-                    std::fs::remove_file(&p)
-                        .with_context(|| format!("remove {}", p.display()))?;
+                    std::fs::remove_file(&p).with_context(|| format!("remove {}", p.display()))?;
                 }
             } else if name.ends_with(".lock") {
                 // a lock we couldn't take: a live fetch holds it
                 retained += md.len();
-                crate::nawa_info!("clean sources: leaving {} (a live fetch holds its lock)", p.display());
+                crate::nawa_info!(
+                    "clean sources: leaving {} (a live fetch holds its lock)",
+                    p.display()
+                );
             } else {
                 retained += md.len();
                 crate::nawa_info!("clean sources: leaving {} (not Nawa-owned)", p.display());
@@ -442,13 +508,19 @@ mod tests {
         clean_dir(&d, false);
         assert!(!d.join("old.bin").exists());
         assert!(!d.join("tree").exists());
-        assert!(d.join("live.part").exists(), "a live worker's part file must survive");
+        assert!(
+            d.join("live.part").exists(),
+            "a live worker's part file must survive"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
     fn legacy_cache_entry_requires_a_sha16_dash_prefix() {
-        assert!(legacy_cache_entry(&format!("{}-pkg.tar.zst", "0123456789abcdef")));
+        assert!(legacy_cache_entry(&format!(
+            "{}-pkg.tar.zst",
+            "0123456789abcdef"
+        )));
         assert!(legacy_cache_entry(&format!("{}-file", "a".repeat(16))));
         assert!(!legacy_cache_entry("short-file"));
         assert!(!legacy_cache_entry(&format!("{}-file", "a".repeat(15))));
@@ -467,8 +539,14 @@ mod tests {
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o444)).unwrap();
 
         assert_eq!(sweep_tree(&entry, true).unwrap(), 5);
-        assert_eq!(std::fs::metadata(&entry).unwrap().permissions().mode() & 0o777, 0o555);
-        assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o444);
+        assert_eq!(
+            std::fs::metadata(&entry).unwrap().permissions().mode() & 0o777,
+            0o555
+        );
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o444
+        );
         assert!(file.exists(), "a dry run must not remove anything");
 
         sweep_tree(&entry, false).unwrap();
@@ -507,7 +585,10 @@ mod tests {
         assert!(!cache.join("fetch").exists());
         assert!(!cache.join(&legacy).exists());
         assert!(!cache.join("dead.lock").exists());
-        assert!(cache.join("keep.txt").exists(), "unowned files must survive");
+        assert!(
+            cache.join("keep.txt").exists(),
+            "unowned files must survive"
+        );
         assert!(live.exists(), "a held lock must survive");
         drop(held);
         let _ = std::fs::remove_dir_all(&d);

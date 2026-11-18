@@ -43,7 +43,6 @@ pub(crate) fn check_offline(url: &str, offline: bool) -> Result<()> {
     Ok(())
 }
 
-
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20); // curl --connect-timeout 20
 /// Per-read socket timeout: a mirror that stops sending for this long is
 /// treated as dead instead of hanging the build forever.
@@ -130,7 +129,11 @@ fn http_get(agent: &ureq::Agent, url: &str) -> Result<ureq::Response> {
         // signed CDN URLs are hundreds of characters of noise: show only the
         // hosts, and only when asked (NAWA_VERBOSE=1)
         if std::env::var_os("NAWA_VERBOSE").is_some_and(|v| v != "0" && !v.is_empty()) {
-            crate::nawa_info_stderr!("redirect {} -> {}", current.host_str().unwrap_or("?"), loc.split('?').next().unwrap_or(&loc));
+            crate::nawa_info_stderr!(
+                "redirect {} -> {}",
+                current.host_str().unwrap_or("?"),
+                loc.split('?').next().unwrap_or(&loc)
+            );
         }
         current = redirect_target(&current, &loc)?;
     }
@@ -172,7 +175,10 @@ pub(crate) fn progress_line(label: &str, done: u64, total: Option<u64>) -> Strin
 
 /// `libepoxy-1.5.9-1.nawa.tar.zst.part` -> `libepoxy-1.5.9-1`
 pub(crate) fn progress_label(dest: &Path) -> String {
-    let n = dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let n = dest
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let n = n.trim_start_matches('.');
     let n = n.strip_suffix(".part").unwrap_or(n);
     n.strip_suffix(".nawa.tar.zst").unwrap_or(n).to_string()
@@ -183,7 +189,9 @@ pub(crate) fn progress_label(dest: &Path) -> String {
 /// percentage (when the server sent Content-Length), then leaves it as a
 /// finished line; small files and non-terminals stay silent.
 fn stream_body(resp: ureq::Response, dest: &Path) -> Result<u64> {
-    let total_len: Option<u64> = resp.header("Content-Length").and_then(|v| v.trim().parse().ok());
+    let total_len: Option<u64> = resp
+        .header("Content-Length")
+        .and_then(|v| v.trim().parse().ok());
     let mut reader = resp.into_reader();
     let f = std::fs::File::create(dest).with_context(|| format!("create {}", dest.display()))?;
     let mut w = BufWriter::with_capacity(256 * 1024, f);
@@ -198,7 +206,8 @@ fn stream_body(resp: ureq::Response, dest: &Path) -> Result<u64> {
         if n == 0 {
             break;
         }
-        w.write_all(&buf[..n]).with_context(|| format!("write {}", dest.display()))?;
+        w.write_all(&buf[..n])
+            .with_context(|| format!("write {}", dest.display()))?;
         total += n as u64;
         if show && (!drawn || last.elapsed() >= Duration::from_millis(100)) {
             // \x1b[K clears what a longer previous line left behind
@@ -208,7 +217,8 @@ fn stream_body(resp: ureq::Response, dest: &Path) -> Result<u64> {
             drawn = true;
         }
     }
-    w.flush().with_context(|| format!("flush {}", dest.display()))?;
+    w.flush()
+        .with_context(|| format!("flush {}", dest.display()))?;
     if show && (drawn || total >= PROGRESS_MIN_BYTES) {
         eprintln!("\r{}\x1b[K", progress_line(&label, total, Some(total)));
     } else if drawn {
@@ -245,7 +255,9 @@ fn fetch_to_file(agent: &ureq::Agent, url: &str, dest: &Path, attempts: u32) -> 
             Ok(outcome) => return Ok(outcome),
             Err(e) if is_retryable(&e) && attempt < attempts => {
                 let wait = backoff(attempt);
-                crate::nawa_info_stderr!("{url}: attempt {attempt}/{attempts} failed ({e:#}); retrying in {wait:?}");
+                crate::nawa_info_stderr!(
+                    "{url}: attempt {attempt}/{attempts} failed ({e:#}); retrying in {wait:?}"
+                );
                 std::thread::sleep(wait);
             }
             Err(e) => return Err(e),

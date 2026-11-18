@@ -1,18 +1,18 @@
 //! read-only query commands: search, info, why, deps, query, files, owner.
 
-use anyhow::{bail, Result};
-use std::collections::BTreeSet;
-use crate::application::features::package::query;
+use crate::adapters::db;
 use crate::application::context::Ctx;
-use std::collections::HashSet;
+use crate::application::features::package::query;
+use crate::application::features::package::revdep;
+use crate::deps;
 use crate::presentation::color::Palette;
 use crate::presentation::color::Stream;
-use crate::adapters::db;
-use crate::deps;
 use crate::presentation::humanize::format_date;
 use crate::presentation::humanize::format_size;
 use crate::recipe;
-use crate::application::features::package::revdep;
+use anyhow::{bail, Result};
+use std::collections::BTreeSet;
+use std::collections::HashSet;
 
 pub(crate) fn cmd_search(ctx: &Ctx, term: &str, glob: bool) -> Result<()> {
     let all = ctx.load_all()?;
@@ -32,7 +32,10 @@ pub(crate) fn cmd_search(ctx: &Ctx, term: &str, glob: bool) -> Result<()> {
         println!(
             "{mark} {} {}  {}",
             pal.name(&format!("{nl:<24}")),
-            pal.ver(&format!("{:<12}", format!("{}-{}", rec.package.version, rec.package.rel))),
+            pal.ver(&format!(
+                "{:<12}",
+                format!("{}-{}", rec.package.version, rec.package.rel)
+            )),
             pal.dim(&rec.package.summary),
         );
     }
@@ -75,7 +78,10 @@ pub(crate) fn cmd_info(ctx: &Ctx, name: &str) -> Result<()> {
     } else if let Some(p) = rec.package.source.strip_prefix("local:") {
         format!("local:{p}")
     } else if rec.package.sha256.is_empty() {
-        pal.warn(&format!("{} (source sha256 NOT pinned)", rec.package.source))
+        pal.warn(&format!(
+            "{} (source sha256 NOT pinned)",
+            rec.package.source
+        ))
     } else {
         format!("{} (sha256 pinned)", rec.package.source)
     };
@@ -184,8 +190,7 @@ pub(crate) fn cmd_why(ctx: &Ctx, name: &str, tree: bool) -> Result<()> {
 
 pub(crate) fn cmd_deps(ctx: &Ctx, name: &str) -> Result<()> {
     let db = db::Db::new(&ctx.root);
-    let installed: HashSet<String> =
-        db.installed()?.into_iter().map(|e| e.name).collect();
+    let installed: HashSet<String> = db.installed()?.into_iter().map(|e| e.name).collect();
     let known = ctx.load_all()?;
     let order = deps::resolve_target(name, &installed, &known)?;
     let pal = Palette::auto(Stream::Stdout);
@@ -228,7 +233,12 @@ pub(crate) fn cmd_deps_all(ctx: &Ctx, include_installed: bool) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn cmd_query(ctx: &Ctx, pattern: Option<&str>, explicit: bool, deps: bool) -> Result<()> {
+pub(crate) fn cmd_query(
+    ctx: &Ctx,
+    pattern: Option<&str>,
+    explicit: bool,
+    deps: bool,
+) -> Result<()> {
     let db = db::Db::new(&ctx.root);
     let mut pkgs = db.installed()?;
     if explicit {
@@ -273,7 +283,10 @@ pub(crate) fn cmd_query(ctx: &Ctx, pattern: Option<&str>, explicit: bool, deps: 
                 reason,
             );
         } else {
-            println!("{:<24} {:<12} rel-{:<3} {}", p.name, p.version, p.rel, p.reason);
+            println!(
+                "{:<24} {:<12} rel-{:<3} {}",
+                p.name, p.version, p.rel, p.reason
+            );
         }
     }
     if shown == 0 {
@@ -329,7 +342,13 @@ pub(crate) fn cmd_revdep(
             bail!("`{n}` is not installed");
         }
     }
-    let opts = revdep::Options { lib_dirs, ignore, symlinks: !no_symlinks, unowned, scan_dirs };
+    let opts = revdep::Options {
+        lib_dirs,
+        ignore,
+        symlinks: !no_symlinks,
+        unowned,
+        scan_dirs,
+    };
     let rep = revdep::scan(&ctx.root, &db, names, &opts)?;
 
     // which package provides what is missing? (archives built here, then recipe names)
@@ -337,7 +356,8 @@ pub(crate) fn cmd_revdep(
     let sug = if no_suggest || missing.is_empty() {
         revdep::Suggestions::new()
     } else {
-        let recipes: Vec<String> = ctx.load_all()
+        let recipes: Vec<String> = ctx
+            .load_all()
             .map(|m| m.into_keys().collect())
             .unwrap_or_default();
         let installed: std::collections::HashSet<String> =
@@ -345,13 +365,20 @@ pub(crate) fn cmd_revdep(
         revdep::suggest(&missing, &ctx.builddir.join("out"), &recipes, &installed)
     };
 
-    let unowned_note = if rep.unowned.is_clean() { "" } else { " and unowned files" };
+    let unowned_note = if rep.unowned.is_clean() {
+        ""
+    } else {
+        " and unowned files"
+    };
     if json {
         println!("{}", rep.to_json(&sug));
         if rep.is_clean() {
             return Ok(());
         }
-        bail!("broken links found in {} package(s){unowned_note}", rep.packages.len());
+        bail!(
+            "broken links found in {} package(s){unowned_note}",
+            rep.packages.len()
+        );
     }
 
     let pal = Palette::auto(Stream::Stdout);
@@ -364,7 +391,11 @@ pub(crate) fn cmd_revdep(
         print!("{}", fmt_revdep_pkg(&pal, &rep.unowned, &sug));
     }
     if rep.unparseable > 0 {
-        println!("{} {} ELF file(s) could not be parsed", pal.warn("warning:"), rep.unparseable);
+        println!(
+            "{} {} ELF file(s) could not be parsed",
+            pal.warn("warning:"),
+            rep.unparseable
+        );
     }
     let extra = if rep.unowned_checked {
         format!(" + {} unowned file(s)", rep.unowned_files)
@@ -386,7 +417,10 @@ pub(crate) fn cmd_revdep(
         let broken: Vec<&str> = rep.packages.keys().map(|s| s.as_str()).collect();
         println!("packages to rebuild: {}", broken.join(" "));
     }
-    bail!("broken links found in {} package(s){unowned_note}", rep.packages.len())
+    bail!(
+        "broken links found in {} package(s){unowned_note}",
+        rep.packages.len()
+    )
 }
 
 /// The text report of one package (or of the unowned files).
@@ -396,7 +430,11 @@ fn fmt_revdep_pkg(pal: &Palette, pr: &revdep::PkgReport, sug: &revdep::Suggestio
     for f in &pr.files {
         let _ = writeln!(s, "  {}", f.path);
         for m in &f.missing {
-            let note = if m.wrong_arch { " (wrong architecture)" } else { "" };
+            let note = if m.wrong_arch {
+                " (wrong architecture)"
+            } else {
+                ""
+            };
             let _ = writeln!(s, "      {} {}{note}", pal.err("missing:"), m.name);
             for p in sug.get(&m.name).into_iter().flatten() {
                 let _ = writeln!(s, "        {} {}", pal.dim("->"), fmt_provider(p));
@@ -418,9 +456,15 @@ fn fmt_provider(p: &revdep::Provider) -> String {
         revdep::Source::Recipe => "name match",
     };
     if p.installed {
-        format!("{} ({how}) is installed but lacks the file — reinstall or rebuild it", p.package)
+        format!(
+            "{} ({how}) is installed but lacks the file — reinstall or rebuild it",
+            p.package
+        )
     } else {
-        format!("{} ({how}) is not installed — nawa install {}", p.package, p.package)
+        format!(
+            "{} ({how}) is not installed — nawa install {}",
+            p.package, p.package
+        )
     }
 }
 
@@ -432,7 +476,13 @@ pub(crate) fn warn_revdep(ctx: &Ctx, changed: &[String]) {
         return;
     }
     let db = db::Db::new(&ctx.root);
-    let opts = revdep::Options { lib_dirs: &[], ignore: &[], symlinks: true, unowned: false, scan_dirs: &[] };
+    let opts = revdep::Options {
+        lib_dirs: &[],
+        ignore: &[],
+        symlinks: true,
+        unowned: false,
+        scan_dirs: &[],
+    };
     let checked = revdep::affected(&db, changed).and_then(|names| {
         if names.is_empty() {
             Ok(revdep::Report::default())
@@ -452,21 +502,25 @@ pub(crate) fn warn_revdep(ctx: &Ctx, changed: &[String]) {
     }
     let pal = Palette::auto(Stream::Stderr);
     let none = revdep::Suggestions::new();
-    crate::nawa_info_stderr!("{} this change left broken shared-library links:", pal.warn("warning:"));
+    crate::nawa_info_stderr!(
+        "{} this change left broken shared-library links:",
+        pal.warn("warning:")
+    );
     for (pkg, pr) in &rep.packages {
         eprintln!("{}", pal.name(pkg));
         eprint!("{}", fmt_revdep_pkg(&pal, pr, &none));
     }
     let pkgs: Vec<&str> = rep.packages.keys().map(|s| s.as_str()).collect();
-    crate::nawa_info_stderr!("details and fixes: nawa revdep {}   (silence: NAWA_NO_REVDEP=1)", pkgs.join(" "));
+    crate::nawa_info_stderr!(
+        "details and fixes: nawa revdep {}   (silence: NAWA_NO_REVDEP=1)",
+        pkgs.join(" ")
+    );
 }
 
 /// Every known package name: the recipes tree plus the local db. One bare
 /// name per line — the completion scripts call this dynamically.
 pub(crate) fn cmd_complete_pkgs(ctx: &Ctx) -> Result<()> {
-    let mut names: BTreeSet<String> = ctx.load_all()?
-        .into_keys()
-        .collect();
+    let mut names: BTreeSet<String> = ctx.load_all()?.into_keys().collect();
     for e in db::Db::new(&ctx.root).installed()? {
         names.insert(e.name);
     }
@@ -477,4 +531,3 @@ pub(crate) fn cmd_complete_pkgs(ctx: &Ctx) -> Result<()> {
 }
 
 // ---- presentation helpers (unit-tested below) ------------------------------
-

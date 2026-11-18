@@ -52,17 +52,17 @@
 
 #[cfg(test)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(test)]
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
 #[cfg(test)]
-use std::os::unix::process::CommandExt;
-#[cfg(test)]
 use std::process::Stdio;
 #[cfg(test)]
-use std::time::Instant;
-#[cfg(test)]
 use std::time::Duration;
+#[cfg(test)]
+use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 
@@ -71,10 +71,8 @@ use crate::recipe::Recipe;
 
 use self::cargo::isolated_cargo_paths;
 
-
 /// How many output lines a failed run quotes.
 pub(crate) const FAIL_TAIL_LINES: usize = 30;
-
 
 /// Fetch-schema version of the Go backend (§10.3): appended to the build id
 /// as `fetch-go=<v>` whenever `[fetch.go]` exists, so a change in *how* Nawa
@@ -85,7 +83,6 @@ pub(crate) const FETCH_GO_SCHEMA_VERSION: &str = "1";
 
 /// Same for `[fetch.cargo]` → `fetch-cargo=<v>`.
 pub(crate) const FETCH_CARGO_SCHEMA_VERSION: &str = "1";
-
 
 /// The versioned, unambiguous first field of every ecosystem key (§11).
 pub(crate) const FETCH_CACHE_ENCODING: &[u8] = b"nawa-fetch-v1";
@@ -122,7 +119,6 @@ pub(crate) struct FetchRun<'a> {
     pub assembled: Option<&'a crate::build::closure::AssembledRoot>,
 }
 
-
 /// Run the ecosystem fetch for one recipe (§7, §8). Returns the build-time
 /// environment entries to append to the whitelist (already phrased in the
 /// frame the build sees: in-sandbox paths when `sandboxed`). Both tables may
@@ -139,7 +135,6 @@ pub(crate) fn run(r: &FetchRun<'_>) -> Result<Vec<(String, String)>> {
     Ok(env)
 }
 
-
 /// Toolchain identity used by the build cache. Closure builds already hash
 /// the exact toolchain package archives in their dependency closure; other
 /// isolation modes must pin the executable versions found through the exact
@@ -154,7 +149,12 @@ pub(crate) fn build_toolchain_identity(
     let mut identity = Vec::new();
     for (enabled, name, args, label) in [
         (rec.fetch.go.is_some(), "go", vec!["version"], "go"),
-        (rec.fetch.cargo.is_some(), "cargo", vec!["--version"], "cargo"),
+        (
+            rec.fetch.cargo.is_some(),
+            "cargo",
+            vec!["--version"],
+            "cargo",
+        ),
     ] {
         if !enabled {
             continue;
@@ -167,8 +167,9 @@ pub(crate) fn build_toolchain_identity(
                 std::process::id(),
                 crate::adapters::unique::next()
             ));
-            std::fs::create_dir(&probe_root)
-                .with_context(|| format!("create toolchain identity scratch {}", probe_root.display()))?;
+            std::fs::create_dir(&probe_root).with_context(|| {
+                format!("create toolchain identity scratch {}", probe_root.display())
+            })?;
             let (cargo_home, cwd) = match isolated_cargo_paths(&probe_root) {
                 Ok(paths) => paths,
                 Err(e) => {
@@ -222,7 +223,6 @@ pub(crate) fn build_toolchain_identity(
     Ok(identity)
 }
 
-
 pub mod cargo;
 pub mod common;
 pub mod go;
@@ -231,21 +231,18 @@ pub(crate) use cargo::run_cargo;
 pub(crate) use common::fetch_path;
 #[cfg(test)]
 pub(crate) use common::{
-    cleanup_failed_populate, copy_into_view, publish_entry, resolver_target_inside,
-    stream_and_wait,
+    cleanup_failed_populate, copy_into_view, publish_entry, resolver_target_inside, stream_and_wait,
 };
 pub(crate) use go::run_go;
 
 #[cfg(test)]
 mod timeout_tests {
     use super::*;
-    
+
     #[test]
     fn timeout_kills_descendant_that_keeps_stdout_open_after_shell_exit() {
-        let pid_file = std::env::temp_dir().join(format!(
-            "nawa-fetch-descendant-{}",
-            std::process::id()
-        ));
+        let pid_file =
+            std::env::temp_dir().join(format!("nawa-fetch-descendant-{}", std::process::id()));
         let _ = std::fs::remove_file(&pid_file);
         let script = "sleep 30 & echo $! > \"$1\"; exit 0";
         let mut child = std::process::Command::new("bash")
@@ -285,10 +282,12 @@ mod timeout_tests {
             std::thread::sleep(Duration::from_millis(25));
         }
         let _ = std::fs::remove_file(&pid_file);
-        assert!(terminated, "the background descendant {pid} survived timeout");
+        assert!(
+            terminated,
+            "the background descendant {pid} survived timeout"
+        );
     }
 }
-
 
 #[cfg(test)]
 mod resolver_path_tests {
@@ -314,15 +313,17 @@ mod resolver_path_tests {
         )
         .unwrap();
         let inside = resolver_target_inside(&root, "resolv.conf").unwrap();
-        assert_eq!(inside, PathBuf::from("/run/systemd/resolve/stub-resolv.conf"));
+        assert_eq!(
+            inside,
+            PathBuf::from("/run/systemd/resolve/stub-resolv.conf")
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
     fn resolver_relative_symlink_is_normalized_inside_root() {
         let root = scratch();
-        std::os::unix::fs::symlink("../run/resolv.conf", root.join("etc/resolv.conf"))
-            .unwrap();
+        std::os::unix::fs::symlink("../run/resolv.conf", root.join("etc/resolv.conf")).unwrap();
         let inside = resolver_target_inside(&root, "resolv.conf").unwrap();
         assert_eq!(inside, PathBuf::from("/run/resolv.conf"));
         let _ = std::fs::remove_dir_all(root);
@@ -341,8 +342,16 @@ mod resolver_path_tests {
     fn resolver_symlink_chain_is_resolved_inside_the_supplied_root() {
         let root = scratch();
         std::fs::create_dir_all(root.join("run/systemd/resolve")).unwrap();
-        std::fs::write(root.join("run/systemd/resolve/resolv.conf"), b"nameserver 192.0.2.53\\n").unwrap();
-        std::os::unix::fs::symlink("/run/systemd/resolve/resolv.conf", root.join("etc/resolv.conf")).unwrap();
+        std::fs::write(
+            root.join("run/systemd/resolve/resolv.conf"),
+            b"nameserver 192.0.2.53\\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            "/run/systemd/resolve/resolv.conf",
+            root.join("etc/resolv.conf"),
+        )
+        .unwrap();
         let inside = resolver_target_inside(&root, "resolv.conf").unwrap();
         assert_eq!(inside, PathBuf::from("/run/systemd/resolve/resolv.conf"));
         assert!(root.join(inside.strip_prefix("/").unwrap()).is_file());
@@ -354,7 +363,8 @@ mod resolver_path_tests {
         let root = scratch();
         std::os::unix::fs::symlink("hosts", root.join("etc/resolv.conf")).unwrap();
         std::os::unix::fs::symlink("resolv.conf", root.join("etc/hosts")).unwrap();
-        let error = resolver_target_inside(&root, "resolv.conf").expect_err("symlink loop must fail");
+        let error =
+            resolver_target_inside(&root, "resolv.conf").expect_err("symlink loop must fail");
         assert!(error.to_string().contains("exceeds 40 links"), "{error}");
         let _ = std::fs::remove_dir_all(root);
     }
@@ -363,8 +373,12 @@ mod resolver_path_tests {
     fn resolver_symlink_cannot_escape_root_with_parent_components() {
         let root = scratch();
         std::os::unix::fs::symlink("../../../../etc/passwd", root.join("etc/resolv.conf")).unwrap();
-        let error = resolver_target_inside(&root, "resolv.conf").expect_err("must remain inside root");
-        assert!(error.to_string().contains("escapes the sandbox root"), "{error}");
+        let error =
+            resolver_target_inside(&root, "resolv.conf").expect_err("must remain inside root");
+        assert!(
+            error.to_string().contains("escapes the sandbox root"),
+            "{error}"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }
@@ -384,20 +398,36 @@ mod publish_tests {
         let temp = base.join("temp");
         std::fs::create_dir_all(temp.join("sub")).unwrap();
         std::fs::write(temp.join("sub/run.sh"), b"#!/bin/sh\n").unwrap();
-        std::fs::set_permissions(temp.join("sub/run.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(
+            temp.join("sub/run.sh"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
         std::fs::write(temp.join("plain.txt"), b"data").unwrap();
-        std::fs::set_permissions(temp.join("plain.txt"), std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(
+            temp.join("plain.txt"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
 
         let entry = base.join("entry");
         publish_entry(&temp, &entry).unwrap();
-        assert_eq!(mode_of(&entry.join("sub/run.sh")), 0o555, "executable stays executable");
+        assert_eq!(
+            mode_of(&entry.join("sub/run.sh")),
+            0o555,
+            "executable stays executable"
+        );
         assert_eq!(mode_of(&entry.join("plain.txt")), 0o444);
         assert_eq!(mode_of(&entry.join("sub")), 0o555);
 
         let view = base.join("view");
         std::fs::create_dir_all(&view).unwrap();
         copy_into_view(&entry, &view).unwrap();
-        assert_eq!(mode_of(&view.join("sub/run.sh")), 0o755, "the view restores a writable executable");
+        assert_eq!(
+            mode_of(&view.join("sub/run.sh")),
+            0o755,
+            "the view restores a writable executable"
+        );
         assert_eq!(mode_of(&view.join("plain.txt")), 0o644);
 
         cleanup_failed_populate(&base);

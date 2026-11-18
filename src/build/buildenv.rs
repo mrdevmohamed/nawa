@@ -39,9 +39,9 @@ impl Isolation {
             "env" => Isolation::Env,
             "sandbox" => Isolation::Sandbox,
             "closure" => Isolation::Closure,
-            other => bail!(
-                "unknown isolation level `{other}` (expected none | env | sandbox | closure)"
-            ),
+            other => {
+                bail!("unknown isolation level `{other}` (expected none | env | sandbox | closure)")
+            }
         })
     }
 
@@ -268,8 +268,19 @@ mod tests {
         assert_eq!(
             keys,
             vec![
-                "CFLAGS", "HOME", "LANG", "LC_ALL", "LDFLAGS", "NAWA_JOBS", "NAWA_PKGDIR",
-                "NAWA_SRCDIR", "PATH", "SHELL", "SOURCE_DATE_EPOCH", "TMPDIR", "TZ",
+                "CFLAGS",
+                "HOME",
+                "LANG",
+                "LC_ALL",
+                "LDFLAGS",
+                "NAWA_JOBS",
+                "NAWA_PKGDIR",
+                "NAWA_SRCDIR",
+                "PATH",
+                "SHELL",
+                "SOURCE_DATE_EPOCH",
+                "TMPDIR",
+                "TZ",
             ],
             "env whitelist changed — update docs/design/build-isolation.md §6"
         );
@@ -292,20 +303,21 @@ mod tests {
     #[test]
     fn whitelist_gains_srcroot_and_assetsdir_only_when_enabled() {
         let profile = profile();
-        let mk = |srcroot: Option<&Path>, assetsdir: Option<&Path>, fetch_env: &[(String, String)]| {
-            let spec = EnvSpec {
-                profile_env: &profile,
-                jobs: 8,
-                srcdir: Path::new(SANDBOX_SRC),
-                pkgdir: Path::new(SANDBOX_PKG),
-                home: SANDBOX_HOME,
-                source_date_epoch: 1_700_000_000,
-                srcroot,
-                assetsdir,
-                fetch_env: fetch_env.to_vec(),
+        let mk =
+            |srcroot: Option<&Path>, assetsdir: Option<&Path>, fetch_env: &[(String, String)]| {
+                let spec = EnvSpec {
+                    profile_env: &profile,
+                    jobs: 8,
+                    srcdir: Path::new(SANDBOX_SRC),
+                    pkgdir: Path::new(SANDBOX_PKG),
+                    home: SANDBOX_HOME,
+                    source_date_epoch: 1_700_000_000,
+                    srcroot,
+                    assetsdir,
+                    fetch_env: fetch_env.to_vec(),
+                };
+                whitelist(&spec)
             };
-            whitelist(&spec)
-        };
         // enabled: exactly the legacy set plus the two names, sorted in
         let env = mk(
             Some(Path::new("/build/src/kernel")),
@@ -316,24 +328,40 @@ mod tests {
         assert_eq!(
             keys,
             vec![
-                "CFLAGS", "GOMODCACHE", "HOME", "LANG", "LC_ALL", "LDFLAGS", "NAWA_ASSETSDIR",
-                "NAWA_JOBS", "NAWA_PKGDIR", "NAWA_SRCDIR", "NAWA_SRCROOT", "PATH", "SHELL",
-                "SOURCE_DATE_EPOCH", "TMPDIR", "TZ",
+                "CFLAGS",
+                "GOMODCACHE",
+                "HOME",
+                "LANG",
+                "LC_ALL",
+                "LDFLAGS",
+                "NAWA_ASSETSDIR",
+                "NAWA_JOBS",
+                "NAWA_PKGDIR",
+                "NAWA_SRCDIR",
+                "NAWA_SRCROOT",
+                "PATH",
+                "SHELL",
+                "SOURCE_DATE_EPOCH",
+                "TMPDIR",
+                "TZ",
             ],
             "new-schema whitelist = legacy set + NAWA_SRCROOT + NAWA_ASSETSDIR + [fetch] env"
         );
         let get = |k: &str| {
-            env.iter().find(|(ek, _)| *ek == k).map(|(_, v)| v.clone()).unwrap()
+            env.iter()
+                .find(|(ek, _)| *ek == k)
+                .map(|(_, v)| v.clone())
+                .unwrap()
         };
         assert_eq!(get("NAWA_SRCROOT"), "/build/src/kernel");
         assert_eq!(get("NAWA_ASSETSDIR"), "/build/assets");
         assert_eq!(get("GOMODCACHE"), "/build/fetch/go");
         // each name alone is possible (sources-only or assets-only recipe)
-        for (srcroot, assetsdir) in
-            [(Some(Path::new("/r")), None), (None, Some(Path::new("/a")))]
-        {
-            let keys: Vec<String> =
-                mk(srcroot, assetsdir, &[]).into_iter().map(|(k, _)| k).collect();
+        for (srcroot, assetsdir) in [(Some(Path::new("/r")), None), (None, Some(Path::new("/a")))] {
+            let keys: Vec<String> = mk(srcroot, assetsdir, &[])
+                .into_iter()
+                .map(|(k, _)| k)
+                .collect();
             assert!(
                 keys.iter().any(|k| k == "NAWA_SRCROOT") == srcroot.is_some(),
                 "NAWA_SRCROOT presence must follow the field"
@@ -380,7 +408,12 @@ mod tests {
             ("GOMODCACHE".into(), "/build/fetch/go".into()),
             ("GOCACHE".into(), "/build/home/gocache".into()),
         ]);
-        let get = |k: &str| env.iter().find(|(ek, _)| *ek == k).map(|(_, v)| v.clone()).unwrap();
+        let get = |k: &str| {
+            env.iter()
+                .find(|(ek, _)| *ek == k)
+                .map(|(_, v)| v.clone())
+                .unwrap()
+        };
         assert_eq!(get("GOMODCACHE"), "/build/fetch/go");
         assert_eq!(get("GOCACHE"), "/build/home/gocache");
         assert_eq!(env.len(), 15, "two extra keys, rest identical to legacy");
@@ -434,10 +467,7 @@ mod tests {
 
         // nothing regular: the pinned-epoch demand (§6)
         let err = source_date_epoch_from_files(&d).unwrap_err();
-        assert!(
-            err.to_string().contains("source_date_epoch"),
-            "got: {err}"
-        );
+        assert!(err.to_string().contains("source_date_epoch"), "got: {err}");
 
         // one regular file makes the epoch — the newest regular-file mtime
         let f = d.join("x");
@@ -470,7 +500,6 @@ pub(crate) enum CheckMode {
     /// Run it after `compile`; a failure only prints a warning.
     Warn,
 }
-
 
 #[derive(Debug, Clone)]
 pub(crate) struct BuildOpts {
@@ -511,7 +540,6 @@ pub(crate) struct BuildOpts {
     /// `slim.rs`. On by default; a recipe can opt out of single passes.
     pub slim: bool,
 }
-
 
 impl Default for BuildOpts {
     fn default() -> Self {

@@ -11,9 +11,9 @@ use std::process::{Child, ChildStdout, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 use walkdir::WalkDir;
 
+use super::{FetchRun, DEFAULT_TIMEOUT_SECS, FAIL_TAIL_LINES, FETCH_CACHE_ENCODING, MARKER};
 use crate::sandbox::spec::ExtraBind;
 use crate::sandbox::{BuildPaths, RootSpec, SandboxSpec};
-use super::{FETCH_CACHE_ENCODING, MARKER, FAIL_TAIL_LINES, DEFAULT_TIMEOUT_SECS, FetchRun};
 
 /// sha256 over the length-prefixed key fields (§11): `nawa-fetch-v1`, the
 /// ecosystem, then the backend's field set. Length-prefixing makes the
@@ -32,19 +32,15 @@ pub(crate) fn ecosystem_key(eco: &str, fields: &[&[u8]]) -> Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
-
 /// `<srccache>/fetch/<eco>` — the ecosystem cache root (§11).
 pub(crate) fn eco_cache_dir(r: &FetchRun, eco: &str) -> PathBuf {
     r.srccache.join("fetch").join(eco)
 }
 
-
 /// A cache entry is a hit only with its completion marker (§11).
 pub(crate) fn entry_complete(entry: &Path) -> bool {
     entry.join(MARKER).is_file()
 }
-
-
 
 /// §12: `NAWA_FETCH_TIMEOUT`, default 1800. Invalid values fail loud.
 pub(crate) fn fetch_timeout_secs() -> Result<u64> {
@@ -57,7 +53,6 @@ pub(crate) fn fetch_timeout_secs() -> Result<u64> {
     }
 }
 
-
 /// The fetch PATH (§7): the whitelist PATH; `NAWA_FETCH_PATH` can prepend
 /// a test-only element on dev hosts whose toolchain lives elsewhere.
 pub(crate) fn fetch_path() -> String {
@@ -66,7 +61,6 @@ pub(crate) fn fetch_path() -> String {
         _ => "/usr/bin:/usr/sbin".to_string(),
     }
 }
-
 
 /// Spawn one fetch command in the right flavor: sandboxed (`sandbox`/
 /// `closure`) through the §12 fetch spec — configured once, via the same
@@ -121,7 +115,6 @@ pub(crate) fn spawn_fetch_child(
             .context("failed to spawn the fetch run")
     }
 }
-
 
 /// The sandbox spec of one fetch run (§12). Clones the shape of the build
 /// spec (same staging binds, same mask) and then hardens it: strict
@@ -211,7 +204,12 @@ pub(crate) fn fetch_sandbox_spec(
                 dir: r.work.join("buildroot").to_string_lossy().into_owned(),
                 layers: r
                     .assembled
-                    .map(|a| a.layer_dirs.iter().map(|p| p.to_string_lossy().into_owned()).collect())
+                    .map(|a| {
+                        a.layer_dirs
+                            .iter()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .collect()
+                    })
                     .unwrap_or_default(),
             }
         } else {
@@ -235,10 +233,10 @@ pub(crate) fn fetch_sandbox_spec(
         // §12: drop privileges for the fetch process when we are root
         run_uid: privileged().then_some(65534),
         run_gid: privileged().then_some(65534),
-        memory_limit_bytes: 0,     // RLIMIT_AS breaks Go; the timeout is the bound
-        process_limit: 4096,       // threads count
-        file_size_limit_bytes: 0,  // a module may exceed any small cap
-        open_files_limit: 4096,    // parallel downloads
+        memory_limit_bytes: 0, // RLIMIT_AS breaks Go; the timeout is the bound
+        process_limit: 4096,   // threads count
+        file_size_limit_bytes: 0, // a module may exceed any small cap
+        open_files_limit: 4096, // parallel downloads
         readonly_paths: vec![format!("{}/src", base.trim_end_matches('/'))],
         extra_binds,
         strict_readonly_root: true,
@@ -253,7 +251,6 @@ pub(crate) fn fetch_sandbox_spec(
     })
 }
 
-
 /// §12: Nawa follows the symlink chain of the host's `/etc/resolv.conf`,
 /// copies its content together with `/etc/hosts` into `<work>/fetch/etc/`,
 /// then binds the copies read-only as `file` binds — binding the host path
@@ -264,9 +261,11 @@ pub(crate) fn normalize_resolver_path(path: &Path) -> Result<PathBuf> {
     let mut out = PathBuf::from("/");
     for part in path.components() {
         match part {
-            std::path::Component::RootDir | std::path::Component::CurDir => {},
+            std::path::Component::RootDir | std::path::Component::CurDir => {}
             std::path::Component::ParentDir => {
-                if !out.pop() { bail!("resolver symlink escapes the sandbox root"); }
+                if !out.pop() {
+                    bail!("resolver symlink escapes the sandbox root");
+                }
             }
             std::path::Component::Normal(name) => out.push(name),
             _ => bail!("unsupported resolver path component in {}", path.display()),
@@ -274,7 +273,6 @@ pub(crate) fn normalize_resolver_path(path: &Path) -> Result<PathBuf> {
     }
     Ok(out)
 }
-
 
 /// Resolve the final symlink chain using the sandbox root's view of /etc.
 /// Absolute symlink targets remain absolute inside that root. A missing final
@@ -286,7 +284,11 @@ pub(crate) fn resolver_target_inside(root: &Path, name: &str) -> Result<PathBuf>
         let host_path = if root == Path::new("/") {
             inside.clone()
         } else {
-            root.join(inside.strip_prefix("/").context("resolver path is not absolute")?)
+            root.join(
+                inside
+                    .strip_prefix("/")
+                    .context("resolver path is not absolute")?,
+            )
         };
         match std::fs::symlink_metadata(&host_path) {
             Ok(md) if md.file_type().is_symlink() => {
@@ -295,16 +297,30 @@ pub(crate) fn resolver_target_inside(root: &Path, name: &str) -> Result<PathBuf>
                 inside = if target.is_absolute() {
                     normalize_resolver_path(&target)?
                 } else {
-                    normalize_resolver_path(&inside.parent().unwrap_or(Path::new("/")).join(target))?
+                    normalize_resolver_path(
+                        &inside.parent().unwrap_or(Path::new("/")).join(target),
+                    )?
                 };
             }
-            Ok(_) => { resolved = true; break; }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => { resolved = true; break; }
-            Err(e) => return Err(e).with_context(|| format!("inspect resolver path {}", host_path.display())),
+            Ok(_) => {
+                resolved = true;
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                resolved = true;
+                break;
+            }
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("inspect resolver path {}", host_path.display()))
+            }
         }
     }
     if !resolved {
-        bail!("resolver symlink chain exceeds 40 links inside {}", root.display());
+        bail!(
+            "resolver symlink chain exceeds 40 links inside {}",
+            root.display()
+        );
     }
     if root == Path::new("/") {
         if let Ok(real) = std::fs::canonicalize(&inside) {
@@ -314,11 +330,9 @@ pub(crate) fn resolver_target_inside(root: &Path, name: &str) -> Result<PathBuf>
     normalize_resolver_path(&inside)
 }
 
-
 pub(crate) fn resolver_binds(r: &FetchRun) -> Result<Vec<ExtraBind>> {
     let etc = r.work.join("fetch").join("etc");
-    std::fs::create_dir_all(&etc)
-        .with_context(|| format!("create {}", etc.display()))?;
+    std::fs::create_dir_all(&etc).with_context(|| format!("create {}", etc.display()))?;
     let root = if r.opts.isolation == crate::build::buildenv::Isolation::Closure {
         r.work.join("buildroot")
     } else {
@@ -348,11 +362,9 @@ pub(crate) fn resolver_binds(r: &FetchRun) -> Result<Vec<ExtraBind>> {
     Ok(out)
 }
 
-
 pub(crate) fn privileged() -> bool {
     crate::presentation::diag::is_root()
 }
-
 
 /// Publication (§11): normalise ownership (the sandbox identity may have
 /// written the entry) and strip write permission (dirs 0555, files 0444,
@@ -406,7 +418,6 @@ pub(crate) fn publish_entry(temp: &Path, entry: &Path) -> Result<()> {
     Ok(())
 }
 
-
 /// A failed/needs-removal populate dir or stale entry: restore write
 /// permission over the tree (publication strips it) so the removal can
 /// actually delete children, then remove. Best effort — cleanup that
@@ -423,7 +434,6 @@ pub(crate) fn cleanup_failed_populate(dir: &Path) {
     }
     let _ = std::fs::remove_dir_all(dir);
 }
-
 
 /// Copy a published cache entry into the per-build view (§11: never
 /// hard-linked — a write through the view must not reach the shared entry).
@@ -462,7 +472,6 @@ pub(crate) fn copy_into_view(entry: &Path, view: &Path) -> Result<()> {
     Ok(())
 }
 
-
 /// Stream a fetch child's combined stdout (both run flavors exec
 /// `exec 2>&1` first) to the console — and to `<work>/<label>.log` when a
 /// log path is given (populate runs; the version probe stays silent) —
@@ -477,7 +486,9 @@ pub(crate) fn stream_and_wait(
     kill_process_group: bool,
 ) -> Result<ExitStatus> {
     let mut log = match log_path {
-        Some(p) => Some(std::fs::File::create(p).with_context(|| format!("create {}", p.display()))?),
+        Some(p) => {
+            Some(std::fs::File::create(p).with_context(|| format!("create {}", p.display()))?)
+        }
         None => None,
     };
 
@@ -493,14 +504,18 @@ pub(crate) fn stream_and_wait(
         let mut r = std::io::BufReader::new(stdout);
         let mut buf = Vec::new();
         while r.read_until(b'\n', &mut buf).unwrap_or(0) > 0 {
-            if let Some(f) = log.as_mut() { let _ = f.write_all(&buf); }
+            if let Some(f) = log.as_mut() {
+                let _ = f.write_all(&buf);
+            }
             {
                 let mut out = std::io::stdout().lock();
                 let _ = out.write_all(&buf);
                 let _ = out.flush();
             }
             let mut t = tail_writer.lock().unwrap();
-            if t.len() == FAIL_TAIL_LINES { t.pop_front(); }
+            if t.len() == FAIL_TAIL_LINES {
+                t.pop_front();
+            }
             t.push_back(String::from_utf8_lossy(&buf).trim_end().to_string());
             buf.clear();
         }
@@ -517,10 +532,15 @@ pub(crate) fn stream_and_wait(
                 let t: Vec<String> = tail.lock().unwrap().drain(..).collect();
                 bail!("{label} exceeded NAWA_FETCH_TIMEOUT ({timeout_secs}s); a descendant retained stdout and the process tree was killed\n--- last output ---\n{}", t.join("\n"));
             }
-            reader.join().map_err(|_| anyhow::Error::msg("fetch log reader crashed"))?;
+            reader
+                .join()
+                .map_err(|_| anyhow::Error::msg("fetch log reader crashed"))?;
             let t: Vec<String> = tail.lock().unwrap().drain(..).collect();
             if !status.success() {
-                bail!("{label} failed with status {status}\n--- last output ---\n{}", t.join("\n"));
+                bail!(
+                    "{label} failed with status {status}\n--- last output ---\n{}",
+                    t.join("\n")
+                );
             }
             return Ok(status);
         }
@@ -534,15 +554,15 @@ pub(crate) fn stream_and_wait(
     }
 }
 
-
 /// Kill the plain fetch process group, including Go/Cargo descendants. Sandboxed
 /// runs are supervised by the PID namespace and must not signal the caller.
 pub(crate) fn terminate_fetch_process(child: &mut Child, kill_process_group: bool) {
     if kill_process_group {
-        unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL); }
+        unsafe {
+            libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+        }
     } else {
         let _ = child.kill();
     }
     let _ = child.wait();
 }
-

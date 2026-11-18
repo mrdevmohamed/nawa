@@ -68,9 +68,15 @@ fn writers_and_readers_wait_for_a_held_lock_and_time_out() {
             .args(&args)
             .output()
             .unwrap();
-        assert!(!out.status.success(), "{args:?} must not run while the lock is held");
+        assert!(
+            !out.status.success(),
+            "{args:?} must not run while the lock is held"
+        );
         let err = String::from_utf8_lossy(&out.stderr);
-        assert!(err.contains("waiting for the package database lock"), "{err}");
+        assert!(
+            err.contains("waiting for the package database lock"),
+            "{err}"
+        );
         assert!(err.contains("timed out"), "{err}");
         assert!(t.elapsed() < Duration::from_secs(6), "gave up too late");
     }
@@ -214,7 +220,10 @@ fn mutating_command_without_the_marker_uses_its_own_lock() {
         .unwrap();
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success());
-    assert!(err.contains("waiting for the package database lock"), "{err}");
+    assert!(
+        err.contains("waiting for the package database lock"),
+        "{err}"
+    );
     let _ = holder.kill();
     let _ = holder.wait();
     let _ = fs::remove_dir_all(&root);

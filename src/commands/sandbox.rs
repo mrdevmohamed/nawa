@@ -57,5 +57,4 @@ pub(crate) fn cmd_sandbox_probe(op: Option<String>) -> Result<()> {
             std::process::exit(if all_ok { 0 } else { 1 });
         }
     }
-
 }

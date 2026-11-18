@@ -1,6 +1,5 @@
 //! Small human-readable formatters (durations, dates, sizes).
 
-
 /// "3m05s" / "1h02m" / "12s"
 pub(crate) fn format_duration(secs: u64) -> String {
     match secs {
@@ -36,7 +35,12 @@ pub(crate) fn format_datetime(secs: u64) -> String {
         return "-".to_string();
     }
     let time = secs % 86_400;
-    format!("{} {:02}:{:02}", format_date(secs), time / 3600, (time % 3600) / 60)
+    format!(
+        "{} {:02}:{:02}",
+        format_date(secs),
+        time / 3600,
+        (time % 3600) / 60
+    )
 }
 
 /// Byte count in human units.

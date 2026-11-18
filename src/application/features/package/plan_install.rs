@@ -13,12 +13,12 @@
 use anyhow::{bail, Context, Result};
 use std::collections::{BTreeMap, HashMap};
 
-use crate::application::features::system::profile::EffectiveProfile;
 use crate::adapters::config::InstallMode;
-use crate::application::context::Ctx;
 use crate::adapters::db::Entry;
-use crate::fetch::RepoRef;
+use crate::application::context::Ctx;
 use crate::application::features::package::plan::{self, Why};
+use crate::application::features::system::profile::EffectiveProfile;
+use crate::fetch::RepoRef;
 use crate::recipe::Recipe;
 use crate::repo::RepoEntry;
 use crate::upgrade::OpenRepo;
@@ -95,7 +95,8 @@ impl Sourcing {
             Some(re) => {
                 let theirs = format!("{}-{}", re.version, re.rel);
                 let ours = format!("{}-{}", rec.package.version, rec.package.rel);
-                let older = crate::domain::package::version::vercmp(&theirs, &ours) == std::cmp::Ordering::Less;
+                let older = crate::domain::package::version::vercmp(&theirs, &ours)
+                    == std::cmp::Ordering::Less;
                 if older && !strict {
                     // the recipe tree is newer than the repository: honour the recipe
                     Ok((Source::Build, None))
@@ -200,7 +201,9 @@ pub(crate) fn init_note(profile: &EffectiveProfile, init: &plan::InitSelection) 
 /// package without `[capabilities]` is never guessed into the role. Returns
 /// nothing when no profile decision was declared, so legacy behavior is
 /// byte-identical.
-pub(crate) fn provider_note(plan: &crate::application::features::package::plan::Plan) -> Option<Notice> {
+pub(crate) fn provider_note(
+    plan: &crate::application::features::package::plan::Plan,
+) -> Option<Notice> {
     let plan::InitSelection::Declared { identity } = &plan.init else {
         return None;
     };
@@ -214,10 +217,12 @@ pub(crate) fn provider_note(plan: &crate::application::features::package::plan::
     for item in &plan.items {
         let declared = match &item.rec.capabilities {
             None => Provides::Unknown,
-            Some(caps) => match crate::domain::package::metadata::normalize_provides(&caps.provides) {
-                Ok(values) => Provides::parse_all(&values).unwrap_or(Provides::Unknown),
-                Err(_) => Provides::Unknown,
-            },
+            Some(caps) => {
+                match crate::domain::package::metadata::normalize_provides(&caps.provides) {
+                    Ok(values) => Provides::parse_all(&values).unwrap_or(Provides::Unknown),
+                    Err(_) => Provides::Unknown,
+                }
+            }
         };
         match declared.init_provider() {
             // §6.2: the exclusive init role selects exactly one declared
@@ -228,7 +233,11 @@ pub(crate) fn provider_note(plan: &crate::application::features::package::plan::
                 }
             }
             InitProvider::Ambiguous(caps) => {
-                let keys = caps.iter().map(|c| c.to_key()).collect::<Vec<_>>().join(", ");
+                let keys = caps
+                    .iter()
+                    .map(|c| c.to_key())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 ambiguous.push(format!("{} [{keys}]", item.rec.package.name));
             }
             _ => {}
@@ -314,11 +323,20 @@ pub(crate) fn plan(
                 let candidate = known
                     .get(target)
                     .map(|recipe| (recipe.package.version.as_str(), recipe.package.rel))
-                    .or_else(|| binaries.get(target).map(|entry| (entry.version.as_str(), entry.rel)));
-                let Some((version, rel)) = candidate else { continue };
-                let Some(current) = installed.get(target) else { continue };
+                    .or_else(|| {
+                        binaries
+                            .get(target)
+                            .map(|entry| (entry.version.as_str(), entry.rel))
+                    });
+                let Some((version, rel)) = candidate else {
+                    continue;
+                };
+                let Some(current) = installed.get(target) else {
+                    continue;
+                };
                 let wanted = crate::domain::planning::install::version_rel(version, rel);
-                let have = crate::domain::planning::install::version_rel(&current.version, current.rel);
+                let have =
+                    crate::domain::planning::install::version_rel(&current.version, current.rel);
                 if crate::domain::package::version::vercmp(&wanted, &have)
                     != std::cmp::Ordering::Greater
                 {
@@ -341,7 +359,9 @@ pub(crate) fn plan(
         notices.push(note);
     }
     for name in &plan.up_to_date {
-        notices.push(Notice::Info(format!("{name} is already installed and up to date")));
+        notices.push(Notice::Info(format!(
+            "{name} is already installed and up to date"
+        )));
     }
     Ok(PlanOutcome { plan, extras })
 }
@@ -572,23 +592,40 @@ mod tests {
         let sourcing = Sourcing {
             mode: InstallMode::Repo,
             ask: false,
-            open: Some(open_repo(vec![binary_app, repo_entry("binary-lib", "1.0", 1)])),
+            open: Some(open_repo(vec![
+                binary_app,
+                repo_entry("binary-lib", "1.0", 1),
+            ])),
         };
         let known = BTreeMap::from([
-            ("app".to_string(), rec_with_deps("app", "1.0", &["build-only"], &[])),
+            (
+                "app".to_string(),
+                rec_with_deps("app", "1.0", &["build-only"], &[]),
+            ),
             ("build-only".to_string(), rec("build-only", "1.0", &[])),
         ]);
         let outcome = plan(
-            &["app".to_string()], &known, &inst(vec![]), &sourcing,
-            &no_profile(), Why::Explicit, true, &mut Vec::new(),
-        ).unwrap();
+            &["app".to_string()],
+            &known,
+            &inst(vec![]),
+            &sourcing,
+            &no_profile(),
+            Why::Explicit,
+            true,
+            &mut Vec::new(),
+        )
+        .unwrap();
 
         assert_eq!(
             outcome.plan.order,
             [plan::PlanStep::Binary(0), plan::PlanStep::Binary(1)]
         );
         assert_eq!(
-            outcome.extras.iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>(),
+            outcome
+                .extras
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
             ["binary-lib", "app"]
         );
         assert!(outcome.plan.items.is_empty());
@@ -607,20 +644,35 @@ mod tests {
             ])),
         };
         let known = BTreeMap::from([
-            ("app".to_string(), rec_with_deps("app", "1.0", &["build-lib"], &[])),
+            (
+                "app".to_string(),
+                rec_with_deps("app", "1.0", &["build-lib"], &[]),
+            ),
             ("build-lib".to_string(), rec("build-lib", "1.0", &[])),
         ]);
         let outcome = plan(
-            &["app".to_string()], &known, &inst(vec![]), &sourcing,
-            &no_profile(), Why::Explicit, true, &mut Vec::new(),
-        ).unwrap();
+            &["app".to_string()],
+            &known,
+            &inst(vec![]),
+            &sourcing,
+            &no_profile(),
+            Why::Explicit,
+            true,
+            &mut Vec::new(),
+        )
+        .unwrap();
 
         assert_eq!(
             outcome.plan.order,
             [plan::PlanStep::Recipe(0), plan::PlanStep::Recipe(1)]
         );
         assert_eq!(
-            outcome.plan.items.iter().map(|item| item.rec.package.name.as_str()).collect::<Vec<_>>(),
+            outcome
+                .plan
+                .items
+                .iter()
+                .map(|item| item.rec.package.name.as_str())
+                .collect::<Vec<_>>(),
             ["build-lib", "app"]
         );
         assert!(outcome.extras.is_empty());
@@ -633,16 +685,29 @@ mod tests {
         let sourcing = Sourcing {
             mode: InstallMode::Auto,
             ask: false,
-            open: Some(open_repo(vec![binary_app, repo_entry("binary-lib", "1.0", 1)])),
+            open: Some(open_repo(vec![
+                binary_app,
+                repo_entry("binary-lib", "1.0", 1),
+            ])),
         };
         let known = BTreeMap::from([
-            ("app".to_string(), rec_with_deps("app", "1.0", &["build-lib"], &[])),
+            (
+                "app".to_string(),
+                rec_with_deps("app", "1.0", &["build-lib"], &[]),
+            ),
             ("build-lib".to_string(), rec("build-lib", "1.0", &[])),
         ]);
         let outcome = plan(
-            &["app".to_string()], &known, &inst(vec![]), &sourcing,
-            &no_profile(), Why::Explicit, true, &mut Vec::new(),
-        ).unwrap();
+            &["app".to_string()],
+            &known,
+            &inst(vec![]),
+            &sourcing,
+            &no_profile(),
+            Why::Explicit,
+            true,
+            &mut Vec::new(),
+        )
+        .unwrap();
 
         assert_eq!(
             outcome.plan.order,
@@ -653,11 +718,19 @@ mod tests {
             ]
         );
         assert_eq!(
-            outcome.plan.items.iter().map(|item| item.rec.package.name.as_str()).collect::<Vec<_>>(),
+            outcome
+                .plan
+                .items
+                .iter()
+                .map(|item| item.rec.package.name.as_str())
+                .collect::<Vec<_>>(),
             ["build-lib", "app"]
         );
         assert_eq!(outcome.extras[0].name, "binary-lib");
-        assert!(matches!(sourcing.pick(&known["app"]).unwrap().0, Source::Repo(_)));
+        assert!(matches!(
+            sourcing.pick(&known["app"]).unwrap().0,
+            Source::Repo(_)
+        ));
     }
 
     #[test]
@@ -667,16 +740,29 @@ mod tests {
         let sourcing = Sourcing {
             mode: InstallMode::Ask,
             ask: true,
-            open: Some(open_repo(vec![binary_app, repo_entry("binary-lib", "1.0", 1)])),
+            open: Some(open_repo(vec![
+                binary_app,
+                repo_entry("binary-lib", "1.0", 1),
+            ])),
         };
         let known = BTreeMap::from([
-            ("app".to_string(), rec_with_deps("app", "1.0", &["build-lib"], &[])),
+            (
+                "app".to_string(),
+                rec_with_deps("app", "1.0", &["build-lib"], &[]),
+            ),
             ("build-lib".to_string(), rec("build-lib", "1.0", &[])),
         ]);
         let outcome = plan(
-            &["app".to_string()], &known, &inst(vec![]), &sourcing,
-            &no_profile(), Why::Explicit, true, &mut Vec::new(),
-        ).unwrap();
+            &["app".to_string()],
+            &known,
+            &inst(vec![]),
+            &sourcing,
+            &no_profile(),
+            Why::Explicit,
+            true,
+            &mut Vec::new(),
+        )
+        .unwrap();
 
         assert_eq!(
             outcome.plan.order,
@@ -696,16 +782,29 @@ mod tests {
         let sourcing = Sourcing {
             mode: InstallMode::Auto,
             ask: false,
-            open: Some(open_repo(vec![binary_app, repo_entry("binary-lib", "1.0", 1)])),
+            open: Some(open_repo(vec![
+                binary_app,
+                repo_entry("binary-lib", "1.0", 1),
+            ])),
         };
         let known = BTreeMap::from([
-            ("app".to_string(), rec_with_deps("app", "1.0", &[], &["recipe-lib"])),
+            (
+                "app".to_string(),
+                rec_with_deps("app", "1.0", &[], &["recipe-lib"]),
+            ),
             ("recipe-lib".to_string(), rec("recipe-lib", "1.0", &[])),
         ]);
         let outcome = plan(
-            &["app".to_string()], &known, &inst(vec![]), &sourcing,
-            &no_profile(), Why::Explicit, true, &mut Vec::new(),
-        ).unwrap();
+            &["app".to_string()],
+            &known,
+            &inst(vec![]),
+            &sourcing,
+            &no_profile(),
+            Why::Explicit,
+            true,
+            &mut Vec::new(),
+        )
+        .unwrap();
 
         assert_eq!(
             outcome.plan.order,
@@ -717,15 +816,26 @@ mod tests {
     #[test]
     fn recipe_to_binary_dependency_is_ordered_before_the_recipe() {
         let sourcing = Sourcing {
-            mode: InstallMode::Auto, ask: false,
+            mode: InstallMode::Auto,
+            ask: false,
             open: Some(open_repo(vec![repo_entry("binary-lib", "1.0", 1)])),
         };
         let known = BTreeMap::from([("app".to_string(), rec("app", "1.0", &["binary-lib"]))]);
         let outcome = plan(
-            &["app".to_string()], &known, &inst(vec![]), &sourcing,
-            &no_profile(), Why::Explicit, true, &mut Vec::new(),
-        ).unwrap();
-        assert_eq!(outcome.plan.order, [plan::PlanStep::Binary(0), plan::PlanStep::Recipe(0)]);
+            &["app".to_string()],
+            &known,
+            &inst(vec![]),
+            &sourcing,
+            &no_profile(),
+            Why::Explicit,
+            true,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            outcome.plan.order,
+            [plan::PlanStep::Binary(0), plan::PlanStep::Recipe(0)]
+        );
         assert_eq!(outcome.extras[0].name, "binary-lib");
     }
 
@@ -734,14 +844,26 @@ mod tests {
         let mut binary_app = repo_entry("binary-app", "1.0", 1);
         binary_app.rundeps = Some(vec!["recipe-lib".to_string()]);
         let sourcing = Sourcing {
-            mode: InstallMode::Auto, ask: false, open: Some(open_repo(vec![binary_app])),
+            mode: InstallMode::Auto,
+            ask: false,
+            open: Some(open_repo(vec![binary_app])),
         };
         let known = BTreeMap::from([("recipe-lib".to_string(), rec("recipe-lib", "1.0", &[]))]);
         let outcome = plan(
-            &["binary-app".to_string()], &known, &inst(vec![]), &sourcing,
-            &no_profile(), Why::Explicit, true, &mut Vec::new(),
-        ).unwrap();
-        assert_eq!(outcome.plan.order, [plan::PlanStep::Recipe(0), plan::PlanStep::Binary(0)]);
+            &["binary-app".to_string()],
+            &known,
+            &inst(vec![]),
+            &sourcing,
+            &no_profile(),
+            Why::Explicit,
+            true,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            outcome.plan.order,
+            [plan::PlanStep::Recipe(0), plan::PlanStep::Binary(0)]
+        );
         assert_eq!(outcome.plan.items[0].why, Why::Dependency);
         assert_eq!(outcome.extras[0].name, "binary-app");
     }
@@ -751,14 +873,28 @@ mod tests {
         let mut binary_app = repo_entry("binary-app", "1.0", 1);
         binary_app.rundeps = Some(vec!["binary-lib".to_string()]);
         let sourcing = Sourcing {
-            mode: InstallMode::Auto, ask: false,
-            open: Some(open_repo(vec![binary_app, repo_entry("binary-lib", "1.0", 1)])),
+            mode: InstallMode::Auto,
+            ask: false,
+            open: Some(open_repo(vec![
+                binary_app,
+                repo_entry("binary-lib", "1.0", 1),
+            ])),
         };
         let outcome = plan(
-            &["binary-app".to_string()], &BTreeMap::new(), &inst(vec![]), &sourcing,
-            &no_profile(), Why::Explicit, true, &mut Vec::new(),
-        ).unwrap();
-        assert_eq!(outcome.plan.order, [plan::PlanStep::Binary(0), plan::PlanStep::Binary(1)]);
+            &["binary-app".to_string()],
+            &BTreeMap::new(),
+            &inst(vec![]),
+            &sourcing,
+            &no_profile(),
+            Why::Explicit,
+            true,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            outcome.plan.order,
+            [plan::PlanStep::Binary(0), plan::PlanStep::Binary(1)]
+        );
         assert_eq!(outcome.extras[0].name, "binary-lib");
         assert_eq!(outcome.extras[1].name, "binary-app");
         assert_eq!(outcome.plan.binary_whys, [Why::Dependency, Why::Explicit]);
@@ -769,16 +905,27 @@ mod tests {
         let mut legacy = repo_entry("legacy-bin", "1.0", 1);
         legacy.rundeps = None;
         let sourcing = Sourcing {
-            mode: InstallMode::Auto, ask: false, open: Some(open_repo(vec![legacy])),
+            mode: InstallMode::Auto,
+            ask: false,
+            open: Some(open_repo(vec![legacy])),
         };
         let mut notices = Vec::new();
         let outcome = plan(
-            &["legacy-bin".to_string()], &BTreeMap::new(), &inst(vec![]), &sourcing,
-            &no_profile(), Why::Explicit, true, &mut notices,
-        ).unwrap();
+            &["legacy-bin".to_string()],
+            &BTreeMap::new(),
+            &inst(vec![]),
+            &sourcing,
+            &no_profile(),
+            Why::Explicit,
+            true,
+            &mut notices,
+        )
+        .unwrap();
         assert_eq!(outcome.extras[0].name, "legacy-bin");
         assert_eq!(outcome.plan.unknown_dependencies, ["legacy-bin"]);
-        assert!(infos(&notices).iter().any(|notice| notice.contains("dependency closure")));
+        assert!(infos(&notices)
+            .iter()
+            .any(|notice| notice.contains("dependency closure")));
     }
 
     #[test]
@@ -950,7 +1097,10 @@ mod tests {
         use crate::application::features::package::plan::InitSelection;
 
         let mut plain = crate::application::features::package::plan::Plan::default();
-        assert!(provider_note(&plain).is_none(), "no profile decision — no note");
+        assert!(
+            provider_note(&plain).is_none(),
+            "no profile decision — no note"
+        );
 
         plain.init = InitSelection::Declared {
             identity: "systemd".to_string(),
@@ -962,11 +1112,13 @@ mod tests {
         provider.capabilities = Some(crate::recipe::model::Capabilities {
             provides: vec!["init-system=systemd".to_string()],
         });
-        plain.items.push(crate::application::features::package::plan::Item {
-            rec: provider,
-            why: crate::application::features::package::plan::Why::Explicit,
-            replaces: None,
-        });
+        plain
+            .items
+            .push(crate::application::features::package::plan::Item {
+                rec: provider,
+                why: crate::application::features::package::plan::Why::Explicit,
+                replaces: None,
+            });
         let explained = provider_note(&plain).expect("the provider is named");
         let text = format!("{explained:?}");
         assert!(text.contains("systemd"), "{text}");

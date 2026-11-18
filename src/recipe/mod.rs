@@ -1,15 +1,15 @@
 //! Recipe parsing (split from monolithic recipe.rs).
 
-pub mod model;
-pub mod validate;
 pub mod expand;
 pub mod load;
+pub mod model;
+pub mod validate;
 
-pub(crate) use model::{Recipe, SourceSpec, FetchSpec, ExpandCtx};
+pub(crate) use load::{load_all, load_by_name, locate};
+pub(crate) use model::{ExpandCtx, FetchSpec, Recipe, SourceSpec};
 #[cfg(test)]
 pub(crate) use model::{CARGO_TOOLCHAIN, CA_BUNDLE, GO_TOOLCHAIN, SCHEMA_MARKER};
 pub(crate) use validate::is_lower_hex64;
-pub(crate) use load::{load_all, load_by_name, locate};
 
 #[cfg(test)]
 mod tests {
@@ -50,16 +50,18 @@ mod tests {
         );
         let rec: Recipe = toml::from_str(&with).unwrap();
         rec.validate().unwrap();
-        assert_eq!(rec.package.mirrors, vec!["https://m1.example/gzip-%{version}.tar.xz"]);
+        assert_eq!(
+            rec.package.mirrors,
+            vec!["https://m1.example/gzip-%{version}.tar.xz"]
+        );
     }
 
     #[test]
     fn mirrors_need_a_downloadable_source() {
-        let bad = SAMPLE
-            .replace(
-                "source = \"https://ftp.gnu.org/gnu/gzip/gzip-%{version}.tar.xz\"",
-                "source = \"local:/src/gzip\"\n        mirrors = [\"https://m1.example/x.tar.xz\"]",
-            );
+        let bad = SAMPLE.replace(
+            "source = \"https://ftp.gnu.org/gnu/gzip/gzip-%{version}.tar.xz\"",
+            "source = \"local:/src/gzip\"\n        mirrors = [\"https://m1.example/x.tar.xz\"]",
+        );
         let rec: Recipe = toml::from_str(&bad).unwrap();
         let err = rec.validate().unwrap_err().to_string();
         assert!(err.contains("package.mirrors"), "got: {err}");
@@ -143,7 +145,10 @@ mod tests {
             "dedup",
         );
         assert_eq!(
-            rec.build_deps().iter().filter(|d| **d == GO_TOOLCHAIN).count(),
+            rec.build_deps()
+                .iter()
+                .filter(|d| **d == GO_TOOLCHAIN)
+                .count(),
             1,
             "a declared toolchain dep must not be duplicated"
         );
@@ -204,7 +209,10 @@ mod tests {
             "the Rust toolchain must not declare [fetch.cargo], got: {err}"
         );
         let rec = new_schema_with_fetch("[fetch.go]\ndir = \".\"", GO_TOOLCHAIN);
-        assert!(rec.validate().is_err(), "[fetch.go] in the Go toolchain recipe");
+        assert!(
+            rec.validate().is_err(),
+            "[fetch.go] in the Go toolchain recipe"
+        );
     }
 
     #[test]
@@ -416,9 +424,7 @@ mod tests {
                 "workdir = \"kernel\"",
                 format!("workdir = \"kernel\"\n        {patch}").as_str(),
             );
-            let rec: Recipe = toml::from_str(&mixed).unwrap_or_else(|e| {
-                panic!("{label}: {e}")
-            });
+            let rec: Recipe = toml::from_str(&mixed).unwrap_or_else(|e| panic!("{label}: {e}"));
             let err = rec.validate().unwrap_err().to_string();
             assert!(
                 err.contains("mix") && err.contains(label),
@@ -440,13 +446,13 @@ mod tests {
         assert!(err.contains("duplicate"), "got: {err}");
 
         for bad in [
-            "UPPER",    // case
-            "",         // empty
-            "a/b",      // path separator
-            "-a",       // head not [a-z0-9]
-            "_a",       // head not [a-z0-9]
-            "a b",      // space
-            "a-b-c!",   // non-name char
+            "UPPER",  // case
+            "",       // empty
+            "a/b",    // path separator
+            "-a",     // head not [a-z0-9]
+            "_a",     // head not [a-z0-9]
+            "a b",    // space
+            "a-b-c!", // non-name char
         ] {
             let bad_name = NEW_SCHEMA.replace("name = \"main\"", &format!("name = \"{bad}\""));
             let rec: Recipe = toml::from_str(&bad_name).unwrap();
@@ -463,7 +469,8 @@ mod tests {
         for good in ["a", "main", "bootstrap-2.data", "x_y.z-1"] {
             let ok_name = NEW_SCHEMA.replace("name = \"main\"", &format!("name = \"{good}\""));
             let rec: Recipe = toml::from_str(&ok_name).unwrap();
-            rec.validate().unwrap_or_else(|e| panic!("`{good}` should be valid: {e}"));
+            rec.validate()
+                .unwrap_or_else(|e| panic!("`{good}` should be valid: {e}"));
         }
     }
 
@@ -487,10 +494,7 @@ mod tests {
     #[test]
     fn into_and_workdir_must_be_relative_and_safe() {
         for into in ["/abs", "../escape", "a/../b", "trailing/"] {
-            let mixed = NEW_SCHEMA.replace(
-                "into = \"kernel\"",
-                &format!("into = \"{into}\""),
-            );
+            let mixed = NEW_SCHEMA.replace("into = \"kernel\"", &format!("into = \"{into}\""));
             let rec: Recipe = toml::from_str(&mixed).unwrap();
             let err = rec.validate().unwrap_err();
             // the long-form error reports the failing field through the
@@ -498,13 +502,17 @@ mod tests {
             assert!(format!("{err:?}").contains("into"), "{into}: {err:?}");
         }
         for workdir in ["/usr", "../x", "a/../b", "end/"] {
-            let mixed = NEW_SCHEMA.replace(
-                "workdir = \"kernel\"",
-                &format!("workdir = \"{workdir}\""),
-            );
+            let mixed =
+                NEW_SCHEMA.replace("workdir = \"kernel\"", &format!("workdir = \"{workdir}\""));
             let rec: Recipe = toml::from_str(&mixed).unwrap();
             let err = rec.validate().unwrap_err().to_string();
-            assert!({ let e = format!("{err:#}"); e.contains("workdir") }, "{workdir}: {err}");
+            assert!(
+                {
+                    let e = format!("{err:#}");
+                    e.contains("workdir")
+                },
+                "{workdir}: {err}"
+            );
         }
     }
 
@@ -537,16 +545,11 @@ mod tests {
             );
         let rec: Recipe = toml::from_str(&plain).unwrap();
         assert_eq!(rec.package.sources.len(), 2);
-        assert!(rec
-            .package
-            .sources
-            .iter()
-            .all(|s| s.unpack == Some(false)));
+        assert!(rec.package.sources.iter().all(|s| s.unpack == Some(false)));
         let err = rec.validate().unwrap_err().to_string();
         assert!(err.contains("unpack = false"), "got: {err}");
         // ...and pinning it makes the recipe valid
-        let pinned = plain
-            .replace("rel = 1", "rel = 1\n        source_date_epoch = 1700000000");
+        let pinned = plain.replace("rel = 1", "rel = 1\n        source_date_epoch = 1700000000");
         let rec: Recipe = toml::from_str(&pinned).unwrap();
         rec.validate().unwrap();
     }
@@ -557,9 +560,7 @@ mod tests {
     /// typo'd `include` must not silently stage nothing).
     #[test]
     fn assets_parse_and_deny_unknown_fields() {
-        let with = NEW_SCHEMA
-            .replace("    \"#;", "")
-            .replace("</沉默>", "")
+        let with = NEW_SCHEMA.replace("    \"#;", "").replace("</沉默>", "")
             + r#"
         [assets]
         include = ["patches/fix-build.patch", "config/x86_64.fragment"]
@@ -573,7 +574,8 @@ mod tests {
         assert!(toml::from_str::<Recipe>(&with.replace(
             "[assets]\n        include = [\"patches/fix-build.patch\", \"config/x86_64.fragment\"]",
             "assets = \"patches\""
-        )).is_err());
+        ))
+        .is_err());
     }
 
     /// An `[assets]` table alone is a new-schema table: the marker is
@@ -627,15 +629,11 @@ mod tests {
     fn assets_include_paths_are_validated() {
         for bad in ["", "  ", "/abs/config", "../escape", "kernel.config/"] {
             let bad_line = format!("include = [\"{bad}\"]");
-            let with = NEW_SCHEMA.replace("    \"#;", "") + format!(
-                "\n        [assets]\n        {bad_line}\n    "
-            ).as_str();
+            let with = NEW_SCHEMA.replace("    \"#;", "")
+                + format!("\n        [assets]\n        {bad_line}\n    ").as_str();
             let rec: Recipe = toml::from_str(&with).unwrap();
             let err = format!("{:#}", rec.validate().unwrap_err());
-            assert!(
-                err.contains("[assets] include"),
-                "{bad:?}: {err}"
-            );
+            assert!(err.contains("[assets] include"), "{bad:?}: {err}");
         }
     }
 
@@ -659,7 +657,8 @@ mod tests {
         assert!(err.contains("NAWA_ASSETSDIR"), "got: {err}");
         // assets but no sources: %{srcroot} is refused (see above) and the
         // combined recipe passes
-        let both = NEW_SCHEMA.replace("    \"#;", "") + r#"
+        let both = NEW_SCHEMA.replace("    \"#;", "")
+            + r#"
         [assets]
         include = ["config/x86_64.fragment"]
     "#;
@@ -726,10 +725,7 @@ dir = "rust"
             "provides = [\"\"]",
             "surprise = true",
         ] {
-            let raw = SAMPLE.replace(
-                "[depends]",
-                &format!("[capabilities]\n{bad}\n\n[depends]"),
-            );
+            let raw = SAMPLE.replace("[depends]", &format!("[capabilities]\n{bad}\n\n[depends]"));
             let result = toml::from_str::<Recipe>(&raw)
                 .map_err(anyhow::Error::msg)
                 .and_then(|rec| rec.validate());

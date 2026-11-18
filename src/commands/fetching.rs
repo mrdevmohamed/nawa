@@ -14,14 +14,14 @@
 //! at `closure` the same build root a build would assemble is prepared first
 //! (the toolchain lives in it).
 use crate::application::context::Ctx;
-use crate::build::assets;
 use crate::build;
+use crate::build::assets;
 use crate::build::buildenv;
 use crate::build::closure;
-use crate::fetch;
 use crate::build::fetchrun;
-use crate::recipe;
 use crate::build::sources;
+use crate::fetch;
+use crate::recipe;
 
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
@@ -43,11 +43,7 @@ pub(crate) fn cmd_fetch(
     // same way build refuses them (§12)
     let load = |wanted: &dyn Fn(&recipe::Recipe) -> bool| -> Result<Vec<recipe::Recipe>> {
         let known = ctx.load_all()?;
-        let mut recs: Vec<recipe::Recipe> = known
-            .values()
-            .filter(|r| wanted(r))
-            .cloned()
-            .collect();
+        let mut recs: Vec<recipe::Recipe> = known.values().filter(|r| wanted(r)).cloned().collect();
         recs.sort_by(|a, b| a.package.name.cmp(&b.package.name));
         Ok(recs)
     };
@@ -75,7 +71,9 @@ pub(crate) fn cmd_fetch(
         recs
     };
     if recs.is_empty() {
-        crate::nawa_info!("fetch: nothing to fetch (--all found no recipe with a remote source or a fetch table)");
+        crate::nawa_info!(
+            "fetch: nothing to fetch (--all found no recipe with a remote source or a fetch table)"
+        );
         return Ok(());
     }
 
@@ -98,17 +96,22 @@ pub(crate) fn cmd_fetch(
     info_mode(&recs, sources_only, offline);
 
     for rec in &recs {
-        fetch_one(ctx, &builddir, rec, &srccache, isolation, sources_only, offline, allow_degraded)
-            .with_context(|| format!("fetching sources for {}", rec.id()))?;
+        fetch_one(
+            ctx,
+            &builddir,
+            rec,
+            &srccache,
+            isolation,
+            sources_only,
+            offline,
+            allow_degraded,
+        )
+        .with_context(|| format!("fetching sources for {}", rec.id()))?;
     }
     crate::nawa_info!(
         "fetch: {} recipe(s) done{}",
         recs.len(),
-        if sources_only {
-            " (sources only)"
-        } else {
-            ""
-        }
+        if sources_only { " (sources only)" } else { "" }
     );
     Ok(())
 }
@@ -121,13 +124,24 @@ fn fetchable_legacy(rec: &recipe::Recipe) -> bool {
 }
 
 fn info_mode(recs: &[recipe::Recipe], sources_only: bool, offline: bool) {
-    let what = if sources_only { "sources" } else { "sources + ecosystems" };
-    let mode = if offline { " (offline: verify only)" } else { "" };
+    let what = if sources_only {
+        "sources"
+    } else {
+        "sources + ecosystems"
+    };
+    let mode = if offline {
+        " (offline: verify only)"
+    } else {
+        ""
+    };
     crate::nawa_info!(
         "fetch: {} recipe(s) — {}: {}{mode}",
         recs.len(),
         what,
-        recs.iter().map(|r| r.package.name.clone()).collect::<Vec<_>>().join(", ")
+        recs.iter()
+            .map(|r| r.package.name.clone())
+            .collect::<Vec<_>>()
+            .join(", ")
     );
 }
 
@@ -153,8 +167,7 @@ fn fetch_one(
     // build would enforce before any download — missing paths, symlinks and
     // specials fail here, the snapshot digest is recomputed (never cached).
     if !rec.assets.include.is_empty() {
-        assets::precheck(rec)
-            .with_context(|| format!("assets of recipe {}", rec.package.name))?;
+        assets::precheck(rec).with_context(|| format!("assets of recipe {}", rec.package.name))?;
     }
 
     let work = builddir.join(rec.id());
@@ -218,8 +231,7 @@ fn fetch_one(
     let mut assembled: Option<closure::AssembledRoot> = None;
     if opts.isolation == buildenv::Isolation::Closure {
         let known = ctx.load_all()?;
-        let members =
-            closure::buildroot(rec, &known, false).context("compute build root")?;
+        let members = closure::buildroot(rec, &known, false).context("compute build root")?;
         crate::nawa_info!(
             "fetch: closure: {} package(s) in the build root: {}",
             members.len(),
@@ -263,11 +275,7 @@ fn fetch_one(
 /// cache (`<sha16>-<file name>`, §1.1), no extraction — the build unpacks
 /// from the verified cache as today. Cached hits are re-verified, corrupt
 /// entries re-downloaded.
-fn fetch_legacy_source(
-    rec: &recipe::Recipe,
-    ctx: &Ctx,
-    cache_dir: &std::path::Path,
-) -> Result<()> {
+fn fetch_legacy_source(rec: &recipe::Recipe, ctx: &Ctx, cache_dir: &std::path::Path) -> Result<()> {
     std::fs::create_dir_all(cache_dir)
         .with_context(|| format!("create source cache {}", cache_dir.display()))?;
     let ectx = recipe::ExpandCtx {
@@ -279,14 +287,23 @@ fn fetch_legacy_source(
         assetsdir: None,
     };
     let source = rec.expand(&rec.package.source, &ectx);
-    let fname = source.rsplit('/').next().unwrap_or("source.tar").to_string();
+    let fname = source
+        .rsplit('/')
+        .next()
+        .unwrap_or("source.tar")
+        .to_string();
     let sha = rec.package.sha256.as_str();
     let tarball = cache_dir.join(format!("{}-{}", sha.get(..16).unwrap_or("nosha"), fname));
     if tarball.exists() && fetch::verify_sha256(&tarball, sha).is_ok() {
         crate::nawa_info!("source cached: {}", tarball.display());
         return Ok(());
     }
-    let mirrors: Vec<String> = rec.package.mirrors.iter().map(|m| rec.expand(m, &ectx)).collect();
+    let mirrors: Vec<String> = rec
+        .package
+        .mirrors
+        .iter()
+        .map(|m| rec.expand(m, &ectx))
+        .collect();
     fetch::download_cached_with_mirrors(&source, &mirrors, &tarball, Some(sha))?;
     fetch::verify_sha256(&tarball, sha)
         .with_context(|| format!("verify the fetched source of recipe {}", rec.package.name))?;
@@ -307,5 +324,13 @@ pub(crate) fn cmd_fetch_checked(
     if !all && names.is_empty() {
         bail!("`nawa fetch` needs recipe names or --all");
     }
-    cmd_fetch(ctx, names, all, isolation, sources_only, offline, allow_degraded)
+    cmd_fetch(
+        ctx,
+        names,
+        all,
+        isolation,
+        sources_only,
+        offline,
+        allow_degraded,
+    )
 }

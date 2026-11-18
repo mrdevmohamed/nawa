@@ -26,7 +26,6 @@
 //! provides = ["init-system=runit"]
 //! ```
 
-
 /// One normalized capability identity: `domain=identity` (§6.1, e.g.
 /// `init-system=runit`).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]

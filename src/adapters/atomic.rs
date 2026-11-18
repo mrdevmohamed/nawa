@@ -40,8 +40,6 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-
-
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FailPoint {
@@ -162,11 +160,14 @@ fn create_dir_all_durable(path: &Path) -> Result<()> {
         Ok(metadata) if metadata.is_dir() => return Ok(()),
         Ok(_) => bail!("{} exists but is not a directory", path.display()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error)
-            .with_context(|| format!("inspect parent directory {}", path.display())),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect parent directory {}", path.display()))
+        }
     }
 
-    let parent = path.parent()
+    let parent = path
+        .parent()
         .filter(|candidate| !candidate.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     create_dir_all_durable(parent)?;
@@ -174,14 +175,16 @@ fn create_dir_all_durable(path: &Path) -> Result<()> {
     match fs::create_dir(path) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let metadata = fs::metadata(path)
-                .with_context(|| format!("inspect concurrently-created directory {}", path.display()))?;
+            let metadata = fs::metadata(path).with_context(|| {
+                format!("inspect concurrently-created directory {}", path.display())
+            })?;
             if !metadata.is_dir() {
                 bail!("{} exists but is not a directory", path.display());
             }
         }
-        Err(error) => return Err(error)
-            .with_context(|| format!("create directory {}", path.display())),
+        Err(error) => {
+            return Err(error).with_context(|| format!("create directory {}", path.display()))
+        }
     }
 
     sync_directory(parent)?;
@@ -192,25 +195,39 @@ fn create_dir_all_durable(path: &Path) -> Result<()> {
 /// Atomically replace `path` with `bytes`. The temp file is exclusive and
 /// receives its final permissions at creation time.
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
-    let parent = path.parent().filter(|p| !p.as_os_str().is_empty())
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     create_dir_all_durable(parent)?;
-    let name = path.file_name()
+    let name = path
+        .file_name()
         .ok_or_else(|| anyhow::anyhow!("atomic-write destination has no file name"))?
         .to_string_lossy();
 
     for attempt in 0..32u32 {
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH)
-            .unwrap_or_default().as_nanos();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
         let sequence = crate::adapters::unique::next();
         let temporary = parent.join(format!(
-            ".{name}.{}.{}.{sequence}.{attempt}.tmp", std::process::id(), nanos
+            ".{name}.{}.{}.{sequence}.{attempt}.tmp",
+            std::process::id(),
+            nanos
         ));
-        let mut file = match OpenOptions::new().write(true).create_new(true).mode(mode).open(&temporary) {
+        let mut file = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .open(&temporary)
+        {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error)
-                .with_context(|| format!("create temporary file {}", temporary.display())),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("create temporary file {}", temporary.display()))
+            }
         };
 
         let written = (|| -> Result<()> {
@@ -242,7 +259,10 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
         sync_directory(parent)?;
         return Ok(());
     }
-    bail!("could not allocate a unique temporary file for {}", path.display())
+    bail!(
+        "could not allocate a unique temporary file for {}",
+        path.display()
+    )
 }
 
 #[cfg(test)]
@@ -252,7 +272,8 @@ mod tests {
 
     fn temp_dir() -> PathBuf {
         let path = std::env::temp_dir().join(format!(
-            "nawa-atomic-{}-{}", std::process::id(),
+            "nawa-atomic-{}-{}",
+            std::process::id(),
             crate::adapters::unique::next()
         ));
         fs::create_dir_all(&path).unwrap();

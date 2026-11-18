@@ -1,10 +1,13 @@
 //! Go backend (§7).
 
 use anyhow::{bail, Context, Result};
-use std::path::{Path, PathBuf};
 use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 
-use super::common::{ecosystem_key, eco_cache_dir, entry_complete, copy_into_view, publish_entry, cleanup_failed_populate, spawn_fetch_child, fetch_path, fetch_timeout_secs, stream_and_wait};
+use super::common::{
+    cleanup_failed_populate, copy_into_view, eco_cache_dir, ecosystem_key, entry_complete,
+    fetch_path, fetch_timeout_secs, publish_entry, spawn_fetch_child, stream_and_wait,
+};
 use super::FetchRun;
 use crate::recipe::FetchSpec;
 
@@ -26,7 +29,10 @@ pub(crate) fn run_go(r: &FetchRun<'_>, spec: &FetchSpec) -> Result<Vec<(String, 
         ensure_go_entry(r, &plan, &key)?;
         let entry = eco_cache_dir(r, "go").join(&key);
         copy_into_view(&entry, &view_host).with_context(|| {
-            format!("populate the per-build Go fetch view {}", view_host.display())
+            format!(
+                "populate the per-build Go fetch view {}",
+                view_host.display()
+            )
         })?;
         "-mod=readonly"
     };
@@ -46,10 +52,12 @@ pub(crate) fn run_go(r: &FetchRun<'_>, spec: &FetchSpec) -> Result<Vec<(String, 
         ("GOFLAGS".into(), goflags.into()),
         ("GOTOOLCHAIN".into(), "local".into()),
         ("GOWORK".into(), "off".into()),
-        ("GOCACHE".into(), format!("{}/gocache", r.whitelist_home.trim_end_matches('/'))),
+        (
+            "GOCACHE".into(),
+            format!("{}/gocache", r.whitelist_home.trim_end_matches('/')),
+        ),
     ])
 }
-
 
 /// Precondition checks of §14C plus the vendored detection (§7). All of this
 /// happens after source staging, so the files exist when checked.
@@ -61,7 +69,6 @@ pub(crate) struct GoPlan {
     go_mod: Vec<u8>,
     go_sum: Vec<u8>,
 }
-
 
 pub(crate) fn plan_go(r: &FetchRun<'_>, spec: &FetchSpec) -> Result<GoPlan> {
     let dir = if spec.dir == "." || spec.dir.is_empty() {
@@ -118,13 +125,17 @@ pub(crate) fn plan_go(r: &FetchRun<'_>, spec: &FetchSpec) -> Result<GoPlan> {
         .with_context(|| format!("read {}", dir.join("go.mod").display()))?;
     let go_sum = std::fs::read(dir.join("go.sum"))
         .with_context(|| format!("read {}", dir.join("go.sum").display()))?;
-    Ok(GoPlan { dir, vendored, go_mod, go_sum })
+    Ok(GoPlan {
+        dir,
+        vendored,
+        go_mod,
+        go_sum,
+    })
 }
 
 // ===========================================================================
 // §8 Cargo backend
 // ===========================================================================
-
 
 /// Make sure the Go module cache entry `key` is published: marker-free fast
 /// path when it exists, otherwise take the entry flock, recheck, populate
@@ -161,19 +172,17 @@ pub(crate) fn ensure_go_entry(r: &FetchRun, plan: &GoPlan, key: &str) -> Result<
         crate::adapters::unique::next()
     ));
     let _ = std::fs::remove_dir_all(&temp);
-    std::fs::create_dir_all(&temp)
-        .with_context(|| format!("create {}", temp.display()))?;
+    std::fs::create_dir_all(&temp).with_context(|| format!("create {}", temp.display()))?;
     std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o777))?;
 
-    let outcome = run_populate(r, plan, &temp, "fetch-go")
-        .and_then(|()| publish_entry(&temp, &entry));
+    let outcome =
+        run_populate(r, plan, &temp, "fetch-go").and_then(|()| publish_entry(&temp, &entry));
     if let Err(err) = outcome {
         cleanup_failed_populate(&temp);
         return Err(err.context("populating the Go module cache (fetch-phase.md §11)"));
     }
     Ok(())
 }
-
 
 /// `NAWA_GOPROXY` handling (§7): `https://` or `file://`, defaults to the
 /// Go proxy *without* a `,direct` fallback — direct would run VCS tools
@@ -193,10 +202,13 @@ pub(crate) fn proxy_and_sumdb() -> Result<(String, &'static str)> {
         }
         _ => "https://proxy.golang.org".to_string(),
     };
-    let sumdb = if proxy.starts_with("file://") { "off" } else { "sum.golang.org" };
+    let sumdb = if proxy.starts_with("file://") {
+        "off"
+    } else {
+        "sum.golang.org"
+    };
     Ok((proxy, sumdb))
 }
-
 
 /// The §7 fetch allowlist, parameterised for the run flavor. The build
 /// environment (§7 bottom list) is separate — see [`run`].
@@ -222,10 +234,8 @@ pub(crate) fn go_fetch_env(
     ]
 }
 
-
 /// The fixed commands of the Go backend (§7), run in the fetch directory.
 const GO_POPULATE_SCRIPT: &str = "go mod download && go mod verify";
-
 
 /// Run [`GO_POPULATE_SCRIPT`] against the temporary entry directory,
 /// sandboxed at `sandbox`/`closure` (the §12 fetch profile: strict read-only
@@ -243,7 +253,12 @@ pub(crate) fn run_populate(r: &FetchRun, plan: &GoPlan, temp: &Path, label: &str
         let base = r.build_inside.trim_end_matches('/');
         // the fetch scratch is the per-build home bind; the temporary entry
         // is a writable extra bind at <base>/fetch-out (§12)
-        let env = go_fetch_env(&proxy, sumdb, &format!("{base}/home"), &format!("{base}/fetch-out"));
+        let env = go_fetch_env(
+            &proxy,
+            sumdb,
+            &format!("{base}/home"),
+            &format!("{base}/fetch-out"),
+        );
         spawn_fetch_child(r, &script, env, &plan.dir, Some(temp), timeout_secs)?
     } else {
         // no sandbox (§12): the host toolchain, a cleared environment, the
@@ -251,14 +266,27 @@ pub(crate) fn run_populate(r: &FetchRun, plan: &GoPlan, temp: &Path, label: &str
         let home_host = r.work.join("sb").join("home");
         std::fs::create_dir_all(&home_host)
             .with_context(|| format!("create {}", home_host.display()))?;
-        let env = go_fetch_env(&proxy, sumdb, &home_host.to_string_lossy(), &temp.to_string_lossy());
+        let env = go_fetch_env(
+            &proxy,
+            sumdb,
+            &home_host.to_string_lossy(),
+            &temp.to_string_lossy(),
+        );
         spawn_fetch_child(r, &script, env, &plan.dir, None, timeout_secs)?
     };
 
-    let status = stream_and_wait(&mut child, Some(&log_path), timeout_secs, label, !r.sandboxed)?;
+    let status = stream_and_wait(
+        &mut child,
+        Some(&log_path),
+        timeout_secs,
+        label,
+        !r.sandboxed,
+    )?;
     if !status.success() {
-        bail!("fetch run ({label}) failed with status {status} — log: {}", log_path.display());
+        bail!(
+            "fetch run ({label}) failed with status {status} — log: {}",
+            log_path.display()
+        );
     }
     Ok(())
 }
-

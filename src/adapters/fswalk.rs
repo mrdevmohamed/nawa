@@ -22,7 +22,9 @@ pub(crate) fn entries_sorted_ok(root: &Path) -> Vec<walkdir::DirEntry> {
 /// Sorted `Result` entries (errors preserved) for callers that fail on a walk
 /// error (e.g. `archive` where a permission error should abort the build).
 #[inline]
-pub(crate) fn entries_sorted(root: &Path) -> Vec<std::result::Result<walkdir::DirEntry, walkdir::Error>> {
+pub(crate) fn entries_sorted(
+    root: &Path,
+) -> Vec<std::result::Result<walkdir::DirEntry, walkdir::Error>> {
     walkdir::WalkDir::new(root)
         .sort_by_file_name()
         .into_iter()

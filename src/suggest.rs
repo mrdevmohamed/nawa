@@ -101,8 +101,22 @@ mod tests {
         // one namespace's alnum soup including many edit neighbours, and a
         // non-ASCII name: every pair must agree with the full DP reference
         let names = [
-            "gzip", "gzp", "zstd", "zst", "grep", "gawk", "gmp", "mpfr", "glibc",
-            "libz", "zlib", "curl", "openssl", "openssl1", "", "换行包",
+            "gzip",
+            "gzp",
+            "zstd",
+            "zst",
+            "grep",
+            "gawk",
+            "gmp",
+            "mpfr",
+            "glibc",
+            "libz",
+            "zlib",
+            "curl",
+            "openssl",
+            "openssl1",
+            "",
+            "换行包",
         ];
         for a in names {
             for b in names {
@@ -119,8 +133,14 @@ mod tests {
             base = format!("pkg-{}-suffix{}", seed, seed % 7);
             for cut in [0, 1, 2] {
                 let shorter = &base[..base.len().saturating_sub(cut * 2)];
-                assert_eq!(levenshtein(&base, shorter), reference_levenshtein(&base, shorter));
-                assert_eq!(levenshtein(shorter, &base), reference_levenshtein(shorter, &base));
+                assert_eq!(
+                    levenshtein(&base, shorter),
+                    reference_levenshtein(&base, shorter)
+                );
+                assert_eq!(
+                    levenshtein(shorter, &base),
+                    reference_levenshtein(shorter, &base)
+                );
             }
         }
     }

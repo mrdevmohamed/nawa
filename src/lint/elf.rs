@@ -92,7 +92,10 @@ pub(crate) fn parse_elf(data: &[u8]) -> Result<Option<ElfInfo>> {
     // relocatable objects (ET_REL) and kernel core dumps (ET_CORE) never
     // carry an ELF interpreter / dynamic linking info worth auditing;
     // matching the previous reader, they parse to nothing
-    if matches!(elf.header.e_type, goblin::elf::header::ET_REL | goblin::elf::header::ET_CORE) {
+    if matches!(
+        elf.header.e_type,
+        goblin::elf::header::ET_REL | goblin::elf::header::ET_CORE
+    ) {
         return Ok(None);
     }
     let Some(dynamic) = &elf.dynamic else {
@@ -110,10 +113,7 @@ pub(crate) fn parse_elf(data: &[u8]) -> Result<Option<ElfInfo>> {
         // reader kept the last non-empty one — same drop-in behaviour
         rpath: last_non_empty(&elf.rpaths),
         runpath: last_non_empty(&elf.runpaths),
-        soname: elf
-            .soname
-            .filter(|s| !s.is_empty())
-            .map(str::to_string),
+        soname: elf.soname.filter(|s| !s.is_empty()).map(str::to_string),
         interp: elf.interpreter.map(str::to_string),
         is_64: elf.is_64,
         machine: elf.header.e_machine,
@@ -122,6 +122,9 @@ pub(crate) fn parse_elf(data: &[u8]) -> Result<Option<ElfInfo>> {
 }
 
 pub(crate) fn last_non_empty(paths: &[&str]) -> Option<String> {
-    paths.iter().rev().find(|p| !p.is_empty()).map(|p| (*p).to_string())
+    paths
+        .iter()
+        .rev()
+        .find(|p| !p.is_empty())
+        .map(|p| (*p).to_string())
 }
-

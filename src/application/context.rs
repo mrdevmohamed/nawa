@@ -21,7 +21,8 @@ pub(crate) struct Ctx {
     /// (install/upgrade/build each walk the recipes tree multiple times)
     /// do not re-parse every `recipe.toml`. Safe because the recipes tree
     /// does not change during a single command execution.
-    pub(crate) recipe_cache: std::cell::RefCell<Option<std::collections::BTreeMap<String, crate::recipe::Recipe>>>,
+    pub(crate) recipe_cache:
+        std::cell::RefCell<Option<std::collections::BTreeMap<String, crate::recipe::Recipe>>>,
 }
 
 impl Ctx {
@@ -40,7 +41,9 @@ impl Ctx {
     }
 
     /// Cached [`recipe::load_all`] for this command's recipes root.
-    pub(crate) fn load_all(&self) -> Result<std::collections::BTreeMap<String, crate::recipe::Recipe>> {
+    pub(crate) fn load_all(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, crate::recipe::Recipe>> {
         let cached = self.recipe_cache.borrow();
         if let Some(map) = cached.as_ref() {
             return Ok(map.clone());
@@ -54,7 +57,11 @@ impl Ctx {
 
 /// `--build` / `--from-repo` / `--from` collapse to one install mode.
 /// Shared by `install` and `update` so flag precedence cannot drift.
-pub(crate) fn resolve_mode(build: bool, from_repo: bool, from: Option<&str>) -> Result<Option<InstallMode>> {
+pub(crate) fn resolve_mode(
+    build: bool,
+    from_repo: bool,
+    from: Option<&str>,
+) -> Result<Option<InstallMode>> {
     if build {
         Ok(Some(InstallMode::Build))
     } else if from_repo {

@@ -134,13 +134,24 @@ struct CapUserData {
 /// struct layouts are fixed ABI (linux/capability.h); `_LINUX_CAPABILITY_...`
 /// v3 carries two `cap_user_data` words.
 pub(crate) fn drop_capabilities() -> Result<()> {
-    let hdr = CapUserHeader { version: LINUX_CAPABILITY_VERSION_3, pid: 0 };
-    let data = [CapUserData { effective: 0, permitted: 0, inheritable: 0 }; 2];
+    let hdr = CapUserHeader {
+        version: LINUX_CAPABILITY_VERSION_3,
+        pid: 0,
+    };
+    let data = [CapUserData {
+        effective: 0,
+        permitted: 0,
+        inheritable: 0,
+    }; 2];
     // SAFETY: valid, correctly-aligned pointers to our own the initialized
     // structs of fixed size; SYS_capset reads exactly them and never
     // succeeds-with-side-effects on failure — checked below.
     let rc = unsafe {
-        libc::syscall(libc::SYS_capset, &hdr as *const CapUserHeader, data.as_ptr())
+        libc::syscall(
+            libc::SYS_capset,
+            &hdr as *const CapUserHeader,
+            data.as_ptr(),
+        )
     };
     if rc != 0 {
         // capset(2) is a bare syscall (no libc wrapper); the error mapping

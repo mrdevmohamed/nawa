@@ -5,8 +5,8 @@
 use anyhow::Result;
 use std::path::Path;
 
-use crate::cli::HistoryCmd;
 use crate::application::context::Ctx;
+use crate::cli::HistoryCmd;
 use crate::transaction::history::PackageChange;
 use crate::{transaction, undo};
 
@@ -39,14 +39,27 @@ pub(crate) fn print_history(root: &Path, limit: usize) -> Result<()> {
 pub(crate) fn print_info(root: &Path, id: u64) -> Result<()> {
     let r = crate::transaction::history::load_record(root, id)?;
     println!("Transaction {}", r.id);
-    println!("  Command:   {} {}", r.command, r.requested_packages.join(" "));
+    println!(
+        "  Command:   {} {}",
+        r.command,
+        r.requested_packages.join(" ")
+    );
     println!("  Status:    {}", r.status);
-    println!("  Started:   {}", crate::presentation::humanize::format_datetime(r.started_at));
+    println!(
+        "  Started:   {}",
+        crate::presentation::humanize::format_datetime(r.started_at)
+    );
     if let Some(f) = r.finished_at {
-        println!("  Finished:  {}", crate::presentation::humanize::format_datetime(f));
+        println!(
+            "  Finished:  {}",
+            crate::presentation::humanize::format_datetime(f)
+        );
     }
     if let Some(d) = r.duration_seconds {
-        println!("  Duration:  {}", crate::presentation::humanize::format_duration(d));
+        println!(
+            "  Duration:  {}",
+            crate::presentation::humanize::format_duration(d)
+        );
     }
     if !r.initiated_by.is_empty() {
         println!("  Initiated: {}", r.initiated_by);
@@ -93,7 +106,11 @@ pub(crate) fn print_info(root: &Path, id: u64) -> Result<()> {
 }
 
 fn artifact_of_after(change: &PackageChange) -> &str {
-    change.after.as_ref().map(|a| a.artifact_sha256.as_str()).unwrap_or("")
+    change
+        .after
+        .as_ref()
+        .map(|a| a.artifact_sha256.as_str())
+        .unwrap_or("")
 }
 
 /// `nawa history [list|info|undo]`
@@ -113,5 +130,4 @@ pub(crate) fn cmd_history(
         Some(HistoryCmd::Info { id }) => print_info(&ctx.root, id),
         Some(HistoryCmd::Undo { id, yes }) => undo::history_undo(&ctx.root, id, yes),
     }
-
 }

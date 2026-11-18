@@ -36,8 +36,14 @@ fn upgrade_with_recipe_tree_actually_upgrades() {
     let root = base.join("root");
     let nawa = env!("CARGO_BIN_EXE_nawa");
     let st = Command::new(nawa)
-        .args(["--root", root.to_str().unwrap(), "install", mkfake.to_str().unwrap()])
-        .status().unwrap();
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "install",
+            mkfake.to_str().unwrap(),
+        ])
+        .status()
+        .unwrap();
     assert!(st.success());
 
     // repo with v2 (newer)
@@ -47,17 +53,23 @@ fn upgrade_with_recipe_tree_actually_upgrades() {
     write_fake(&v2, "a", "2.0", 1, b"two");
     let st = Command::new(nawa)
         .args(["repo-create", repo.to_str().unwrap(), "--out", "index.toml"])
-        .status().unwrap();
+        .status()
+        .unwrap();
     assert!(st.success());
 
     // upgrade with the recipe tree present
     let out = Command::new(nawa)
         .args([
-            "--root", root.to_str().unwrap(),
-            "--recipes", base.join("recipes").to_str().unwrap(),
-            "upgrade", "--repo", repo.to_str().unwrap(),
+            "--root",
+            root.to_str().unwrap(),
+            "--recipes",
+            base.join("recipes").to_str().unwrap(),
+            "upgrade",
+            "--repo",
+            repo.to_str().unwrap(),
         ])
-        .output().unwrap();
+        .output()
+        .unwrap();
     println!("--- nawa upgrade stdout ---");
     println!("{}", String::from_utf8_lossy(&out.stdout));
     println!("--- nawa upgrade stderr ---");
@@ -66,7 +78,10 @@ fn upgrade_with_recipe_tree_actually_upgrades() {
 
     let bin = root.join("usr/bin/demo");
     let content = fs::read(&bin).unwrap_or_default();
-    println!("installed binary content: {:?}", String::from_utf8_lossy(&content));
+    println!(
+        "installed binary content: {:?}",
+        String::from_utf8_lossy(&content)
+    );
     if content == b"two" {
         println!("RESULT: upgrade worked (bug NOT present)");
     } else {
@@ -86,11 +101,13 @@ fn write_fake(out: &PathBuf, name: &str, ver: &str, rel: u32, body: &[u8]) {
     hdr.set_size(pkginfo.len() as u64);
     hdr.set_mode(0o644);
     hdr.set_cksum();
-    tar.append_data(&mut hdr, ".PKGINFO", pkginfo.as_bytes()).unwrap();
+    tar.append_data(&mut hdr, ".PKGINFO", pkginfo.as_bytes())
+        .unwrap();
     let mut h2 = tar::Header::new_gnu();
     h2.set_size(body.len() as u64);
     h2.set_mode(0o755);
     h2.set_cksum();
-    tar.append_data(&mut h2, "payload/usr/bin/demo", body).unwrap();
+    tar.append_data(&mut h2, "payload/usr/bin/demo", body)
+        .unwrap();
     tar.into_inner().unwrap().finish().unwrap();
 }

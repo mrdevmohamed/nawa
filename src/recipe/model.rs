@@ -315,4 +315,3 @@ pub(crate) struct ExpandCtx {
     /// as above: recipes without `[assets]` never see the name.
     pub assetsdir: Option<PathBuf>,
 }
-

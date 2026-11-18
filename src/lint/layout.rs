@@ -1,6 +1,5 @@
 //! Layout and text-leak checks.
 
-
 use super::elf::ElfInfo;
 use super::{LintCtx, LintReport, ALLOWED_TOP, KERNEL_MANAGED, SKELETON_TOP};
 
@@ -29,7 +28,8 @@ pub(crate) fn check_layout(rel: &str, md: &std::fs::Metadata, rep: &mut LintRepo
     if top == "usr" && rel.starts_with("usr/local/") && (is_file || is_link) {
         // the skeleton may create the /usr/local directories; nothing may
         // live in them — that path belongs to the site administrator
-        rep.errors.push(format!("{rel}: nothing may be installed into /usr/local"));
+        rep.errors
+            .push(format!("{rel}: nothing may be installed into /usr/local"));
     }
     use std::os::unix::fs::PermissionsExt;
     let mode = md.permissions().mode();
@@ -93,7 +93,8 @@ pub(crate) fn check_text_leaks(rel: &str, data: &[u8], ctx: &LintCtx, rep: &mut 
     needles.extend(ctx.extra_leak_paths.iter().copied());
     for n in needles {
         if text.contains(n) {
-            rep.errors.push(format!("{rel}: contains the sandbox path {n}"));
+            rep.errors
+                .push(format!("{rel}: contains the sandbox path {n}"));
         }
     }
     if let Some(hb) = ctx.host_builddir {

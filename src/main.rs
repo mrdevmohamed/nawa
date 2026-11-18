@@ -33,11 +33,11 @@ mod upgrade;
 // top-level command orchestration and dispatch (`commands::dispatch`) and
 // the error/exit path (`bootstrap`). Each module imports what it uses
 // explicitly.
+use adapters::config::Overrides;
+use adapters::{config, lock};
+use application::context::Ctx;
 use clap::Parser;
 use commands::{run, should_run_post_transaction_hooks};
-use adapters::{config, lock};
-use adapters::config::Overrides;
-use application::context::Ctx;
 
 // The cli items stay bound at the crate root (as before the cli module
 // split): `commands/fetching.rs` addresses `crate::default_jobs`, and the
@@ -45,7 +45,14 @@ use application::context::Ctx;
 use cli::*;
 
 fn main() {
-    let Cli { root, recipes, builddir, profiles, jobs, cmd } = Cli::parse();
+    let Cli {
+        root,
+        recipes,
+        builddir,
+        profiles,
+        jobs,
+        cmd,
+    } = Cli::parse();
     let overrides = Overrides {
         root,
         recipes,

@@ -11,9 +11,16 @@ pub(crate) fn order_with_fallback(
     tree: &BTreeMap<String, recipe::Recipe>,
 ) -> Vec<String> {
     let planned: HashSet<&String> = names.iter().collect();
-    let satisfied: HashSet<String> =
-        installed.iter().filter(|n| !planned.contains(*n)).cloned().collect();
-    let known: Vec<String> = names.iter().filter(|n| tree.contains_key(*n)).cloned().collect();
+    let satisfied: HashSet<String> = installed
+        .iter()
+        .filter(|n| !planned.contains(*n))
+        .cloned()
+        .collect();
+    let known: Vec<String> = names
+        .iter()
+        .filter(|n| tree.contains_key(*n))
+        .cloned()
+        .collect();
     let mut ordered: Vec<String> = match deps::resolve(&known, &satisfied, tree) {
         Ok(order) => order
             .into_iter()
@@ -27,10 +34,12 @@ pub(crate) fn order_with_fallback(
             k
         }
     };
-    let mut unknown: Vec<String> =
-        names.iter().filter(|n| !tree.contains_key(*n)).cloned().collect();
+    let mut unknown: Vec<String> = names
+        .iter()
+        .filter(|n| !tree.contains_key(*n))
+        .cloned()
+        .collect();
     unknown.sort();
     ordered.extend(unknown);
     ordered
 }
-

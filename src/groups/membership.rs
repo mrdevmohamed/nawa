@@ -73,7 +73,10 @@ pub(crate) fn load(root: &Path, group_id: &str) -> Result<Option<MembershipRecor
     let record: MembershipRecord =
         toml::from_str(&raw).with_context(|| format!("corrupt membership for {group_id}"))?;
     if record.schema != 1 {
-        anyhow::bail!("unsupported membership schema {} for {group_id}", record.schema);
+        anyhow::bail!(
+            "unsupported membership schema {} for {group_id}",
+            record.schema
+        );
     }
     Ok(Some(record))
 }

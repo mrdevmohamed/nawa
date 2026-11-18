@@ -22,10 +22,6 @@ pub(crate) fn enqueue_transaction(root: &Path, record: &TransactionRecord) -> Re
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
     let target = dir.join(format!("{:010}.toml", record.id));
-    crate::adapters::atomic::write_atomic(
-        &target,
-        toml::to_string(record)?.as_bytes(),
-        0o600,
-    )
-    .with_context(|| format!("publish transaction observer event {}", target.display()))
+    crate::adapters::atomic::write_atomic(&target, toml::to_string(record)?.as_bytes(), 0o600)
+        .with_context(|| format!("publish transaction observer event {}", target.display()))
 }

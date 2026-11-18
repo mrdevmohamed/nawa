@@ -4,15 +4,15 @@ use anyhow::{bail, Context, Result};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::adapters::artifact;
 use crate::adapters::archive;
+use crate::adapters::artifact;
 use crate::adapters::db::{Db, Entry};
-use crate::install::InstallAuth;
-use crate::install::hooks::{hook_status_path, run_tracked_hook, save_hooks};
-use crate::install::journal::{FileJournalId, Tx};
 use crate::adapters::interrupt;
 use crate::adapters::sign;
 use crate::domain::system::migration::LegacyInitHandoff;
+use crate::install::hooks::{hook_status_path, run_tracked_hook, save_hooks};
+use crate::install::journal::{FileJournalId, Tx};
+use crate::install::InstallAuth;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn install_archive_payload(
@@ -63,7 +63,14 @@ pub(crate) fn install_archive_payload(
     let extracted = archive::extract(archive_path, &tmp)?;
     interrupt::check()?;
     let info = archive::parse_pkginfo(&extracted.pkginfo)?;
-    let Pkginfo { name, version, rel, arch, size, run } = Pkginfo::from_map(&info);
+    let Pkginfo {
+        name,
+        version,
+        rel,
+        arch,
+        size,
+        run,
+    } = Pkginfo::from_map(&info);
 
     // ---- current state of this package (if this is an upgrade/reinstall) ---
     let old = db.entry(&name)?;
@@ -98,7 +105,12 @@ pub(crate) fn install_archive_payload(
     };
 
     // ---- keep a copy of the archive in the package cache --------------------
-    cache_archive_named(archive_path, cache_name_source, root, cache_detached_signature)?;
+    cache_archive_named(
+        archive_path,
+        cache_name_source,
+        root,
+        cache_detached_signature,
+    )?;
     // ---- publish the verified bytes as a content-addressed object and keep
     // the authentication provenance (roadmap §4.4/§4.5). Failures here only
     // cost the history/undo evidence, not the install itself — but a digest
@@ -108,7 +120,12 @@ pub(crate) fn install_archive_payload(
         archive_path,
         cache_name_source,
         &auth,
-        &PackageIdentity { name: &name, version: &version, rel, arch: &arch },
+        &PackageIdentity {
+            name: &name,
+            version: &version,
+            rel,
+            arch: &arch,
+        },
     );
     if is_upgrade {
         crate::nawa_info!(
@@ -139,8 +156,15 @@ pub(crate) fn install_archive_payload(
     }
 
     // ---- delete files that disappeared between the two versions -------------
-    let obsolete_dirs =
-        retire_obsolete_files(&db, &mut tx, root, &name, &old_files, &staged_files, &owners)?;
+    let obsolete_dirs = retire_obsolete_files(
+        &db,
+        &mut tx,
+        root,
+        &name,
+        &old_files,
+        &staged_files,
+        &owners,
+    )?;
 
     // last point where backing out is safe: the files are in place but the
     // db does not know them yet, and the journal can still undo all of it
@@ -151,7 +175,10 @@ pub(crate) fn install_archive_payload(
 
     // ---- register in db (atomic: temp file + rename) -------------------------
     let reason = match reason {
-        crate::adapters::db::InstallReason::Keep => old.as_ref().map(|o| o.reason.clone()).unwrap_or_else(|| "explicit".into()),
+        crate::adapters::db::InstallReason::Keep => old
+            .as_ref()
+            .map(|o| o.reason.clone())
+            .unwrap_or_else(|| "explicit".into()),
         r => r.as_str().to_string(),
     };
     let entry = Entry {
@@ -209,7 +236,10 @@ pub(crate) fn install_archive_payload(
     }
 
     if is_upgrade {
-        crate::nawa_success!("upgraded {} (previous version kept for rollback)", entry.version_full());
+        crate::nawa_success!(
+            "upgraded {} (previous version kept for rollback)",
+            entry.version_full()
+        );
     } else {
         crate::nawa_success!("installed {} into {}", entry.version_full(), root.display());
     }
@@ -235,9 +265,21 @@ impl Pkginfo {
         let size: u64 = info.get("size").and_then(|v| v.parse().ok()).unwrap_or(0);
         let run: Vec<String> = info
             .get("rundeps")
-            .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+            .map(|s| {
+                s.split(',')
+                    .map(|x| x.trim().to_string())
+                    .filter(|x| !x.is_empty())
+                    .collect()
+            })
             .unwrap_or_default();
-        Pkginfo { name, version, rel, arch, size, run }
+        Pkginfo {
+            name,
+            version,
+            rel,
+            arch,
+            size,
+            run,
+        }
     }
 }
 
@@ -276,10 +318,8 @@ fn legacy_init_handoff_matches(
         Ok(target) => target,
         Err(_) => return Ok(false),
     };
-    Ok(
-        staged_target == Path::new("../lib/systemd/systemd")
-            && installed_target == Path::new("/usr/bin/runit"),
-    )
+    Ok(staged_target == Path::new("../lib/systemd/systemd")
+        && installed_target == Path::new("/usr/bin/runit"))
 }
 
 /// Fail when the staged tree would overwrite a file another package owns.
@@ -299,7 +339,10 @@ fn check_file_conflicts(
         // directories merge silently across packages — never a conflict
         // (every distro has several packages owning /etc or /usr)
         let p = tmp.join(f.trim_start_matches('/'));
-        if std::fs::symlink_metadata(&p).map(|m| m.is_dir()).unwrap_or(false) {
+        if std::fs::symlink_metadata(&p)
+            .map(|m| m.is_dir())
+            .unwrap_or(false)
+        {
             continue;
         }
         // a symlink that already points exactly where this package wants
@@ -315,21 +358,21 @@ fn check_file_conflicts(
         }
         if f == "/usr/bin/init" {
             let recorded = db.owners_of_file(f)?;
-            let foreign: Vec<&String> = recorded.iter().filter(|owner| owner.as_str() != name).collect();
+            let foreign: Vec<&String> = recorded
+                .iter()
+                .filter(|owner| owner.as_str() != name)
+                .collect();
             if !foreign.is_empty() {
-                if legacy_init_handoff_matches(
-                    tmp,
-                    root,
-                    name,
-                    f,
-                    db,
-                    legacy_init_handoff,
-                )? {
+                if legacy_init_handoff_matches(tmp, root, name, f, db, legacy_init_handoff)? {
                     continue;
                 }
                 conflicts.push(format!(
                     "{f} (owned by {})",
-                    foreign.iter().map(|owner| owner.as_str()).collect::<Vec<_>>().join(", ")
+                    foreign
+                        .iter()
+                        .map(|owner| owner.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ));
                 continue;
             }
@@ -344,7 +387,12 @@ fn check_file_conflicts(
         bail!(
             "file conflicts installing {}:\n  {}\n(use --force to override)",
             name,
-            conflicts.iter().take(20).cloned().collect::<Vec<_>>().join("\n  ")
+            conflicts
+                .iter()
+                .take(20)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n  ")
         );
     }
     Ok(())
@@ -363,7 +411,9 @@ fn record_artifact(
     let (name, version, rel, arch) = (id.name, id.version, id.rel, id.arch);
     match artifact::store_verified_copy(root, archive_path, None) {
         Ok((_, digest)) => {
-            let size = std::fs::metadata(archive_path).map(|m| m.len()).unwrap_or(0);
+            let size = std::fs::metadata(archive_path)
+                .map(|m| m.len())
+                .unwrap_or(0);
             let mut prov = artifact::Provenance::new(auth.kind(), &digest, size);
             prov.package = Some(artifact::PackageIdentity {
                 name: name.to_string(),
@@ -372,13 +422,23 @@ fn record_artifact(
                 arch: arch.to_string(),
             });
             match auth {
-                InstallAuth::SignedIndex { index_bytes, index_signature, signer_public, repo_id } => {
+                InstallAuth::SignedIndex {
+                    index_bytes,
+                    index_signature,
+                    signer_public,
+                    repo_id,
+                } => {
                     if let Err(e) = artifact::save_provenance(root, &prov) {
                         crate::nawa_warn!("could not record artifact provenance: {e:#}");
                     } else if let (Some(idx), Some(key)) = (index_bytes, signer_public) {
                         if let Err(e) = artifact::retain_repository_proof(
-                            root, &digest, idx, index_signature.as_deref(), key,
-                            repo_id.as_deref().unwrap_or("repository"), true,
+                            root,
+                            &digest,
+                            idx,
+                            index_signature.as_deref(),
+                            key,
+                            repo_id.as_deref().unwrap_or("repository"),
+                            true,
                         ) {
                             crate::nawa_warn!("could not retain repository proof: {e:#}");
                         }
@@ -394,9 +454,7 @@ fn record_artifact(
                         if sig.is_file() {
                             let fingerprint = sign::read_sig_file(&sig)
                                 .ok()
-                                .map(|sf| artifact::key_fingerprint(
-                                    &sf.embedded.to_bytes(),
-                                ))
+                                .map(|sf| artifact::key_fingerprint(&sf.embedded.to_bytes()))
                                 .unwrap_or_default();
                             let _ = artifact::retain_detached_signature(
                                 root,
@@ -479,7 +537,13 @@ fn retire_obsolete_files(
 /// * legacy undo records without a digest fall back to the previous
 ///   behaviour (detached-signature policy where a usable signature exists).
 ///   This weaker legacy path is explicit and never reported as strong proof.
-pub(crate) fn copy_atomic(src: &Path, tmp: &Path, dest: &Path, copy_ctx: &str, rename_ctx: &str) -> Result<()> {
+pub(crate) fn copy_atomic(
+    src: &Path,
+    tmp: &Path,
+    dest: &Path,
+    copy_ctx: &str,
+    rename_ctx: &str,
+) -> Result<()> {
     let res = (|| -> Result<()> {
         std::fs::copy(src, tmp).with_context(|| copy_ctx.to_string())?;
         std::fs::rename(tmp, dest).with_context(|| rename_ctx.to_string())?;
@@ -526,10 +590,8 @@ pub(crate) fn cache_archive_named(
     if copy_detached_signature {
         let sig = sign::sig_path_for(name_source);
         if sig.is_file() {
-            let sig_tmp = sig_dest.with_file_name(format!(
-                ".signature-{}-{stamp}.tmp",
-                std::process::id()
-            ));
+            let sig_tmp =
+                sig_dest.with_file_name(format!(".signature-{}-{stamp}.tmp", std::process::id()));
             copy_atomic(
                 &sig,
                 &sig_tmp,
@@ -547,7 +609,6 @@ pub(crate) fn cache_archive_named(
     }
     Ok(dest)
 }
-
 
 pub(crate) fn save_undo(db: &Db, root: &Path, prev: &Entry) -> Result<()> {
     let dir = root.join("var/lib/nawa/undo").join(&prev.name);
@@ -567,7 +628,9 @@ pub(crate) fn save_undo(db: &Db, root: &Path, prev: &Entry) -> Result<()> {
 /// One walk over the staging tree: every file to install plus the
 /// `/etc` hash baseline (config protection). Sorted, like both
 /// former walks, so conflict order is unchanged.
-pub(crate) fn stage_tree(staged: &Path) -> Result<(Vec<String>, std::collections::HashMap<String, String>)> {
+pub(crate) fn stage_tree(
+    staged: &Path,
+) -> Result<(Vec<String>, std::collections::HashMap<String, String>)> {
     let mut files = Vec::new();
     let mut etc_hashes = std::collections::HashMap::new();
     for e in walkdir::WalkDir::new(staged).sort_by_file_name() {
@@ -578,7 +641,11 @@ pub(crate) fn stage_tree(staged: &Path) -> Result<(Vec<String>, std::collections
         }
         let pkgpath = format!("/{}", rel.display());
         files.push(pkgpath.clone());
-        if rel.components().next().is_some_and(|c| c.as_os_str() == "etc") {
+        if rel
+            .components()
+            .next()
+            .is_some_and(|c| c.as_os_str() == "etc")
+        {
             if let Some(h) = path_hash(e.path()) {
                 etc_hashes.insert(pkgpath, h);
             }
@@ -639,7 +706,10 @@ pub(crate) fn move_tree(
                     let mut alt = to.clone().into_os_string();
                     alt.push(".nawa-new");
                     tx.place(&from, Path::new(&alt))?;
-                    diverted.push((to.to_string_lossy().to_string(), alt.to_string_lossy().to_string()));
+                    diverted.push((
+                        to.to_string_lossy().to_string(),
+                        alt.to_string_lossy().to_string(),
+                    ));
                 } else {
                     tx.place(&from, &to)?;
                 }
@@ -682,7 +752,10 @@ pub(crate) fn path_hash(p: &Path) -> Option<String> {
 }
 
 pub(crate) fn contents_differ(staged: &Path, dest: &Path) -> bool {
-    let (ma, mb) = match (std::fs::symlink_metadata(staged), std::fs::symlink_metadata(dest)) {
+    let (ma, mb) = match (
+        std::fs::symlink_metadata(staged),
+        std::fs::symlink_metadata(dest),
+    ) {
         (Ok(a), Ok(b)) => (a, b),
         // destination missing -> nothing to protect
         _ => return false,
@@ -702,8 +775,6 @@ pub(crate) fn contents_differ(staged: &Path, dest: &Path) -> bool {
         }
     }
 }
-
-
 
 #[cfg(test)]
 mod legacy_init_conflict_tests {
@@ -742,13 +813,16 @@ mod legacy_init_conflict_tests {
         let owners = db.file_owners().unwrap();
         let staged_files = vec!["/usr/bin/init".to_string()];
 
-        let error = check_file_conflicts(
-            &staged, &root, "systemd", &staged_files, &owners, &db, None,
-        ).expect_err("ordinary installation must not take the legacy init entry point");
+        let error =
+            check_file_conflicts(&staged, &root, "systemd", &staged_files, &owners, &db, None)
+                .expect_err("ordinary installation must not take the legacy init entry point");
 
         assert!(error.to_string().contains("/usr/bin/init"));
         assert!(error.to_string().contains("runit-services"));
-        assert_eq!(std::fs::read_link(&root_init).unwrap(), PathBuf::from("/usr/bin/runit"));
+        assert_eq!(
+            std::fs::read_link(&root_init).unwrap(),
+            PathBuf::from("/usr/bin/runit")
+        );
         let _ = std::fs::remove_dir_all(base);
     }
 
@@ -770,17 +844,31 @@ mod legacy_init_conflict_tests {
             &staged,
             "pkgname = systemd\npkgver = 261.5\npkgrel = 2\narch = x86_64\nrundeps = \nsize = 1\n",
             &archive_path,
-        ).unwrap();
+        )
+        .unwrap();
 
         let definition = builtin_faseela_runit_to_systemd();
-        let authority = definition.legacy_init_handoff().expect("the built-in migration grants the narrow authority");
+        let authority = definition
+            .legacy_init_handoff()
+            .expect("the built-in migration grants the narrow authority");
         install_archive_payload(
-            &archive_path, &archive_path, &root, false, InstallReason::Explicit,
-            false, InstallAuth::LocalBuild, None, Some(&authority),
-        ).unwrap();
+            &archive_path,
+            &archive_path,
+            &root,
+            false,
+            InstallReason::Explicit,
+            false,
+            InstallAuth::LocalBuild,
+            None,
+            Some(&authority),
+        )
+        .unwrap();
 
         let db = Db::new(&root);
-        assert_eq!(std::fs::read_link(&root_init).unwrap(), PathBuf::from("../lib/systemd/systemd"));
+        assert_eq!(
+            std::fs::read_link(&root_init).unwrap(),
+            PathBuf::from("../lib/systemd/systemd")
+        );
         assert_eq!(
             db.owners_of_file("/usr/bin/init").unwrap(),
             vec!["runit-services".to_string(), "systemd".to_string()],
@@ -791,8 +879,14 @@ mod legacy_init_conflict_tests {
         // path now shared with systemd.
         crate::install::rollback::remove_with("runit-services", &root, false).unwrap();
         assert!(db.entry("runit-services").unwrap().is_none());
-        assert_eq!(db.owners_of_file("/usr/bin/init").unwrap(), vec!["systemd".to_string()]);
-        assert_eq!(std::fs::read_link(&root_init).unwrap(), PathBuf::from("../lib/systemd/systemd"));
+        assert_eq!(
+            db.owners_of_file("/usr/bin/init").unwrap(),
+            vec!["systemd".to_string()]
+        );
+        assert_eq!(
+            std::fs::read_link(&root_init).unwrap(),
+            PathBuf::from("../lib/systemd/systemd")
+        );
         let _ = std::fs::remove_dir_all(base);
     }
 
@@ -812,11 +906,19 @@ mod legacy_init_conflict_tests {
         let staged = stage_systemd_init(&base);
         let db = Db::new(&root);
         let owners = db.file_owners().unwrap();
-        let authority = builtin_faseela_runit_to_systemd().legacy_init_handoff().unwrap();
+        let authority = builtin_faseela_runit_to_systemd()
+            .legacy_init_handoff()
+            .unwrap();
         let error = check_file_conflicts(
-            &staged, &root, "systemd", &["/usr/bin/init".to_string()],
-            &owners, &db, Some(&authority),
-        ).expect_err("an additional package owner must keep the collision blocked");
+            &staged,
+            &root,
+            "systemd",
+            &["/usr/bin/init".to_string()],
+            &owners,
+            &db,
+            Some(&authority),
+        )
+        .expect_err("an additional package owner must keep the collision blocked");
         assert!(error.to_string().contains("other-owner"));
         let _ = std::fs::remove_dir_all(base);
     }

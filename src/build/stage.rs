@@ -29,8 +29,12 @@ pub(super) fn stage_source(
     src: &Path,
     pkg: &Path,
 ) -> Result<StagedSource> {
-    let (builddir, work, src, pkg) =
-        (builddir.to_path_buf(), work.to_path_buf(), src.to_path_buf(), pkg.to_path_buf());
+    let (builddir, work, src, pkg) = (
+        builddir.to_path_buf(),
+        work.to_path_buf(),
+        src.to_path_buf(),
+        pkg.to_path_buf(),
+    );
     let name = &rec.package.name;
     let ctx = ExpandCtx {
         jobs: opts.jobs,
@@ -79,7 +83,7 @@ pub(super) fn stage_source(
             bail!("local source {} does not exist", p.display());
         }
         fetch::copy_local(&p, &src)?;
-        grant_source_write(&src);  // host copies can carry foreign owners too
+        grant_source_write(&src); // host copies can carry foreign owners too
         src.clone()
     } else {
         // expand %{version} & co. in the source URL itself
@@ -100,8 +104,12 @@ pub(super) fn stage_source(
         } else {
             crate::nawa_info!("downloading {source}");
         }
-        let mirrors: Vec<String> =
-            rec.package.mirrors.iter().map(|m| rec.expand(m, &ctx)).collect();
+        let mirrors: Vec<String> = rec
+            .package
+            .mirrors
+            .iter()
+            .map(|m| rec.expand(m, &ctx))
+            .collect();
         fetch::download_cached_with_mirrors(&source, &mirrors, &tarball, Some(sha))?;
         fetch::verify_sha256(&tarball, sha)?;
 
@@ -128,11 +136,19 @@ pub(super) fn stage_source(
                 rec.package.source_dir.clone()
             };
             let candidate = src.join(rec.expand(&dir, &ctx));
-            if candidate.is_dir() { candidate } else { src.clone() }
+            if candidate.is_dir() {
+                candidate
+            } else {
+                src.clone()
+            }
         }
     };
 
-    Ok(StagedSource { srcdir, sources: staged, assets: staged_assets })
+    Ok(StagedSource {
+        srcdir,
+        sources: staged,
+        assets: staged_assets,
+    })
 }
 
 /// Where the sandbox's build base lives for this build; empty when the build
@@ -151,7 +167,11 @@ pub(super) fn sandbox_base_for(opts: &BuildOpts, work: &Path) -> Result<String> 
         }
     }
     let sandboxed = opts.isolation >= Isolation::Sandbox;
-    Ok(if sandboxed { sandbox_inside_base(work) } else { String::new() })
+    Ok(if sandboxed {
+        sandbox_inside_base(work)
+    } else {
+        String::new()
+    })
 }
 
 /// The build's own view of the workspace paths (`%{srcdir}`, `%{pkgdir}`,
@@ -204,5 +224,10 @@ pub(super) fn build_view(
     } else {
         pkg.to_path_buf()
     };
-    BuildView { srcroot, src: view_src, pkg: view_pkg, assets }
+    BuildView {
+        srcroot,
+        src: view_src,
+        pkg: view_pkg,
+        assets,
+    }
 }

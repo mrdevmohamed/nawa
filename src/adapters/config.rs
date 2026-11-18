@@ -149,7 +149,10 @@ pub(crate) struct Config {
 
 impl Config {
     pub fn source_of(&self, key: &str) -> &str {
-        self.sources.get(key).map(|s| s.as_str()).unwrap_or("default")
+        self.sources
+            .get(key)
+            .map(|s| s.as_str())
+            .unwrap_or("default")
     }
 }
 
@@ -207,14 +210,15 @@ fn read_layer(path: &Path) -> Result<Layer> {
     let cfg: FileCfg =
         toml::from_str(&raw).with_context(|| format!("bad config {}", path.display()))?;
     let base = path.parent().map(|d| d.to_path_buf()).unwrap_or_default();
-    Ok(Layer { path: path.to_path_buf(), base, cfg })
+    Ok(Layer {
+        path: path.to_path_buf(),
+        base,
+        cfg,
+    })
 }
 
 /// First layer (highest precedence first) that sets the key.
-fn pick<T>(
-    layers: &[Layer],
-    get: impl Fn(&FileCfg) -> Option<T>,
-) -> Option<(T, &Layer)> {
+fn pick<T>(layers: &[Layer], get: impl Fn(&FileCfg) -> Option<T>) -> Option<(T, &Layer)> {
     layers.iter().find_map(|l| get(&l.cfg).map(|v| (v, l)))
 }
 
@@ -284,20 +288,40 @@ pub(crate) fn load(ov: &Overrides) -> Result<Config> {
 
     // ---- the four path keys -------------------------------------------------
     cfg.root = resolve_path(
-        "root", ov.root.clone(), "NAWA_ROOT", &layers,
-        |c| c.root.clone(), PathBuf::from("/"), &mut cfg.sources,
+        "root",
+        ov.root.clone(),
+        "NAWA_ROOT",
+        &layers,
+        |c| c.root.clone(),
+        PathBuf::from("/"),
+        &mut cfg.sources,
     );
     cfg.recipes = resolve_path(
-        "recipes", ov.recipes.clone(), "NAWA_RECIPES", &layers,
-        |c| c.recipes.clone(), PathBuf::from("recipes"), &mut cfg.sources,
+        "recipes",
+        ov.recipes.clone(),
+        "NAWA_RECIPES",
+        &layers,
+        |c| c.recipes.clone(),
+        PathBuf::from("recipes"),
+        &mut cfg.sources,
     );
     cfg.builddir = resolve_path(
-        "builddir", ov.builddir.clone(), "NAWA_BUILDDIR", &layers,
-        |c| c.builddir.clone(), PathBuf::from("build"), &mut cfg.sources,
+        "builddir",
+        ov.builddir.clone(),
+        "NAWA_BUILDDIR",
+        &layers,
+        |c| c.builddir.clone(),
+        PathBuf::from("build"),
+        &mut cfg.sources,
     );
     cfg.profiles = resolve_path(
-        "profiles", ov.profiles.clone(), "NAWA_PROFILES", &layers,
-        |c| c.profiles.clone(), PathBuf::from("profiles"), &mut cfg.sources,
+        "profiles",
+        ov.profiles.clone(),
+        "NAWA_PROFILES",
+        &layers,
+        |c| c.profiles.clone(),
+        PathBuf::from("profiles"),
+        &mut cfg.sources,
     );
 
     // ---- jobs -------------------------------------------------------------
@@ -309,19 +333,24 @@ pub(crate) fn load(ov: &Overrides) -> Result<Config> {
         cfg.sources.insert("jobs".into(), "env NAWA_JOBS".into());
     } else if let Some((v, layer)) = pick(&layers, |c| c.jobs) {
         cfg.jobs = Some(v);
-        cfg.sources.insert("jobs".into(), layer.path.display().to_string());
+        cfg.sources
+            .insert("jobs".into(), layer.path.display().to_string());
     }
 
     // ---- repo (built-in default: DEFAULT_REPO) -------------------------------
     if let Some(v) = ov.repo.clone() {
         cfg.repo = normalize_repo(&v);
         cfg.sources.insert("repo".into(), "flag".into());
-    } else if let Some(v) = std::env::var("NAWA_REPO").ok().filter(|s| !s.trim().is_empty()) {
+    } else if let Some(v) = std::env::var("NAWA_REPO")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+    {
         cfg.repo = normalize_repo(&v);
         cfg.sources.insert("repo".into(), "env NAWA_REPO".into());
     } else if let Some((v, layer)) = pick(&layers, |c| c.repo.clone()) {
         cfg.repo = normalize_repo(&v);
-        cfg.sources.insert("repo".into(), layer.path.display().to_string());
+        cfg.sources
+            .insert("repo".into(), layer.path.display().to_string());
     }
 
     // ---- downloads (roadmap §7.2: flag > env > file > default) -----------------
@@ -332,11 +361,13 @@ pub(crate) fn load(ov: &Overrides) -> Result<Config> {
     } else if let Ok(v) = std::env::var("NAWA_DOWNLOADS") {
         if !v.trim().is_empty() {
             downloads = v.trim().parse::<u32>().context("bad NAWA_DOWNLOADS")?;
-            cfg.sources.insert("downloads".into(), "env NAWA_DOWNLOADS".into());
+            cfg.sources
+                .insert("downloads".into(), "env NAWA_DOWNLOADS".into());
         }
     } else if let Some((v, layer)) = pick(&layers, |c| c.downloads) {
         downloads = v;
-        cfg.sources.insert("downloads".into(), layer.path.display().to_string());
+        cfg.sources
+            .insert("downloads".into(), layer.path.display().to_string());
     }
     if downloads == 0 {
         bail!("downloads = 0 is invalid — use at least 1 (sequential downloading)");
@@ -347,20 +378,28 @@ pub(crate) fn load(ov: &Overrides) -> Result<Config> {
     if let Some(m) = ov.install_mode {
         cfg.install_mode = m;
         cfg.sources.insert("install_mode".into(), "flag".into());
-    } else if let Some(v) = std::env::var("NAWA_INSTALL_MODE").ok().filter(|s| !s.trim().is_empty()) {
+    } else if let Some(v) = std::env::var("NAWA_INSTALL_MODE")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+    {
         cfg.install_mode = InstallMode::parse(&v).context("bad NAWA_INSTALL_MODE")?;
-        cfg.sources.insert("install_mode".into(), "env NAWA_INSTALL_MODE".into());
+        cfg.sources
+            .insert("install_mode".into(), "env NAWA_INSTALL_MODE".into());
     } else if let Some((v, layer)) = pick(&layers, |c| c.install_mode.clone()) {
         cfg.install_mode = InstallMode::parse(&v)
             .with_context(|| format!("bad install_mode in {}", layer.path.display()))?;
-        cfg.sources.insert("install_mode".into(), layer.path.display().to_string());
+        cfg.sources
+            .insert("install_mode".into(), layer.path.display().to_string());
     }
 
     Ok(cfg)
 }
 
 fn env_path(key: &str) -> Option<PathBuf> {
-    std::env::var(key).ok().filter(|s| !s.trim().is_empty()).map(PathBuf::from)
+    std::env::var(key)
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from)
 }
 
 fn env_u32(key: &str) -> Result<Option<u32>> {
@@ -502,7 +541,11 @@ mod tests {
         assert_eq!(cfg.builddir, PathBuf::from("build"));
         assert_eq!(cfg.profiles, PathBuf::from("profiles"));
         assert_eq!(cfg.jobs, None);
-        assert_eq!(cfg.repo.as_deref(), Some(DEFAULT_REPO), "built-in default repo");
+        assert_eq!(
+            cfg.repo.as_deref(),
+            Some(DEFAULT_REPO),
+            "built-in default repo"
+        );
         assert_eq!(cfg.install_mode, InstallMode::Auto);
         assert_eq!(cfg.source_of("root"), "default");
         assert_eq!(cfg.source_of("repo"), "default");
@@ -529,14 +572,21 @@ mod tests {
         // relative to the FILE, not the CWD
         assert_eq!(cfg.recipes, project.join("src/recipes"));
         assert_eq!(cfg.jobs, Some(4));
-        assert_eq!(cfg.source_of("jobs"), project.join("nawa.toml").to_string_lossy());
+        assert_eq!(
+            cfg.source_of("jobs"),
+            project.join("nawa.toml").to_string_lossy()
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
     fn precedence_flag_beats_env_beats_file() {
         let base = tempdir("prec");
-        std::fs::write(base.join("nawa.toml"), "jobs = 2\nbuilddir = \"from-file\"\n").unwrap();
+        std::fs::write(
+            base.join("nawa.toml"),
+            "jobs = 2\nbuilddir = \"from-file\"\n",
+        )
+        .unwrap();
         let g = isolate(&base);
         std::env::remove_var("NAWA_CONFIG");
         std::env::set_var("NAWA_JOBS", "6");
@@ -611,13 +661,19 @@ mod tests {
 
         // project file wins where both set a key ...
         assert_eq!(cfg.jobs, Some(5));
-        assert_eq!(cfg.source_of("jobs"), project.join("nawa.toml").to_string_lossy());
+        assert_eq!(
+            cfg.source_of("jobs"),
+            project.join("nawa.toml").to_string_lossy()
+        );
         // ... the system file fills in everything else, relative paths
         // anchored at /etc/nawa (here: the temp sysconf dir)
         assert_eq!(cfg.recipes, sysdir.join("sysrecipes"));
         assert_eq!(cfg.repo.as_deref(), Some("https://sys.example/repo"));
         assert_eq!(cfg.install_mode, InstallMode::Build);
-        assert_eq!(cfg.source_of("repo"), sysdir.join("nawa.toml").to_string_lossy());
+        assert_eq!(
+            cfg.source_of("repo"),
+            sysdir.join("nawa.toml").to_string_lossy()
+        );
         assert_eq!(cfg.system_file, Some(sysdir.join("nawa.toml")));
         assert_eq!(cfg.file, Some(project.join("nawa.toml")));
         let _ = std::fs::remove_dir_all(&base);
@@ -673,7 +729,10 @@ mod tests {
         std::env::remove_var("NAWA_CONFIG");
         let err = load(&Overrides::default()).unwrap_err();
         restore(g, &base);
-        assert!(format!("{err:#}").contains("unknown install mode"), "{err:#}");
+        assert!(
+            format!("{err:#}").contains("unknown install mode"),
+            "{err:#}"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 

@@ -1,11 +1,16 @@
 //! Repository index creation and validation (split from monolithic repo.rs).
 
-pub mod model;
-pub mod validate;
 pub mod create;
-pub mod update;
+pub mod model;
 pub mod pack;
+pub mod update;
+pub mod validate;
 
+pub(crate) use create::create_index_with_locations_and_groups;
+#[cfg(test)]
+pub(crate) use create::{
+    create_index, create_index_with, create_index_with_locations, create_index_with_version,
+};
 pub(crate) use model::{
     Index, RepoEntry, ARCHIVE_LOCATION_PER_PACKAGE_URL, INDEX_SCHEMA_V2, INDEX_SCHEMA_V3,
     INDEX_SCHEMA_V4, RECIPES_SUFFIX,
@@ -14,25 +19,20 @@ pub(crate) use model::{
 pub(crate) use model::{
     RepositoryMeta, ARCHIVE_AUTH_SIGNED_INDEX, ARCHIVE_LOCATION_BASE_URL, INDEX_VALIDITY_SECS,
 };
-pub(crate) use validate::load_index_bytes;
-#[cfg(test)]
-pub(crate) use validate::load_index;
-pub(crate) use create::create_index_with_locations_and_groups;
-#[cfg(test)]
-pub(crate) use create::{
-    create_index, create_index_with, create_index_with_locations, create_index_with_version,
-};
-pub(crate) use update::{update_index_files, UpdateIndexFilesInputs};
+pub(crate) use pack::validate_rev;
 #[cfg(test)]
 pub(crate) use update::{update_index, IndexDelta};
-pub(crate) use pack::validate_rev;
+pub(crate) use update::{update_index_files, UpdateIndexFilesInputs};
+#[cfg(test)]
+pub(crate) use validate::load_index;
+pub(crate) use validate::load_index_bytes;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::archive;
     #[cfg(test)]
     use std::path::{Path, PathBuf};
-    use crate::adapters::archive;
 
     #[test]
     fn index_keeps_only_the_newest_version_per_package() {
@@ -45,8 +45,15 @@ mod tests {
             let st = base.join(format!("st-{ver}-{rel}"));
             std::fs::create_dir_all(&st).unwrap();
             std::fs::write(st.join("f"), b"x").unwrap();
-            let pkginfo = format!("pkgname = demo\npkgver = {ver}\npkgrel = {rel}\narch = x86_64\nsize = 1\n");
-            archive::create(&st, &pkginfo, &dir.join(format!("demo-{ver}-{rel}.nawa.tar.zst"))).unwrap();
+            let pkginfo = format!(
+                "pkgname = demo\npkgver = {ver}\npkgrel = {rel}\narch = x86_64\nsize = 1\n"
+            );
+            archive::create(
+                &st,
+                &pkginfo,
+                &dir.join(format!("demo-{ver}-{rel}.nawa.tar.zst")),
+            )
+            .unwrap();
         }
 
         let out = base.join("index.toml");
@@ -60,7 +67,10 @@ mod tests {
         assert_eq!(e.installed_size, 1);
         let old = "[[package]]\nname = \"a\"\nversion = \"1\"\nrel = 1\narch = \"x86_64\"\nfile = \"a.nawa.tar.zst\"\nsha256 = \"00\"\n";
         let parsed: Index = toml::from_str(old).unwrap();
-        assert_eq!((parsed.packages[0].size, parsed.packages[0].installed_size), (0, 0));
+        assert_eq!(
+            (parsed.packages[0].size, parsed.packages[0].installed_size),
+            (0, 0)
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -120,19 +130,26 @@ mod tests {
         };
         index.validate().unwrap();
 
-        index.packages[0].download_url = Some("http://github.com/example/repo/file.nawa.tar.zst".into());
+        index.packages[0].download_url =
+            Some("http://github.com/example/repo/file.nawa.tar.zst".into());
         assert!(index.validate().unwrap_err().to_string().contains("HTTPS"));
 
-        index.packages[0].download_url = Some("https://user:password@github.com/example/repo/file.nawa.tar.zst".into());
+        index.packages[0].download_url =
+            Some("https://user:password@github.com/example/repo/file.nawa.tar.zst".into());
         assert!(index.validate().is_err());
 
         index.packages[0].download_url = None;
-        assert!(index.validate().unwrap_err().to_string().contains("download_url"));
+        assert!(index
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("download_url"));
     }
 
     #[test]
     fn repo_create_v3_applies_package_locations_manifest() {
-        let base = std::env::temp_dir().join(format!("nawa-repo-v3-locations-{}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("nawa-repo-v3-locations-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let dir = base.join("repo");
         let staging = base.join("staging");
@@ -140,13 +157,18 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::create_dir_all(&staging).unwrap();
         std::fs::create_dir_all(recipes.join("base/demo")).unwrap();
-        std::fs::write(recipes.join("base/demo/recipe.toml"), "[package]\nname = \"demo\"\nversion = \"1.0\"\n").unwrap();
+        std::fs::write(
+            recipes.join("base/demo/recipe.toml"),
+            "[package]\nname = \"demo\"\nversion = \"1.0\"\n",
+        )
+        .unwrap();
         std::fs::write(staging.join("bin"), b"bash").unwrap();
         archive::create(
             &staging,
             "pkgname = demo\npkgver = 1.0\npkgrel = 1\narch = x86_64\nsize = 4\n",
             &dir.join("demo-1.0-1.nawa.tar.zst"),
-        ).unwrap();
+        )
+        .unwrap();
 
         let locations = base.join("locations.toml");
         std::fs::write(
@@ -163,8 +185,13 @@ mod tests {
 
         let index_path = dir.join("index.toml");
         let index = create_index_with_locations(
-            &dir, &index_path, Some((&recipes, "abc123")), INDEX_SCHEMA_V3, Some(&locations)
-        ).unwrap();
+            &dir,
+            &index_path,
+            Some((&recipes, "abc123")),
+            INDEX_SCHEMA_V3,
+            Some(&locations),
+        )
+        .unwrap();
         assert_eq!(
             index.packages[0].download_url.as_deref(),
             Some("https://github.com/example/repo/releases/download/packages-0001/sha256-demo.nawa.tar.zst")
@@ -222,10 +249,18 @@ mod tests {
             }],
         };
         index.repository.as_mut().unwrap().archive_auth = "detached".into();
-        assert!(index.validate().unwrap_err().to_string().contains("archive_auth"));
+        assert!(index
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("archive_auth"));
         index.repository.as_mut().unwrap().archive_auth = ARCHIVE_AUTH_SIGNED_INDEX.into();
         index.packages[0].sha256 = "xyz".into();
-        assert!(index.validate().unwrap_err().to_string().contains("SHA-256"));
+        assert!(index
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("SHA-256"));
     }
 
     // ---- repo-update ------------------------------------------------------
@@ -234,12 +269,19 @@ mod tests {
         let st = root.join(format!("st-{name}-{ver}-{rel}"));
         std::fs::create_dir_all(&st).unwrap();
         std::fs::write(st.join("f"), format!("{name}{ver}{rel}")).unwrap();
-        let info = format!("pkgname = {name}\npkgver = {ver}\npkgrel = {rel}\narch = x86_64\nsize = 7\n");
-        archive::create(&st, &info, &dir.join(format!("{name}-{ver}-{rel}.nawa.tar.zst"))).unwrap();
+        let info =
+            format!("pkgname = {name}\npkgver = {ver}\npkgrel = {rel}\narch = x86_64\nsize = 7\n");
+        archive::create(
+            &st,
+            &info,
+            &dir.join(format!("{name}-{ver}-{rel}.nawa.tar.zst")),
+        )
+        .unwrap();
     }
 
     fn scratch(tag: &str) -> PathBuf {
-        let base = std::env::temp_dir().join(format!("nawa-repo-update-{tag}-{}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("nawa-repo-update-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         base
@@ -255,10 +297,16 @@ mod tests {
         let base = scratch("equiv");
         let a = base.join("a");
         std::fs::create_dir_all(&a).unwrap();
-        for (n, v) in [("demo", "1.0"), ("keep", "1.0"), ("old", "1.0"), ("swap", "1.0")] {
+        for (n, v) in [
+            ("demo", "1.0"),
+            ("keep", "1.0"),
+            ("old", "1.0"),
+            ("swap", "1.0"),
+        ] {
             mk_archive(&base, &a, n, v, 1);
         }
-        let base_idx = create_index_with_version(&a, &base.join("a.toml"), None, INDEX_SCHEMA_V2).unwrap();
+        let base_idx =
+            create_index_with_version(&a, &base.join("a.toml"), None, INDEX_SCHEMA_V2).unwrap();
 
         // the delta: new swap, new fresh, an OLDER demo (must be ignored), `old` gone
         let new = base.join("new");
@@ -266,7 +314,8 @@ mod tests {
         mk_archive(&base, &new, "swap", "2.0", 1);
         mk_archive(&base, &new, "fresh", "1.0", 1);
         mk_archive(&base, &new, "demo", "0.5", 1);
-        let new_idx = create_index_with_version(&new, &base.join("new.toml"), None, INDEX_SCHEMA_V2).unwrap();
+        let new_idx =
+            create_index_with_version(&new, &base.join("new.toml"), None, INDEX_SCHEMA_V2).unwrap();
 
         let updated = update_index(
             &base_idx,
@@ -277,12 +326,16 @@ mod tests {
             },
             None,
             1_000,
-        ).unwrap();
+        )
+        .unwrap();
 
         // reference: one directory holding (A - old) + new, indexed from scratch
         let full = base.join("full");
         std::fs::create_dir_all(&full).unwrap();
-        for f in std::fs::read_dir(&a).unwrap().chain(std::fs::read_dir(&new).unwrap()) {
+        for f in std::fs::read_dir(&a)
+            .unwrap()
+            .chain(std::fs::read_dir(&new).unwrap())
+        {
             let f = f.unwrap().path();
             if f.extension().map(|x| x == "zst").unwrap_or(false)
                 && !f.file_name().unwrap().to_string_lossy().starts_with("old-")
@@ -290,7 +343,9 @@ mod tests {
                 std::fs::copy(&f, full.join(f.file_name().unwrap())).unwrap();
             }
         }
-        let reference = create_index_with_version(&full, &base.join("full.toml"), None, INDEX_SCHEMA_V2).unwrap();
+        let reference =
+            create_index_with_version(&full, &base.join("full.toml"), None, INDEX_SCHEMA_V2)
+                .unwrap();
         assert_eq!(shape(&updated), shape(&reference));
         assert_eq!(updated.find("swap").unwrap().version, "2.0");
         assert_eq!(updated.find("demo").unwrap().version, "1.0");
@@ -306,7 +361,8 @@ mod tests {
         let a = base.join("a");
         std::fs::create_dir_all(&a).unwrap();
         mk_archive(&base, &a, "demo", "1.0", 1);
-        let idx = create_index_with_version(&a, &base.join("a.toml"), None, INDEX_SCHEMA_V2).unwrap();
+        let idx =
+            create_index_with_version(&a, &base.join("a.toml"), None, INDEX_SCHEMA_V2).unwrap();
         let later = idx.generated.unwrap() + 80 * 24 * 3600;
         let refreshed = update_index(&idx, IndexDelta::default(), None, later).unwrap();
         assert_eq!(shape(&refreshed), shape(&idx));
@@ -321,17 +377,32 @@ mod tests {
         let a = base.join("a");
         std::fs::create_dir_all(&a).unwrap();
         mk_archive(&base, &a, "demo", "1.0", 1);
-        let idx = create_index_with_version(&a, &base.join("a.toml"), None, INDEX_SCHEMA_V2).unwrap();
+        let idx =
+            create_index_with_version(&a, &base.join("a.toml"), None, INDEX_SCHEMA_V2).unwrap();
         let same = update_index(
             &idx,
-            IndexDelta { add: idx.packages.clone(), ..Default::default() },
-            None, 5,
-        ).unwrap();
+            IndexDelta {
+                add: idx.packages.clone(),
+                ..Default::default()
+            },
+            None,
+            5,
+        )
+        .unwrap();
         assert_eq!(shape(&same), shape(&idx));
 
         let mut changed = idx.packages.clone();
         changed[0].sha256 = "b".repeat(64);
-        let err = update_index(&idx, IndexDelta { add: changed, ..Default::default() }, None, 5).unwrap_err();
+        let err = update_index(
+            &idx,
+            IndexDelta {
+                add: changed,
+                ..Default::default()
+            },
+            None,
+            5,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("immutable"), "{err}");
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -342,9 +413,13 @@ mod tests {
         let a = base.join("a");
         std::fs::create_dir_all(&a).unwrap();
         mk_archive(&base, &a, "demo", "1.0", 1);
-        let idx = create_index_with_version(&a, &base.join("a.toml"), None, INDEX_SCHEMA_V2).unwrap();
+        let idx =
+            create_index_with_version(&a, &base.join("a.toml"), None, INDEX_SCHEMA_V2).unwrap();
 
-        let lose = IndexDelta { remove_files: vec!["demo-1.0-1.nawa.tar.zst".into()], ..Default::default() };
+        let lose = IndexDelta {
+            remove_files: vec!["demo-1.0-1.nawa.tar.zst".into()],
+            ..Default::default()
+        };
         let err = update_index(&idx, lose, None, 5).unwrap_err();
         assert!(err.to_string().contains("without an entry"), "{err}");
 
@@ -354,12 +429,27 @@ mod tests {
             drop_packages: vec!["demo".into()],
             ..Default::default()
         };
-        assert!(update_index(&idx, drop, None, 5).unwrap().packages.is_empty());
-        let noop = IndexDelta { remove_files: vec!["demo-0.1-1.nawa.tar.zst".into()], ..Default::default() };
-        assert_eq!(shape(&update_index(&idx, noop, None, 5).unwrap()), shape(&idx));
+        assert!(update_index(&idx, drop, None, 5)
+            .unwrap()
+            .packages
+            .is_empty());
+        let noop = IndexDelta {
+            remove_files: vec!["demo-0.1-1.nawa.tar.zst".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            shape(&update_index(&idx, noop, None, 5).unwrap()),
+            shape(&idx)
+        );
 
-        let typo = IndexDelta { drop_packages: vec!["nope".into()], ..Default::default() };
-        assert!(update_index(&idx, typo, None, 5).unwrap_err().to_string().contains("not in the base index"));
+        let typo = IndexDelta {
+            drop_packages: vec!["nope".into()],
+            ..Default::default()
+        };
+        assert!(update_index(&idx, typo, None, 5)
+            .unwrap_err()
+            .to_string()
+            .contains("not in the base index"));
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -370,14 +460,21 @@ mod tests {
         std::fs::create_dir_all(&a).unwrap();
         mk_archive(&base, &a, "demo", "1.0", 1);
         mk_archive(&base, &a, "demo", "2.0", 1);
-        let idx = create_index_with_version(&a, &base.join("a.toml"), None, INDEX_SCHEMA_V2).unwrap();
+        let idx =
+            create_index_with_version(&a, &base.join("a.toml"), None, INDEX_SCHEMA_V2).unwrap();
         assert_eq!(idx.find("demo").unwrap().version, "2.0");
 
         // roll back: 2.0 leaves, the caller supplies the 1.0 entry to take over
         let only_old = base.join("only-old");
         std::fs::create_dir_all(&only_old).unwrap();
-        std::fs::copy(a.join("demo-1.0-1.nawa.tar.zst"), only_old.join("demo-1.0-1.nawa.tar.zst")).unwrap();
-        let old_entry = create_index_with_version(&only_old, &base.join("o.toml"), None, INDEX_SCHEMA_V2).unwrap();
+        std::fs::copy(
+            a.join("demo-1.0-1.nawa.tar.zst"),
+            only_old.join("demo-1.0-1.nawa.tar.zst"),
+        )
+        .unwrap();
+        let old_entry =
+            create_index_with_version(&only_old, &base.join("o.toml"), None, INDEX_SCHEMA_V2)
+                .unwrap();
         let rolled = update_index(
             &idx,
             IndexDelta {
@@ -385,8 +482,10 @@ mod tests {
                 remove_files: vec!["demo-2.0-1.nawa.tar.zst".into()],
                 ..Default::default()
             },
-            None, 5,
-        ).unwrap();
+            None,
+            5,
+        )
+        .unwrap();
         assert_eq!(rolled.find("demo").unwrap().version, "1.0");
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -398,12 +497,25 @@ mod tests {
         std::fs::create_dir_all(&a).unwrap();
         mk_archive(&base, &a, "demo", "1.0", 1);
         let v1 = create_index(&a, &base.join("v1.toml")).unwrap();
-        assert!(update_index(&v1, IndexDelta::default(), None, 5).unwrap_err().to_string().contains("schema-2 or schema-3"));
+        assert!(update_index(&v1, IndexDelta::default(), None, 5)
+            .unwrap_err()
+            .to_string()
+            .contains("schema-2 or schema-3"));
 
-        let v2 = create_index_with_version(&a, &base.join("v2.toml"), None, INDEX_SCHEMA_V2).unwrap();
+        let v2 =
+            create_index_with_version(&a, &base.join("v2.toml"), None, INDEX_SCHEMA_V2).unwrap();
         let mut bad = v2.packages[0].clone();
         bad.name = "other".into();
-        let err = update_index(&v2, IndexDelta { add: vec![bad], ..Default::default() }, None, 5).unwrap_err();
+        let err = update_index(
+            &v2,
+            IndexDelta {
+                add: vec![bad],
+                ..Default::default()
+            },
+            None,
+            5,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("expected"), "{err}");
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -416,19 +528,43 @@ mod tests {
         mk_archive(&base, &a, "demo", "1.0", 1);
         let loc = base.join("loc.toml");
         std::fs::write(&loc, "schema = 1\n[package_urls]\n\"demo-1.0-1.nawa.tar.zst\" = \"https://github.com/e/r/releases/download/packages-0001/demo.nawa.tar.zst\"\n\"extra-1.0-1.nawa.tar.zst\" = \"https://github.com/e/r/releases/download/packages-0001/extra.nawa.tar.zst\"\n").unwrap();
-        let idx = create_index_with_locations(&a, &base.join("a.toml"), None, INDEX_SCHEMA_V3, Some(&loc)).unwrap();
+        let idx = create_index_with_locations(
+            &a,
+            &base.join("a.toml"),
+            None,
+            INDEX_SCHEMA_V3,
+            Some(&loc),
+        )
+        .unwrap();
 
         let new = base.join("new");
         std::fs::create_dir_all(&new).unwrap();
         mk_archive(&base, &new, "extra", "1.0", 1);
-        let new_idx = create_index_with_locations(&new, &base.join("n.toml"), None, INDEX_SCHEMA_V3, Some(&loc)).unwrap();
+        let new_idx = create_index_with_locations(
+            &new,
+            &base.join("n.toml"),
+            None,
+            INDEX_SCHEMA_V3,
+            Some(&loc),
+        )
+        .unwrap();
         // entries without download_url: the manifest must supply it
         let mut entry = new_idx.packages[0].clone();
         entry.download_url = None;
         let entries = base.join("entries.toml");
-        std::fs::write(&entries, toml::to_string(&Index {
-            generated: None, expires: None, repository: None, recipes: None, groups: None, packages: vec![entry],
-        }).unwrap()).unwrap();
+        std::fs::write(
+            &entries,
+            toml::to_string(&Index {
+                generated: None,
+                expires: None,
+                repository: None,
+                recipes: None,
+                groups: None,
+                packages: vec![entry],
+            })
+            .unwrap(),
+        )
+        .unwrap();
 
         let out = base.join("out.toml");
         let updated = update_index_files(
@@ -483,13 +619,24 @@ mod tests {
         )
         .unwrap();
         let out = base.join("index.toml");
-        let idx = create_index_with_locations_and_groups(&dir, &out, None, 4, Some(&locations), None).unwrap();
+        let idx =
+            create_index_with_locations_and_groups(&dir, &out, None, 4, Some(&locations), None)
+                .unwrap();
         assert_eq!(idx.repository.as_ref().unwrap().schema, 4);
-        assert_eq!(idx.packages[0].rundeps.as_deref(), Some(&["glibc".to_string(), "mesa".to_string()][..]));
-        assert_eq!(idx.packages[0].provides.as_deref(), Some(&["init-system=runit".to_string()][..]));
+        assert_eq!(
+            idx.packages[0].rundeps.as_deref(),
+            Some(&["glibc".to_string(), "mesa".to_string()][..])
+        );
+        assert_eq!(
+            idx.packages[0].provides.as_deref(),
+            Some(&["init-system=runit".to_string()][..])
+        );
         let raw = std::fs::read(&out).unwrap();
         let parsed = load_index_bytes(&raw).unwrap();
-        assert_eq!(parsed.packages[0].provides.as_deref(), Some(&["init-system=runit".to_string()][..]));
+        assert_eq!(
+            parsed.packages[0].provides.as_deref(),
+            Some(&["init-system=runit".to_string()][..])
+        );
         let text = String::from_utf8(raw).unwrap();
         assert!(text.contains("schema = 4"));
         assert!(text.contains("provides = [\"init-system=runit\"]"));
@@ -525,7 +672,10 @@ mod tests {
             None,
         )
         .unwrap_err();
-        assert!(format!("{error:#}").contains("no provides field"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("no provides field"),
+            "{error:#}"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -556,14 +706,22 @@ provides = ["init-system=runit"]
 "#;
         load_index_bytes(good.as_bytes()).unwrap();
 
-        let unknown = good.replace("rundeps = [\"glibc\"]", "rundeps = [\"glibc\"]\nsurprise = 1");
-        assert!(format!("{:#}", load_index_bytes(unknown.as_bytes()).unwrap_err()).contains("unknown field"));
+        let unknown = good.replace(
+            "rundeps = [\"glibc\"]",
+            "rundeps = [\"glibc\"]\nsurprise = 1",
+        );
+        assert!(
+            format!("{:#}", load_index_bytes(unknown.as_bytes()).unwrap_err())
+                .contains("unknown field")
+        );
 
         let missing = good.replace("provides = [\"init-system=runit\"]\n", "");
         assert!(load_index_bytes(missing.as_bytes()).is_err());
 
         let duplicate = good.replace("rundeps = [\"glibc\"]", "rundeps = [\"glibc\", \"glibc\"]");
-        assert!(format!("{:#}", load_index_bytes(duplicate.as_bytes()).unwrap_err()).contains("twice"));
+        assert!(
+            format!("{:#}", load_index_bytes(duplicate.as_bytes()).unwrap_err()).contains("twice")
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -574,7 +732,11 @@ provides = ["init-system=runit"]
         let base = crate::testutil::tmpdir("repo-legacy");
         for (schema, location, url) in [
             (2u32, "base-url", None),
-            (3, "per-package-url", Some("https://example.com/demo.nawa.tar.zst")),
+            (
+                3,
+                "per-package-url",
+                Some("https://example.com/demo.nawa.tar.zst"),
+            ),
         ] {
             let mut doc = format!(
                 "generated = 10\nexpires = 20\n\n[repository]\nschema = {schema}\narchive_auth = \"signed-index\"\nhash_algorithm = \"sha256\"\nindex_signature = \"nawa-sig-v1\"\narchive_location = \"{location}\"\n\n[[package]]\nname = \"demo\"\nversion = \"1\"\nrel = 1\narch = \"x86_64\"\nfile = \"demo-1-1.nawa.tar.zst\"\nsha256 = \"{}\"\nsize = 10\n",
@@ -589,8 +751,14 @@ provides = ["init-system=runit"]
                 idx.packages[0].provides.as_ref(),
             )
             .unwrap();
-            assert_eq!(meta.provides, crate::domain::system::capability::Provides::Unknown);
-            assert_eq!(meta.rundeps, crate::domain::package::metadata::RunDeps::Unknown);
+            assert_eq!(
+                meta.provides,
+                crate::domain::system::capability::Provides::Unknown
+            );
+            assert_eq!(
+                meta.rundeps,
+                crate::domain::package::metadata::RunDeps::Unknown
+            );
         }
         let _ = std::fs::remove_dir_all(&base);
     }

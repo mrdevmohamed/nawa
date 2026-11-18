@@ -5,24 +5,22 @@
 //! Observer errors are stored as diagnostics and never reverse package state.
 
 use anyhow::{Context, Result};
-use serde::Serialize;
 use rustix::fd::AsFd;
 use rustix::fs::{flock, FlockOperation};
+use serde::Serialize;
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use crate::transaction::history::TransactionRecord;
-use crate::transaction::outbox::outbox_dir;
 use super::discovery::{self, PluginState};
 use super::manifest::Capability;
 use super::runner::{PluginProcess, DEFAULT_TIMEOUT};
+use crate::transaction::history::TransactionRecord;
+use crate::transaction::outbox::outbox_dir;
 
 fn failures_dir(root: &Path) -> PathBuf {
     root.join("var/lib/nawa/plugins/failures")
 }
-
-
 
 /// Serialize event dispatchers without holding the package database lock.
 /// A non-blocking lock also avoids deadlocking a plugin that invokes Nawa.
@@ -31,7 +29,7 @@ fn acquire_dispatch_lock(dir: &Path) -> Result<Option<File>> {
     let file = OpenOptions::new()
         .read(true)
         .write(true)
-.create(true)
+        .create(true)
         .truncate(false)
         .mode(0o600)
         .open(&path)
@@ -45,8 +43,10 @@ fn acquire_dispatch_lock(dir: &Path) -> Result<Option<File>> {
                 match error.kind() {
                     std::io::ErrorKind::Interrupted => continue,
                     std::io::ErrorKind::WouldBlock => return Ok(None),
-                    _ => return Err(error)
-                        .with_context(|| format!("lock plugin event outbox {}", dir.display())),
+                    _ => {
+                        return Err(error)
+                            .with_context(|| format!("lock plugin event outbox {}", dir.display()))
+                    }
                 }
             }
         }
@@ -90,10 +90,15 @@ pub(crate) fn dispatch_pending(
             return;
         }
     };
-    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
     let mut paths: Vec<PathBuf> = entries
         .filter_map(|entry| entry.ok().map(|item| item.path()))
-        .filter(|path| path.extension().is_some_and(|extension| extension == "toml"))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "toml")
+        })
         .collect();
     paths.sort();
 
@@ -109,7 +114,9 @@ pub(crate) fn dispatch_pending(
         for failure in dispatch_record(root, project_config, system_config, &record) {
             crate::nawa_warn!(
                 "observer plugin {} failed for {}: {}",
-                failure.plugin_id, failure.event_type, failure.error
+                failure.plugin_id,
+                failure.event_type,
+                failure.error
             );
             if let Err(error) = store_failure(root, &failure) {
                 diagnostics_complete = false;
@@ -121,7 +128,10 @@ pub(crate) fn dispatch_pending(
             continue;
         }
         if let Err(error) = std::fs::remove_file(&path) {
-            crate::nawa_warn!("could not remove dispatched event {}: {error}", path.display());
+            crate::nawa_warn!(
+                "could not remove dispatched event {}: {error}",
+                path.display()
+            );
         }
     }
 }
@@ -129,8 +139,8 @@ pub(crate) fn dispatch_pending(
 fn load_event(path: &Path) -> Result<TransactionRecord> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("read observer event {}", path.display()))?;
-    let record: TransactionRecord = toml::from_str(&raw)
-        .with_context(|| format!("parse observer event {}", path.display()))?;
+    let record: TransactionRecord =
+        toml::from_str(&raw).with_context(|| format!("parse observer event {}", path.display()))?;
     record.validate()?;
     Ok(record)
 }
@@ -145,7 +155,12 @@ fn dispatch_record(
     let discovered = match discovery::discover(crate::presentation::diag::is_root()) {
         Ok(plugins) => plugins,
         Err(error) => {
-            return vec![failure(record.id, "discovery", "transaction.observe", format!("{error:#}"))];
+            return vec![failure(
+                record.id,
+                "discovery",
+                "transaction.observe",
+                format!("{error:#}"),
+            )];
         }
     };
     let events = transaction_events(record);
@@ -159,17 +174,16 @@ fn dispatch_record(
         if !state.has_grant(&plugin.manifest.id, Capability::TransactionObserve) {
             continue;
         }
-        let wanted: Vec<_> = events.iter()
+        let wanted: Vec<_> = events
+            .iter()
             .filter(|(event_type, _)| plugin.manifest.events.iter().any(|name| name == event_type))
             .collect();
         if wanted.is_empty() {
             continue;
         }
 
-        let granted = state.granted_capabilities(
-            &plugin.manifest.id,
-            &plugin.manifest.requested_capabilities,
-        );
+        let granted = state
+            .granted_capabilities(&plugin.manifest.id, &plugin.manifest.requested_capabilities);
         let mut process = match PluginProcess::start_with_policy(
             &plugin.manifest,
             &granted,
@@ -178,14 +192,24 @@ fn dispatch_record(
         ) {
             Ok(process) => process,
             Err(error) => {
-                failures.push(failure(record.id, &plugin.manifest.id, "startup", format!("{error:#}")));
+                failures.push(failure(
+                    record.id,
+                    &plugin.manifest.id,
+                    "startup",
+                    format!("{error:#}"),
+                ));
                 continue;
             }
         };
         for (event_type, change_index) in wanted {
             let payload = event_payload(record, event_type, *change_index, &granted);
             if let Err(error) = process.notify_event(event_type, &payload, DEFAULT_TIMEOUT) {
-                failures.push(failure(record.id, &plugin.manifest.id, event_type, format!("{error:#}")));
+                failures.push(failure(
+                    record.id,
+                    &plugin.manifest.id,
+                    event_type,
+                    format!("{error:#}"),
+                ));
                 break;
             }
         }
@@ -247,18 +271,35 @@ fn event_payload(
         "command": record.command,
         "status": record.status,
     });
-    let Some(object) = payload.as_object_mut() else { return payload };
+    let Some(object) = payload.as_object_mut() else {
+        return payload;
+    };
 
     if granted.contains(&Capability::HistoryRead) {
         object.insert("started_at".into(), record.started_at.into());
-        object.insert("finished_at".into(), serde_json::to_value(record.finished_at).unwrap_or(serde_json::Value::Null));
-        object.insert("duration_seconds".into(), serde_json::to_value(record.duration_seconds).unwrap_or(serde_json::Value::Null));
+        object.insert(
+            "finished_at".into(),
+            serde_json::to_value(record.finished_at).unwrap_or(serde_json::Value::Null),
+        );
+        object.insert(
+            "duration_seconds".into(),
+            serde_json::to_value(record.duration_seconds).unwrap_or(serde_json::Value::Null),
+        );
         object.insert("initiated_by".into(), record.initiated_by.clone().into());
-        object.insert("undoes".into(), serde_json::to_value(record.undoes).unwrap_or(serde_json::Value::Null));
-        object.insert("undone_by".into(), serde_json::to_value(record.undone_by).unwrap_or(serde_json::Value::Null));
+        object.insert(
+            "undoes".into(),
+            serde_json::to_value(record.undoes).unwrap_or(serde_json::Value::Null),
+        );
+        object.insert(
+            "undone_by".into(),
+            serde_json::to_value(record.undone_by).unwrap_or(serde_json::Value::Null),
+        );
     }
     if granted.contains(&Capability::RepositoryMetadataRead) {
-        object.insert("repository_ids".into(), serde_json::to_value(&record.repository_ids).unwrap_or(serde_json::Value::Null));
+        object.insert(
+            "repository_ids".into(),
+            serde_json::to_value(&record.repository_ids).unwrap_or(serde_json::Value::Null),
+        );
     }
     if granted.contains(&Capability::PackagePlanInspect) {
         let selected: Vec<_> = match change_index {
@@ -266,18 +307,23 @@ fn event_payload(
             None => record.package_changes.iter().collect(),
         };
         let changes: Vec<serde_json::Value> = selected
-        .into_iter()
-        .map(|change| serde_json::json!({
-            "name": change.name,
-            "action": change.action,
-            "status": change.status,
-            "source": change.source,
-            "failure": change.failure,
-            "hook": change.hook,
-        }))
-        .collect();
+            .into_iter()
+            .map(|change| {
+                serde_json::json!({
+                    "name": change.name,
+                    "action": change.action,
+                    "status": change.status,
+                    "source": change.source,
+                    "failure": change.failure,
+                    "hook": change.hook,
+                })
+            })
+            .collect();
         object.insert("package_changes".into(), serde_json::Value::Array(changes));
-        object.insert("requested_packages".into(), serde_json::to_value(&record.requested_packages).unwrap_or(serde_json::Value::Null));
+        object.insert(
+            "requested_packages".into(),
+            serde_json::to_value(&record.requested_packages).unwrap_or(serde_json::Value::Null),
+        );
     }
     payload
 }
@@ -306,11 +352,7 @@ fn store_failure(root: &Path, failure: &ObserverFailure) -> Result<()> {
         failure.recorded_at,
         std::process::id()
     ));
-    crate::adapters::atomic::write_atomic(
-        &target,
-        toml::to_string(failure)?.as_bytes(),
-        0o600,
-    )
+    crate::adapters::atomic::write_atomic(&target, toml::to_string(failure)?.as_bytes(), 0o600)
 }
 
 #[cfg(test)]

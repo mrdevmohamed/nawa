@@ -178,8 +178,8 @@ fn append_normalized(
     } else {
         h.set_size(md.len());
         h.set_cksum();
-        let f = File::open(path)
-            .with_context(|| format!("open {} for archiving", path.display()))?;
+        let f =
+            File::open(path).with_context(|| format!("open {} for archiving", path.display()))?;
         builder.append_data(&mut h, name, f)?;
     }
     Ok(())
@@ -265,7 +265,9 @@ pub(crate) fn extract_entry_into<R: Read>(
             std::fs::remove_file(&dest)?;
         }
     }
-    entry.unpack(&dest).with_context(|| format!("unpack {}", dest.display()))?;
+    entry
+        .unpack(&dest)
+        .with_context(|| format!("unpack {}", dest.display()))?;
     // tar-rs defers directory permission changes to the end of a full
     // `Archive::unpack` — which never happens with our per-entry pattern.
     // Apply directory modes explicitly so e.g. /tmp keeps its sticky bit.
@@ -369,8 +371,6 @@ pub(crate) fn read_pkginfo(archive: &Path) -> Result<String> {
     anyhow::bail!("no .PKGINFO in {}", archive.display())
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -389,11 +389,8 @@ mod tests {
         std::fs::write(staging.join("etc/real.txt"), b"real content\n").unwrap();
         std::os::unix::fs::symlink("/proc/mounts", staging.join("etc/mtab")).unwrap();
         std::os::unix::fs::symlink("real.txt", staging.join("etc/relative-link")).unwrap();
-        std::fs::set_permissions(
-            staging.join("tmp"),
-            std::fs::Permissions::from_mode(0o1777),
-        )
-        .unwrap();
+        std::fs::set_permissions(staging.join("tmp"), std::fs::Permissions::from_mode(0o1777))
+            .unwrap();
 
         let archive = base.join("test.nawa.tar.zst");
         create(&staging, "pkgname = t", &archive).unwrap();
@@ -404,18 +401,34 @@ mod tests {
         let mtab = std::fs::symlink_metadata(out.join("etc/mtab")).unwrap();
         assert!(mtab.is_symlink(), "etc/mtab was dereferenced into a file");
         assert_eq!(
-            std::fs::read_link(out.join("etc/mtab")).unwrap().to_str().unwrap(),
+            std::fs::read_link(out.join("etc/mtab"))
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "/proc/mounts"
         );
         assert_eq!(
-            std::fs::read_link(out.join("etc/relative-link")).unwrap().to_str().unwrap(),
+            std::fs::read_link(out.join("etc/relative-link"))
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "real.txt"
         );
-        assert_eq!(std::fs::read(out.join("etc/real.txt")).unwrap(), b"real content\n");
+        assert_eq!(
+            std::fs::read(out.join("etc/real.txt")).unwrap(),
+            b"real content\n"
+        );
 
         // directory modes (incl. sticky bit) survive the roundtrip
-        let tmp_mode = std::fs::metadata(out.join("tmp")).unwrap().permissions().mode();
-        assert_eq!(tmp_mode & 0o7777, 0o1777, "sticky bit lost on extracted dir");
+        let tmp_mode = std::fs::metadata(out.join("tmp"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(
+            tmp_mode & 0o7777,
+            0o1777,
+            "sticky bit lost on extracted dir"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -461,7 +474,8 @@ mod tests {
             h.set_mode(0o777);
             h.set_link_name(&outside).unwrap();
             h.set_cksum();
-            b.append_data(&mut h, "payload/a", std::io::empty()).unwrap();
+            b.append_data(&mut h, "payload/a", std::io::empty())
+                .unwrap();
             let mut h2 = tar::Header::new_gnu();
             h2.set_size(1);
             h2.set_mode(0o644);
@@ -496,11 +510,13 @@ mod tests {
             let mut h = tar::Header::new_gnu();
             h.set_size(0);
             h.set_mode(0o644);
-            b.append_data(&mut h, "payload/foo\n/etc/passwd", std::io::empty()).unwrap();
+            b.append_data(&mut h, "payload/foo\n/etc/passwd", std::io::empty())
+                .unwrap();
             let mut h2 = tar::Header::new_gnu();
             h2.set_size(0);
             h2.set_mode(0o644);
-            b.append_data(&mut h2, ".PKGINFO", std::io::empty()).unwrap();
+            b.append_data(&mut h2, ".PKGINFO", std::io::empty())
+                .unwrap();
             b.into_inner().unwrap().finish().unwrap();
         }
         assert!(extract(&a, &base.join("out")).is_err());
@@ -537,7 +553,9 @@ mod tests {
     fn normalised_archives_are_reproducible() {
         let base = std::env::temp_dir().join(format!("nawa-archive-repro-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
-        let norm = Normalize { source_date_epoch: 1_700_000_000 };
+        let norm = Normalize {
+            source_date_epoch: 1_700_000_000,
+        };
 
         let mut hashes = Vec::new();
         for (i, (uid, age)) in [(1000u32, 86400u64), (12345, 3600)].iter().enumerate() {
@@ -548,7 +566,10 @@ mod tests {
             // fresh + future mtimes must both clamp to the epoch
             let t = std::time::SystemTime::UNIX_EPOCH
                 + std::time::Duration::from_secs(norm.source_date_epoch + age);
-            let f = std::fs::File::options().write(true).open(st.join("usr/bin/prog")).unwrap();
+            let f = std::fs::File::options()
+                .write(true)
+                .open(st.join("usr/bin/prog"))
+                .unwrap();
             f.set_modified(t).unwrap();
             drop(f);
             nix_chown(&st, *uid);
@@ -557,7 +578,10 @@ mod tests {
             create_normalized(&st, "pkgname = t\n", None, &a, &norm).unwrap();
             hashes.push(sha256_file(&a));
         }
-        assert_eq!(hashes[0], hashes[1], "normalised archives must be identical");
+        assert_eq!(
+            hashes[0], hashes[1],
+            "normalised archives must be identical"
+        );
 
         // entry header sanity: uid/gid 0, clamped mtime, empty uname/gname
         let f = File::open(base.join("out0.nawa.tar.zst")).unwrap();
@@ -593,4 +617,3 @@ mod tests {
         hex::encode(h.finalize())
     }
 }
-

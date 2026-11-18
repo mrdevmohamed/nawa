@@ -215,7 +215,9 @@ impl OperationHandle {
     /// Record the target of a compensating operation. The original record
     /// is annotated only after this transaction is durably completed.
     pub fn link_undo(&mut self, original: u64) -> Result<()> {
-        if self.tx.is_none() { return Ok(()) }
+        if self.tx.is_none() {
+            return Ok(());
+        }
         let record = crate::transaction::history::load_record(&self.root, original)?;
         if let Some(by) = record.undone_by {
             anyhow::bail!("transaction {original} was already undone by transaction {by}");
@@ -241,8 +243,11 @@ impl RecorderHandle<'_> {
     /// Write the write-ahead intent for one package step (before the
     /// mutation runs).
     pub fn step_intent(
-        &mut self, package: &str, action: StepAction,
-        before: Option<&crate::adapters::db::Entry>, target: Option<&crate::adapters::db::Entry>,
+        &mut self,
+        package: &str,
+        action: StepAction,
+        before: Option<&crate::adapters::db::Entry>,
+        target: Option<&crate::adapters::db::Entry>,
         artifact_sha256: &str,
     ) -> Result<u32> {
         let target = target.map(PackageState::from_entry);
@@ -251,17 +256,24 @@ impl RecorderHandle<'_> {
 
     /// Persist a target snapshot parsed from an archive or repository index.
     pub fn step_intent_state(
-        &mut self, package: &str, action: StepAction,
-        before: Option<&crate::adapters::db::Entry>, target: Option<&PackageState>,
+        &mut self,
+        package: &str,
+        action: StepAction,
+        before: Option<&crate::adapters::db::Entry>,
+        target: Option<&PackageState>,
         artifact_sha256: &str,
     ) -> Result<u32> {
         let Some(tx) = self.op.tx else { return Ok(0) };
         let step = (self.op.changes.len() + 1) as u32;
         let intent = journal::StepIntent {
-            schema: SCHEMA_VERSION, tx, step, package: package.to_string(),
+            schema: SCHEMA_VERSION,
+            tx,
+            step,
+            package: package.to_string(),
             action: action.as_str().to_string(),
             precondition: before.map(PackageState::from_entry),
-            target: target.cloned(), artifact_sha256: artifact_sha256.to_string(),
+            target: target.cloned(),
+            artifact_sha256: artifact_sha256.to_string(),
         };
         journal::write_intent(&self.op.root, &intent)?;
         Ok(step)
@@ -346,10 +358,22 @@ mod tests {
         // step: install demo 1.0
         let mut rec = op.recorder();
         let step = rec
-            .step_intent("demo", StepAction::Install, None, Some(&entry("demo", "1.0", &"a".repeat(64))), &"a".repeat(64))
+            .step_intent(
+                "demo",
+                StepAction::Install,
+                None,
+                Some(&entry("demo", "1.0", &"a".repeat(64))),
+                &"a".repeat(64),
+            )
             .unwrap();
         // simulate the db commit
-        Db::new(&root).add(&entry("demo", "1.0", &"a".repeat(64)), &[], &Default::default()).unwrap();
+        Db::new(&root)
+            .add(
+                &entry("demo", "1.0", &"a".repeat(64)),
+                &[],
+                &Default::default(),
+            )
+            .unwrap();
         rec.step_result(
             step,
             "demo",
@@ -379,7 +403,8 @@ mod tests {
     fn failing_operation_without_commits_is_failed() {
         let base = tmpdir("failed");
         let root = base.join("root");
-        let op = begin_operation(&root, OperationCommand::Install, &["demo".to_string()], &[]).unwrap();
+        let op =
+            begin_operation(&root, OperationCommand::Install, &["demo".to_string()], &[]).unwrap();
         let err = anyhow::anyhow!("fetch failed");
         op.finish(Some(&err)).unwrap();
         let record = crate::transaction::history::load_record(&root, 1).unwrap();
@@ -391,13 +416,39 @@ mod tests {
     fn partial_operation_after_committed_step() {
         let base = tmpdir("partial");
         let root = base.join("root");
-        let mut op = begin_operation(&root, OperationCommand::Install, &["a".to_string(), "b".to_string()], &[]).unwrap();
+        let mut op = begin_operation(
+            &root,
+            OperationCommand::Install,
+            &["a".to_string(), "b".to_string()],
+            &[],
+        )
+        .unwrap();
         {
             let mut rec = op.recorder();
-            let step = rec.step_intent("a", StepAction::Install, None, Some(&entry("a", "1", &"a".repeat(64))), "").unwrap();
-            Db::new(&root).add(&entry("a", "1", &"a".repeat(64)), &[], &Default::default()).unwrap();
-            rec.step_result(step, "a", StepAction::Install, StepStatus::Committed, None,
-                Some(&entry("a", "1", &"a".repeat(64))), "local-build", None, None).unwrap();
+            let step = rec
+                .step_intent(
+                    "a",
+                    StepAction::Install,
+                    None,
+                    Some(&entry("a", "1", &"a".repeat(64))),
+                    "",
+                )
+                .unwrap();
+            Db::new(&root)
+                .add(&entry("a", "1", &"a".repeat(64)), &[], &Default::default())
+                .unwrap();
+            rec.step_result(
+                step,
+                "a",
+                StepAction::Install,
+                StepStatus::Committed,
+                None,
+                Some(&entry("a", "1", &"a".repeat(64))),
+                "local-build",
+                None,
+                None,
+            )
+            .unwrap();
         }
         let err = anyhow::anyhow!("second fetch failed");
         op.finish(Some(&err)).unwrap();
@@ -415,11 +466,26 @@ mod tests {
         assert!(op.tx().is_none());
         {
             let mut rec = op.recorder();
-            let step = rec.step_intent("x", StepAction::Install, None, None, "").unwrap();
-            rec.step_result(step, "x", StepAction::Install, StepStatus::Committed, None, None, "", None, None).unwrap();
+            let step = rec
+                .step_intent("x", StepAction::Install, None, None, "")
+                .unwrap();
+            rec.step_result(
+                step,
+                "x",
+                StepAction::Install,
+                StepStatus::Committed,
+                None,
+                None,
+                "",
+                None,
+                None,
+            )
+            .unwrap();
         }
         op.finish(None).unwrap();
-        assert!(crate::transaction::history::list_records(&root).unwrap().is_empty());
+        assert!(crate::transaction::history::list_records(&root)
+            .unwrap()
+            .is_empty());
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -427,13 +493,38 @@ mod tests {
     fn undo_linking_annotates_both_records() {
         let base = tmpdir("undolink");
         let root = base.join("root");
-        let mut op1 = begin_operation(&root, OperationCommand::Install, &["demo".to_string()], &[]).unwrap();
+        let mut op1 =
+            begin_operation(&root, OperationCommand::Install, &["demo".to_string()], &[]).unwrap();
         {
             let mut rec = op1.recorder();
-            let step = rec.step_intent("demo", StepAction::Install, None, Some(&entry("demo", "1.0", &"a".repeat(64))), "").unwrap();
-            Db::new(&root).add(&entry("demo", "1.0", &"a".repeat(64)), &[], &Default::default()).unwrap();
-            rec.step_result(step, "demo", StepAction::Install, StepStatus::Committed, None,
-                Some(&entry("demo", "1.0", &"a".repeat(64))), "local-build", None, None).unwrap();
+            let step = rec
+                .step_intent(
+                    "demo",
+                    StepAction::Install,
+                    None,
+                    Some(&entry("demo", "1.0", &"a".repeat(64))),
+                    "",
+                )
+                .unwrap();
+            Db::new(&root)
+                .add(
+                    &entry("demo", "1.0", &"a".repeat(64)),
+                    &[],
+                    &Default::default(),
+                )
+                .unwrap();
+            rec.step_result(
+                step,
+                "demo",
+                StepAction::Install,
+                StepStatus::Committed,
+                None,
+                Some(&entry("demo", "1.0", &"a".repeat(64))),
+                "local-build",
+                None,
+                None,
+            )
+            .unwrap();
         }
         op1.finish(None).unwrap();
 
@@ -443,15 +534,31 @@ mod tests {
         {
             let before = Db::new(&root).entry("demo").unwrap();
             let mut rec = op2.recorder();
-            let undo_step = rec.step_intent(
-                "demo", StepAction::Remove, before.as_ref(), None,
-                before.as_ref().map(|entry| entry.artifact_sha256.as_str()).unwrap_or(""),
-            ).unwrap();
+            let undo_step = rec
+                .step_intent(
+                    "demo",
+                    StepAction::Remove,
+                    before.as_ref(),
+                    None,
+                    before
+                        .as_ref()
+                        .map(|entry| entry.artifact_sha256.as_str())
+                        .unwrap_or(""),
+                )
+                .unwrap();
             Db::new(&root).remove("demo").unwrap();
             rec.step_result(
-                undo_step, "demo", StepAction::Remove, StepStatus::Committed,
-                before.as_ref(), None, "history-undo", None, None,
-            ).unwrap();
+                undo_step,
+                "demo",
+                StepAction::Remove,
+                StepStatus::Committed,
+                before.as_ref(),
+                None,
+                "history-undo",
+                None,
+                None,
+            )
+            .unwrap();
         }
         op2.finish(None).unwrap();
         crate::transaction::history::mark_undone_by(&root, 1, undo_id).unwrap();

@@ -93,7 +93,10 @@ fn an_unreadable_record_directory_fails_the_gate_closed_for_mutations() {
     fs::write(records_dir(&root), "not a directory").unwrap();
 
     let (_stdout, stderr, ok) = run(&root, &["remove", "anything", "--yes"], false);
-    assert!(!ok, "a mutation must fail when gate state cannot be read: {stderr}");
+    assert!(
+        !ok,
+        "a mutation must fail when gate state cannot be read: {stderr}"
+    );
     assert!(
         stderr.contains("cannot check the persistent migration mutation gate")
             && (stderr.contains("Not a directory") || stderr.contains("not a real directory")),
@@ -111,13 +114,27 @@ fn an_unreadable_record_directory_fails_the_gate_closed_for_mutations() {
 #[test]
 fn multiple_gate_records_are_reported_deterministically() {
     let root = scratch("multiple-gates");
-    seed(&root, "zzz-migration", "awaiting-reboot", "faseela.init.runit_to_systemd");
-    seed(&root, "aaa-migration", "needs-recovery", "faseela.init.runit_to_systemd");
+    seed(
+        &root,
+        "zzz-migration",
+        "awaiting-reboot",
+        "faseela.init.runit_to_systemd",
+    );
+    seed(
+        &root,
+        "aaa-migration",
+        "needs-recovery",
+        "faseela.init.runit_to_systemd",
+    );
 
     let (_stdout, stderr, ok) = run(&root, &["remove", "anything", "--yes"], false);
     assert!(!ok);
-    let first = stderr.find("aaa-migration is needs-recovery").expect("first gate");
-    let second = stderr.find("zzz-migration is awaiting-reboot").expect("second gate");
+    let first = stderr
+        .find("aaa-migration is needs-recovery")
+        .expect("first gate");
+    let second = stderr
+        .find("zzz-migration is awaiting-reboot")
+        .expect("second gate");
     assert!(first < second, "deterministic sorted order: {stderr}");
     let _ = fs::remove_dir_all(&root);
 }
@@ -125,16 +142,27 @@ fn multiple_gate_records_are_reported_deterministically() {
 #[test]
 fn a_corrupt_but_parseable_record_fails_closed_naming_the_file() {
     let root = scratch("corrupt-record");
-    let path = seed(&root, "broken", "bogus-state", "faseela.init.runit_to_systemd");
+    let path = seed(
+        &root,
+        "broken",
+        "bogus-state",
+        "faseela.init.runit_to_systemd",
+    );
 
     let (_stdout, stderr, ok) = run(&root, &["remove", "anything", "--yes"], false);
     assert!(!ok);
-    assert!(stderr.contains("cannot check the persistent migration mutation gate"), "{stderr}");
+    assert!(
+        stderr.contains("cannot check the persistent migration mutation gate"),
+        "{stderr}"
+    );
     assert!(
         stderr.contains(path.file_name().unwrap().to_string_lossy().as_ref()),
         "the exact file is named: {stderr}"
     );
-    assert!(stderr.contains("unknown migration state"), "the cause is named: {stderr}");
+    assert!(
+        stderr.contains("unknown migration state"),
+        "the cause is named: {stderr}"
+    );
     let _ = fs::remove_dir_all(&root);
 }
 
@@ -187,19 +215,30 @@ fn terminal_records_do_not_block_mutations() {
 #[test]
 fn a_forged_held_marker_cannot_resume_a_migration_or_cross_the_gate() {
     let root = scratch("forged-resume");
-    seed(&root, "faseela-runit-to-systemd-v1", "awaiting-reboot", "faseela.init.runit_to_systemd");
+    seed(
+        &root,
+        "faseela-runit-to-systemd-v1",
+        "awaiting-reboot",
+        "faseela.init.runit_to_systemd",
+    );
     let before = fs::read(records_dir(&root).join("faseela-runit-to-systemd-v1.toml")).unwrap();
 
     // offline-root preflight already refuses, but the forged marker must
     // never become migration authority: no record is touched, no lock made.
     let (stdout, stderr, ok) = run(&root, &["system", "migrate", "resume"], true);
-    assert!(!ok, "a nested process cannot resume a migration: {stdout}{stderr}");
+    assert!(
+        !ok,
+        "a nested process cannot resume a migration: {stdout}{stderr}"
+    );
     assert_eq!(
         fs::read(records_dir(&root).join("faseela-runit-to-systemd-v1.toml")).unwrap(),
         before,
         "the record survived byte-for-byte"
     );
-    assert!(!root.join("var/lib/nawa/lock").exists(), "no lock was created");
+    assert!(
+        !root.join("var/lib/nawa/lock").exists(),
+        "no lock was created"
+    );
     let _ = fs::remove_dir_all(&root);
 }
 
@@ -228,7 +267,10 @@ fn a_repository_style_handler_cannot_drive_the_migration_namespace() {
     let root = scratch("handler-attack-cli");
     for attack in ["/usr/bin/sh", "sh -c reboot", ".HOOKS", "migration.handler"] {
         let (_stdout, stderr, ok) = run(&root, &["system", "migrate", "show", attack], false);
-        assert!(!ok, "an attack string {attack:?} must not be accepted: {stderr}");
+        assert!(
+            !ok,
+            "an attack string {attack:?} must not be accepted: {stderr}"
+        );
         assert!(
             stderr.contains("no migration record")
                 || stderr.contains("unknown")

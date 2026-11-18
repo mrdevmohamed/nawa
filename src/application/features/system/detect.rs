@@ -25,15 +25,14 @@
 //! Every source is an injectable path, so each rule is unit-testable
 //! without booting anything and without touching the host.
 
-
 use std::fs;
 use std::path::Path;
 
 use crate::domain::system::identity::{classify_pid1, identify, InitKind, Pid1};
 
 pub(crate) use crate::domain::system::observation::{
-    Confidence, Context, DesiredInit, Evidence, InitCandidate, InstalledInit,
-    ObservedSystem, RuntimeInit,
+    Confidence, Context, DesiredInit, Evidence, InitCandidate, InstalledInit, ObservedSystem,
+    RuntimeInit,
 };
 
 /// Read the desired init and retain the validated profile from the same
@@ -671,7 +670,10 @@ mod tests {
 
         let installed = installed_init(&root);
         assert!(
-            !installed.candidates.iter().any(|candidate| candidate.kind == InitKind::Systemd),
+            !installed
+                .candidates
+                .iter()
+                .any(|candidate| candidate.kind == InitKind::Systemd),
             "an ancestor symlink must not expose host-side init binaries: {:?}",
             installed.candidates
         );
@@ -689,7 +691,9 @@ mod tests {
         assert!(
             installed.candidates.iter().any(|candidate| {
                 candidate.kind == InitKind::Systemd
-                    && candidate.evidence.contains("symlink → ../lib/systemd/systemd")
+                    && candidate
+                        .evidence
+                        .contains("symlink → ../lib/systemd/systemd")
             }),
             "an in-root merged-/usr symlink remains valid evidence: {:?}",
             installed.candidates

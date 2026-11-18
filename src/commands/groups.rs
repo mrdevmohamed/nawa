@@ -3,18 +3,18 @@
 //! planner (cmd_install), removals recompute reachability from the
 //! remaining explicit/group roots.
 
-use anyhow::{Context, Result};
-use crate::application::context::Ctx;
-use crate::cli::PlanFlags;
-use crate::presentation::confirm;
 use crate::adapters::db;
+use crate::adapters::lock;
+use crate::application::context::Ctx;
+use crate::application::features::package::plan;
+use crate::cli::PlanFlags;
 use crate::fetch;
 use crate::groups;
 use crate::install;
-use crate::adapters::lock;
-use crate::application::features::package::plan;
+use crate::presentation::confirm;
 use crate::transaction;
 use crate::upgrade;
+use anyhow::{Context, Result};
 
 use anyhow::bail;
 
@@ -43,7 +43,10 @@ pub(crate) fn cmd_group_info(ctx: &Ctx, id: &str) -> Result<()> {
         bail!("group {id} is not installed (install it with `nawa group install {id}`)");
     };
     println!("Group:     {} ({})", g.group_id, g.packages.len());
-    println!("Installed: {}", crate::presentation::humanize::format_date(g.installed_at));
+    println!(
+        "Installed: {}",
+        crate::presentation::humanize::format_date(g.installed_at)
+    );
     if !g.source_repository.is_empty() {
         println!("Source:    {}", g.source_repository);
     }
@@ -66,9 +69,11 @@ pub(crate) fn cmd_group_install(
     with_optional: bool,
 ) -> Result<()> {
     groups::check_group_id(id)?;
-    let repo_url = ctx.repo.as_deref().filter(|url| !url.is_empty()).with_context(|| {
-        "no repository configured; set repo in /etc/nawa/nawa.toml"
-    })?;
+    let repo_url = ctx
+        .repo
+        .as_deref()
+        .filter(|url| !url.is_empty())
+        .with_context(|| "no repository configured; set repo in /etc/nawa/nawa.toml")?;
     let repo_ref = fetch::RepoRef::parse(repo_url)?;
     let open = upgrade::open_repo(&ctx.root, &repo_ref, flags.allow_unsigned, false)
         .with_context(|| format!("cannot read group metadata from repository {repo_url}"))?;
@@ -78,9 +83,10 @@ pub(crate) fn cmd_group_install(
     let catalog = open.groups.as_ref().with_context(|| {
         format!("repository {repo_url} does not publish groups.toml in its signed index")
     })?;
-    let definition = catalog.find(id).cloned().with_context(|| {
-        format!("repository {repo_url} has no group named {id}")
-    })?;
+    let definition = catalog
+        .find(id)
+        .cloned()
+        .with_context(|| format!("repository {repo_url} has no group named {id}"))?;
     let packages = definition.effective_packages(with_optional);
     if packages.is_empty() {
         bail!("group {id} has no packages selected for installation");
@@ -95,19 +101,37 @@ pub(crate) fn cmd_group_install(
              remove it first with `nawa group remove {id}`, then install it again"
         );
     }
-    let definition_revision = open.index.groups.as_ref()
-        .map(|entry| entry.sha256.clone()).unwrap_or_default();
-    let source_repository = open.base_url.clone()
+    let definition_revision = open
+        .index
+        .groups
+        .as_ref()
+        .map(|entry| entry.sha256.clone())
+        .unwrap_or_default();
+    let source_repository = open
+        .base_url
+        .clone()
         .unwrap_or_else(|| open.dir.display().to_string());
 
     crate::nawa_info!(
         "installing group {} — {} package(s){}",
         definition.name,
         packages.len(),
-        if with_optional { " (including optional)" } else { "" }
+        if with_optional {
+            " (including optional)"
+        } else {
+            ""
+        }
     );
     crate::commands::installing::cmd_install_with_why(
-        ctx, &packages, flags, false, None, None, None, plan::Why::Group, Some(id),
+        ctx,
+        &packages,
+        flags,
+        false,
+        None,
+        None,
+        None,
+        plan::Why::Group,
+        Some(id),
     )?;
     if !flags.dry_run {
         let _lock = lock::acquire(&ctx.root, lock::Mode::Exclusive)?;
@@ -115,14 +139,17 @@ pub(crate) fn cmd_group_install(
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_secs())
             .unwrap_or(0);
-        groups::membership::save(&ctx.root, &groups::membership::MembershipRecord {
-            schema: 1,
-            group_id: id.to_string(),
-            definition_revision,
-            installed_at,
-            source_repository,
-            packages,
-        })?;
+        groups::membership::save(
+            &ctx.root,
+            &groups::membership::MembershipRecord {
+                schema: 1,
+                group_id: id.to_string(),
+                definition_revision,
+                installed_at,
+                source_repository,
+                packages,
+            },
+        )?;
         crate::nawa_success!("group {id} installed");
     }
     Ok(())
@@ -138,27 +165,46 @@ pub(crate) fn cmd_group_remove(ctx: &Ctx, id: &str, yes: bool) -> Result<()> {
     let installed_names: std::collections::BTreeSet<String> =
         installed.iter().map(|entry| entry.name.clone()).collect();
     let other_groups = groups::membership::group_owned_packages(&ctx.root, Some(id))?;
-    let explicit: std::collections::BTreeSet<&str> = installed.iter()
+    let explicit: std::collections::BTreeSet<&str> = installed
+        .iter()
         .filter(|entry| entry.reason == "explicit")
-        .map(|entry| entry.name.as_str()).collect();
-    let mut candidates: Vec<String> = record.packages.iter()
+        .map(|entry| entry.name.as_str())
+        .collect();
+    let mut candidates: Vec<String> = record
+        .packages
+        .iter()
         .filter(|name| installed_names.contains(*name))
         .filter(|name| !other_groups.contains(*name) && !explicit.contains(name.as_str()))
-        .cloned().collect();
+        .cloned()
+        .collect();
     candidates = plan::removal_order(&candidates, &installed);
     let candidate_set: std::collections::BTreeSet<String> = candidates.iter().cloned().collect();
-    candidates.retain(|package| installed.iter()
-        .filter(|entry| !candidate_set.contains(&entry.name))
-        .all(|entry| !entry.run.iter().any(|dependency| dependency == package)));
+    candidates.retain(|package| {
+        installed
+            .iter()
+            .filter(|entry| !candidate_set.contains(&entry.name))
+            .all(|entry| !entry.run.iter().any(|dependency| dependency == package))
+    });
 
     crate::nawa_info!("removing group {} (membership record)", id);
-    for package in &candidates { println!("  remove {package}"); }
+    for package in &candidates {
+        println!("  remove {package}");
+    }
     if !candidates.is_empty() {
-        confirm::confirm(&format!("nawa: remove {} package(s) of group {id}?", candidates.len()), yes)?;
+        confirm::confirm(
+            &format!(
+                "nawa: remove {} package(s) of group {id}?",
+                candidates.len()
+            ),
+            yes,
+        )?;
     }
 
     let mut op = transaction::begin_operation(
-        &ctx.root, transaction::OperationCommand::GroupRemove, &[id.to_string()], &[],
+        &ctx.root,
+        transaction::OperationCommand::GroupRemove,
+        &[id.to_string()],
+        &[],
     )?;
     op.record_group(id);
     let mut failure: Option<anyhow::Error> = None;
@@ -167,11 +213,19 @@ pub(crate) fn cmd_group_remove(ctx: &Ctx, id: &str, yes: bool) -> Result<()> {
         let (step_no, file_journal) = {
             let mut recorder = op.recorder();
             let step_no = recorder.step_intent(
-                package, transaction::history::StepAction::Remove,
-                before.as_ref(), None,
-                before.as_ref().map(|entry| entry.artifact_sha256.as_str()).unwrap_or(""),
+                package,
+                transaction::history::StepAction::Remove,
+                before.as_ref(),
+                None,
+                before
+                    .as_ref()
+                    .map(|entry| entry.artifact_sha256.as_str())
+                    .unwrap_or(""),
             )?;
-            (step_no, install::FileJournalId::for_step(recorder.tx(), step_no))
+            (
+                step_no,
+                install::FileJournalId::for_step(recorder.tx(), step_no),
+            )
         };
         let result = install::remove_with_linked(package, &ctx.root, false, file_journal);
         {
@@ -187,7 +241,10 @@ pub(crate) fn cmd_group_remove(ctx: &Ctx, id: &str, yes: bool) -> Result<()> {
                 &result,
             )?;
         }
-        if let Err(error) = result { failure = Some(error); break; }
+        if let Err(error) = result {
+            failure = Some(error);
+            break;
+        }
     }
     match failure {
         Some(error) => {

@@ -9,9 +9,9 @@ use std::path::Path;
 use anyhow::Result;
 
 use super::*; // sibling `commands` handlers, grouped by domain
+use crate::application::context::{resolve_mode, resolve_repo, Ctx};
 use crate::application::lifecycle::{lock_need, LockNeed};
 use crate::cli::{completions_script, Cmd, ConfigCmd, GroupCmd, HistoryCmd, PluginCmd};
-use crate::application::context::{resolve_mode, resolve_repo, Ctx};
 
 pub(crate) fn run(ctx: &Ctx, cmd: Cmd, track_package_changes: bool) -> (Result<()>, bool) {
     let mode = lock_need(&cmd.lock_request()).map(|need| match need {
@@ -85,10 +85,9 @@ pub(crate) fn run(ctx: &Ctx, cmd: Cmd, track_package_changes: bool) -> (Result<(
 pub(crate) fn should_run_post_transaction_hooks(cmd: &Cmd) -> bool {
     match cmd {
         Cmd::Build { install, .. } => *install,
-        Cmd::Install { .. }
-        | Cmd::Update { .. }
-        | Cmd::Remove { .. }
-        | Cmd::Rollback { .. } => true,
+        Cmd::Install { .. } | Cmd::Update { .. } | Cmd::Remove { .. } | Cmd::Rollback { .. } => {
+            true
+        }
         Cmd::Autoremove { dry_run, .. } => !*dry_run,
         Cmd::Upgrade { dry_run, .. } => !*dry_run,
         Cmd::Group { action } => match action {
@@ -106,7 +105,10 @@ pub(crate) fn should_run_post_transaction_hooks(cmd: &Cmd) -> bool {
 /// Compare package payload identity, excluding ownership-only metadata such as
 /// the explicit/dependency/group install reason. Shared cache triggers need to
 /// run only when package payloads were installed, replaced, or removed.
-fn installed_package_payload_changed(before: &[crate::adapters::db::Entry], after: &[crate::adapters::db::Entry]) -> bool {
+fn installed_package_payload_changed(
+    before: &[crate::adapters::db::Entry],
+    after: &[crate::adapters::db::Entry],
+) -> bool {
     if before.len() != after.len() {
         return true;
     }
@@ -124,9 +126,13 @@ fn installed_package_payload_changed(before: &[crate::adapters::db::Entry], afte
 /// Read the installed package set. Commands with a whole-operation lock already
 /// hold a consistent view; commands that lock per step take a shared lock only
 /// for this read.
-fn installed_snapshot(root: &Path, needs_shared_lock: bool) -> Result<Vec<crate::adapters::db::Entry>> {
+fn installed_snapshot(
+    root: &Path,
+    needs_shared_lock: bool,
+) -> Result<Vec<crate::adapters::db::Entry>> {
     if needs_shared_lock {
-        let _snapshot_lock = crate::adapters::lock::acquire(root, crate::adapters::lock::Mode::Shared)?;
+        let _snapshot_lock =
+            crate::adapters::lock::acquire(root, crate::adapters::lock::Mode::Shared)?;
         crate::adapters::db::Db::new(root).installed()
     } else {
         crate::adapters::db::Db::new(root).installed()
@@ -171,38 +177,115 @@ fn run_command(ctx: &Ctx, cmd: Cmd) -> Result<()> {
                 force,
             )
         }
-        Cmd::Install { targets, flags, no_deps, key, build, from_repo, from, repo } => {
+        Cmd::Install {
+            targets,
+            flags,
+            no_deps,
+            key,
+            build,
+            from_repo,
+            from,
+            repo,
+        } => {
             let mode = resolve_mode(build, from_repo, from.as_deref())?;
             cmd_install(ctx, &targets, &flags, no_deps, key, mode, repo)
         }
         Cmd::Outdated => cmd_outdated(ctx),
-        Cmd::Update { names, flags, build, from_repo, from, repo } => {
+        Cmd::Update {
+            names,
+            flags,
+            build,
+            from_repo,
+            from,
+            repo,
+        } => {
             let mode = resolve_mode(build, from_repo, from.as_deref())?;
             cmd_update(ctx, &names, &flags, mode, repo)
-        },
-        Cmd::Autoremove { dry_run, yes, build_deps } => {
-            cmd_autoremove(ctx, dry_run, yes, build_deps)
         }
+        Cmd::Autoremove {
+            dry_run,
+            yes,
+            build_deps,
+        } => cmd_autoremove(ctx, dry_run, yes, build_deps),
         Cmd::Search { term, glob } => cmd_search(ctx, &term, glob),
         Cmd::Info { name } => cmd_info(ctx, &name),
         Cmd::Why { name, tree } => cmd_why(ctx, &name, tree),
         Cmd::Deps { name } => cmd_deps(ctx, &name),
         Cmd::DepsAll { include_installed } => cmd_deps_all(ctx, include_installed),
         Cmd::Remove { name, force, yes } => cmd_remove(ctx, &name, force, yes),
-        Cmd::Query { pattern, explicit, deps } => {
-            cmd_query(ctx, pattern.as_deref(), explicit, deps)
-        }
+        Cmd::Query {
+            pattern,
+            explicit,
+            deps,
+        } => cmd_query(ctx, pattern.as_deref(), explicit, deps),
         Cmd::Files { name } => cmd_files(ctx, &name),
         Cmd::Owner { file } => cmd_owner(ctx, &file),
-        Cmd::Revdep { names, lib_dirs, ignore, no_symlinks, unowned, scan_dirs, json, no_suggest } => {
-            cmd_revdep(ctx, &names, &lib_dirs, &ignore, no_symlinks, unowned, &scan_dirs, json, no_suggest)
-        }
-        Cmd::RepoCreate { dir, out, sign, key, index_version, locations, recipes, recipes_rev, groups } => {
-            cmd_repo_create(&dir, out, sign, key.as_deref(), index_version, locations.as_deref(), recipes.as_deref(), recipes_rev.as_deref(), groups.as_deref())
-        }
-        Cmd::RepoUpdate { dir, base, trust_key, out, add_entries, remove, drop, locations, recipes, recipes_rev, key } => {
-            cmd_repo_update(&dir, &base, &trust_key, out, add_entries.as_deref(), remove, drop, locations.as_deref(), recipes.as_deref(), recipes_rev.as_deref(), key.as_deref())
-        }
+        Cmd::Revdep {
+            names,
+            lib_dirs,
+            ignore,
+            no_symlinks,
+            unowned,
+            scan_dirs,
+            json,
+            no_suggest,
+        } => cmd_revdep(
+            ctx,
+            &names,
+            &lib_dirs,
+            &ignore,
+            no_symlinks,
+            unowned,
+            &scan_dirs,
+            json,
+            no_suggest,
+        ),
+        Cmd::RepoCreate {
+            dir,
+            out,
+            sign,
+            key,
+            index_version,
+            locations,
+            recipes,
+            recipes_rev,
+            groups,
+        } => cmd_repo_create(
+            &dir,
+            out,
+            sign,
+            key.as_deref(),
+            index_version,
+            locations.as_deref(),
+            recipes.as_deref(),
+            recipes_rev.as_deref(),
+            groups.as_deref(),
+        ),
+        Cmd::RepoUpdate {
+            dir,
+            base,
+            trust_key,
+            out,
+            add_entries,
+            remove,
+            drop,
+            locations,
+            recipes,
+            recipes_rev,
+            key,
+        } => cmd_repo_update(
+            &dir,
+            &base,
+            &trust_key,
+            out,
+            add_entries.as_deref(),
+            remove,
+            drop,
+            locations.as_deref(),
+            recipes.as_deref(),
+            recipes_rev.as_deref(),
+            key.as_deref(),
+        ),
         Cmd::Keygen { out } => cmd_keygen(out),
         Cmd::Sign { file, key } => cmd_sign(&file, key.as_deref()),
         Cmd::Verify { file, key } => {
@@ -210,7 +293,13 @@ fn run_command(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             Ok(())
         }
         Cmd::Trust { keyfile } => cmd_trust(ctx, &keyfile),
-        Cmd::Upgrade { repo, dry_run, force, allow_unsigned, yes } => {
+        Cmd::Upgrade {
+            repo,
+            dry_run,
+            force,
+            allow_unsigned,
+            yes,
+        } => {
             let repo_ref = resolve_repo(ctx, repo)?;
             let observed = crate::application::features::system::detect::observe(
                 &ctx.root,
@@ -221,29 +310,76 @@ fn run_command(ctx: &Ctx, cmd: Cmd) -> Result<()> {
                 &repo_ref,
                 &ctx.recipes,
                 &observed,
-                &crate::upgrade::UpgradeOpts { dry_run, force, allow_unsigned, yes },
+                &crate::upgrade::UpgradeOpts {
+                    dry_run,
+                    force,
+                    allow_unsigned,
+                    yes,
+                },
             )
         }
-        Cmd::Sync { repo, force, allow_unsigned } => {
+        Cmd::Sync {
+            repo,
+            force,
+            allow_unsigned,
+        } => {
             let repo_ref = resolve_repo(ctx, repo)?;
-            crate::application::features::repository::sync::sync(&ctx.root, &repo_ref, &ctx.recipes, &crate::application::features::repository::sync::SyncOpts { force, allow_unsigned })
+            crate::application::features::repository::sync::sync(
+                &ctx.root,
+                &repo_ref,
+                &ctx.recipes,
+                &crate::application::features::repository::sync::SyncOpts {
+                    force,
+                    allow_unsigned,
+                },
+            )
         }
         Cmd::Repolist { all } => crate::commands::repositories::cmd_repolist(&ctx.cfg, all),
-        Cmd::Makecache { allow_unsigned, force } => {
+        Cmd::Makecache {
+            allow_unsigned,
+            force,
+        } => {
             crate::commands::repositories::cmd_makecache(&ctx.cfg, &ctx.root, allow_unsigned, force)
         }
-        Cmd::Repoquery { name, repo_id, info } => {
-            crate::commands::repositories::cmd_repoquery(&ctx.cfg, &ctx.root, &name, repo_id.as_deref(), info)
-        }
-        Cmd::Fetch { names, all, isolation, sources_only, offline, allow_degraded } => {
-            cmd_fetch_checked(ctx, &names, all, isolation.as_deref(), sources_only, offline, allow_degraded)
-        }
+        Cmd::Repoquery {
+            name,
+            repo_id,
+            info,
+        } => crate::commands::repositories::cmd_repoquery(
+            &ctx.cfg,
+            &ctx.root,
+            &name,
+            repo_id.as_deref(),
+            info,
+        ),
+        Cmd::Fetch {
+            names,
+            all,
+            isolation,
+            sources_only,
+            offline,
+            allow_degraded,
+        } => cmd_fetch_checked(
+            ctx,
+            &names,
+            all,
+            isolation.as_deref(),
+            sources_only,
+            offline,
+            allow_degraded,
+        ),
         Cmd::Recipe { action } => cmd_recipe(ctx, action),
-        Cmd::Clean { category, dry_run } => crate::commands::repositories::cmd_clean(ctx, &category, dry_run),
+        Cmd::Clean { category, dry_run } => {
+            crate::commands::repositories::cmd_clean(ctx, &category, dry_run)
+        }
         Cmd::Group { action } => match action {
             GroupCmd::List => cmd_group_list(ctx),
             GroupCmd::Info { id } => cmd_group_info(ctx, &id),
-            GroupCmd::Install { id, with_optional, flags } => cmd_group_install(ctx, &id, &flags, with_optional),
+            GroupCmd::Install {
+                id,
+                with_optional,
+                flags,
+            } => cmd_group_install(ctx, &id, &flags, with_optional),
             GroupCmd::Remove { id, yes } => cmd_group_remove(ctx, &id, yes),
         },
         Cmd::Plugin { action } => match action {

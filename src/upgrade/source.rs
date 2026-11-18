@@ -9,9 +9,9 @@
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
+use crate::adapters::sign;
 use crate::fetch::{self, RepoRef};
 use crate::repo;
-use crate::adapters::sign;
 
 use super::verify::{
     check_archive_matches_index, check_index_freshness, require_trust_for_remote,
@@ -54,7 +54,10 @@ impl OpenRepo {
     /// entry declares both fields; a legacy v1–v3 entry maps to *unknown*
     /// (B3 chain §7), which is why a legacy package cannot drive an init
     /// migration. The value comes from authenticated index bytes only.
-    pub(crate) fn metadata_for(&self, name: &str) -> Option<crate::domain::package::metadata::PkgMetadata> {
+    pub(crate) fn metadata_for(
+        &self,
+        name: &str,
+    ) -> Option<crate::domain::package::metadata::PkgMetadata> {
         let entry = self.index.find(name)?;
         crate::domain::package::metadata::metadata_from_options(
             entry.rundeps.as_ref(),
@@ -162,7 +165,9 @@ fn refresh_remote_index(url: &str, cache: &Path) -> Result<bool> {
             Ok(false)
         }
         Ok(false) => bail!("remote index not available (HTTP error): {index_url}"),
-        Err(e) if crate::presentation::diag::has_io_kind(&e, std::io::ErrorKind::PermissionDenied) => {
+        Err(e)
+            if crate::presentation::diag::has_io_kind(&e, std::io::ErrorKind::PermissionDenied) =>
+        {
             let _ = std::fs::remove_file(cache.join("index.toml.part"));
             crate::nawa_warn!("repository cache is not writable; using cached index");
             Ok(true)

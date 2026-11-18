@@ -100,7 +100,9 @@ struct AuthoritySeal;
 /// Only compiled-in migration feature code may call this (enforced by the
 /// layering check); no external input can reach it.
 pub(crate) fn migration_authority() -> MigrationAuthority {
-    MigrationAuthority { _seal: AuthoritySeal }
+    MigrationAuthority {
+        _seal: AuthoritySeal,
+    }
 }
 
 /// Acquire the exclusive database lock while a migration gate is active,
@@ -278,7 +280,9 @@ pub(crate) fn try_acquire(root: &Path, mode: Mode) -> Result<Attempt> {
                 std::fs::create_dir_all(dir)
                     .with_context(|| format!("create {}", dir.display()))?;
             }
-            open_rw(&path).with_context(|| format!("cannot open the package database lock {}", path.display()))?
+            open_rw(&path).with_context(|| {
+                format!("cannot open the package database lock {}", path.display())
+            })?
         }
         Mode::Shared => {
             // readers never create nawa state; a missing/unwritable lock
@@ -361,8 +365,14 @@ mod tests {
     fn exclusive_excludes_everything_until_dropped() {
         let root = tmp("ex");
         let first = locked(try_acquire(&root, Mode::Exclusive).unwrap());
-        assert!(matches!(try_acquire(&root, Mode::Exclusive).unwrap(), Attempt::Busy));
-        assert!(matches!(try_acquire(&root, Mode::Shared).unwrap(), Attempt::Busy));
+        assert!(matches!(
+            try_acquire(&root, Mode::Exclusive).unwrap(),
+            Attempt::Busy
+        ));
+        assert!(matches!(
+            try_acquire(&root, Mode::Shared).unwrap(),
+            Attempt::Busy
+        ));
         drop(first);
         let _again = locked(try_acquire(&root, Mode::Exclusive).unwrap());
         let _ = std::fs::remove_dir_all(&root);
@@ -374,7 +384,10 @@ mod tests {
         std::fs::create_dir_all(root.join("var/lib/nawa")).unwrap();
         let a = locked(try_acquire(&root, Mode::Shared).unwrap());
         let _b = locked(try_acquire(&root, Mode::Shared).unwrap());
-        assert!(matches!(try_acquire(&root, Mode::Exclusive).unwrap(), Attempt::Busy));
+        assert!(matches!(
+            try_acquire(&root, Mode::Exclusive).unwrap(),
+            Attempt::Busy
+        ));
         drop(a);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -382,7 +395,10 @@ mod tests {
     #[test]
     fn shared_on_a_root_without_nawa_state_needs_no_lock_and_creates_nothing() {
         let root = tmp("none");
-        assert!(matches!(try_acquire(&root, Mode::Shared).unwrap(), Attempt::NotNeeded));
+        assert!(matches!(
+            try_acquire(&root, Mode::Shared).unwrap(),
+            Attempt::NotNeeded
+        ));
         assert!(!root.join("var").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -512,18 +528,11 @@ mod tests {
         std::thread::scope(|s| {
             // 3 readers + 1 writer: all must see Busy while the holder lives
             let mut handles = Vec::new();
-            for mode in [
-                Mode::Shared,
-                Mode::Shared,
-                Mode::Shared,
-                Mode::Exclusive,
-            ] {
+            for mode in [Mode::Shared, Mode::Shared, Mode::Shared, Mode::Exclusive] {
                 let root = root.clone();
-                handles.push(s.spawn(move || {
-                    match try_acquire(&root, mode) {
-                        Ok(Attempt::Busy) => true,
-                        other => panic!("expected Busy under contention, got {other:?}"),
-                    }
+                handles.push(s.spawn(move || match try_acquire(&root, mode) {
+                    Ok(Attempt::Busy) => true,
+                    other => panic!("expected Busy under contention, got {other:?}"),
                 }));
             }
             for h in handles {
@@ -540,7 +549,10 @@ mod tests {
             for _ in 0..3 {
                 locks.push(locked(try_acquire(&root, Mode::Shared).unwrap()));
             }
-            assert!(matches!(try_acquire(&root, Mode::Exclusive).unwrap(), Attempt::Busy));
+            assert!(matches!(
+                try_acquire(&root, Mode::Exclusive).unwrap(),
+                Attempt::Busy
+            ));
             drop(locks);
         });
         let _ = std::fs::remove_dir_all(&root);
@@ -552,10 +564,19 @@ mod tests {
     fn busy_attempt_does_not_leak_a_lock() {
         let root = tmp("leak");
         let _holder = locked(try_acquire(&root, Mode::Exclusive).unwrap());
-        assert!(matches!(try_acquire(&root, Mode::Shared).unwrap(), Attempt::Busy));
+        assert!(matches!(
+            try_acquire(&root, Mode::Shared).unwrap(),
+            Attempt::Busy
+        ));
         // repeated busy attempts stay busy (no fd was left locked behind)
-        assert!(matches!(try_acquire(&root, Mode::Shared).unwrap(), Attempt::Busy));
-        assert!(matches!(try_acquire(&root, Mode::Exclusive).unwrap(), Attempt::Busy));
+        assert!(matches!(
+            try_acquire(&root, Mode::Shared).unwrap(),
+            Attempt::Busy
+        ));
+        assert!(matches!(
+            try_acquire(&root, Mode::Exclusive).unwrap(),
+            Attempt::Busy
+        ));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

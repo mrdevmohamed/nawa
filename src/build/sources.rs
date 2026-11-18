@@ -59,7 +59,13 @@ type Claims = BTreeMap<PathBuf, Claim>;
 /// Stage every `[[package.sources]]` of `rec` into `<work>/src` and return
 /// the workspace layout. `cache` is the source cache root (`$NAWA_SRCCACHE`,
 /// default `<builddir>/distfiles`) — the same value the legacy branch uses.
-pub(crate) fn stage_sources(rec: &Recipe, work: &Path, src: &Path, cache: &Path, jobs: u32) -> Result<SourcesStaged> {
+pub(crate) fn stage_sources(
+    rec: &Recipe,
+    work: &Path,
+    src: &Path,
+    cache: &Path,
+    jobs: u32,
+) -> Result<SourcesStaged> {
     // the per-source extraction directory: same filesystem as `src/`, so
     // the rename merge never copies (§4.2)
     let stage = work.join("stage");
@@ -134,15 +140,15 @@ fn download_sources<'a>(
             let ctx = &ctx;
             let h = scope.spawn(move || {
                 let url = rec.expand(&spec.url, ctx);
-                let mirrors: Vec<String> = spec
-                    .mirrors
-                    .iter()
-                    .map(|m| rec.expand(m, ctx))
-                    .collect();
+                let mirrors: Vec<String> =
+                    spec.mirrors.iter().map(|m| rec.expand(m, ctx)).collect();
                 let dest = fetch::digest_cache_dir(cache).join(&spec.sha256);
                 fetch::download_content_addressed(&url, &mirrors, &spec.sha256, &dest)
                     .with_context(|| {
-                        format!("fetch source `{}` of recipe {}", spec.name, rec.package.name)
+                        format!(
+                            "fetch source `{}` of recipe {}",
+                            spec.name, rec.package.name
+                        )
                     })?;
                 crate::nawa_success!("source `{}` verified: {}", spec.name, dest.display());
                 let archived = match spec.unpack {
@@ -187,13 +193,7 @@ fn extract_archives(fetched: &[Fetched<'_>], stage: &Path) -> Result<()> {
         }
         let dir = stage.join(&f.spec.name);
         fetch::extract_source_archive_stripped(&f.cache_path, &dir, f.spec.strip_components)
-            .with_context(|| {
-                format!(
-                    "extract source `{}` into {}",
-                    f.spec.name,
-                    dir.display()
-                )
-            })?;
+            .with_context(|| format!("extract source `{}` into {}", f.spec.name, dir.display()))?;
     }
     Ok(())
 }
@@ -225,9 +225,8 @@ fn merge_archives(
 fn source_date_epoch(rec: &Recipe, src: &Path) -> Result<u64> {
     let sde = match rec.package.source_date_epoch {
         Some(p) => p,
-        None => crate::build::buildenv::source_date_epoch_from_files(src).with_context(|| {
-            format!("derive SOURCE_DATE_EPOCH for recipe {}", rec.package.name)
-        })?,
+        None => crate::build::buildenv::source_date_epoch_from_files(src)
+            .with_context(|| format!("derive SOURCE_DATE_EPOCH for recipe {}", rec.package.name))?,
     };
     Ok(sde)
 }
@@ -243,7 +242,11 @@ fn stage_plain_sources(
         if f.archived {
             continue;
         }
-        let fname = f.url.rsplit('/').find(|s| !s.is_empty()).unwrap_or("source.bin");
+        let fname = f
+            .url
+            .rsplit('/')
+            .find(|s| !s.is_empty())
+            .unwrap_or("source.bin");
         let into = if f.spec.into.is_empty() {
             PathBuf::from(fname)
         } else {
@@ -297,10 +300,7 @@ fn merge_staged(
     src: &Path,
     claims: &mut Claims,
 ) -> Result<()> {
-    for entry in walkdir::WalkDir::new(from)
-        .min_depth(1)
-        .sort_by_file_name()
-    {
+    for entry in walkdir::WalkDir::new(from).min_depth(1).sort_by_file_name() {
         let entry = entry.with_context(|| format!("walk {}", from.display()))?;
         let rel = entry
             .path()
@@ -365,11 +365,7 @@ fn match_vs_claims(
 ) -> Result<()> {
     // every parent directory must be a directory: register the missing
     // chain (this source owns the dirs it creates)
-    let mut ancestors: Vec<PathBuf> = path
-        .ancestors()
-        .skip(1)
-        .map(Path::to_path_buf)
-        .collect();
+    let mut ancestors: Vec<PathBuf> = path.ancestors().skip(1).map(Path::to_path_buf).collect();
     ancestors.reverse();
     for anc in ancestors {
         if anc.as_os_str().is_empty() {
@@ -385,9 +381,16 @@ fn match_vs_claims(
                 owner
             ),
             None => {
-                claims.insert(anc.clone(), Claim { is_dir: true, owner: owner.to_string() });
-                std::fs::create_dir_all(src.join(&anc))
-                    .with_context(|| format!("create workspace dir {}", src.join(&anc).display()))?;
+                claims.insert(
+                    anc.clone(),
+                    Claim {
+                        is_dir: true,
+                        owner: owner.to_string(),
+                    },
+                );
+                std::fs::create_dir_all(src.join(&anc)).with_context(|| {
+                    format!("create workspace dir {}", src.join(&anc).display())
+                })?;
             }
         }
     }
@@ -420,7 +423,10 @@ fn match_vs_claims(
             }
             claims.insert(
                 path.to_path_buf(),
-                Claim { is_dir: !wants_file, owner: owner.to_string() },
+                Claim {
+                    is_dir: !wants_file,
+                    owner: owner.to_string(),
+                },
             );
         }
     }
@@ -477,7 +483,11 @@ mod tests {
         merge_staged(&stage, &PathBuf::new(), "main", &src, &mut claims).unwrap();
         let md = std::fs::symlink_metadata(src.join("hello")).unwrap();
         use std::os::unix::fs::MetadataExt;
-        assert_eq!(md.mtime(), 1_000_000, "rename keeps the archive mtime (§4.2)");
+        assert_eq!(
+            md.mtime(),
+            1_000_000,
+            "rename keeps the archive mtime (§4.2)"
+        );
         assert!(claims.get(Path::new("hello")).unwrap().owner == "main");
         // the stage source entry was moved away
         assert!(!stage.join("hello").exists());
@@ -495,7 +505,14 @@ mod tests {
         make_tree(&d.join("stage/patches"), &[("0001-fix", "", b"diff\n")], 7);
 
         let mut claims = Claims::new();
-        merge_staged(&d.join("stage/main"), &PathBuf::from("kernel"), "main", &src, &mut claims).unwrap();
+        merge_staged(
+            &d.join("stage/main"),
+            &PathBuf::from("kernel"),
+            "main",
+            &src,
+            &mut claims,
+        )
+        .unwrap();
         merge_staged(
             &d.join("stage/patches"),
             &PathBuf::from("patches"),
@@ -504,10 +521,18 @@ mod tests {
             &mut claims,
         )
         .unwrap();
-        assert_eq!(std::fs::read(src.join("kernel/Makefile")).unwrap(), b"make\n");
-        assert_eq!(std::fs::read(src.join("patches/0001-fix")).unwrap(), b"diff\n");
         assert_eq!(
-            claims.get(Path::new("kernel")).map(|c| (c.owner.as_str(), c.is_dir)),
+            std::fs::read(src.join("kernel/Makefile")).unwrap(),
+            b"make\n"
+        );
+        assert_eq!(
+            std::fs::read(src.join("patches/0001-fix")).unwrap(),
+            b"diff\n"
+        );
+        assert_eq!(
+            claims
+                .get(Path::new("kernel"))
+                .map(|c| (c.owner.as_str(), c.is_dir)),
             Some(("main", true))
         );
         let _ = std::fs::remove_dir_all(&d);
@@ -527,7 +552,10 @@ mod tests {
         merge_staged(&a, &PathBuf::new(), "a", &src, &mut claims).unwrap();
         let err = merge_staged(&b, &PathBuf::new(), "b", &src, &mut claims).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("claimed twice") && msg.contains("`a`") && msg.contains("`b`"), "got: {msg}");
+        assert!(
+            msg.contains("claimed twice") && msg.contains("`a`") && msg.contains("`b`"),
+            "got: {msg}"
+        );
         // the first source's bytes win; nothing was overwritten
         assert_eq!(std::fs::read(src.join("C")).unwrap(), b"from a\n");
         let _ = std::fs::remove_dir_all(&d);
@@ -544,9 +572,13 @@ mod tests {
 
         let mut claims = Claims::new();
         merge_staged(&d.join("stage/a"), &PathBuf::new(), "a", &src, &mut claims).unwrap();
-        let err = merge_staged(&d.join("stage/b"), &PathBuf::new(), "b", &src, &mut claims).unwrap_err();
+        let err =
+            merge_staged(&d.join("stage/b"), &PathBuf::new(), "b", &src, &mut claims).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("collision") && msg.contains("`a`") && msg.contains("`b`"), "got: {msg}");
+        assert!(
+            msg.contains("collision") && msg.contains("`a`") && msg.contains("`b`"),
+            "got: {msg}"
+        );
 
         // and the other direction: dir first, file second — a fresh
         // workspace, with both stage trees rebuilt (the first merges
@@ -557,8 +589,22 @@ mod tests {
         make_tree(&d2.join("stage/b"), &[("data/payload", "", b"busy\n")], 7);
         make_tree(&d2.join("stage/a"), &[("data", "", b"file\n")], 7);
         let mut claims = Claims::new();
-        merge_staged(&d2.join("stage/b"), &PathBuf::new(), "b", &src2, &mut claims).unwrap();
-        let err = merge_staged(&d2.join("stage/a"), &PathBuf::new(), "a", &src2, &mut claims).unwrap_err();
+        merge_staged(
+            &d2.join("stage/b"),
+            &PathBuf::new(),
+            "b",
+            &src2,
+            &mut claims,
+        )
+        .unwrap();
+        let err = merge_staged(
+            &d2.join("stage/a"),
+            &PathBuf::new(),
+            "a",
+            &src2,
+            &mut claims,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("collision"), "got: {err}");
         let _ = std::fs::remove_dir_all(&d2);
         let _ = std::fs::remove_dir_all(&d);
@@ -650,7 +696,10 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("collision"), "got: {err}");
-        assert_eq!(std::fs::read(src.join("shared.dat")).unwrap(), b"already here\n");
+        assert_eq!(
+            std::fs::read(src.join("shared.dat")).unwrap(),
+            b"already here\n"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 }

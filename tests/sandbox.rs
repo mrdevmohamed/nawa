@@ -90,7 +90,10 @@ LC_ALL = "C"
 NAWA_SRCDIR = "/tmp/.nawa-sbx/src"
 NAWA_PKGDIR = "/tmp/.nawa-sbx/pkg"
 "#
-    .replace("__DEGRADED__", if allow_degraded { "true" } else { "false" })
+    .replace(
+        "__DEGRADED__",
+        if allow_degraded { "true" } else { "false" },
+    )
     .replace("__SCRIPT__", script)
     .replace("__SRC__", &dir.join("src").display().to_string())
     .replace("__PKG__", &dir.join("pkg").display().to_string())
@@ -128,7 +131,10 @@ fn uid_is_zero_inside_and_no_stragglers_survive() {
     );
     assert!(o.status.success(), "{}", out_str(&o));
     let so = String::from_utf8_lossy(&o.stdout);
-    assert!(so.contains("uid=0"), "uid inside the sandbox must be 0: {so}");
+    assert!(
+        so.contains("uid=0"),
+        "uid inside the sandbox must be 0: {so}"
+    );
 
     // the straggler must be gone once PID 1 exited (pid namespace cleanup)
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -136,10 +142,18 @@ fn uid_is_zero_inside_and_no_stragglers_survive() {
         let gone = fs::read_dir("/proc")
             .map(|rd| {
                 rd.filter_map(|e| e.ok())
-                    .filter(|e| e.file_name().to_string_lossy().chars().all(|c| c.is_ascii_digit()))
+                    .filter(|e| {
+                        e.file_name()
+                            .to_string_lossy()
+                            .chars()
+                            .all(|c| c.is_ascii_digit())
+                    })
                     .all(|e| {
-                        let cl = fs::read_to_string(format!("/proc/{}/cmdline", e.file_name().to_string_lossy()))
-                            .unwrap_or_default();
+                        let cl = fs::read_to_string(format!(
+                            "/proc/{}/cmdline",
+                            e.file_name().to_string_lossy()
+                        ))
+                        .unwrap_or_default();
                         !cl.contains("sleep 987654")
                     })
             })
@@ -159,11 +173,7 @@ fn environment_is_exactly_the_whitelist() {
         return;
     }
     let d = scratch("env");
-    let o = run_spec(
-        &d,
-        "env | sort | grep -v '^_='\n",
-        true,
-    );
+    let o = run_spec(&d, "env | sort | grep -v '^_='\n", true);
     assert!(o.status.success(), "{}", out_str(&o));
     let so = String::from_utf8_lossy(&o.stdout);
     for line in so.lines() {
@@ -272,14 +282,21 @@ echo tmp-private
     assert!(so.contains("root-is-readonly"), "{}", so);
     assert!(so.contains("destdir-writable"), "{}", so);
     assert!(so.contains("tmp-private"), "{}", so);
-    assert!(d.join("pkg/staged-file").exists(), "DESTDIR file must land in the host staging dir");
+    assert!(
+        d.join("pkg/staged-file").exists(),
+        "DESTDIR file must land in the host staging dir"
+    );
     let _ = fs::remove_dir_all(&d);
 }
 
 #[test]
 fn pid_namespace_shows_only_the_build() {
     let p = probe_all();
-    if should_skip(&p, !p.userns || !p.proc, "a fresh /proc for the pid namespace") {
+    if should_skip(
+        &p,
+        !p.userns || !p.proc,
+        "a fresh /proc for the pid namespace",
+    ) {
         return;
     }
     let d = scratch("pid");
@@ -287,7 +304,10 @@ fn pid_namespace_shows_only_the_build() {
     assert!(o.status.success(), "{}", out_str(&o));
     let so = String::from_utf8_lossy(&o.stdout);
     let count: usize = so.trim().parse().unwrap_or(999);
-    assert!(count <= 5, "the pid namespace leaks host processes: {count} visible\n{so}");
+    assert!(
+        count <= 5,
+        "the pid namespace leaks host processes: {count} visible\n{so}"
+    );
     let _ = fs::remove_dir_all(&d);
 }
 
@@ -311,7 +331,12 @@ fn timeout_kills_the_whole_section() {
         .arg(d.join("spec.toml"))
         .output()
         .unwrap();
-    assert_eq!(o.status.code(), Some(124), "expected the timeout exit code 124: {}", out_str(&o));
+    assert_eq!(
+        o.status.code(),
+        Some(124),
+        "expected the timeout exit code 124: {}",
+        out_str(&o)
+    );
     assert!(
         String::from_utf8_lossy(&o.stderr).contains("timed out"),
         "a timeout must be reported loudly: {}",

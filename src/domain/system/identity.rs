@@ -4,7 +4,6 @@
 //! service enablement or runtime service state, and it never infers
 //! `init-system` from package names or file presence (§6.3(4)).
 
-
 /// The init-system identities in scope. The migration design limits provider
 /// selection to the exact `init-system=runit` and `init-system=systemd`
 /// identities (§6); a positively identified init outside that pair is

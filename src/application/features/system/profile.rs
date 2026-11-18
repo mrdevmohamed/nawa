@@ -28,7 +28,9 @@ use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::domain::system::profile::{ProviderPoliciesDoc, ProviderPolicyDoc, ProvidersDoc, SystemProfile};
+use crate::domain::system::profile::{
+    ProviderPoliciesDoc, ProviderPolicyDoc, ProvidersDoc, SystemProfile,
+};
 
 /// The effective target profile together with the file that supplied each
 /// declared provider role (§5.1: an observation must include its source —
@@ -62,11 +64,14 @@ pub(crate) fn load_effective(root: &Path) -> Result<EffectiveProfile> {
 /// preserved. This is a containment check, not a race-free openat walk.
 fn target_profile_path(root: &Path, relative: &Path) -> Result<std::path::PathBuf> {
     if relative.is_absolute()
-        || relative.components().any(|component| {
-            !matches!(component, std::path::Component::Normal(_))
-        })
+        || relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
     {
-        anyhow::bail!("invalid system profile path beneath target root: {}", relative.display());
+        anyhow::bail!(
+            "invalid system profile path beneath target root: {}",
+            relative.display()
+        );
     }
 
     let canonical_root = std::fs::canonicalize(root)
@@ -100,9 +105,7 @@ fn target_profile_path(root: &Path, relative: &Path) -> Result<std::path::PathBu
                         }
                         break;
                     }
-                    Err(parent_error)
-                        if parent_error.kind() == std::io::ErrorKind::NotFound =>
-                    {
+                    Err(parent_error) if parent_error.kind() == std::io::ErrorKind::NotFound => {
                         ancestor = path.parent();
                     }
                     Err(parent_error) => {
@@ -114,8 +117,9 @@ fn target_profile_path(root: &Path, relative: &Path) -> Result<std::path::PathBu
             }
             Ok(candidate)
         }
-        Err(error) => Err(error)
-            .with_context(|| format!("resolve system profile {}", candidate.display())),
+        Err(error) => {
+            Err(error).with_context(|| format!("resolve system profile {}", candidate.display()))
+        }
     }
 }
 
@@ -174,9 +178,7 @@ fn read_one(path: &Path) -> Result<Option<SystemProfile>> {
 /// `[providers]` section is the only table), and the domain rejects keys
 /// it does not know — so a newer profile document fails loudly instead of
 /// being silently misread.
-fn parse_doc(
-    text: &str,
-) -> Result<(BTreeMap<String, String>, ProvidersDoc, ProviderPoliciesDoc)> {
+fn parse_doc(text: &str) -> Result<(BTreeMap<String, String>, ProvidersDoc, ProviderPoliciesDoc)> {
     let value: toml::Value = toml::from_str(text).context("profile is not valid TOML")?;
     let table = value
         .as_table()
@@ -205,9 +207,9 @@ fn parse_doc(
                 .ok_or_else(|| anyhow::anyhow!("profile key policy must be a table"))?;
             let mut domains = BTreeMap::new();
             for (role, value) in section {
-                let table = value.as_table().ok_or_else(|| {
-                    anyhow::anyhow!("policy for {role:?} must be a table")
-                })?;
+                let table = value
+                    .as_table()
+                    .ok_or_else(|| anyhow::anyhow!("policy for {role:?} must be a table"))?;
                 let mut policy = ProviderPolicyDoc::default();
                 for (field, value) in table {
                     let values = string_array(value, &format!("policy {role:?}.{field}"))?;
@@ -365,7 +367,10 @@ init-system = \"systemd\"
 
         let effective = load_effective(&f.dir).unwrap();
         assert_eq!(
-            effective.profile.as_ref().and_then(|profile| profile.provider("init-system")),
+            effective
+                .profile
+                .as_ref()
+                .and_then(|profile| profile.provider("init-system")),
             Some("systemd")
         );
         assert!(
@@ -398,11 +403,17 @@ init-system = \"systemd\"
             vec!["networkmanager".to_string(), "connman".to_string()]
         );
         assert_eq!(
-            effective.policy_sources.get("init-system").map(|p| p.as_path()),
+            effective
+                .policy_sources
+                .get("init-system")
+                .map(|p| p.as_path()),
             Some(f.overrides.as_path())
         );
         assert_eq!(
-            effective.policy_sources.get("network-stack").map(|p| p.as_path()),
+            effective
+                .policy_sources
+                .get("network-stack")
+                .map(|p| p.as_path()),
             Some(f.defaults.as_path())
         );
     }
@@ -414,10 +425,7 @@ init-system = \"systemd\"
             &f.defaults,
             "schema = 2\n\n[policy.init-system]\nrequired = [\"systemd\"]\n",
         );
-        write(
-            &f.overrides,
-            "schema = 2\n\n[policy.init-system]\n",
-        );
+        write(&f.overrides, "schema = 2\n\n[policy.init-system]\n");
         let effective = load_effective_at(&f.defaults, &f.overrides).unwrap();
         let policy = effective
             .profile
@@ -460,7 +468,10 @@ init-system = \"systemd\"
         write(&f.defaults, DESKTOP);
         let effective = load_effective_at(&f.defaults, &f.overrides).unwrap();
         assert_eq!(
-            effective.profile.as_ref().and_then(|p| p.provider("init-system")),
+            effective
+                .profile
+                .as_ref()
+                .and_then(|p| p.provider("init-system")),
             Some("systemd")
         );
     }
@@ -606,7 +617,10 @@ init-system = \"systemd\"
         assert_eq!(profile.architecture.as_deref(), Some("x86_64"));
         assert_eq!(profile.provider("init-system"), Some("systemd"));
         assert_eq!(
-            distribution.role_sources.get("init-system").map(|p| p.as_path()),
+            distribution
+                .role_sources
+                .get("init-system")
+                .map(|p| p.as_path()),
             Some(defaults.as_path())
         );
 
@@ -620,9 +634,11 @@ init-system = \"systemd\"
         assert_eq!(profile.profile.as_deref(), Some("administrator-managed"));
         assert_eq!(profile.provider("init-system"), Some("runit"));
         assert_eq!(
-            effective.role_sources.get("init-system").map(|p| p.as_path()),
+            effective
+                .role_sources
+                .get("init-system")
+                .map(|p| p.as_path()),
             Some(overrides.as_path())
         );
     }
-
 }

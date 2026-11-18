@@ -598,7 +598,10 @@ impl Cmd {
             // installing by name builds first, so (like `build --install`)
             // it locks around each install step only
             Cmd::Install { targets, .. } => {
-                if targets.iter().all(|t| crate::adapters::pathutil::is_archive_arg(t)) {
+                if targets
+                    .iter()
+                    .all(|t| crate::adapters::pathutil::is_archive_arg(t))
+                {
                     Request::InstallArchives
                 } else {
                     Request::InstallByName
@@ -883,9 +886,15 @@ mod tests {
     #[test]
     fn migration_apply_requires_an_explicit_system_plan_identity() {
         let base = [
-            "nawa", "system", "migrate", "apply", "faseela-runit-to-systemd-v1",
-            "--from", "init-system=runit",
-            "--to", "init-system=systemd",
+            "nawa",
+            "system",
+            "migrate",
+            "apply",
+            "faseela-runit-to-systemd-v1",
+            "--from",
+            "init-system=runit",
+            "--to",
+            "init-system=systemd",
             "--acknowledge-reboot",
             "--acknowledge-recovery",
         ];

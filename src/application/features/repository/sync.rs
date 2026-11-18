@@ -35,11 +35,16 @@ pub(crate) fn sync(root: &Path, repo_ref: &RepoRef, dest: &Path, opts: &SyncOpts
     repo::validate_rev(&rec.rev)?;
     upgrade::verify::validate_entry_filename(&rec.file)?;
     if !rec.file.ends_with(repo::RECIPES_SUFFIX) {
-        bail!("index lists `{}` as the recipe tree — unexpected file name", rec.file);
+        bail!(
+            "index lists `{}` as the recipe tree — unexpected file name",
+            rec.file
+        );
     }
 
     let rev_path = rev_file(root);
-    let current = std::fs::read_to_string(&rev_path).ok().map(|s| s.trim().to_string());
+    let current = std::fs::read_to_string(&rev_path)
+        .ok()
+        .map(|s| s.trim().to_string());
     if current.as_deref() == Some(rec.rev.as_str()) && dest.is_dir() {
         crate::nawa_info!("recipes already at {} ({})", rec.rev, dest.display());
         return Ok(());
@@ -48,11 +53,18 @@ pub(crate) fn sync(root: &Path, repo_ref: &RepoRef, dest: &Path, opts: &SyncOpts
     // the tarball: located (local repo) or downloaded (remote), then checked
     // against the sha256 in the authenticated index
     let tarball = match &open.base_url {
-        None if open.index.repository.as_ref().map(|m| m.archive_location.as_str())
+        None if open
+            .index
+            .repository
+            .as_ref()
+            .map(|m| m.archive_location.as_str())
             == Some(repo::ARCHIVE_LOCATION_PER_PACKAGE_URL) =>
         {
             let source_url = upgrade::archive_download_url(
-                "", &open.index, &rec.file, rec.download_url.as_deref()
+                "",
+                &open.index,
+                &rec.file,
+                rec.download_url.as_deref(),
             )?;
             let cache = fetch::remote_cache_dir(root, &source_url);
             std::fs::create_dir_all(&cache)
@@ -65,22 +77,35 @@ pub(crate) fn sync(root: &Path, repo_ref: &RepoRef, dest: &Path, opts: &SyncOpts
         Some(url) => {
             let path = open.dir.join(&rec.file);
             let source_url = upgrade::archive_download_url(
-                url, &open.index, &rec.file, rec.download_url.as_deref()
+                url,
+                &open.index,
+                &rec.file,
+                rec.download_url.as_deref(),
             )?;
             fetch::download_cached(&source_url, &path, Some(&rec.sha256))?;
             path
         }
     };
     if !tarball.is_file() {
-        bail!("recipe archive {} listed in the index is missing", tarball.display());
+        bail!(
+            "recipe archive {} listed in the index is missing",
+            tarball.display()
+        );
     }
     let snapshot_dir = root.join(".nawa");
     let snapshot = fetch::snapshot_file(&tarball, Some(&rec.sha256), &snapshot_dir)?;
     let verified_tarball = snapshot.path();
 
-    let parent = dest.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let parent = dest
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
     std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    let name = dest.file_name().context("recipes path has no name")?.to_string_lossy().to_string();
+    let name = dest
+        .file_name()
+        .context("recipes path has no name")?
+        .to_string_lossy()
+        .to_string();
     let pid = std::process::id();
     let staging = parent.join(format!(".{name}.sync-{pid}"));
     let old = parent.join(format!(".{name}.old-{pid}"));
@@ -100,7 +125,10 @@ pub(crate) fn sync(root: &Path, repo_ref: &RepoRef, dest: &Path, opts: &SyncOpts
         }
         if dest.exists() {
             std::fs::rename(dest, &old).with_context(|| {
-                format!("move aside {} (is it a mount point? is it writable?)", dest.display())
+                format!(
+                    "move aside {} (is it a mount point? is it writable?)",
+                    dest.display()
+                )
             })?;
         }
         if let Err(e) = std::fs::rename(&staging, dest) {
@@ -126,7 +154,11 @@ pub(crate) fn sync(root: &Path, repo_ref: &RepoRef, dest: &Path, opts: &SyncOpts
     let tmp = rev_path.with_extension("rev.part");
     std::fs::write(&tmp, format!("{}\n", rec.rev))?;
     std::fs::rename(&tmp, &rev_path)?;
-    crate::nawa_success!("recipes synced to {} ({count} recipes) -> {}", rec.rev, dest.display());
+    crate::nawa_success!(
+        "recipes synced to {} ({count} recipes) -> {}",
+        rec.rev,
+        dest.display()
+    );
     Ok(())
 }
 
@@ -167,8 +199,15 @@ mod tests {
     }
 
     fn run(e: &Env) -> Result<()> {
-        sync(&e.root, &RepoRef::Local(e.repo.clone()), &e.dest,
-             &SyncOpts { force: false, allow_unsigned: true })
+        sync(
+            &e.root,
+            &RepoRef::Local(e.repo.clone()),
+            &e.dest,
+            &SyncOpts {
+                force: false,
+                allow_unsigned: true,
+            },
+        )
     }
 
     #[test]
@@ -176,17 +215,32 @@ mod tests {
         let e = env("roundtrip");
         publish(&e, &tree(&e.base, "t1", "one"), "aaa111");
         run(&e).unwrap();
-        assert_eq!(std::fs::read_to_string(e.dest.join("base/hello/recipe.toml")).unwrap(), "# one\n");
-        assert_eq!(std::fs::read_to_string(rev_file(&e.root)).unwrap().trim(), "aaa111");
+        assert_eq!(
+            std::fs::read_to_string(e.dest.join("base/hello/recipe.toml")).unwrap(),
+            "# one\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(rev_file(&e.root)).unwrap().trim(),
+            "aaa111"
+        );
 
         publish(&e, &tree(&e.base, "t2", "two"), "bbb222");
         run(&e).unwrap();
-        assert_eq!(std::fs::read_to_string(e.dest.join("base/hello/recipe.toml")).unwrap(), "# two\n");
-        assert_eq!(std::fs::read_to_string(rev_file(&e.root)).unwrap().trim(), "bbb222");
+        assert_eq!(
+            std::fs::read_to_string(e.dest.join("base/hello/recipe.toml")).unwrap(),
+            "# two\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(rev_file(&e.root)).unwrap().trim(),
+            "bbb222"
+        );
         // no staging / backup leftovers next to the tree
-        let leftovers: Vec<_> = std::fs::read_dir(e.dest.parent().unwrap()).unwrap()
-            .filter_map(|x| x.ok()).map(|x| x.file_name().to_string_lossy().to_string())
-            .filter(|n| n.starts_with('.')).collect();
+        let leftovers: Vec<_> = std::fs::read_dir(e.dest.parent().unwrap())
+            .unwrap()
+            .filter_map(|x| x.ok())
+            .map(|x| x.file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with('.'))
+            .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
         let _ = std::fs::remove_dir_all(&e.base);
     }
@@ -204,7 +258,10 @@ mod tests {
         std::fs::write(&tb, bytes).unwrap();
         let err = run(&e).unwrap_err();
         assert!(format!("{err:#}").contains("sha256 mismatch"), "{err:#}");
-        assert_eq!(std::fs::read_to_string(e.dest.join("base/hello/recipe.toml")).unwrap(), "# one\n");
+        assert_eq!(
+            std::fs::read_to_string(e.dest.join("base/hello/recipe.toml")).unwrap(),
+            "# one\n"
+        );
         let _ = std::fs::remove_dir_all(&e.base);
     }
 
@@ -225,7 +282,10 @@ mod tests {
         run(&e).unwrap();
         std::fs::write(e.dest.join("marker"), "x").unwrap();
         run(&e).unwrap();
-        assert!(e.dest.join("marker").exists(), "an up-to-date tree must not be replaced");
+        assert!(
+            e.dest.join("marker").exists(),
+            "an up-to-date tree must not be replaced"
+        );
         let _ = std::fs::remove_dir_all(&e.base);
     }
 
@@ -249,12 +309,14 @@ mod tests {
     #[test]
     fn trusted_v2_index_authenticates_recipe_tree() {
         let e = env("trusted-v2");
-        let (secret, public) = crate::adapters::sign::keygen(&e.base.join("publisher-keys")).unwrap();
+        let (secret, public) =
+            crate::adapters::sign::keygen(&e.base.join("publisher-keys")).unwrap();
         crate::adapters::sign::trust(&public, &e.root).unwrap();
 
         let first_tree = tree(&e.base, "v2-one", "v2-one");
         let index_path = e.repo.join("index.toml");
-        repo::create_index_with_version(&e.repo, &index_path, Some((&first_tree, "aaa111")), 2).unwrap();
+        repo::create_index_with_version(&e.repo, &index_path, Some((&first_tree, "aaa111")), 2)
+            .unwrap();
         crate::adapters::sign::sign(&index_path, &secret).unwrap();
         run(&e).unwrap();
         assert_eq!(
@@ -263,7 +325,8 @@ mod tests {
         );
 
         let second_tree = tree(&e.base, "v2-two", "v2-two");
-        repo::create_index_with_version(&e.repo, &index_path, Some((&second_tree, "bbb222")), 2).unwrap();
+        repo::create_index_with_version(&e.repo, &index_path, Some((&second_tree, "bbb222")), 2)
+            .unwrap();
         crate::adapters::sign::sign(&index_path, &secret).unwrap();
         let archive = e.repo.join("recipes-bbb222.recipes.tar.zst");
         let mut bytes = std::fs::read(&archive).unwrap();
@@ -279,5 +342,4 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&e.base);
     }
-
 }

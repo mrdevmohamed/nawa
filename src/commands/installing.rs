@@ -1,36 +1,36 @@
 //! install / remove / update / autoremove / outdated handlers and the plan runner.
 
-use anyhow::{bail, Result};
-use crate::suggest;
-use crate::application::context::Ctx;
 use crate::adapters::config::InstallMode;
+use crate::adapters::db;
+use crate::adapters::lock;
+use crate::adapters::pathutil::is_archive_arg;
+use crate::application::context::Ctx;
 use crate::application::features::package::apply_transaction::{
-    apply_transaction, archive_name_of, ApplyRequest, Applied,
+    apply_transaction, archive_name_of, Applied, ApplyRequest,
 };
+use crate::application::features::package::plan;
 use crate::application::features::package::plan_install;
+use crate::application::features::package::revdep;
 use crate::application::features::system::profile as sys_profile;
 use crate::application::ports::user_interaction::{PlanView, UserInteraction};
-use crate::presentation::color::Palette;
-use std::path::Path;
-use std::path::PathBuf;
+use crate::application::recovery;
 use crate::cli::PlanFlags;
-use crate::presentation::color::Stream;
 use crate::commands::build_one;
+use crate::commands::warn_revdep;
+use crate::domain::package::version;
+use crate::groups;
+use crate::install;
+use crate::presentation::color::Palette;
+use crate::presentation::color::Stream;
 use crate::presentation::confirm;
-use crate::adapters::db;
 use crate::presentation::humanize::format_date;
 use crate::presentation::humanize::format_duration;
 use crate::presentation::humanize::format_size;
-use crate::groups;
-use crate::install;
-use crate::adapters::pathutil::is_archive_arg;
-use crate::adapters::lock;
-use crate::application::features::package::plan;
-use crate::application::recovery;
-use crate::application::features::package::revdep;
+use crate::suggest;
 use crate::transaction;
-use crate::domain::package::version;
-use crate::commands::warn_revdep;
+use anyhow::{bail, Result};
+use std::path::Path;
+use std::path::PathBuf;
 
 pub(crate) fn cmd_install(
     ctx: &Ctx,
@@ -41,7 +41,17 @@ pub(crate) fn cmd_install(
     mode: Option<InstallMode>,
     repo: Option<String>,
 ) -> Result<()> {
-    cmd_install_with_why(ctx, targets, flags, no_deps, key, mode, repo, plan::Why::Explicit, None)
+    cmd_install_with_why(
+        ctx,
+        targets,
+        flags,
+        no_deps,
+        key,
+        mode,
+        repo,
+        plan::Why::Explicit,
+        None,
+    )
 }
 
 #[allow(clippy::too_many_arguments)] // mirrors cmd_install and adds an explicit install reason
@@ -59,7 +69,13 @@ pub(crate) fn cmd_install_with_why(
     let archives = targets.iter().filter(|t| is_archive_arg(t)).count();
     if archives == targets.len() {
         for t in targets {
-            install_archive_file(ctx, Path::new(t), flags.force, flags.allow_unsigned, key.clone())?;
+            install_archive_file(
+                ctx,
+                Path::new(t),
+                flags.force,
+                flags.allow_unsigned,
+                key.clone(),
+            )?;
         }
         let changed: Vec<String> = targets
             .iter()
@@ -180,12 +196,8 @@ pub(crate) fn cmd_install_with_why(
         } else {
             transaction::OperationCommand::Install
         };
-        let mut op = transaction::begin_operation(
-            &ctx.root,
-            command,
-            &remaining_targets,
-            &repo_ids,
-        )?;
+        let mut op =
+            transaction::begin_operation(&ctx.root, command, &remaining_targets, &repo_ids)?;
         if let Some(id) = group_id {
             op.record_group(id);
         }
@@ -262,12 +274,43 @@ fn interaction(yes: bool) -> UserInteraction {
 fn render_plan(view: &PlanView) {
     let pal = Palette::auto(Stream::Stdout);
     let rows = &view.rows;
-    let size_cell = |n: u64| if n == 0 { "-".to_string() } else { format_size(n) };
-    let wn = rows.iter().map(|r| r.name.len()).max().unwrap_or(0).max("Package".len());
-    let wv = rows.iter().map(|r| r.ver.len()).max().unwrap_or(0).max("Version".len());
-    let wd = rows.iter().map(|r| size_cell(r.dl).len()).max().unwrap_or(0).max("Download".len());
-    let wi = rows.iter().map(|r| size_cell(r.inst).len()).max().unwrap_or(0).max("Installed".len());
-    let wh = rows.iter().map(|r| r.sha256.as_ref().map_or(1, String::len)).max().unwrap_or(1).max("SHA-256".len());
+    let size_cell = |n: u64| {
+        if n == 0 {
+            "-".to_string()
+        } else {
+            format_size(n)
+        }
+    };
+    let wn = rows
+        .iter()
+        .map(|r| r.name.len())
+        .max()
+        .unwrap_or(0)
+        .max("Package".len());
+    let wv = rows
+        .iter()
+        .map(|r| r.ver.len())
+        .max()
+        .unwrap_or(0)
+        .max("Version".len());
+    let wd = rows
+        .iter()
+        .map(|r| size_cell(r.dl).len())
+        .max()
+        .unwrap_or(0)
+        .max("Download".len());
+    let wi = rows
+        .iter()
+        .map(|r| size_cell(r.inst).len())
+        .max()
+        .unwrap_or(0)
+        .max("Installed".len());
+    let wh = rows
+        .iter()
+        .map(|r| r.sha256.as_ref().map_or(1, String::len))
+        .max()
+        .unwrap_or(1)
+        .max("SHA-256".len());
     if let Some(repository) = &view.repository {
         println!("Repository: {repository}");
     }
@@ -301,7 +344,9 @@ fn render_plan(view: &PlanView) {
         format_size(inst_sum)
     );
     if unknown > 0 {
-        line.push_str(&format!(" (not counting {unknown} package(s) of unknown size)"));
+        line.push_str(&format!(
+            " (not counting {unknown} package(s) of unknown size)"
+        ));
     }
     println!("{line}");
 }
@@ -333,7 +378,10 @@ pub(crate) fn cmd_outdated(ctx: &Ctx) -> Result<()> {
             pal.ver(&format!("{}-{}", r.package.version, r.package.rel)),
         );
     }
-    crate::nawa_info!("{} package(s) can be updated — run `nawa update`", list.len());
+    crate::nawa_info!(
+        "{} package(s) can be updated — run `nawa update`",
+        list.len()
+    );
     Ok(())
 }
 
@@ -345,7 +393,11 @@ pub(crate) fn cmd_update(
     repo: Option<String>,
 ) -> Result<()> {
     let mode = mode.unwrap_or_else(|| {
-        if repo.is_some() { InstallMode::Repo } else { InstallMode::Build }
+        if repo.is_some() {
+            InstallMode::Repo
+        } else {
+            InstallMode::Build
+        }
     });
 
     let known = ctx.load_all()?;
@@ -371,19 +423,27 @@ pub(crate) fn cmd_update(
     }
     let repo_url = repo.or_else(|| ctx.repo.clone());
     let (sourcing, sourcing_notes) = plan_install::open_sourcing(
-        ctx, mode, repo_url.as_deref(), flags.allow_unsigned, flags.force,
+        ctx,
+        mode,
+        repo_url.as_deref(),
+        flags.allow_unsigned,
+        flags.force,
     )?;
-    for note in &sourcing_notes { note.emit(); }
+    for note in &sourcing_notes {
+        note.emit();
+    }
 
     // Strict repository updates must validate every requested package before
     // resolving or opening the transaction. A stale archive is never a
     // successful update merely because it can be installed.
     if mode == InstallMode::Repo {
         for name in &targets {
-            let recipe = known.get(name).ok_or_else(|| anyhow::anyhow!("no recipe for {name}"))?;
-            let re = sourcing.entry(name).ok_or_else(|| anyhow::anyhow!(
-                "{name} has no package for this architecture in the repository"
-            ))?;
+            let recipe = known
+                .get(name)
+                .ok_or_else(|| anyhow::anyhow!("no recipe for {name}"))?;
+            let re = sourcing.entry(name).ok_or_else(|| {
+                anyhow::anyhow!("{name} has no package for this architecture in the repository")
+            })?;
             let available = format!("{}-{}", re.version, re.rel);
             let wanted = format!("{}-{}", recipe.package.version, recipe.package.rel);
             if version::vercmp(&available, &wanted) == std::cmp::Ordering::Less {
@@ -396,14 +456,24 @@ pub(crate) fn cmd_update(
 
     let mut notices = Vec::new();
     let planned = plan_install::plan(
-        &targets, &known, &installed, &sourcing, &effective,
-        plan::Why::Update, true, &mut notices,
+        &targets,
+        &known,
+        &installed,
+        &sourcing,
+        &effective,
+        plan::Why::Update,
+        true,
+        &mut notices,
     );
-    for notice in &notices { notice.emit(); }
+    for notice in &notices {
+        notice.emit();
+    }
     let outcome = planned?;
     let plan = outcome.plan;
     let extras = outcome.extras;
-    if let Some(note) = plan_install::provider_note(&plan) { note.emit(); }
+    if let Some(note) = plan_install::provider_note(&plan) {
+        note.emit();
+    }
     if plan.items.is_empty() && extras.is_empty() {
         crate::nawa_info!("everything is up to date");
         return Ok(());
@@ -427,9 +497,8 @@ pub(crate) fn cmd_update(
             &repo_ids,
         )?
     };
-    let build = |ctx: &Ctx, it: &plan::Item, n: usize, total: usize| {
-        build_one(ctx, it, flags, n, total)
-    };
+    let build =
+        |ctx: &Ctx, it: &plan::Item, n: usize, total: usize| build_one(ctx, it, flags, n, total);
     let request = ApplyRequest {
         build: &build,
         force: flags.force,
@@ -446,7 +515,9 @@ pub(crate) fn cmd_update(
             op.finish(Some(&err))?;
             // also after a partial run: whatever was installed is worth
             // checking
-            let changed: Vec<String> = plan.items.iter()
+            let changed: Vec<String> = plan
+                .items
+                .iter()
                 .map(|it| it.rec.package.name.clone())
                 .chain(extras.iter().map(|entry| entry.name.clone()))
                 .collect();
@@ -466,7 +537,9 @@ pub(crate) fn cmd_update(
         );
     }
     // also after a partial run: whatever was installed is worth checking
-    let changed: Vec<String> = plan.items.iter()
+    let changed: Vec<String> = plan
+        .items
+        .iter()
         .map(|it| it.rec.package.name.clone())
         .chain(extras.iter().map(|entry| entry.name.clone()))
         .collect();
@@ -588,11 +661,19 @@ pub(crate) fn install_archive_file(
     let pkg_name = archive_name_of(file)
         .ok_or_else(|| anyhow::anyhow!("cannot read package name from {}", file.display()))?;
     let before = db.entry(&pkg_name)?;
-    let target = install::inspect_archive_state(file, crate::adapters::db::InstallReason::Explicit, before.as_ref())?;
+    let target = install::inspect_archive_state(
+        file,
+        crate::adapters::db::InstallReason::Explicit,
+        before.as_ref(),
+    )?;
     let action = match &before {
         None => transaction::history::StepAction::Install,
-        Some(old) if old.version != target.version.clone().unwrap_or_default()
-            || Some(old.rel) != target.rel => transaction::history::StepAction::Upgrade,
+        Some(old)
+            if old.version != target.version.clone().unwrap_or_default()
+                || Some(old.rel) != target.rel =>
+        {
+            transaction::history::StepAction::Upgrade
+        }
         Some(_) => transaction::history::StepAction::Reinstall,
     };
     let digest = target.artifact_sha256.clone();
@@ -603,13 +684,20 @@ pub(crate) fn install_archive_file(
         &[],
     )?;
     let mut recorder = op.recorder();
-    let step_no = recorder.step_intent_state(
-        &pkg_name, action, before.as_ref(), Some(&target), &digest,
-    )?;
+    let step_no =
+        recorder.step_intent_state(&pkg_name, action, before.as_ref(), Some(&target), &digest)?;
     let file_journal = install::FileJournalId::for_step(recorder.tx(), step_no);
     let result = install::install_archive_pinned(
-        file, &ctx.root,
-        install::InstallOpts { force, allow_unsigned, key: key.as_deref(), reason: crate::adapters::db::InstallReason::Explicit, pinned_sha: Some(&digest), file_journal },
+        file,
+        &ctx.root,
+        install::InstallOpts {
+            force,
+            allow_unsigned,
+            key: key.as_deref(),
+            reason: crate::adapters::db::InstallReason::Explicit,
+            pinned_sha: Some(&digest),
+            file_journal,
+        },
     );
     install::record_install_outcome(
         &mut recorder,
@@ -644,8 +732,18 @@ pub(crate) fn cmd_remove(ctx: &Ctx, name: &str, force: bool, yes: bool) -> Resul
     // the confirmation shows what will actually happen; the removal itself
     // re-checks dependents (refusing without --force) after the prompt
     let pal = Palette::auto(Stream::Stdout);
-    crate::nawa_info!("{} {} ({} file(s))", pal.warn("removing"), pal.name(name), nfiles);
-    println!("     {} {} — {}", pal.dim("version"), pal.ver(&entry.version_full()), pal.dim(&format_date(entry.install_date)));
+    crate::nawa_info!(
+        "{} {} ({} file(s))",
+        pal.warn("removing"),
+        pal.name(name),
+        nfiles
+    );
+    println!(
+        "     {} {} — {}",
+        pal.dim("version"),
+        pal.ver(&entry.version_full()),
+        pal.dim(&format_date(entry.install_date))
+    );
     if !dependents.is_empty() {
         println!(
             "     {} {}",
@@ -677,7 +775,10 @@ pub(crate) fn cmd_remove(ctx: &Ctx, name: &str, force: bool, yes: bool) -> Resul
         transaction::history::StepAction::Remove,
         before.as_ref(),
         None,
-        before.as_ref().map(|b| b.artifact_sha256.as_str()).unwrap_or(""),
+        before
+            .as_ref()
+            .map(|b| b.artifact_sha256.as_str())
+            .unwrap_or(""),
     )?;
     let file_journal = install::FileJournalId::for_step(recorder.tx(), step_no);
     let result = install::remove_with_linked(name, &ctx.root, force, file_journal);

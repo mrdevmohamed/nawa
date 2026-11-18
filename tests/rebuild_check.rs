@@ -35,13 +35,23 @@ fn nawa_bin() -> PathBuf {
 fn nawa() -> Command {
     let mut c = Command::new(nawa_bin());
     for k in [
-        "NAWA_CONFIG", "NAWA_ROOT", "NAWA_RECIPES", "NAWA_BUILDDIR",
-        "NAWA_PROFILES", "NAWA_JOBS", "NAWA_REPO", "NAWA_INSTALL_MODE",
-        "NAWA_OFFLINE", "NAWA_SRCCACHE",
+        "NAWA_CONFIG",
+        "NAWA_ROOT",
+        "NAWA_RECIPES",
+        "NAWA_BUILDDIR",
+        "NAWA_PROFILES",
+        "NAWA_JOBS",
+        "NAWA_REPO",
+        "NAWA_INSTALL_MODE",
+        "NAWA_OFFLINE",
+        "NAWA_SRCCACHE",
     ] {
         c.env_remove(k);
     }
-    c.env("NAWA_SYSCONFDIR", std::env::temp_dir().join("nawa-test-no-sysconf"));
+    c.env(
+        "NAWA_SYSCONFDIR",
+        std::env::temp_dir().join("nawa-test-no-sysconf"),
+    );
     c.env("NAWA_INSTALL_MODE", "build");
     c.current_dir(std::env::temp_dir());
     c
@@ -106,9 +116,14 @@ fn serve_forever(body: Vec<u8>) -> std::net::TcpListener {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let l2 = listener.try_clone().unwrap();
     std::thread::spawn(move || loop {
-        let Ok((mut sock, _)) = l2.accept() else { break };
-        let resp = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len())
-            .into_bytes();
+        let Ok((mut sock, _)) = l2.accept() else {
+            break;
+        };
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
         use std::io::Write;
         let _ = sock.write_all(&resp);
         let _ = sock.write_all(&body);
@@ -180,7 +195,10 @@ fn legacy_tarball_recipe_with_pinned_epoch_rebuild_check_passes() {
     let top = "example-1.0";
     let tarball = fixture_tar_gz(top);
     let server = serve_forever(tarball.clone());
-    let url = format!("http://127.0.0.1:{}/example-1.0.tar.gz", server.local_addr().unwrap().port());
+    let url = format!(
+        "http://127.0.0.1:{}/example-1.0.tar.gz",
+        server.local_addr().unwrap().port()
+    );
 
     let r = recipes.join("rebtar");
     fs::create_dir_all(&r).unwrap();

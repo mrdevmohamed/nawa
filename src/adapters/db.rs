@@ -112,12 +112,12 @@ pub(crate) fn migrate_install_dates(root: &Path) -> Result<Vec<String>> {
     if !db.local_dir().exists() {
         return Ok(changed);
     }
-        for entry in db.installed()? {
-            let dir = db.local_dir().join(&entry.name);
-            let desc = dir.join("desc");
-            if !desc.exists() {
-                continue;
-            }
+    for entry in db.installed()? {
+        let dir = db.local_dir().join(&entry.name);
+        let desc = dir.join("desc");
+        if !desc.exists() {
+            continue;
+        }
         let fixed = normalize_legacy_install_date(entry.install_date);
         if fixed == entry.install_date {
             continue;
@@ -161,12 +161,16 @@ pub(crate) fn valid_version(v: &str) -> bool {
         _ => return false,
     }
     v.len() <= 128
-        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '_' | '.' | '-' | '~' | ':'))
+        && chars
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '_' | '.' | '-' | '~' | ':'))
 }
 
 pub(crate) fn check_name(n: &str) -> Result<()> {
     if !valid_name(n) {
-        bail!("invalid package name `{}` (allowed: letters, digits and + _ . -)", n.escape_debug());
+        bail!(
+            "invalid package name `{}` (allowed: letters, digits and + _ . -)",
+            n.escape_debug()
+        );
     }
     Ok(())
 }
@@ -177,7 +181,9 @@ pub(crate) struct Db {
 
 impl Db {
     pub fn new(root: &Path) -> Self {
-        Db { root: root.to_path_buf() }
+        Db {
+            root: root.to_path_buf(),
+        }
     }
 
     pub fn local_dir(&self) -> PathBuf {
@@ -275,10 +281,7 @@ impl Db {
             (files.join("\n") + "\n").as_bytes(),
             0o644,
         )?;
-        let mut h: Vec<String> = hashes
-            .iter()
-            .map(|(p, s)| format!("{s}  {p}"))
-            .collect();
+        let mut h: Vec<String> = hashes.iter().map(|(p, s)| format!("{s}  {p}")).collect();
         h.sort();
         crate::adapters::atomic::write_atomic(
             &dir.join("hashes"),
@@ -349,7 +352,9 @@ mod tests {
         for ok in ["gzip", "libstdc++", "python-mako", "a.b_c-1", "7zip"] {
             assert!(valid_name(ok), "{ok}");
         }
-        for bad in ["", ".", "..", "../x", "a/b", "/etc", "-rf", ".hidden", "a b", "a\nb", "x\0y", "é"] {
+        for bad in [
+            "", ".", "..", "../x", "a/b", "/etc", "-rf", ".hidden", "a b", "a\nb", "x\0y", "é",
+        ] {
             assert!(!valid_name(bad), "{bad:?}");
         }
         assert!(!valid_name(&"a".repeat(129)));
@@ -387,7 +392,10 @@ mod tests {
         // a genuine seconds timestamp (year 2026) is kept
         assert_eq!(normalize_legacy_install_date(1_762_000_000), 1_762_000_000);
         // a nanosecond timestamp (same instant) is converted
-        assert_eq!(normalize_legacy_install_date(1_762_000_000_000_000_000), 1_762_000_000);
+        assert_eq!(
+            normalize_legacy_install_date(1_762_000_000_000_000_000),
+            1_762_000_000
+        );
         // zero/unknown stays
         assert_eq!(normalize_legacy_install_date(0), 0);
     }
@@ -419,7 +427,10 @@ mod tests {
         assert!(db.local_dir().join("old/desc.pre-seconds.bak").exists());
         // second run: nothing left to do
         assert!(migrate_install_dates(&base).unwrap().is_empty());
-        assert_eq!(db.entry("old").unwrap().unwrap().install_date, 1_762_000_000);
+        assert_eq!(
+            db.entry("old").unwrap().unwrap().install_date,
+            1_762_000_000
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -429,6 +440,9 @@ mod tests {
         let e: Entry = toml::from_str(raw).unwrap();
         assert_eq!(e.artifact_sha256, "");
         let serialized = toml::to_string_pretty(&e).unwrap();
-        assert!(!serialized.contains("artifact_sha256"), "legacy shape preserved on write");
+        assert!(
+            !serialized.contains("artifact_sha256"),
+            "legacy shape preserved on write"
+        );
     }
 }

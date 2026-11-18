@@ -9,8 +9,8 @@
 //! Every helper degrades to the plain string when colors are off, so call
 //! sites never need two code paths.
 
-use std::io::IsTerminal;
 use anstyle::{AnsiColor, Style};
+use std::io::IsTerminal;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Stream {
@@ -55,7 +55,10 @@ impl Palette {
 
     /// The application prefix used by all status messages.
     pub fn brand(&self, s: &str) -> String {
-        self.wrap(Style::new().fg_color(Some(AnsiColor::Cyan.into())).bold(), s)
+        self.wrap(
+            Style::new().fg_color(Some(AnsiColor::Cyan.into())).bold(),
+            s,
+        )
     }
 
     /// Package / command names in user-facing listings.

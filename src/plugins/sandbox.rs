@@ -7,10 +7,10 @@
 
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
-use std::os::unix::io::AsRawFd;
-use std::os::unix::process::CommandExt;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -33,9 +33,11 @@ impl Drop for WorkDir {
 pub(super) fn spawn(executable: &Path, protected_paths: &[PathBuf]) -> Result<SandboxedChild> {
     let executable = std::fs::canonicalize(executable)
         .with_context(|| format!("resolve plugin executable {}", executable.display()))?;
-    let source_dir = executable.parent()
+    let source_dir = executable
+        .parent()
         .ok_or_else(|| anyhow::anyhow!("plugin executable has no parent directory"))?;
-    let filename = executable.file_name()
+    let filename = executable
+        .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| anyhow::anyhow!("plugin executable file name is not valid UTF-8"))?
         .to_string();
@@ -54,13 +56,22 @@ pub(super) fn spawn(executable: &Path, protected_paths: &[PathBuf]) -> Result<Sa
 
     let env = plugin_env();
     let mask = mask_paths(protected_paths);
-    let spec = plugin_spec(source_dir, &filename, &pkg_dir, &home_dir, &scratch_dir, env, mask);
+    let spec = plugin_spec(
+        source_dir,
+        &filename,
+        &pkg_dir,
+        &home_dir,
+        &scratch_dir,
+        env,
+        mask,
+    );
     let spec_path = workdir.join("plugin-sandbox.toml");
     std::fs::write(&spec_path, toml::to_string(&spec)?)?;
     std::fs::set_permissions(&spec_path, std::fs::Permissions::from_mode(0o644))?;
 
     let nawa = std::env::current_exe().context("locate nawa for plugin sandbox")?;
-    let (parent_end, child_end) = UnixStream::pair().context("create plugin sandbox sync socket")?;
+    let (parent_end, child_end) =
+        UnixStream::pair().context("create plugin sandbox sync socket")?;
     let child_fd = child_end.as_raw_fd();
     let parent_pid = std::process::id() as libc::pid_t;
     let mut command = Command::new(nawa);
@@ -105,7 +116,10 @@ pub(super) fn spawn(executable: &Path, protected_paths: &[PathBuf]) -> Result<Sa
     let child = command.spawn().context("start plugin namespace sandbox")?;
     drop(child_end);
     crate::sandbox::parent_sync(&child, parent_end);
-    Ok(SandboxedChild { child, cleanup: guard })
+    Ok(SandboxedChild {
+        child,
+        cleanup: guard,
+    })
 }
 
 /// The plugin's whole environment: a fixed PATH/HOME and the few locale and
@@ -187,7 +201,10 @@ fn plugin_spec(
             scratch: scratch_dir.to_string_lossy().to_string(),
         },
         env,
-        script: format!("exec {}", shell_quote(&format!("{plugin_src_inside}/{filename}"))),
+        script: format!(
+            "exec {}",
+            shell_quote(&format!("{plugin_src_inside}/{filename}"))
+        ),
         timeout_secs: 30,
         network: false,
         sysfs: false,
@@ -207,18 +224,16 @@ fn plugin_spec(
         // /dev is a private tmpfs populated by setup_dev; leave its mount
         // writable for normal device-node opens while directory permissions
         // still prevent the unprivileged plugin from creating nodes.
-        writable_paths: vec![
-            "/tmp".to_string(),
-            plugin_home_inside,
-            "/dev".to_string(),
-        ],
+        writable_paths: vec!["/tmp".to_string(), plugin_home_inside, "/dev".to_string()],
     }
 }
 
 fn create_workdir() -> Result<PathBuf> {
     for attempt in 0..32u32 {
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH)
-            .unwrap_or_default().as_nanos();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
         let path = std::env::temp_dir().join(format!(
             "nawa-plugin-{}-{nanos}-{attempt}",
             std::process::id()
@@ -236,11 +251,15 @@ fn create_workdir() -> Result<PathBuf> {
 }
 
 fn push_mask_dir(path: &Path, mask: &mut Vec<String>) {
-    let Ok(resolved) = std::fs::canonicalize(path) else { return };
+    let Ok(resolved) = std::fs::canonicalize(path) else {
+        return;
+    };
     let dir = if resolved.is_dir() {
         resolved
     } else {
-        let Some(parent) = resolved.parent() else { return };
+        let Some(parent) = resolved.parent() else {
+            return;
+        };
         parent.to_path_buf()
     };
     if dir == Path::new("/") {

@@ -69,8 +69,9 @@ impl GroupDefinition {
             };
             let mut seen = BTreeSet::new();
             for p in list {
-                crate::adapters::db::check_name(p)
-                    .with_context(|| format!("group {} has an invalid {list_name} member", self.id))?;
+                crate::adapters::db::check_name(p).with_context(|| {
+                    format!("group {} has an invalid {list_name} member", self.id)
+                })?;
                 if !seen.insert(p.clone()) {
                     bail!("group {} lists `{p}` twice in {list_name}", self.id);
                 }
@@ -105,7 +106,6 @@ impl GroupDefinition {
         out
     }
 }
-
 
 /// A repository-published catalog containing one [[group]] table per group.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,7 +146,6 @@ use anyhow::Context as _;
 mod tests {
     use super::*;
 
-
     #[test]
     fn catalog_rejects_duplicate_ids_and_finds_groups() {
         let raw = r#"
@@ -165,14 +164,16 @@ default = ["sway"]
 "#;
         let catalog = GroupCatalog::from_toml(raw).unwrap();
         assert_eq!(catalog.groups.len(), 2);
-        assert_eq!(catalog.find("dev").unwrap().effective_packages(false), vec!["git", "cmake"]);
+        assert_eq!(
+            catalog.find("dev").unwrap().effective_packages(false),
+            vec!["git", "cmake"]
+        );
         assert!(GroupCatalog::from_toml(&raw.replace("id = \"desktop\"", "id = \"dev\"")).is_err());
         assert!(GroupCatalog::from_toml(" ").is_err());
     }
 
     #[test]
-    fn ids_and_members_are_validated()
- {
+    fn ids_and_members_are_validated() {
         assert!(check_group_id("development").is_ok());
         assert!(check_group_id("../evil").is_err());
         assert!(check_group_id("").is_err());
@@ -213,7 +214,13 @@ optional = ["gdb", "ninja"]
             optional: vec!["git".into()],
         };
         g.validate().unwrap();
-        assert_eq!(g.effective_packages(false), vec!["gcc".to_string(), "git".to_string()]);
-        assert_eq!(g.effective_packages(true), vec!["gcc".to_string(), "git".to_string()]);
+        assert_eq!(
+            g.effective_packages(false),
+            vec!["gcc".to_string(), "git".to_string()]
+        );
+        assert_eq!(
+            g.effective_packages(true),
+            vec!["gcc".to_string(), "git".to_string()]
+        );
     }
 }

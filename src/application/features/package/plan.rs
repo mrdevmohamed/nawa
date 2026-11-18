@@ -20,14 +20,14 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::adapters::config::InstallMode;
 use crate::adapters::db::Entry;
+use crate::domain::package::metadata::RunDeps;
 use crate::domain::planning::install::{self, Candidate, CandidateOrigin};
 pub(crate) use crate::domain::planning::install::{InitSelection, Why};
-use crate::domain::package::metadata::RunDeps;
-use crate::repo::RepoEntry;
 use crate::domain::planning::removal::{self, InstalledPkg};
 use crate::domain::system::capability::Provides;
 use crate::domain::system::profile::SystemProfile;
 use crate::recipe::Recipe;
+use crate::repo::RepoEntry;
 
 /// The planning semantics of [`Why`] are the domain enum; the database
 /// reason mapping and the label stay here, with the adapters.
@@ -92,10 +92,10 @@ fn full(version: &str, rel: u32) -> String {
 }
 
 /// Everything that must exist before `rec` can be built and used.
-fn deps_of(
-    rec: &Recipe,
-) -> impl Iterator<Item = String> + use<'_> {
-    rec.build_deps().into_iter().chain(rec.depends.run.iter().cloned())
+fn deps_of(rec: &Recipe) -> impl Iterator<Item = String> + use<'_> {
+    rec.build_deps()
+        .into_iter()
+        .chain(rec.depends.run.iter().cloned())
 }
 
 /// Plan the installation of `targets`: adapt recipes and database records
@@ -115,18 +115,16 @@ pub(crate) fn install_plan(
     target_why: Why,
     with_deps: bool,
 ) -> Result<Plan> {
-    let (plan, _) = install_plan_with_binaries(
-        InstallPlanInput {
-            targets,
-            installed,
-            known,
-            binaries: &BTreeMap::new(),
-            mode: InstallMode::Build,
-            profile,
-            target_why,
-            with_deps,
-        },
-    )?;
+    let (plan, _) = install_plan_with_binaries(InstallPlanInput {
+        targets,
+        installed,
+        known,
+        binaries: &BTreeMap::new(),
+        mode: InstallMode::Build,
+        profile,
+        target_why,
+        with_deps,
+    })?;
     Ok(plan)
 }
 
@@ -168,7 +166,12 @@ pub(crate) fn install_plan_with_binaries(
         None => Vec::new(),
     };
     let resolved = install::install_plan(
-        targets, &installed_full, &candidates, profile, target_why, with_deps,
+        targets,
+        &installed_full,
+        &candidates,
+        profile,
+        target_why,
+        with_deps,
     )?;
 
     let mut items = Vec::new();
@@ -182,8 +185,10 @@ pub(crate) fn install_plan_with_binaries(
             CandidateOrigin::Recipe => {
                 let index = items.len();
                 items.push(Item {
-                    rec: known.get(&item.name)
-                        .expect("recipe candidate must retain its recipe").clone(),
+                    rec: known
+                        .get(&item.name)
+                        .expect("recipe candidate must retain its recipe")
+                        .clone(),
                     why: item.why,
                     replaces: item.replaces,
                 });
@@ -191,7 +196,10 @@ pub(crate) fn install_plan_with_binaries(
             }
             CandidateOrigin::Repository => {
                 let entry = binaries.get(&item.name).ok_or_else(|| {
-                    anyhow::anyhow!("resolved binary candidate {} has no repository entry", item.name)
+                    anyhow::anyhow!(
+                        "resolved binary candidate {} has no repository entry",
+                        item.name
+                    )
                 })?;
                 let index = extras.len();
                 extras.push(entry.clone());
@@ -204,7 +212,10 @@ pub(crate) fn install_plan_with_binaries(
 
     Ok((
         Plan {
-            items, order, binary_whys, binary_replaces,
+            items,
+            order,
+            binary_whys,
+            binary_replaces,
             unknown_dependencies: resolved.unknown_dependencies,
             up_to_date: resolved.up_to_date,
             init: resolved.init,
@@ -239,13 +250,18 @@ fn candidate_of(rec: &Recipe) -> Candidate {
 }
 
 fn candidates_of(known: &BTreeMap<String, Recipe>) -> BTreeMap<String, Candidate> {
-    known.iter().map(|(name, rec)| (name.clone(), candidate_of(rec))).collect()
+    known
+        .iter()
+        .map(|(name, rec)| (name.clone(), candidate_of(rec)))
+        .collect()
 }
 
 fn binary_candidate_of(entry: &RepoEntry) -> Result<Candidate> {
     let metadata = crate::domain::package::metadata::metadata_from_options(
-        entry.rundeps.as_ref(), entry.provides.as_ref(),
-    ).map_err(anyhow::Error::msg)?;
+        entry.rundeps.as_ref(),
+        entry.provides.as_ref(),
+    )
+    .map_err(anyhow::Error::msg)?;
     let (deps, dependencies_known) = match metadata.rundeps {
         RunDeps::Declared(deps) => (deps, true),
         RunDeps::Unknown => (Vec::new(), false),
@@ -396,7 +412,12 @@ mod tests {
     use super::*;
 
     fn rec(name: &str, ver: &str, build: &[&str], run: &[&str]) -> Recipe {
-        let q = |l: &[&str]| l.iter().map(|d| format!("{d:?}")).collect::<Vec<_>>().join(", ");
+        let q = |l: &[&str]| {
+            l.iter()
+                .map(|d| format!("{d:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
         toml::from_str(&format!(
             "[package]\nname = \"{name}\"\nversion = \"{ver}\"\n\
              [depends]\nbuild = [{}]\nrun = [{}]\n[build]\ninstall = \"true\"\n",
@@ -407,7 +428,9 @@ mod tests {
     }
 
     fn tree(recs: Vec<Recipe>) -> BTreeMap<String, Recipe> {
-        recs.into_iter().map(|r| (r.package.name.clone(), r)).collect()
+        recs.into_iter()
+            .map(|r| (r.package.name.clone(), r))
+            .collect()
     }
 
     fn entry(name: &str, ver: &str, reason: &str, run: &[&str]) -> Entry {
@@ -429,7 +452,10 @@ mod tests {
     }
 
     fn names(p: &Plan) -> Vec<&str> {
-        p.items.iter().map(|i| i.rec.package.name.as_str()).collect()
+        p.items
+            .iter()
+            .map(|i| i.rec.package.name.as_str())
+            .collect()
     }
 
     #[test]
@@ -439,7 +465,15 @@ mod tests {
             rec("curl", "1", &["zlib"], &["openssl"]),
             rec("openssl", "1", &["zlib"], &[]),
         ]);
-        let p = install_plan(&["curl".into()], &HashMap::new(), &known, None, Why::Explicit, true).unwrap();
+        let p = install_plan(
+            &["curl".into()],
+            &HashMap::new(),
+            &known,
+            None,
+            Why::Explicit,
+            true,
+        )
+        .unwrap();
         assert_eq!(names(&p), ["zlib", "openssl", "curl"]);
         assert_eq!(p.items[0].why, Why::Dependency);
         assert_eq!(p.items[2].why, Why::Explicit);
@@ -447,10 +481,17 @@ mod tests {
 
     #[test]
     fn installed_deps_are_skipped_and_not_walked() {
-        let known = tree(vec![rec("zlib", "1", &[], &[]), rec("curl", "1", &["zlib"], &[])]);
+        let known = tree(vec![
+            rec("zlib", "1", &[], &[]),
+            rec("curl", "1", &["zlib"], &[]),
+        ]);
         let have = inst(vec![entry("zlib", "0.5", "explicit", &[])]);
         let p = install_plan(&["curl".into()], &have, &known, None, Why::Explicit, true).unwrap();
-        assert_eq!(names(&p), ["curl"], "an installed (even older) dep is satisfied");
+        assert_eq!(
+            names(&p),
+            ["curl"],
+            "an installed (even older) dep is satisfied"
+        );
     }
 
     #[test]
@@ -472,15 +513,34 @@ mod tests {
 
     #[test]
     fn no_deps_plans_only_the_target() {
-        let known = tree(vec![rec("zlib", "1", &[], &[]), rec("curl", "1", &["zlib"], &[])]);
-        let p = install_plan(&["curl".into()], &HashMap::new(), &known, None, Why::Explicit, false).unwrap();
+        let known = tree(vec![
+            rec("zlib", "1", &[], &[]),
+            rec("curl", "1", &["zlib"], &[]),
+        ]);
+        let p = install_plan(
+            &["curl".into()],
+            &HashMap::new(),
+            &known,
+            None,
+            Why::Explicit,
+            false,
+        )
+        .unwrap();
         assert_eq!(names(&p), ["curl"]);
     }
 
     #[test]
     fn typo_gets_a_suggestion_and_cycles_are_errors() {
         let known = tree(vec![rec("zlib", "1", &[], &[])]);
-        let e = install_plan(&["zlb".into()], &HashMap::new(), &known, None, Why::Explicit, true).unwrap_err();
+        let e = install_plan(
+            &["zlb".into()],
+            &HashMap::new(),
+            &known,
+            None,
+            Why::Explicit,
+            true,
+        )
+        .unwrap_err();
         assert!(e.to_string().contains("zlib"), "{e}");
 
         let cyc = tree(vec![rec("a", "1", &["b"], &[]), rec("b", "1", &[], &["a"])]);
@@ -515,7 +575,11 @@ mod tests {
     #[test]
     fn outdated_compares_version_and_rel() {
         let known = tree(vec![rec("a", "1.10", &[], &[]), rec("b", "1", &[], &[])]);
-        let have = vec![entry("a", "1.9", "explicit", &[]), entry("b", "1", "explicit", &[]), entry("c", "1", "explicit", &[])];
+        let have = vec![
+            entry("a", "1.9", "explicit", &[]),
+            entry("b", "1", "explicit", &[]),
+            entry("c", "1", "explicit", &[]),
+        ];
         let o = outdated(&have, &known);
         assert_eq!(o.len(), 1);
         assert_eq!(o[0].0.name, "a");
@@ -534,7 +598,11 @@ mod tests {
             entry("gcc", "1", "dependency", &[]),
             entry("stale", "1", "dependency", &[]),
         ];
-        assert_eq!(orphans(&have, &known, false), ["stale"], "build deps of kept packages stay");
+        assert_eq!(
+            orphans(&have, &known, false),
+            ["stale"],
+            "build deps of kept packages stay"
+        );
         let mut both = orphans(&have, &known, true);
         both.sort();
         assert_eq!(both, ["gcc", "stale"], "--build-deps frees them");
@@ -557,8 +625,19 @@ mod tests {
     #[test]
     fn group_install_reason_is_distinct_from_explicit() {
         let known = tree(vec![rec("dev-tool", "1", &[], &[])]);
-        let plan = install_plan(&["dev-tool".into()], &HashMap::new(), &known, None, Why::Group, true).unwrap();
-        assert_eq!(plan.items[0].why.db_reason(), crate::adapters::db::InstallReason::Group);
+        let plan = install_plan(
+            &["dev-tool".into()],
+            &HashMap::new(),
+            &known,
+            None,
+            Why::Group,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            plan.items[0].why.db_reason(),
+            crate::adapters::db::InstallReason::Group
+        );
         assert_eq!(plan.items[0].why.label(), "group");
     }
 

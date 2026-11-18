@@ -45,7 +45,10 @@ pub(crate) fn default_key_dir() -> PathBuf {
         return etc;
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    PathBuf::from(home).join(".config").join("nawa").join("keys")
+    PathBuf::from(home)
+        .join(".config")
+        .join("nawa")
+        .join("keys")
 }
 
 /// Resolve the signing key: `--key` > `$NAWA_SIGN_KEY` > `$NAWA_KEYS_DIR` >
@@ -71,15 +74,12 @@ pub(crate) fn resolve_signing_key(explicit: Option<&Path>) -> Result<PathBuf> {
             return Ok(c.clone());
         }
     }
-    bail!(
-        "no signing key found — run `nawa keygen` or pass --key <nawa.sec>"
-    )
+    bail!("no signing key found — run `nawa keygen` or pass --key <nawa.sec>")
 }
 
 /// Generate a new ed25519 keypair into `dir` (`nawa.sec` 0600 + `nawa.pub` 0644).
 pub(crate) fn keygen(dir: &Path) -> Result<(PathBuf, PathBuf)> {
-    std::fs::create_dir_all(dir)
-        .with_context(|| format!("create key dir {}", dir.display()))?;
+    std::fs::create_dir_all(dir).with_context(|| format!("create key dir {}", dir.display()))?;
     let sec_path = dir.join(SEC_NAME);
     let pub_path = dir.join(PUB_NAME);
     if sec_path.exists() {
@@ -118,8 +118,7 @@ pub(crate) fn load_signing_key(path: &Path) -> Result<SigningKey> {
 pub(crate) fn load_verify_key(path: &Path) -> Result<VerifyingKey> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("read public key {}", path.display()))?;
-    parse_pub_hex(&raw)
-        .with_context(|| format!("bad public key {}", path.display()))
+    parse_pub_hex(&raw).with_context(|| format!("bad public key {}", path.display()))
 }
 
 /// Sign `file` (hash + sign) and write `<file>.sig`. Returns the sig path.
@@ -162,10 +161,11 @@ pub(crate) fn read_sig_file(path: &Path) -> Result<SigFile> {
     let sig_hex = lines.next().unwrap_or_default().trim();
     let pub_hex = lines.next().unwrap_or_default().trim();
     let sig_bytes = decode_hex64(sig_hex).context("bad signature hex")?;
-    let embedded = match VerifyingKey::from_bytes(&decode_hex32(pub_hex).context("bad embedded key hex")?) {
-        Ok(vk) => vk,
-        Err(_) => bail!("embedded key is not a valid ed25519 point"),
-    };
+    let embedded =
+        match VerifyingKey::from_bytes(&decode_hex32(pub_hex).context("bad embedded key hex")?) {
+            Ok(vk) => vk,
+            Err(_) => bail!("embedded key is not a valid ed25519 point"),
+        };
     let sig = match Signature::from_slice(&sig_bytes) {
         Ok(s) => s,
         Err(_) => bail!("truncated signature"),
@@ -232,7 +232,11 @@ pub(crate) fn trusted_keys(root: &Path) -> Result<Vec<(String, VerifyingKey)>> {
         .collect();
     paths.sort();
     for p in paths {
-        let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let name = p
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         match load_verify_key(&p) {
             Ok(vk) => out.push((name, vk)),
             Err(e) => crate::nawa_warn!("skipping unparseable key {name}: {e:#}"),
@@ -364,10 +368,7 @@ pub(crate) fn verify_index_bytes(
                 file.display()
             );
         } else {
-            crate::nawa_warn!(
-                "repository index is unsigned ({})",
-                file.display()
-            );
+            crate::nawa_warn!("repository index is unsigned ({})", file.display());
         }
         return Ok(IndexTrust::UnsignedAllowed);
     }
@@ -377,7 +378,9 @@ pub(crate) fn verify_index_bytes(
         for (name, vk) in &trusted {
             if verify_bytes(bytes, vk, &sf.sig).is_ok() {
                 crate::nawa_success!("repository index signature OK (trusted key {name})");
-                return Ok(IndexTrust::TrustedKey { key_name: name.clone() });
+                return Ok(IndexTrust::TrustedKey {
+                    key_name: name.clone(),
+                });
             }
         }
         bail!(
@@ -400,13 +403,21 @@ pub(crate) fn verify_standalone(file: &Path, root: &Path, key: Option<&Path>) ->
     }
     let sig_path = sig_path_for(file);
     if !sig_path.exists() {
-        bail!("no signature file {} (run `nawa sign {}`)", sig_path.display(), file.display());
+        bail!(
+            "no signature file {} (run `nawa sign {}`)",
+            sig_path.display(),
+            file.display()
+        );
     }
     let sf = read_sig_file(&sig_path)?;
     if let Some(kp) = key {
         let vk = load_verify_key(kp)?;
         verify(file, &vk, &sf.sig)?;
-        println!("{}: signature OK (explicit key {})", file.display(), kp.display());
+        println!(
+            "{}: signature OK (explicit key {})",
+            file.display(),
+            kp.display()
+        );
         return Ok(());
     }
     for (name, vk) in trusted_keys(root)? {
@@ -585,5 +596,4 @@ mod tests {
         assert!(verify_index_bytes(&changed, &index_path, &base, false).is_err());
         let _ = std::fs::remove_dir_all(&base);
     }
-
 }

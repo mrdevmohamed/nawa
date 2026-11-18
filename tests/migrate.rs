@@ -477,7 +477,10 @@ fn plan_is_read_only_and_works_on_an_offline_root() {
         "Rollback limits",
         "no automatic rollback",
     ] {
-        assert!(stdout.contains(expected), "missing {expected:?} in:\n{stdout}");
+        assert!(
+            stdout.contains(expected),
+            "missing {expected:?} in:\n{stdout}"
+        );
     }
     assert_eq!(record_snapshot(&root), before, "plan persisted nothing");
     assert!(!root.join("var/lib/nawa").exists(), "no nawa state created");
