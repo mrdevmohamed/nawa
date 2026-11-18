@@ -11,7 +11,7 @@
 //! live-host operations and remain fail-closed at the external boot-handler
 //! boundary.
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use std::path::Path;
 
 use crate::application::features::system::detect;
