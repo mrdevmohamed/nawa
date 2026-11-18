@@ -414,6 +414,10 @@ fn print_apply(
     acknowledge_reboot: bool,
     acknowledge_recovery: bool,
 ) -> Result<()> {
+    // Refuse offline/chroot/container and unprivileged invocations before
+    // looking up a repository or accepting any plan identity.
+    apply_use::preflight(&ctx.root, Path::new("/proc"))
+        .context("migration apply preflight")?;
     let repository = ctx.repo.as_deref()
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| anyhow!("migration apply requires a configured trusted repository"))?;
