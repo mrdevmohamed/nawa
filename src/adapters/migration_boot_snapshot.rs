@@ -1119,6 +1119,9 @@ mod tests {
         assert!(manifest.entries.iter().any(|entry| {
             entry.path == "etc/runit/runsvdir/default" && entry.kind == "directory"
         }));
+        assert!(!manifest.entries.iter().any(|entry| {
+            entry.path.contains("agetty-link/")
+        }), "the snapshot walk must not follow service symlink directories");
     }
 
     #[test]
@@ -1230,6 +1233,17 @@ mod tests {
         assert!(capture(&root, "faseela-runit-to-systemd-v1").is_err());
         let _ = fs::remove_file(root.join("boot"));
         let _ = fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn capture_rejects_a_runit_service_symlink_that_escapes_the_target_root() {
+        let root = fixture("unsafe-runit-link");
+        symlink(
+            "../../../../../../etc/shadow",
+            root.join("etc/runit/runsvdir/default/networking/unsafe"),
+        )
+        .unwrap();
+        assert!(capture(&root, "faseela-runit-to-systemd-v1").is_err());
     }
 
     #[test]
