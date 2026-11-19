@@ -44,7 +44,16 @@ const KNOWN_PLACEHOLDERS: &[&str] = &[
 
 /// The top-level tables `Recipe` declares (§14B: unknown ones warn).
 const KNOWN_TOP_TABLES: &[&str] = &[
-    "package", "assets", "fetch", "depends", "build", "hooks", "sandbox", "slim",
+    "package",
+    "assets",
+    "fetch",
+    "depends",
+    "capabilities",
+    "relations",
+    "build",
+    "hooks",
+    "sandbox",
+    "slim",
 ];
 
 /// The keys the `[package]` struct declares (§14B: unknown ones warn).
@@ -279,11 +288,13 @@ mod tests {
     fn known_lists_match_the_recipe_struct() {
         assert_eq!(
             KNOWN_TOP_TABLES.len(),
-            8,
+            10,
             "the top-level table list is gated by the §19 design"
         );
         assert!(KNOWN_TOP_TABLES.contains(&"package"));
         assert!(KNOWN_TOP_TABLES.contains(&"build"));
+        assert!(KNOWN_TOP_TABLES.contains(&"capabilities"));
+        assert!(KNOWN_TOP_TABLES.contains(&"relations"));
         assert!(KNOWN_PACKAGE_KEYS.contains(&"name"));
         assert!(KNOWN_PACKAGE_KEYS.contains(&"sha256"));
         // `%%{...}` is no escape here: `Recipe::expand` replaces inside it
