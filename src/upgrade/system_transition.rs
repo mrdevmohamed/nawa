@@ -1,6 +1,6 @@
 //! Read-only migration-candidate planning for ordinary repository upgrades.
 //!
-//! This module never applies a migration. It uses signed v4 repository
+//! This module never applies a migration. It uses trusted, signed schema-v5 repository
 //! metadata and the existing pure install resolver to preview the selected
 //! init provider and its runtime dependency closure. It is deliberately
 //! separate from the normal upgrade transaction.
