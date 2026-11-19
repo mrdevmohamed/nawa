@@ -183,7 +183,11 @@ pub(crate) fn cmd_group_remove(ctx: &Ctx, id: &str, yes: bool) -> Result<()> {
         installed
             .iter()
             .filter(|entry| !candidate_set.contains(&entry.name))
-            .all(|entry| !entry.run.iter().any(|dependency| dependency == package))
+            .all(|entry| {
+                !entry.run.iter().any(|dependency| {
+                    crate::domain::package::relations::depends_on(dependency, package)
+                })
+            })
     });
 
     crate::nawa_info!("removing group {} (membership record)", id);

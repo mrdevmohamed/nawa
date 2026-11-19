@@ -189,6 +189,16 @@ impl RepoRef {
     pub fn parse(s: &str) -> Result<Self> {
         let s = s.trim();
         if s.starts_with("http://") || s.starts_with("https://") {
+            let parsed =
+                url::Url::parse(s).map_err(|_| anyhow::anyhow!("invalid remote repository URL"))?;
+            if parsed.host_str().is_none()
+                || !parsed.username().is_empty()
+                || parsed.password().is_some()
+                || parsed.query().is_some()
+                || parsed.fragment().is_some()
+            {
+                bail!("remote repository URLs must not contain credentials, query parameters, or fragments; configure secrets outside the URL");
+            }
             Ok(RepoRef::Remote(s.trim_end_matches('/').to_string()))
         } else if s.contains("://") {
             bail!("unsupported repository `{s}` — use http(s):// or a local path");

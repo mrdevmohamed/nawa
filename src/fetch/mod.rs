@@ -146,6 +146,21 @@ mod tests {
     }
 
     #[test]
+    fn repository_url_secrets_are_rejected_without_echoing_them() {
+        for raw in [
+            "https://user:secret@example.test/repo",
+            "https://example.test/repo?token=secret",
+            "https://example.test/repo#secret",
+        ] {
+            let error = RepoRef::parse(raw).unwrap_err();
+            assert!(format!("{error:#}").contains("credentials"));
+            let message = format!("{error:#}");
+            assert!(!message.contains("user:secret"));
+            assert!(!message.contains("token=secret"));
+        }
+    }
+
+    #[test]
     fn gnu_urls_get_fallbacks() {
         let v = candidate_urls("https://mirrors.kernel.org/gnu/screen/screen-5.0.0.tar.gz");
         assert_eq!(

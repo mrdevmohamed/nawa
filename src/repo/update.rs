@@ -48,7 +48,7 @@ pub(crate) fn update_index(
     now: u64,
 ) -> Result<Index> {
     let meta = base.repository.clone().context(
-        "repo-update needs a schema-2 or schema-3 base index; a v1 index has no signed hash policy (use repo-create)",
+        "repo-update needs a signed schema-2 through schema-5 base index; a v1 index has no signed hash policy (use repo-create)",
     )?;
     let mut map: BTreeMap<String, RepoEntry> = BTreeMap::new();
     for p in &base.packages {
@@ -89,7 +89,12 @@ pub(crate) fn update_index(
         }
         match map.get(&e.name) {
             Some(cur) if cur.file == e.file => {
-                if cur.sha256 != e.sha256 || cur.size != e.size {
+                if cur.sha256 != e.sha256
+                    || cur.size != e.size
+                    || cur.rundeps != e.rundeps
+                    || cur.provides != e.provides
+                    || cur.relations != e.relations
+                {
                     bail!("{} is already indexed with a different sha256/size; archive files are immutable", e.file);
                 }
             }
@@ -166,7 +171,7 @@ pub(crate) fn update_index_files(
         recipes,
     } = inputs;
     let schema = base.repository.as_ref().map(|m| m.schema).unwrap_or(1);
-    if schema != INDEX_SCHEMA_V3 && locations_path.is_some() {
+    if schema < INDEX_SCHEMA_V3 && locations_path.is_some() {
         bail!("--locations is only valid with a schema-3 base index");
     }
     let locations = match locations_path {

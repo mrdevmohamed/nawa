@@ -63,6 +63,21 @@ pub(crate) fn install_archive_payload(
     let extracted = archive::extract(archive_path, &tmp)?;
     interrupt::check()?;
     let info = archive::parse_pkginfo(&extracted.pkginfo)?;
+    let metadata = crate::domain::package::metadata::PkgMetadata::from_pkginfo_map(&info)
+        .map_err(anyhow::Error::msg)?;
+    if metadata.relations.is_some() {
+        // Validate declared package relations again under the actual mutation
+        // lock. Standalone archive installs cannot bypass solver decisions.
+        let installed = db
+            .installed()?
+            .into_iter()
+            .map(|e| (e.name, format!("{}-{}", e.version, e.rel)))
+            .collect();
+        let name = info.get("pkgname").map(String::as_str).unwrap_or("");
+        metadata
+            .verify_installed(name, &installed)
+            .map_err(anyhow::Error::msg)?;
+    }
     let Pkginfo {
         name,
         version,
@@ -70,7 +85,7 @@ pub(crate) fn install_archive_payload(
         arch,
         size,
         run,
-    } = Pkginfo::from_map(&info);
+    } = Pkginfo::from_map(&info, &metadata);
 
     // ---- current state of this package (if this is an upgrade/reinstall) ---
     let old = db.entry(&name)?;
@@ -83,7 +98,30 @@ pub(crate) fn install_archive_payload(
     // ---- conflict check against the database ------------------------------
     let (staged_files, staged_hashes) = stage_tree(&tmp)?;
     let owners = db.file_owners()?;
-    if !force {
+    if force {
+        // A generic overwrite flag cannot mint migration authority. Keep init
+        // entry-point ownership checks even when ordinary file conflicts are
+        // explicitly overridden.
+        let init_paths: Vec<_> = staged_files
+            .iter()
+            .filter(|p| {
+                matches!(
+                    p.as_str(),
+                    "/usr/bin/init" | "/usr/sbin/init" | "/sbin/init"
+                )
+            })
+            .cloned()
+            .collect();
+        check_file_conflicts(
+            &tmp,
+            root,
+            &name,
+            &init_paths,
+            &owners,
+            &db,
+            legacy_init_handoff,
+        )?;
+    } else {
         check_file_conflicts(
             &tmp,
             root,
@@ -257,21 +295,19 @@ struct Pkginfo {
 }
 
 impl Pkginfo {
-    fn from_map(info: &std::collections::HashMap<String, String>) -> Self {
+    fn from_map(
+        info: &std::collections::HashMap<String, String>,
+        metadata: &crate::domain::package::metadata::PkgMetadata,
+    ) -> Self {
         let name = info.get("pkgname").cloned().unwrap_or_default();
         let version = info.get("pkgver").cloned().unwrap_or_default();
         let rel: u32 = info.get("pkgrel").and_then(|v| v.parse().ok()).unwrap_or(1);
         let arch = info.get("arch").cloned().unwrap_or_default();
         let size: u64 = info.get("size").and_then(|v| v.parse().ok()).unwrap_or(0);
-        let run: Vec<String> = info
-            .get("rundeps")
-            .map(|s| {
-                s.split(',')
-                    .map(|x| x.trim().to_string())
-                    .filter(|x| !x.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default();
+        let run = match &metadata.rundeps {
+            crate::domain::package::metadata::RunDeps::Declared(deps) => deps.clone(),
+            crate::domain::package::metadata::RunDeps::Unknown => Vec::new(),
+        };
         Pkginfo {
             name,
             version,

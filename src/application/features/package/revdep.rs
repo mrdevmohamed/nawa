@@ -462,7 +462,11 @@ pub(crate) fn affected(db: &Db, changed: &[String]) -> Result<Vec<String>> {
         .cloned()
         .collect();
     for e in &installed {
-        if e.run.iter().any(|r| changed.contains(r)) {
+        if e.run.iter().any(|r| {
+            changed
+                .iter()
+                .any(|n| crate::domain::package::relations::depends_on(r, n))
+        }) {
             out.insert(e.name.clone());
         }
     }

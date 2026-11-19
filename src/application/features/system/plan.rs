@@ -87,7 +87,7 @@ impl SystemPlan {
         let (source_fingerprint, index_sha256, signer_sha256) = match &self.repository {
             RepositoryAssessment::Opened {
                 source_fingerprint,
-                index_schema: Some(4),
+                index_schema: Some(5),
                 index_sha256,
                 trusted_signer_sha256: Some(signer),
                 authenticated_by_trusted_key: true,
@@ -98,7 +98,7 @@ impl SystemPlan {
                 index_sha256.clone(),
                 signer.clone(),
             ),
-            _ => bail!("migration approval requires a trusted signed schema-v4 repository index"),
+            _ => bail!("migration approval requires a trusted signed schema-v5 repository index with explicit package relations"),
         };
 
         let (actions, version, from, to, provider_package) = match &self.transition {
@@ -205,10 +205,7 @@ pub(crate) fn build(root: &Path, proc: &Path, repository: Option<&str>) -> Syste
                 ),
                 Ok(repo_ref) => {
                     let (kind, source_fingerprint) = repository_source(&repo_ref);
-                    if kind == RepositoryKind::Remote && !matches!(snapshot.observed.context, crate::domain::system::observation::Context::LiveHost { .. }) {
-                        let reason = "remote metadata refresh would write into an offline/container/chroot target; use a locally materialized signed repository for read-only planning".to_string();
-                        (RepositoryAssessment::NotInspected { reason: reason.clone() }, TransitionAssessment::NotEvaluated { reason })
-                    } else { match crate::upgrade::open_repo(root, &repo_ref, false, false) {
+                    { match crate::upgrade::open_repo_cached(root, &repo_ref, false, false) {
                         Err(error) => (
                             RepositoryAssessment::Unavailable {
                                 kind,
@@ -289,7 +286,7 @@ pub(crate) fn verify_approval_pin(
         bail!("configured repository source changed after approval");
     }
 
-    let open = crate::upgrade::open_repo(root, &repo_ref, false, false)
+    let open = crate::upgrade::open_repo_cached(root, &repo_ref, false, false)
         .context("re-open and authenticate approved repository")?;
     if fingerprint(&open.index_bytes) != pin.index_sha256 {
         bail!(
@@ -300,10 +297,10 @@ pub(crate) fn verify_approval_pin(
     if signer.as_deref() != Some(pin.signer_sha256.as_str()) {
         bail!("trusted repository signing key changed after approval");
     }
-    if open.index.repository.as_ref().map(|meta| meta.schema) != Some(4)
+    if open.index.repository.as_ref().map(|meta| meta.schema) != Some(5)
         || open.archive_auth != ArchiveAuth::SignedIndexSha256
     {
-        bail!("approved repository no longer satisfies the signed schema-v4 migration policy");
+        bail!("approved repository no longer satisfies the signed schema-v5 migration policy");
     }
 
     let mut seen_packages = std::collections::BTreeSet::new();
@@ -374,7 +371,12 @@ pub(crate) fn verify_approval_pin(
 
 /// Run under the coordinator's lock immediately before creating durable intent.
 /// No repository access, networking or solver work occurs in this check.
-pub(crate) fn verify_local_pin(root: &Path, proc: &Path, pin: &SystemPlanPin) -> Result<()> {
+pub(crate) fn verify_local_pin(
+    root: &Path,
+    proc: &Path,
+    pin: &SystemPlanPin,
+    repository: &OpenRepo,
+) -> Result<()> {
     let snapshot = observation::observe(root, proc);
     if fingerprint(format!("{:?}", snapshot.observed).as_bytes()) != pin.observed_sha256
         || installed_packages(&snapshot)? != pin.installed_packages
@@ -384,6 +386,46 @@ pub(crate) fn verify_local_pin(root: &Path, proc: &Path, pin: &SystemPlanPin) ->
             "approved system observations or installed package inventory changed before mutation"
         );
     }
+    #[cfg(not(test))]
+    {
+        if !matches!(
+            snapshot.observed.context,
+            crate::domain::system::observation::Context::LiveHost { .. }
+        ) || !matches!(
+            snapshot.observed.runtime,
+            crate::domain::system::observation::RuntimeInit::Observed {
+                kind: crate::domain::system::identity::InitKind::Runit,
+                confidence: crate::domain::system::observation::Confidence::Proven,
+                ..
+            }
+        ) || !matches!(snapshot.observed.desired, crate::application::features::system::detect::DesiredInit::Declared { ref identity, .. } if identity == "systemd")
+        {
+            bail!("the fresh live-host, source-init or required target profile evidence changed before mutation");
+        }
+    }
+    if repository.index_bytes.is_empty() {
+        bail!("approved repository proof has no signed index bytes");
+    }
+    if fingerprint(&repository.index_bytes) != pin.index_sha256
+        || repository
+            .signer_public
+            .as_deref()
+            .map(fingerprint)
+            .as_deref()
+            != Some(pin.signer_sha256.as_str())
+    {
+        bail!("approved signed-index or signer evidence changed before mutation");
+    }
+    let signature = repository
+        .index_signature
+        .as_deref()
+        .context("approved signed-index signature sidecar is unavailable")?;
+    crate::adapters::sign::verify_trusted_index_proof(
+        &repository.index_bytes,
+        signature,
+        &pin.signer_sha256,
+        root,
+    )?;
     Ok(())
 }
 
@@ -545,7 +587,7 @@ mod tests {
             repository: RepositoryAssessment::Opened {
                 kind: RepositoryKind::Remote,
                 source_fingerprint: "a".repeat(64),
-                index_schema: Some(4),
+                index_schema: Some(5),
                 index_sha256: "b".repeat(64),
                 trusted_signer_sha256: Some("c".repeat(64)),
                 authenticated_by_trusted_key: true,
@@ -655,9 +697,42 @@ mod tests {
         );
         assert!(matches!(
             plan.repository,
-            RepositoryAssessment::NotInspected { .. }
+            RepositoryAssessment::Unavailable { .. }
         ));
         assert!(!root.join("var").exists());
+        assert!(!root.join(".nawa").exists());
+    }
+
+    #[test]
+    fn remote_plan_uses_an_existing_trusted_cache_without_refreshing_or_marking_it_seen() {
+        let root = root("system-plan-cached-remote-readonly");
+        let (secret, public) = crate::adapters::sign::keygen(&root.join("keys")).unwrap();
+        crate::adapters::sign::trust(&public, &root).unwrap();
+        let repository = "https://mirror.example.test/nawa";
+        let cache = crate::fetch::remote_cache_dir(&root, repository);
+        fs::create_dir_all(&cache).unwrap();
+        let index = crate::repo::Index {
+            generated: Some(crate::adapters::artifact::now_secs()),
+            expires: Some(crate::adapters::artifact::now_secs() + 3600),
+            repository: Some(crate::repo::RepositoryMeta::v5_per_package_url()),
+            recipes: None,
+            groups: None,
+            packages: Vec::new(),
+        };
+        let path = cache.join("index.toml");
+        fs::write(&path, toml::to_string(&index).unwrap()).unwrap();
+        crate::adapters::sign::sign(&path, &secret).unwrap();
+        let before = fs::read(&path).unwrap();
+        let plan = build(&root, Path::new("/proc"), Some(repository));
+        assert!(matches!(
+            plan.repository,
+            RepositoryAssessment::Opened {
+                authenticated_by_trusted_key: true,
+                ..
+            }
+        ));
+        assert_eq!(fs::read(path).unwrap(), before);
+        assert!(!cache.join("index.seen").exists());
         assert!(!root.join(".nawa").exists());
     }
 

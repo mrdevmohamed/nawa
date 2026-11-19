@@ -250,10 +250,42 @@ impl ApprovedPlan {
             // authenticate all staged archives after process death, including
             // packages whose install step was never reached. Shared verified
             // cache objects are retained; private copies are cleanup-on-drop.
-            crate::adapters::artifact::store_verified_copy(
+            let (_, stored_digest) = crate::adapters::artifact::store_verified_copy(
                 &ctx.root,
                 copy.path(),
                 Some(&artifact.sha256),
+            )?;
+            if stored_digest != artifact.sha256 {
+                bail!("content-addressed staging changed the approved archive identity");
+            }
+            let signer = open
+                .signer_public
+                .as_deref()
+                .context("trusted repository signer key disappeared during staging")?;
+            let signature = open
+                .index_signature
+                .as_deref()
+                .context("signed repository index sidecar disappeared during staging")?;
+            let mut provenance = crate::adapters::artifact::Provenance::new(
+                crate::adapters::artifact::Authentication::SignedIndex,
+                &artifact.sha256,
+                artifact.size,
+            );
+            provenance.package = Some(crate::adapters::artifact::PackageIdentity {
+                name: artifact.name.clone(),
+                version: entry.version.clone(),
+                rel: entry.rel,
+                arch: entry.arch.clone(),
+            });
+            crate::adapters::artifact::save_provenance(&ctx.root, &provenance)?;
+            crate::adapters::artifact::retain_repository_proof(
+                &ctx.root,
+                &artifact.sha256,
+                &open.index_bytes,
+                Some(signature),
+                signer,
+                &pin.source_fingerprint,
+                true,
             )?;
             if artifact.kind != PackageActionKind::Keep {
                 steps.push(PreparationStep {
@@ -350,7 +382,14 @@ pub(crate) fn prepare(ctx: &Ctx, request: PreparationRequest<'_>) -> Result<Prep
     })?;
     if let Some(pin) = &plan.pin {
         pin.validate().map_err(anyhow::Error::msg)?;
-        plan::verify_local_pin(&ctx.root, &plan.proc, pin)?;
+        plan::verify_local_pin(
+            &ctx.root,
+            &plan.proc,
+            pin,
+            plan.repository
+                .as_ref()
+                .context("approved repository proof is unavailable under the mutation lock")?,
+        )?;
         for (artifact, copy) in pin.artifacts.iter().zip(&plan.staged) {
             crate::fetch::verify_sha256(copy.path(), &artifact.sha256)?;
             if std::fs::metadata(copy.path())?.len() != artifact.size {

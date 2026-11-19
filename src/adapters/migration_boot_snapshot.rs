@@ -1175,7 +1175,11 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     fn fixture(tag: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
+        fixture_under(&std::env::temp_dir(), tag)
+    }
+
+    fn fixture_under(temp_dir: &Path, tag: &str) -> PathBuf {
+        let root = temp_dir.join(format!(
             "nawa-boot-recovery-{tag}-{}-{}",
             std::process::id(),
             unique::next()
@@ -1402,7 +1406,9 @@ mod tests {
 
         // Linux sockaddr_un paths have a small fixed byte limit. Keep this
         // fixture short even when the test process has a large PID.
-        let root = fixture("socket");
+        // Keep the root under a short fixed path: some test runners set
+        // TMPDIR to a long workspace path, but sockaddr_un has a small limit.
+        let root = fixture_under(Path::new("/tmp"), "socket");
         make_snapshot(&root);
         fs::write(root.join("boot/grub/grub.cfg"), b"new config\n").unwrap();
         let socket_path = root.join("etc/runit/runsvdir/default/unexpected.sock");

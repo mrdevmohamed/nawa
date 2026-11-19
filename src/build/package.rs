@@ -121,13 +121,23 @@ fn pkginfo_header(rec: &Recipe, arch: &str, size: u64) -> String {
         rec.package.version,
         rec.package.rel,
         arch,
-        rec.depends.run.join(","),
+        crate::domain::package::metadata::normalize_rundeps(&rec.depends.run)
+            .expect("validated runtime dependencies")
+            .join(","),
         size,
     );
     if let Some(caps) = &rec.capabilities {
         let provides = crate::domain::package::metadata::normalize_provides(&caps.provides)
             .expect("recipe capabilities are validated at load time");
         out.push_str(&format!("provides = {}\n", provides.join(",")));
+    }
+    if let Some(relations) = &rec.relations {
+        let relations = relations.normalized().expect("validated package relations");
+        out.push_str(&format!(
+            "relations_schema = 1\nconflicts = {}\nreplaces = {}\n",
+            relations.conflicts.join(","),
+            relations.replaces.join(",")
+        ));
     }
     out
 }
@@ -270,6 +280,35 @@ mod tests {
         let info = pkginfo_header(&rec, "x86_64", 42);
         assert!(info.contains("rundeps = glibc\n"), "{info}");
         assert!(info.contains("provides = init-system=runit\n"), "{info}");
+    }
+
+    #[test]
+    fn package_relations_flow_from_recipe_into_normalized_archive_metadata() {
+        let mut rec = recipe(Some(&[]));
+        rec.package.source = "local:/nawa-package-relations-1-requires-a-newer-nawa".into();
+        rec.package.source_date_epoch = Some(1);
+        rec.depends.run = vec!["glibc >= 2-1".into()];
+        rec.relations = Some(crate::domain::package::relations::PackageRelations {
+            schema: 1,
+            conflicts: vec!["obsolete < 2-1".into()],
+            replaces: vec!["obsolete<2-1".into()],
+        });
+        rec.validate().unwrap();
+        let text = pkginfo_header(&rec, "x86_64", 1);
+        let map = crate::adapters::archive::parse_pkginfo(&text).unwrap();
+        let metadata =
+            crate::domain::package::metadata::PkgMetadata::from_pkginfo_map(&map).unwrap();
+        assert_eq!(
+            metadata.rundeps,
+            crate::domain::package::metadata::RunDeps::Declared(vec!["glibc>=2-1".into()])
+        );
+        assert_eq!(metadata.relations.unwrap().conflicts, ["obsolete<2-1"]);
+        let split = crate::build::slim::derive_pkginfo(&text, "runit", "runit-doc", 1);
+        let metadata = crate::domain::package::metadata::PkgMetadata::from_pkginfo_map(
+            &crate::adapters::archive::parse_pkginfo(&split).unwrap(),
+        )
+        .unwrap();
+        assert!(metadata.relations.unwrap().replaces.is_empty());
     }
 
     #[test]

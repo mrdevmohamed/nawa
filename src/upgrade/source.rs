@@ -59,9 +59,10 @@ impl OpenRepo {
         name: &str,
     ) -> Option<crate::domain::package::metadata::PkgMetadata> {
         let entry = self.index.find(name)?;
-        crate::domain::package::metadata::metadata_from_options(
+        crate::domain::package::metadata::metadata_from_repository(
             entry.rundeps.as_ref(),
             entry.provides.as_ref(),
+            entry.relations.as_ref(),
         )
         .ok()
     }
@@ -78,6 +79,58 @@ pub(crate) fn open_repo(
 ) -> Result<OpenRepo> {
     let (repo_dir, base_url) = materialize_repository(root, repo_ref, allow_unsigned)?;
 
+    let remote = base_url.is_some();
+    open_repo_dir(
+        root,
+        repo_dir,
+        base_url,
+        remote,
+        true,
+        allow_unsigned,
+        force,
+    )
+}
+
+/// Read-only repository open for plan/inspect commands. Remote repositories
+/// are never refreshed here: only already-materialized cache bytes are used.
+pub(crate) fn open_repo_cached(
+    root: &Path,
+    repo_ref: &RepoRef,
+    allow_unsigned: bool,
+    force: bool,
+) -> Result<OpenRepo> {
+    match repo_ref {
+        RepoRef::Local(dir) => {
+            open_repo_dir(root, dir.clone(), None, false, true, allow_unsigned, force)
+        }
+        RepoRef::Remote(url) => {
+            require_trust_for_remote(root, url, allow_unsigned)?;
+            let cache = fetch::remote_cache_dir(root, url);
+            if !cache.join("index.toml").is_file() {
+                bail!("remote repository has no cached signed index; explicit repository sync is required before read-only system planning");
+            }
+            open_repo_dir(
+                root,
+                cache,
+                Some(url.clone()),
+                true,
+                false,
+                allow_unsigned,
+                force,
+            )
+        }
+    }
+}
+
+fn open_repo_dir(
+    root: &Path,
+    repo_dir: PathBuf,
+    base_url: Option<String>,
+    remote: bool,
+    persist_seen: bool,
+    allow_unsigned: bool,
+    force: bool,
+) -> Result<OpenRepo> {
     let index_path = repo_dir.join("index.toml");
     // Read once: parsing and signature verification must consume identical bytes.
     let index_bytes = std::fs::read(&index_path)
@@ -88,7 +141,13 @@ pub(crate) fn open_repo(
             anyhow::anyhow!("repository index signature is INVALID or untrusted: {e:#}")
         })?;
     let trusted = index_trust.is_trusted();
-    let groups = load_groups(&repo_dir, base_url.as_deref(), &index, trusted)?;
+    let groups = load_groups(
+        &repo_dir,
+        base_url.as_deref(),
+        &index,
+        trusted,
+        persist_seen,
+    )?;
     let archive_auth = select_archive_auth(&index, trusted)?;
 
     // Retain the exact proof bytes of the verification above so later
@@ -103,7 +162,7 @@ pub(crate) fn open_repo(
 
     // Only an index authenticated by a configured trusted key advances the
     // newest-index marker used to prevent remote repository rollback.
-    check_index_freshness(&repo_dir, &index, base_url.is_some(), force, trusted)?;
+    check_index_freshness(&repo_dir, &index, remote, force, trusted, persist_seen)?;
     Ok(OpenRepo {
         dir: repo_dir,
         base_url,
@@ -229,6 +288,7 @@ fn load_groups(
     base_url: Option<&str>,
     index: &repo::Index,
     trusted: bool,
+    allow_download: bool,
 ) -> Result<Option<crate::groups::GroupCatalog>> {
     let Some(entry) = &index.groups else {
         return Ok(None);
@@ -237,13 +297,13 @@ fn load_groups(
         bail!("repository publishes package groups but its index is not authenticated by a trusted key");
     }
     let path = repo_dir.join(&entry.file);
-    if let Some(url) = base_url {
+    if let Some(url) = base_url.filter(|_| allow_download) {
         fetch::download_cached(&format!("{url}/{}", entry.file), &path, Some(&entry.sha256))
             .with_context(|| format!("fetch signed group catalog {}", entry.file))?;
     } else if !path.is_file() {
         bail!(
-            "group catalog {} referenced by the signed index is missing",
-            path.display()
+            "group catalog {} referenced by the signed index is missing from the repository cache",
+            entry.file
         );
     }
     fetch::verify_sha256(&path, &entry.sha256)?;

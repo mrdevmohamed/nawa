@@ -14,9 +14,8 @@ Migration execution now retains the authenticated index proof through the
 existing package installer, including the narrowly typed legacy-init handoff.
 The private staged copy is checked against both the signed archive identity and
 the duplicated solving metadata. Durable plan evidence stores source/location
-fingerprints rather than secret-bearing repository URLs. This does not add
-version constraints, conflicts or replacements to schema 4; that requires an
-explicit later schema contract.
+fingerprints rather than secret-bearing repository URLs. Schema v4 remains
+unchanged; explicit package relations use the additive v5 contract in §11.
 
 The design's capability model (§6) needs one place where each package declares
 *what it provides* (`init-system=runit`) and *what it needs at runtime*
@@ -26,7 +25,8 @@ spellings of the same value, and specifies each spelling exactly:
 1. **Recipe** — the declaration as source input (§6.3(1)).
 2. **Archive `.PKGINFO`** — the package-level source of truth, authenticated
    by the archive digest (§6.3(2)).
-3. **Signed repository index schema v4** — an authenticated duplication so
+3. **Signed repository index schema v4 (capabilities/dependencies) and v5
+   (package relations)** — authenticated duplications so
    Nawa can solve without downloading every archive (§6.3(3)).
 
 Values flow strictly downward; no stage re-interprets or re-derives them
@@ -45,7 +45,7 @@ archive .PKGINFO  provides = … / rundeps = …            (package source of t
       │  authenticated by the archive digest, which the        §6.3(2))
       │  signed index entry carries
       ▼
-index.toml (schema 4)  [[package]] rundeps / provides   (authenticated duplication
+index.toml (schema 4/5)  [[package]] solving metadata    (authenticated duplication
       signed with the existing nawa-sig-v1 signature          for solving, §6.3(3))
 ```
 
@@ -54,7 +54,7 @@ index.toml (schema 4)  [[package]] rundeps / provides   (authenticated duplicati
 - **Archive `.PKGINFO`** records the normalized declaration at build time. It
   is the authority for what the *installed* package provides, and it is what
   the database can read from a cached archive without any index.
-- **Index v4** duplicates the archive fields so binary-only solving works
+- **Index v4/v5** duplicates the archive fields so binary-only solving works
   before download. The index signature authenticates the duplication; the
   chain-comparison rule (§6 below) keeps the two from drifting.
 
@@ -83,11 +83,9 @@ Rules:
   domain-generic; adding another domain is a separate, justified design
   decision, not a schema change.
 - Runtime dependencies keep their existing source: `depends.run` (recipe
-  `Depends`). This proposal adds no new dependency syntax.
-- Out of scope for this pass, and therefore not in schema v4: versioned
-  provides, virtual packages with version ranges, conflicts, and replaces.
-  They would require a later schema version, and v4 readers fail closed on
-  unknown entry fields (§5), so they cannot leak into v4 silently.
+  `Depends`). Schema v5 adds an explicit grammar for versioned runtime package
+  requirements plus conflicts/replacements (§11). Versioned capability
+  provides remain out of scope.
 
 ## 4. Archive spelling (`.PKGINFO`)
 
@@ -147,7 +145,7 @@ Wiring notes for the build (`build/package.rs package_archives`):
   existing behavior is unchanged until then (and documented as an
   intentional normalization when it happens).
 
-## 5. Signed index schema v4
+## 5. Signed index schema v4 (capabilities/dependencies)
 
 Same `[repository]` block (its structure is unchanged, `schema = 4`), and the
 `[[package]]` entry gains two required fields:
@@ -254,7 +252,7 @@ Answering §16.2's first half — the exact per-package fields the solver needs
 to plan an install or upgrade without reading recipes or downloading every
 archive (§8.1):
 
-**Required, and therefore required in v4 entries:**
+**Required, and therefore required in v4/v5 entries:**
 
 | Field      | Why                                                                      |
 | ---------- | ------------------------------------------------------------------------ |
@@ -270,7 +268,8 @@ archive (§8.1):
 **Not required for solving:** `installed_size` (disk accounting only; may be
 0 = unknown), `download_url` (repository-level `archive_location` decides the
 URL scheme), and recipe availability (that is what binary-only means).
-Conflict/replacement data is not modeled in this pass (§3, out of scope).
+Conflicts/replacements remain unknown for legacy archives/indexes; they are
+not inferred as empty.
 
 Everything else the solver needs comes from the installed-package database
 and the detected system state, not from this chain.
@@ -341,3 +340,102 @@ plus `domain/system/capability.rs`) and its `#![allow(dead_code)]` is gone:
    `PkgMetadata` from authenticated index fields (legacy → unknown); and
    `provider_note` explains which planned package provides the profile's
    selected init, preserving the authentication provenance.
+
+## 11. Package relations schema 1 and signed index v5
+
+The existing shared resolver handles version-constrained runtime package
+requirements, conflicts and explicit package replacements. Missing legacy
+metadata remains *unknown*, not an empty relation set.
+
+### Recipe contract
+
+A relation-bearing recipe uses this guarded source marker (it may also use
+fetch-schema tables):
+
+```toml
+[package]
+source = "local:/nawa-package-relations-1-requires-a-newer-nawa"
+source_date_epoch = 1 # required for relation-only/meta recipes
+
+[depends]
+run = ["libc >= 2.40-1", "crypto >= 3.0-2"]
+
+[relations]
+schema = 1
+conflicts = ["old-crypto < 4.0-1"]
+replaces = ["old-crypto < 4.0-1"]
+```
+
+`[relations]` accepts exactly `schema`, `conflicts`, and `replaces`; schema
+must be 1 and both lists are required (`[]` means explicitly empty). The
+relation marker is required when the table exists; relation-only recipes do
+not enter the fetch-source staging path. Versioned `depends.run` entries
+without `[relations]` are rejected. Schema 1 permits constraints on runtime
+dependencies only; build/check dependencies remain package names.
+
+### Exact requirement syntax and normalization
+
+One list entry is exactly `NAME` or `NAME OP VERSION-REL`. `OP` is one of
+`=`, `!=`, `<`, `<=`, `>`, `>=`. Package names use the existing package-name
+alphabet. `VERSION-REL` uses the package version alphabet followed by a final
+hyphen and a positive decimal release. Splitting occurs at the final hyphen,
+so hyphens in the version remain valid. Outer/name/operator/version whitespace
+is trimmed; internal whitespace, commas, empty entries, missing/invalid rels,
+unknown operators, extra tokens, and duplicates after normalization fail
+closed. `vercmp` is the single ordering used for every operator.
+
+### Archive/index representation and compatibility
+
+`.PKGINFO` carries all three fields together:
+
+```text
+relations_schema = 1
+conflicts = old-crypto<4.0-1
+replaces = old-crypto<4.0-1
+```
+
+Flat lists are comma-joined; commas inside entries are forbidden. Signed
+index v5 carries the complete tuple on every package entry:
+
+```toml
+[package.relations]
+schema = 1
+conflicts = ["old-crypto<4.0-1"]
+replaces = ["old-crypto<4.0-1"]
+```
+
+v5 unknown fields, missing tuples, and unsupported relation schemas are
+errors. `repo-create --index-version 5` refuses archives with unknown
+relations and self-validates its serialized v5 index. Relation-bearing
+archives cannot be published as v1-v4: metadata is never silently stripped.
+`repo-update` preserves and compares relations with the immutable archive
+digest/size. The signed index authenticates this tuple; fetch compares it with
+`.PKGINFO` after archive digest verification. Index v1-v4 remains
+backward-compatible and absent relations stay unknown; v4 still supports only
+`rundeps` and `provides`.
+
+### Deterministic resolver behavior
+
+The shared resolver propagates runtime requirements through the full selected
+graph before emitting actions. It rejects unsatisfied range intersections,
+unavailable constrained candidates, unknown relations for versioned edges,
+and implicit downgrades. A matching installed version satisfies a non-target
+edge; otherwise the selected source candidate must be newer and satisfy every
+constraint. No alternative source/archive is substituted silently. Build-root
+closure uses the same grammar and checks candidate versions.
+
+Conflicts are checked against the projected installed state: selected candidate
+versions plus explicit replacement removals. Declarations from either side
+are considered when candidate metadata is known. A replacement is considered
+only for a requested replacing package and an installed target matching the
+declared range. Ambiguous replacers, still-installed dependents,
+target-and-replacement collisions and init-provider/boot-entry replacement
+fail closed. Removals are dependent-first and share the existing package
+transaction history, file WAL and installer path. A partial failure remains a
+recorded partial transaction, never an inferred success.
+
+Normal package plans preserve legacy v1-v4 behavior while displaying unknown
+conflict/replacement metadata. Migration approval requires a trusted schema-v5
+index and refuses every removal action, so generic relations cannot retire
+runit/systemd during migration. Versioned virtual capabilities and
+multi-source candidate backtracking are not part of relations schema 1.

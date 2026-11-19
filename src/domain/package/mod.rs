@@ -6,4 +6,5 @@
 //! comparison.
 
 pub(crate) mod metadata;
+pub(crate) mod relations;
 pub(crate) mod version;

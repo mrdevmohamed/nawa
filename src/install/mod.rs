@@ -442,6 +442,7 @@ mod tests {
         // payload is touched — no silent "prefer the archive" fallback.
         let other_root = base.join("other-root");
         let mismatching = PkgMetadata {
+            relations: None,
             provides: Provides::parse_all(&["init-system=systemd".to_string()]).unwrap(),
             rundeps: matching.rundeps.clone(),
         };

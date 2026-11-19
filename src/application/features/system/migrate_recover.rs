@@ -440,14 +440,15 @@ fn recover_gate_active(
     }
 
     if let Some(reason) = ambiguous {
-        // cannot prove the step outcomes: keep the durable state, gate active
+        // Cannot prove the step outcomes: transition explicitly to
+        // needs-recovery while preserving the mutation gate.
+        amended.state =
+            transition(amended.state, Transition::Ambiguous).map_err(anyhow::Error::msg)?;
         (ui.warn)(&format!(
-            "migration {}: {reason} — the record stays {} (needs-recovery documented for the operator)",
-            record.id,
-            record.state.as_str()
+            "migration {}: {reason} — the record is needs-recovery and its mutation gate remains active",
+            record.id
         ));
-        // The reconciled outcomes that *were* proven are kept on disk; the
-        // state is left gate-keeping and reported as needing recovery.
+        // Keep any outcomes that were independently proven before ambiguity.
         persist(&ctx.root, &amended)?;
         return Ok(RecoveryAction::NeedsRecovery(reason));
     }
@@ -787,12 +788,94 @@ fn verify_retained_evidence(root: &Path, record: &MigrationRecord) -> Result<()>
     for artifact in &pin.artifacts {
         let object = crate::adapters::artifact::object_path(root, &artifact.sha256)?;
         crate::adapters::artifact::verify_object_file(&object, &artifact.sha256)?;
-        if std::fs::metadata(object)?.len() != artifact.size {
+        if std::fs::metadata(&object)?.len() != artifact.size {
             bail!(
                 "retained staged archive size mismatch for {}",
                 artifact.name
             );
         }
+        let provenance = crate::adapters::artifact::load_provenance(root, &artifact.sha256)?
+            .ok_or_else(|| anyhow!("staged archive {} has no durable provenance", artifact.name))?;
+        let repository = provenance
+            .repository
+            .as_ref()
+            .ok_or_else(|| anyhow!("staged archive {} has no signed-index proof", artifact.name))?;
+        let proof_dir = object.parent().unwrap();
+        let signer = std::fs::read(proof_dir.join(format!("{}.signer.pub", artifact.sha256)))?;
+        if provenance.authentication != "signed-index"
+            || provenance.archive_size != artifact.size
+            || repository.index_sha256 != pin.index_sha256
+            || repository.signer_fingerprint != crate::adapters::artifact::key_fingerprint(&signer)
+            || !repository.trusted_at_install
+        {
+            bail!(
+                "staged archive {} provenance differs from approved repository evidence",
+                artifact.name
+            );
+        }
+        let index = std::fs::read(proof_dir.join(format!("{}.index.toml", artifact.sha256)))?;
+        let signature =
+            std::fs::read(proof_dir.join(format!("{}.index.toml.sig", artifact.sha256)))?;
+        if crate::adapters::checksum::sha256_bytes(&index) != pin.index_sha256
+            || Some(crate::adapters::checksum::sha256_bytes(&signature))
+                != repository.index_signature_sha256
+        {
+            bail!(
+                "staged archive {} signed-index proof bundle is corrupt",
+                artifact.name
+            );
+        }
+        crate::adapters::sign::verify_trusted_index_proof(
+            &index,
+            &signature,
+            &pin.signer_sha256,
+            root,
+        )?;
+        let signed_index = crate::repo::load_index_bytes(&index)?;
+        if signed_index.repository.as_ref().map(|meta| meta.schema)
+            != Some(crate::repo::INDEX_SCHEMA_V5)
+        {
+            bail!(
+                "staged archive {} proof is not a strict signed schema-v5 index",
+                artifact.name
+            );
+        }
+        let indexed = signed_index.find(&artifact.name).ok_or_else(|| {
+            anyhow!(
+                "approved package {} is absent from its retained signed index",
+                artifact.name
+            )
+        })?;
+        if indexed.file != artifact.archive
+            || indexed.sha256 != artifact.sha256
+            || indexed.size != artifact.size
+            || crate::domain::planning::install::version_rel(&indexed.version, indexed.rel)
+                != artifact.target
+            || indexed
+                .download_url
+                .as_deref()
+                .map(|url| crate::adapters::checksum::sha256_bytes(url.as_bytes()))
+                != artifact.download_url_sha256
+        {
+            bail!(
+                "staged archive {} differs from its retained exact index entry",
+                artifact.name
+            );
+        }
+        let pkginfo = crate::adapters::archive::parse_pkginfo(
+            &crate::adapters::archive::read_pkginfo(&object)?,
+        )?;
+        let archive_metadata =
+            crate::domain::package::metadata::PkgMetadata::from_pkginfo_map(&pkginfo)
+                .map_err(anyhow::Error::msg)?;
+        let entry_metadata = crate::domain::package::metadata::metadata_from_repository(
+            indexed.rundeps.as_ref(),
+            indexed.provides.as_ref(),
+            indexed.relations.as_ref(),
+        )
+        .map_err(anyhow::Error::msg)?;
+        crate::domain::package::metadata::check_chain(&entry_metadata, &archive_metadata)
+            .map_err(anyhow::Error::msg)?;
     }
     Ok(())
 }
@@ -818,40 +901,22 @@ fn verify_approved_inventory(root: &Path, record: &MigrationRecord) -> Result<()
         .as_ref()
         .ok_or_else(|| anyhow!("no approved package inventory"))?;
     let actual = super::observation::observe(root, Path::new("/proc"));
-    let mut expected: std::collections::BTreeMap<_, _> = pin
-        .installed_identities
+    let count = pin
+        .artifacts
         .iter()
-        .map(|i| (i.name.clone(), i.clone()))
-        .collect();
+        .filter(|a| a.kind != crate::domain::system::plan::PackageActionKind::Keep)
+        .count();
     for artifact in &pin.artifacts {
-        if artifact.kind == crate::domain::system::plan::PackageActionKind::Keep {
-            continue;
-        }
-        let reason = if artifact.install_reason == crate::domain::planning::install::Why::Update {
-            expected
-                .get(&artifact.name)
-                .map(|i| i.reason.clone())
-                .unwrap_or_default()
-        } else {
-            artifact.install_reason.db_reason().as_str().to_string()
-        };
-        expected.insert(
-            artifact.name.clone(),
-            crate::domain::system::plan::InstalledIdentity {
-                name: artifact.name.clone(),
-                version: artifact.target.clone(),
-                sha256: artifact.sha256.clone(),
-                reason,
-            },
-        );
-        if crate::install::hook_needs_retry(root, &artifact.name)? {
+        if artifact.kind != crate::domain::system::plan::PackageActionKind::Keep
+            && crate::install::hook_needs_retry(root, &artifact.name)?
+        {
             bail!("{} has an unverified post-install hook", artifact.name);
         }
     }
     if !matches!(
         actual.packages,
         super::observation::PackageInventory::Available(_)
-    ) || actual.installed_identities != expected.into_values().collect::<Vec<_>>()
+    ) || actual.installed_identities != pin.inventory_after(count)
     {
         bail!("installed package state does not match the exact approved changes; the old provider must be retained");
     }
@@ -973,6 +1038,9 @@ fn resolve_target_file(root: &Path, relative: &str) -> Result<Option<std::path::
         resolved.push(part);
         let meta = match std::fs::symlink_metadata(root.join(&resolved)) {
             Ok(meta) => meta,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && links > 0 => {
+                bail!("init symlink has a missing target inside the selected root");
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e.into()),
         };
@@ -1396,8 +1464,8 @@ mod tests {
         ));
         assert_eq!(
             on_disk(&root).state,
-            MigrationState::Preparing,
-            "state is preserved"
+            MigrationState::NeedsRecovery,
+            "an ambiguous committed WAL postcondition transitions to needs-recovery"
         );
         assert!(gate_active(&root), "the gate stays active");
     }
@@ -1461,7 +1529,7 @@ mod tests {
             report.notes[0].action,
             RecoveryAction::NeedsRecovery(_)
         ));
-        assert_eq!(on_disk(&root).state, MigrationState::Preparing);
+        assert_eq!(on_disk(&root).state, MigrationState::NeedsRecovery);
         assert!(gate_active(&root));
     }
 

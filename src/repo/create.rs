@@ -62,13 +62,11 @@ pub(crate) fn create_index_with_locations_and_groups(
 ) -> Result<Index> {
     if !matches!(
         index_version,
-        1 | INDEX_SCHEMA_V2 | INDEX_SCHEMA_V3 | INDEX_SCHEMA_V4
+        1 | INDEX_SCHEMA_V2 | INDEX_SCHEMA_V3 | INDEX_SCHEMA_V4 | INDEX_SCHEMA_V5
     ) {
-        bail!("unsupported repository index version {index_version} (supported: 1, 2, 3, 4)");
+        bail!("unsupported repository index version {index_version} (supported: 1 through 5)");
     }
-    if (index_version == INDEX_SCHEMA_V3 || index_version == INDEX_SCHEMA_V4)
-        && locations_path.is_none()
-    {
+    if index_version >= INDEX_SCHEMA_V3 && locations_path.is_none() {
         bail!("schema-v{index_version} requires --locations with package_urls and recipe_urls");
     }
     if groups_path.is_some() && index_version < INDEX_SCHEMA_V2 {
@@ -76,9 +74,10 @@ pub(crate) fn create_index_with_locations_and_groups(
     }
     if index_version != INDEX_SCHEMA_V3
         && index_version != INDEX_SCHEMA_V4
+        && index_version != INDEX_SCHEMA_V5
         && locations_path.is_some()
     {
-        bail!("--locations is only valid with --index-version 3 or 4");
+        bail!("--locations is only valid with --index-version 3, 4, or 5");
     }
     let locations = match locations_path {
         Some(path) => Some(load_locations(path)?),
@@ -139,7 +138,7 @@ pub(crate) fn create_index_with_locations_and_groups(
         // in the signed index. An archive with no `provides` line has unknown
         // capabilities; writing `provides = []` would fabricate an
         // authenticated "declares nothing" claim, so refuse publication.
-        let (rundeps, provides) = if index_version == INDEX_SCHEMA_V4 {
+        let (rundeps, provides) = if index_version >= INDEX_SCHEMA_V4 {
             let raw_provides = info.get("provides").with_context(|| {
                 format!(
                     "{} has no provides field in .PKGINFO — rebuild it from a recipe that declares [capabilities] (possibly empty) before publishing a schema-v4 index",
@@ -164,6 +163,14 @@ pub(crate) fn create_index_with_locations_and_groups(
         } else {
             (None, None)
         };
+        let metadata = crate::domain::package::metadata::PkgMetadata::from_pkginfo_map(&info)
+            .map_err(anyhow::Error::msg)?;
+        if metadata.relations.is_some() && index_version != INDEX_SCHEMA_V5 {
+            bail!("{} declares package relations; it must be published in schema-v5, never downgraded", path.display());
+        }
+        if index_version == INDEX_SCHEMA_V5 && metadata.relations.is_none() {
+            bail!("{} has unknown package relations; rebuild with an explicit [relations] declaration before publishing schema-v5", path.display());
+        }
         crate::nawa_success!("index -> {}-{}-{}", name, version, rel);
         let file = path.file_name().unwrap().to_string_lossy().to_string();
         let download_url = locations
@@ -181,6 +188,7 @@ pub(crate) fn create_index_with_locations_and_groups(
             installed_size,
             rundeps,
             provides,
+            relations: metadata.relations,
         });
     }
 
@@ -201,6 +209,7 @@ pub(crate) fn create_index_with_locations_and_groups(
                 installed_size: p.installed_size,
                 rundeps: p.rundeps.clone().unwrap_or_default(),
                 provides: p.provides.clone().unwrap_or_default(),
+                relations: None,
             };
             let text = toml::to_string(&v4).context("serialize schema-v4 package entry")?;
             crate::domain::package::metadata::IndexEntryV4::parse_toml(&text)
@@ -239,6 +248,7 @@ pub(crate) fn create_index_with_locations_and_groups(
             INDEX_SCHEMA_V2 => Some(RepositoryMeta::v2()),
             INDEX_SCHEMA_V3 => Some(RepositoryMeta::v3_per_package_url()),
             INDEX_SCHEMA_V4 => Some(RepositoryMeta::v4_per_package_url()),
+            INDEX_SCHEMA_V5 => Some(RepositoryMeta::v5_per_package_url()),
             _ => unreachable!("index version validated above"),
         },
         recipes: recipes_entry,

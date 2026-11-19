@@ -396,6 +396,37 @@ pub(crate) fn verify_index_bytes(
     Ok(IndexTrust::EmbeddedKeyOnly)
 }
 
+/// Recheck an in-memory repository proof under a caller's mutation lock. This
+/// does not touch the network or repository cache and requires the original
+/// sidecar bytes plus a currently trusted matching signer.
+pub(crate) fn verify_trusted_index_proof(
+    bytes: &[u8],
+    signature_bytes: &[u8],
+    signer_sha256: &str,
+    root: &Path,
+) -> Result<()> {
+    let raw = std::str::from_utf8(signature_bytes)
+        .map_err(|_| anyhow::anyhow!("index signature is not UTF-8"))?;
+    let mut lines = raw.lines();
+    let _comment = lines.next().unwrap_or_default();
+    let sig_hex = lines.next().unwrap_or_default().trim();
+    let _embedded_hex = lines.next().unwrap_or_default().trim();
+    let signature = Signature::from_slice(&decode_hex64(sig_hex).context("bad signature hex")?)
+        .map_err(|_| anyhow::anyhow!("truncated signature"))?;
+    for (name, key) in trusted_keys(root)? {
+        let key_file = trust_dir(root).join(name);
+        let key_bytes =
+            std::fs::read(&key_file).context("read current trusted repository signer")?;
+        let key_sha = crate::adapters::checksum::sha256_bytes(&key_bytes);
+        if key_sha == signer_sha256 {
+            verify_bytes(bytes, &key, &signature)
+                .context("approved repository index signature changed")?;
+            return Ok(());
+        }
+    }
+    bail!("the approved repository signer is no longer in the current trust store")
+}
+
 /// `nawa verify` standalone: explicit key > trust store > embedded key.
 pub(crate) fn verify_standalone(file: &Path, root: &Path, key: Option<&Path>) -> Result<()> {
     if !file.exists() {

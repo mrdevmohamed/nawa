@@ -234,7 +234,7 @@ fn build_from_observation(
     }
 
     let schema = open.index.repository.as_ref().map(|meta| meta.schema);
-    if schema != Some(crate::repo::INDEX_SCHEMA_V4)
+    if schema != Some(crate::repo::INDEX_SCHEMA_V5)
         || open.archive_auth != ArchiveAuth::SignedIndexSha256
         || open.signer_public.is_none()
     {
@@ -242,7 +242,7 @@ fn build_from_observation(
             from: Some(from),
             to: target,
             profile_source,
-            reason: "a trusted signing key and authenticated repository index schema v4 are required; legacy or unsigned metadata cannot select a migration provider".to_string(),
+            reason: "a trusted signing key and authenticated repository index schema v5 are required; legacy, v4 unknown relations or unsigned metadata cannot select a migration provider".to_string(),
         });
     }
 
@@ -268,6 +268,7 @@ fn build_from_observation(
                 dependencies_known: false,
                 origin: CandidateOrigin::Repository,
                 provides: metadata.provides,
+                relations: metadata.relations,
             },
         );
     }
@@ -346,6 +347,7 @@ fn build_from_observation(
                 dependencies_known: true,
                 origin: CandidateOrigin::Repository,
                 provides: metadata.provides,
+                relations: metadata.relations,
             },
         );
     }
@@ -372,6 +374,12 @@ fn build_from_observation(
         }
     };
 
+    if !resolution.removals.is_empty() || !resolution.unknown_relations.is_empty() {
+        return Some(Preview::Unresolved {
+            from: Some(from), to: target, profile_source,
+            reason: "migration requires explicit schema-v5 package relations and cannot remove replacement packages or legacy init providers".into(),
+        });
+    }
     let mut package_actions = Vec::new();
     for item in resolution.items {
         let Some(candidate) = candidates.get(&item.name) else {
@@ -450,8 +458,18 @@ fn build_from_observation(
         };
         package_actions.push(action);
     }
-    for name in resolution.up_to_date {
+    for name in resolution
+        .retained_dependencies
+        .into_iter()
+        .chain(resolution.up_to_date)
+    {
         if let Some(candidate) = candidates.get(&name) {
+            if installed.get(&name)
+                != Some(&install::version_rel(&candidate.version, candidate.rel))
+            {
+                return Some(Preview::Unresolved { from: Some(from), to: target, profile_source,
+                    reason: format!("retained package {name} has no exact current-version artifact in the authenticated index") });
+            }
             let Some(entry) = open.index.find(&name) else {
                 return Some(Preview::Unresolved {
                     from: Some(from),
@@ -647,17 +665,22 @@ mod tests {
             installed_size: 1,
             rundeps: Some(deps.iter().map(|value| value.to_string()).collect()),
             provides: Some(provides.iter().map(|value| value.to_string()).collect()),
+            relations: Some(crate::domain::package::relations::PackageRelations {
+                schema: 1,
+                conflicts: vec![],
+                replaces: vec![],
+            }),
         }
     }
 
-    fn open_v4(entries: Vec<crate::repo::RepoEntry>) -> OpenRepo {
+    fn open_v5(entries: Vec<crate::repo::RepoEntry>) -> OpenRepo {
         OpenRepo {
             dir: PathBuf::new(),
             base_url: None,
             index: crate::repo::Index {
                 generated: None,
                 expires: None,
-                repository: Some(crate::repo::RepositoryMeta::v4_per_package_url()),
+                repository: Some(crate::repo::RepositoryMeta::v5_per_package_url()),
                 recipes: None,
                 groups: None,
                 packages: entries,
@@ -675,9 +698,9 @@ mod tests {
     }
 
     #[test]
-    fn trusted_v4_provider_uses_the_existing_runtime_dependency_solver() {
+    fn trusted_v5_provider_uses_the_existing_runtime_dependency_solver() {
         let root = root();
-        let repo = open_v4(vec![
+        let repo = open_v5(vec![
             entry("libfoo", &[], &[]),
             entry("systemd", &["libfoo"], &["init-system=systemd"]),
         ]);
@@ -716,7 +739,7 @@ mod tests {
     #[test]
     fn unsigned_or_untrusted_index_never_selects_a_migration_provider() {
         let root = root();
-        let mut repo = open_v4(vec![entry("systemd", &[], &["init-system=systemd"])]);
+        let mut repo = open_v5(vec![entry("systemd", &[], &["init-system=systemd"])]);
         repo.signer_public = None;
         let result =
             build_from_observation(&observed(&root, InitKind::Runit), &repo, &HashMap::new())
@@ -730,7 +753,7 @@ mod tests {
     #[test]
     fn multiple_packages_for_the_exclusive_init_provider_are_not_selected_arbitrarily() {
         let root = root();
-        let repo = open_v4(vec![
+        let repo = open_v5(vec![
             entry("systemd", &[], &["init-system=systemd"]),
             entry("systemd-alt", &[], &["init-system=systemd"]),
         ]);
@@ -746,7 +769,7 @@ mod tests {
     #[test]
     fn a_package_declaring_two_init_providers_is_reported_as_ambiguous() {
         let root = root();
-        let repo = open_v4(vec![entry(
+        let repo = open_v5(vec![entry(
             "systemd",
             &[],
             &["init-system=runit", "init-system=systemd"],
@@ -763,7 +786,7 @@ mod tests {
     #[test]
     fn offline_roots_never_use_host_pid_one_for_a_migration_candidate() {
         let root = root();
-        let repo = open_v4(vec![entry("systemd", &[], &["init-system=systemd"])]);
+        let repo = open_v5(vec![entry("systemd", &[], &["init-system=systemd"])]);
         let mut observation = observed(&root, InitKind::Runit);
         observation.context = Context::OfflineRoot { root: root.clone() };
         let result = build_from_observation(&observation, &repo, &HashMap::new()).unwrap();
@@ -774,7 +797,7 @@ mod tests {
     #[test]
     fn indicated_runtime_does_not_hide_an_unresolved_preference_policy() {
         let root = root();
-        let repo = open_v4(vec![entry("systemd", &[], &["init-system=systemd"])]);
+        let repo = open_v5(vec![entry("systemd", &[], &["init-system=systemd"])]);
         let mut observation = observed(&root, InitKind::Runit);
         observation.desired = DesiredInit::NotDeclared;
         observation.runtime = RuntimeInit::Observed {
@@ -811,7 +834,7 @@ mod tests {
     #[test]
     fn an_active_preferred_provider_satisfies_advisory_policy_without_preview_noise() {
         let root = root();
-        let repo = open_v4(vec![entry("systemd", &[], &["init-system=systemd"])]);
+        let repo = open_v5(vec![entry("systemd", &[], &["init-system=systemd"])]);
         let mut observation = observed(&root, InitKind::Systemd);
         observation.desired = DesiredInit::NotDeclared;
         observation.effective_profile = Some(SystemProfile {
@@ -840,7 +863,7 @@ mod tests {
     #[test]
     fn a_forbidden_active_provider_is_reported_without_inventing_a_replacement() {
         let root = root();
-        let repo = open_v4(vec![entry("systemd", &[], &["init-system=systemd"])]);
+        let repo = open_v5(vec![entry("systemd", &[], &["init-system=systemd"])]);
         let mut observation = observed(&root, InitKind::Runit);
         observation.desired = DesiredInit::NotDeclared;
         observation.effective_profile = Some(SystemProfile {
@@ -877,7 +900,7 @@ mod tests {
     #[test]
     fn preferred_provider_policy_is_advisory_not_an_automatic_migration_target() {
         let root = root();
-        let repo = open_v4(vec![entry("systemd", &[], &["init-system=systemd"])]);
+        let repo = open_v5(vec![entry("systemd", &[], &["init-system=systemd"])]);
         let mut observation = observed(&root, InitKind::Runit);
         observation.desired = DesiredInit::NotDeclared;
         observation.effective_profile = Some(SystemProfile {
@@ -909,7 +932,7 @@ mod tests {
     #[test]
     fn already_matching_runtime_and_profile_produces_no_migration_candidate() {
         let root = root();
-        let repo = open_v4(vec![entry("systemd", &[], &["init-system=systemd"])]);
+        let repo = open_v5(vec![entry("systemd", &[], &["init-system=systemd"])]);
         assert!(build_from_observation(
             &observed(&root, InitKind::Systemd),
             &repo,
@@ -922,7 +945,7 @@ mod tests {
     #[test]
     fn unresolved_runtime_dependency_prevents_a_package_candidate() {
         let root = root();
-        let repo = open_v4(vec![entry(
+        let repo = open_v5(vec![entry(
             "systemd",
             &["missing-library"],
             &["init-system=systemd"],

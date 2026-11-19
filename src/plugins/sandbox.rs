@@ -55,7 +55,7 @@ pub(super) fn spawn(executable: &Path, protected_paths: &[PathBuf]) -> Result<Sa
     }
 
     let env = plugin_env();
-    let mask = mask_paths(protected_paths);
+    let mask = mask_paths(protected_paths)?;
     let spec = plugin_spec(
         source_dir,
         &filename,
@@ -141,13 +141,17 @@ fn plugin_env() -> BTreeMap<String, String> {
 
 /// Host paths hidden from the plugin: secrets, nawa's own state, the user's
 /// home, and every path the caller protects.
-fn mask_paths(protected_paths: &[PathBuf]) -> Vec<String> {
+fn mask_paths(protected_paths: &[PathBuf]) -> Result<Vec<String>> {
     let mut mask = vec![
         "/root".to_string(),
         // This kernel pseudo-filesystem cannot be remounted read-only with
         // bind-remount semantics in several user-namespace kernels. It is not
         // needed by plugins, so hide it with the other host-sensitive paths.
         "/proc/sys/fs/binfmt_misc".to_string(),
+        // EFI variable filesystems reject per-mount read-only remounts in
+        // several user namespaces. Plugins have no reason to inspect firmware
+        // variables, so hide this host surface instead of degrading isolation.
+        "/sys/firmware/efi/efivars".to_string(),
         "/home".to_string(),
         "/run".to_string(),
         "/etc/nawa".to_string(),
@@ -159,6 +163,12 @@ fn mask_paths(protected_paths: &[PathBuf]) -> Vec<String> {
         "/var/cache".to_string(),
         "/var/log".to_string(),
     ];
+    // Some container runtimes expose host kernel filesystems again below
+    // /mnt. Mask only those mountpoint aliases: hiding /mnt itself also hides
+    // ordinary mounted data that plugins may legitimately need to read.
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")
+        .context("read mountinfo while preparing plugin sandbox masks")?;
+    mask.extend(pseudo_mount_aliases(&mountinfo));
     if let Ok(home) = std::env::var("HOME") {
         push_mask_dir(Path::new(&home), &mut mask);
     }
@@ -167,7 +177,62 @@ fn mask_paths(protected_paths: &[PathBuf]) -> Vec<String> {
     }
     mask.sort();
     mask.dedup();
-    mask
+    Ok(mask)
+}
+
+/// Find kernel-filesystem mountpoints exposed below the host's `/mnt` tree.
+/// Masking these exact aliases avoids remounting pseudo-filesystems through
+/// their alternate paths without hiding regular `/mnt` contents.
+fn pseudo_mount_aliases(mountinfo: &str) -> Vec<String> {
+    const PSEUDO_FILESYSTEMS: &[&str] = &[
+        "autofs",
+        "bpf",
+        "cgroup",
+        "cgroup2",
+        "configfs",
+        "debugfs",
+        "devpts",
+        "devtmpfs",
+        "efivarfs",
+        "fusectl",
+        "mqueue",
+        "pstore",
+        "proc",
+        "securityfs",
+        "sysfs",
+        "tracefs",
+    ];
+    let mut aliases = Vec::new();
+    for line in mountinfo.lines() {
+        let Some((mount_fields, filesystem_fields)) = line.split_once(" - ") else {
+            continue;
+        };
+        let fields: Vec<_> = mount_fields.split_whitespace().collect();
+        let Some(raw_mountpoint) = fields.get(4) else {
+            continue;
+        };
+        let mountpoint = unescape_mountinfo(raw_mountpoint);
+        let path = Path::new(&mountpoint);
+        if path == Path::new("/mnt") || !path.starts_with("/mnt") {
+            continue;
+        }
+        let Some(filesystem) = filesystem_fields.split_whitespace().next() else {
+            continue;
+        };
+        if PSEUDO_FILESYSTEMS.contains(&filesystem) {
+            aliases.push(mountpoint);
+        }
+    }
+    aliases.sort();
+    aliases.dedup();
+    aliases
+}
+
+fn unescape_mountinfo(path: &str) -> String {
+    path.replace("\\040", " ")
+        .replace("\\011", "\t")
+        .replace("\\012", "\n")
+        .replace("\\134", "\\")
 }
 
 /// The sandbox spec for one plugin run: read-only root, no network, resource
@@ -273,4 +338,26 @@ fn push_mask_dir(path: &Path, mask: &mut Vec<String>) {
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pseudo_mount_aliases;
+
+    #[test]
+    fn plugin_masks_only_pseudo_mount_aliases_below_mnt() {
+        let mountinfo = concat!(
+            "31 20 8:1 / /mnt rw - ext4 /dev/sda1 rw\n",
+            "32 20 0:5 / /mnt/proc rw - proc proc rw\n",
+            "33 20 0:6 / /mnt/sys rw - sysfs sysfs rw\n",
+            "34 20 0:7 / /mnt/sys/firmware/efi/efivars rw - efivarfs efivarfs rw\n",
+            "35 20 8:2 / /mnt/user\\040data rw - ext4 /dev/sdb1 rw\n",
+            "36 20 0:9 / /mnt2/proc rw - proc proc rw\n",
+        );
+
+        assert_eq!(
+            pseudo_mount_aliases(mountinfo),
+            ["/mnt/proc", "/mnt/sys", "/mnt/sys/firmware/efi/efivars"]
+        );
+    }
 }

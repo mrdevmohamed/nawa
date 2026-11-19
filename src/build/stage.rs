@@ -49,7 +49,7 @@ pub(super) fn stage_source(
     let source = &rec.package.source;
     let mut staged: Option<crate::build::sources::SourcesStaged> = None;
     let mut staged_assets: Option<crate::build::assets::AssetsStaged> = None;
-    let srcdir: PathBuf = if rec.is_new_schema() {
+    let srcdir: PathBuf = if rec.is_fetch_schema() {
         // ---- new-schema staging (fetch-phase.md §4.2, §5, §6, §11) -------
         // §5.2: an unreadable/missing asset path fails BEFORE any download,
         // by the same sweep the snapshot will run (§16 Assets 3).
@@ -75,7 +75,10 @@ pub(super) fn stage_source(
             staged_assets = Some(a);
         }
         sub_srcdir
-    } else if source.is_empty() {
+    } else if source.is_empty()
+        || source == crate::recipe::model::SCHEMA_MARKER
+        || source == crate::recipe::model::RELATIONS_MARKER
+    {
         src.clone() // meta package: run scripts directly in src
     } else if let Some(local) = source.strip_prefix("local:") {
         let p = PathBuf::from(local);

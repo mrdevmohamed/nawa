@@ -57,6 +57,32 @@ mod tests {
     }
 
     #[test]
+    fn package_relations_require_their_own_fail_closed_recipe_marker() {
+        let text = "[package]\nname='app'\nversion='1'\nsource='local:/nawa-package-relations-1-requires-a-newer-nawa'\nsource_date_epoch=1\n[depends]\nrun=['lib >= 2-1']\n[capabilities]\nprovides=[]\n[relations]\nschema=1\nconflicts=['old<2-1']\nreplaces=['old<2-1']\n";
+        let recipe: Recipe = toml::from_str(text).unwrap();
+        recipe.validate().unwrap();
+        assert!(recipe.is_new_schema());
+        for marker in ["", super::model::SCHEMA_MARKER] {
+            let mut invalid = recipe.clone();
+            invalid.package.source = marker.into();
+            assert!(invalid.validate().is_err());
+        }
+        let mut invalid = recipe.clone();
+        invalid.relations.as_mut().unwrap().schema = 99;
+        assert!(invalid.validate().is_err());
+        assert!(toml::from_str::<Recipe>(&text.replace("replaces=['old<2-1']", "")).is_err());
+    }
+
+    #[test]
+    fn relation_only_recipe_does_not_enter_the_fetch_source_stager() {
+        let text = "[package]\nname='meta-relations'\nversion='1'\nsource='local:/nawa-package-relations-1-requires-a-newer-nawa'\nsource_date_epoch=1\n[relations]\nschema=1\nconflicts=[]\nreplaces=[]\n";
+        let recipe: Recipe = toml::from_str(text).unwrap();
+        recipe.validate().unwrap();
+        assert!(recipe.is_new_schema());
+        assert!(!recipe.is_fetch_schema());
+    }
+
+    #[test]
     fn mirrors_need_a_downloadable_source() {
         let bad = SAMPLE.replace(
             "source = \"https://ftp.gnu.org/gnu/gzip/gzip-%{version}.tar.xz\"",

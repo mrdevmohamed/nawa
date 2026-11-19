@@ -3,6 +3,7 @@
 //! over normalized inputs (§8.1 installed records); `plan.rs` adapts
 //! database records and recipes and delegates.
 
+use crate::domain::package::relations::Requirement;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// One installed package as the removal planner sees it.
@@ -34,6 +35,13 @@ pub(crate) fn orphans(
     build_deps: bool,
 ) -> Vec<String> {
     let installed_names: HashSet<&str> = installed.iter().map(|e| e.name.as_str()).collect();
+    if installed
+        .iter()
+        .any(|e| e.run.iter().any(|r| Requirement::parse(r).is_err()))
+    {
+        // Unknown/corrupt dependency edges cannot prove any package orphaned.
+        return Vec::new();
+    }
     let by_name: HashMap<&str, &InstalledPkg> =
         installed.iter().map(|e| (e.name.as_str(), e)).collect();
     let mut keep: BTreeSet<String> = BTreeSet::new();
@@ -50,16 +58,16 @@ pub(crate) fn orphans(
             stack.extend(
                 e.run
                     .iter()
-                    .filter(|d| installed_names.contains(d.as_str()))
-                    .cloned(),
+                    .filter_map(|d| Requirement::parse(d).ok().map(|r| r.name))
+                    .filter(|d| installed_names.contains(d.as_str())),
             );
         }
         if !build_deps {
             if let Some(deps) = known_deps.get(n.as_str()) {
                 stack.extend(
                     deps.iter()
-                        .filter(|d| installed_names.contains(d.as_str()))
-                        .cloned(),
+                        .filter_map(|d| Requirement::parse(d).ok().map(|r| r.name))
+                        .filter(|d| installed_names.contains(d.as_str())),
                 );
             }
         }
@@ -92,9 +100,10 @@ pub(crate) fn removal_order(
             .filter(|n| {
                 !left.iter().any(|o| {
                     o != n
-                        && run_edges
-                            .get(*o)
-                            .is_some_and(|d| d.iter().any(|dep| dep.as_str() == *n))
+                        && run_edges.get(*o).is_some_and(|d| {
+                            d.iter()
+                                .any(|dep| crate::domain::package::relations::depends_on(dep, n))
+                        })
                 })
             })
             .collect();

@@ -25,7 +25,11 @@ pub(crate) fn why(root: &Path, name: &str) -> Result<WhyData> {
     let dependents = db
         .installed()?
         .into_iter()
-        .filter(|e| e.run.iter().any(|r| r == name))
+        .filter(|e| {
+            e.run
+                .iter()
+                .any(|r| crate::domain::package::relations::depends_on(r, name))
+        })
         .map(|e| e.name)
         .collect();
     Ok(WhyData { entry, dependents })
@@ -46,7 +50,11 @@ pub(crate) fn recipe_dependents(
         if r.build_deps().iter().any(|d| d == name) {
             kinds.push("build");
         }
-        if r.depends.run.iter().any(|d| d == name) {
+        if r.depends
+            .run
+            .iter()
+            .any(|d| crate::domain::package::relations::depends_on(d, name))
+        {
             kinds.push("run");
         }
         if !kinds.is_empty() {

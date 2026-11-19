@@ -77,6 +77,8 @@ pub(crate) struct Plan {
     pub binary_replaces: Vec<Option<String>>,
     /// repository packages whose runtime dependency closure is unknown.
     pub unknown_dependencies: Vec<String>,
+    pub unknown_relations: Vec<String>,
+    pub removals: Vec<install::Replacement>,
     /// requested targets that need nothing at the selected source version
     /// or newer — reported, not rebuilt
     pub up_to_date: Vec<String>,
@@ -173,6 +175,51 @@ pub(crate) fn install_plan_with_binaries(
         target_why,
         with_deps,
     )?;
+    let mut replacements = resolved.removals;
+    let remove_names: Vec<_> = replacements.iter().map(|r| r.name.clone()).collect();
+    for removal in &replacements {
+        for entry in installed.values() {
+            if entry.name != removal.name
+                && entry.run.iter().any(|raw| {
+                    crate::domain::package::relations::Requirement::parse(raw)
+                        .is_ok_and(|r| r.name == removal.name)
+                })
+            {
+                anyhow::bail!("replacement of {} would break installed dependency of {}; remove or update its dependents explicitly first", removal.name, entry.name);
+            }
+        }
+    }
+    let removal_set: HashSet<_> = remove_names.iter().map(String::as_str).collect();
+    let run_edges: HashMap<_, _> = installed
+        .values()
+        .filter(|e| removal_set.contains(e.name.as_str()))
+        .map(|e| {
+            (
+                e.name.clone(),
+                e.run
+                    .iter()
+                    .filter_map(|raw| {
+                        crate::domain::package::relations::Requirement::parse(raw)
+                            .ok()
+                            .map(|r| r.name)
+                    })
+                    .filter(|name| removal_set.contains(name.as_str()))
+                    .collect(),
+            )
+        })
+        .collect();
+    let order = removal::removal_order(&remove_names, &run_edges);
+    let positions: HashMap<_, _> = order
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.as_str(), i))
+        .collect();
+    replacements.sort_by_key(|r| {
+        positions
+            .get(r.name.as_str())
+            .copied()
+            .unwrap_or(usize::MAX)
+    });
 
     let mut items = Vec::new();
     let mut extras = Vec::new();
@@ -217,6 +264,8 @@ pub(crate) fn install_plan_with_binaries(
             binary_whys,
             binary_replaces,
             unknown_dependencies: resolved.unknown_dependencies,
+            unknown_relations: resolved.unknown_relations,
+            removals: replacements,
             up_to_date: resolved.up_to_date,
             init: resolved.init,
             init_providers,
@@ -246,6 +295,7 @@ fn candidate_of(rec: &Recipe) -> Candidate {
         dependencies_known: true,
         origin: CandidateOrigin::Recipe,
         provides,
+        relations: rec.relations.clone(),
     }
 }
 
@@ -257,9 +307,10 @@ fn candidates_of(known: &BTreeMap<String, Recipe>) -> BTreeMap<String, Candidate
 }
 
 fn binary_candidate_of(entry: &RepoEntry) -> Result<Candidate> {
-    let metadata = crate::domain::package::metadata::metadata_from_options(
+    let metadata = crate::domain::package::metadata::metadata_from_repository(
         entry.rundeps.as_ref(),
         entry.provides.as_ref(),
+        entry.relations.as_ref(),
     )
     .map_err(anyhow::Error::msg)?;
     let (deps, dependencies_known) = match metadata.rundeps {
@@ -274,6 +325,7 @@ fn binary_candidate_of(entry: &RepoEntry) -> Result<Candidate> {
         dependencies_known,
         origin: CandidateOrigin::Repository,
         provides: metadata.provides,
+        relations: metadata.relations,
     })
 }
 
@@ -398,8 +450,12 @@ pub(crate) fn removal_order(names: &[String], installed: &[Entry]) -> Vec<String
                 e.name.clone(),
                 e.run
                     .iter()
+                    .filter_map(|d| {
+                        crate::domain::package::relations::Requirement::parse(d)
+                            .ok()
+                            .map(|r| r.name)
+                    })
                     .filter(|d| set.contains(d.as_str()))
-                    .cloned()
                     .collect(),
             )
         })

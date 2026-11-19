@@ -13,7 +13,7 @@ pub(crate) use create::{
 };
 pub(crate) use model::{
     Index, RepoEntry, ARCHIVE_LOCATION_PER_PACKAGE_URL, INDEX_SCHEMA_V2, INDEX_SCHEMA_V3,
-    INDEX_SCHEMA_V4, RECIPES_SUFFIX,
+    INDEX_SCHEMA_V5, RECIPES_SUFFIX,
 };
 #[cfg(test)]
 pub(crate) use model::{
@@ -95,6 +95,7 @@ mod tests {
                 installed_size: 456,
                 rundeps: None,
                 provides: None,
+                relations: None,
             }],
         };
         index.validate().unwrap();
@@ -126,6 +127,7 @@ mod tests {
                 installed_size: 456,
                 rundeps: None,
                 provides: None,
+                relations: None,
             }],
         };
         index.validate().unwrap();
@@ -246,6 +248,7 @@ mod tests {
                 installed_size: 456,
                 rundeps: None,
                 provides: None,
+                relations: None,
             }],
         };
         index.repository.as_mut().unwrap().archive_auth = "detached".into();
@@ -500,7 +503,7 @@ mod tests {
         assert!(update_index(&v1, IndexDelta::default(), None, 5)
             .unwrap_err()
             .to_string()
-            .contains("schema-2 or schema-3"));
+            .contains("schema-2 through schema-5"));
 
         let v2 =
             create_index_with_version(&a, &base.join("v2.toml"), None, INDEX_SCHEMA_V2).unwrap();
@@ -761,5 +764,62 @@ provides = ["init-system=runit"]
             );
         }
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn schema_five_publishes_exact_archive_relations_and_rejects_downgrading_them() {
+        let root = crate::testutil::tmpdir("repository-v5-relations");
+        let archives = root.join("archives");
+        let stage = root.join("stage");
+        std::fs::create_dir_all(&archives).unwrap();
+        std::fs::create_dir_all(&stage).unwrap();
+        std::fs::write(stage.join("payload"), "bytes").unwrap();
+        let file = "app-1-1.nawa.tar.zst";
+        archive::create(&stage, "pkgname = app\npkgver = 1\npkgrel = 1\narch = x86_64\nrundeps = lib>=2-1\nprovides = \nrelations_schema = 1\nconflicts = old<2-1\nreplaces = old<2-1\n", &archives.join(file)).unwrap();
+        let locations = root.join("locations.toml");
+        std::fs::write(
+            &locations,
+            format!("schema=1\n[package_urls]\n'{file}'='https://example.test/{file}'\n"),
+        )
+        .unwrap();
+        let path = root.join("index.toml");
+        let index = create_index_with_locations_and_groups(
+            &archives,
+            &path,
+            None,
+            5,
+            Some(&locations),
+            None,
+        )
+        .unwrap();
+        let loaded = load_index_bytes(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(loaded.packages[0].relations, index.packages[0].relations);
+        assert_eq!(
+            loaded.packages[0].relations.as_ref().unwrap().conflicts,
+            ["old<2-1"]
+        );
+        for schema in [1, 2, 3, 4] {
+            assert!(create_index_with_locations_and_groups(
+                &archives,
+                &path,
+                None,
+                schema,
+                if schema >= 3 { Some(&locations) } else { None },
+                None
+            )
+            .is_err());
+        }
+        let mut invalid = index.clone();
+        invalid.packages[0].relations = None;
+        assert!(load_index_bytes(toml::to_string(&invalid).unwrap().as_bytes()).is_err());
+        let text = toml::to_string(&index).unwrap();
+        assert!(load_index_bytes(
+            text.replace(
+                "conflicts = [\"old<2-1\"]",
+                "conflicts = [\"old<2-1\"]\nunknown_relation = true"
+            )
+            .as_bytes()
+        )
+        .is_err());
     }
 }

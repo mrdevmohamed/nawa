@@ -96,7 +96,13 @@ The provider declaration must remain consistent through the full trusted chain:
 
 `recipe -> archive .PKGINFO -> signed repository index -> fetched metadata verification -> solver candidate`.
 
-The current index v4 path carries runtime dependency names and capability declarations. It does not yet provide complete version constraints, conflicts, or replacements semantics. Those gaps must be modeled and tested before the platform claims a complete general-purpose solver.
+Index v4 remains the backward-compatible runtime-name/capability format. The
+implemented signed v5 relation contract adds versioned runtime package-name
+requirements, conflicts and explicit replacements to the *existing* shared
+resolver. Missing v1-v4 relation metadata remains unknown. Versioned virtual
+capabilities, source backtracking, and migration-driven package removal are not
+supported; migration planning requires authenticated v5 metadata and refuses
+replacement/removal actions.
 
 ## 4. Unified planning
 

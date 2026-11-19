@@ -28,6 +28,15 @@ impl Recipe {
     /// takes the staging engine in `sources.rs` instead of the legacy path,
     /// and `[assets]` takes `assets.rs`.
     pub fn is_new_schema(&self) -> bool {
+        !self.package.sources.is_empty()
+            || !self.assets.include.is_empty()
+            || self.fetch.any()
+            || self.relations.is_some()
+    }
+
+    /// Source-staging generation only. Package relations have their own
+    /// marker/metadata contract and do not change source staging semantics.
+    pub fn is_fetch_schema(&self) -> bool {
         !self.package.sources.is_empty() || !self.assets.include.is_empty() || self.fetch.any()
     }
 

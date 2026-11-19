@@ -24,6 +24,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use super::relations::{normalize_requirements, PackageRelations, Requirement};
 use crate::domain::system::capability::{Capability, Provides};
 
 /// Normalize a list spelling once, at the boundary where a human or archive
@@ -73,7 +74,7 @@ pub(crate) fn normalize_provides(entries: &[String]) -> Result<Vec<String>, Stri
 
 /// Normalize a `rundeps` declaration (package names, case-sensitive, trimmed).
 pub(crate) fn normalize_rundeps(entries: &[String]) -> Result<Vec<String>, String> {
-    normalize_list(entries, "rundeps")
+    normalize_requirements(entries, "rundeps")
 }
 
 /// The runtime-dependency declaration as carried by metadata (§6.3(5)): a
@@ -96,9 +97,50 @@ pub(crate) enum RunDeps {
 pub(crate) struct PkgMetadata {
     pub(crate) provides: Provides,
     pub(crate) rundeps: RunDeps,
+    /// Absent in schema 1–4: unknown conflicts/replacements, never empty.
+    pub(crate) relations: Option<PackageRelations>,
 }
 
 impl PkgMetadata {
+    /// Revalidate a fully declared archive against the actual installed state.
+    /// This checks a selected operation; it does not select packages or solve.
+    pub(crate) fn verify_installed(
+        &self,
+        name: &str,
+        installed: &HashMap<String, String>,
+    ) -> Result<(), String> {
+        let Some(relations) = &self.relations else {
+            return Ok(());
+        };
+        if let RunDeps::Declared(deps) = &self.rundeps {
+            for raw in deps {
+                let requirement = Requirement::parse(raw)?;
+                if requirement.name == name
+                    || !installed
+                        .get(&requirement.name)
+                        .is_some_and(|v| requirement.matches(v))
+                {
+                    return Err(format!(
+                        "installed packages do not satisfy runtime requirement {}",
+                        requirement.canonical()
+                    ));
+                }
+            }
+        } else {
+            return Err("declared relations require known runtime dependencies".into());
+        }
+        for raw in relations.conflicts.iter().chain(&relations.replaces) {
+            let requirement = Requirement::parse(raw)?;
+            if requirement.name == name
+                || installed
+                    .get(&requirement.name)
+                    .is_some_and(|v| requirement.matches(v))
+            {
+                return Err(format!("package relation {} still matches an installed package; an explicitly reviewed replacement plan is required", requirement.canonical()));
+            }
+        }
+        Ok(())
+    }
     /// Metadata of a legacy record: an index v1–v3 entry or an archive
     /// written before the field existed (§6.3(4)–(5)). Both fields unknown;
     /// capabilities are never inferred from package names or file presence
@@ -107,6 +149,7 @@ impl PkgMetadata {
         PkgMetadata {
             provides: Provides::Unknown,
             rundeps: RunDeps::Unknown,
+            relations: None,
         }
     }
 
@@ -127,9 +170,37 @@ impl PkgMetadata {
         };
         let rundeps = match info.get("rundeps") {
             None => RunDeps::Unknown,
-            Some(raw) => RunDeps::Declared(split_flat_list(raw, "rundeps")?),
+            Some(raw) => RunDeps::Declared(normalize_rundeps(&split_flat_list(raw, "rundeps")?)?),
         };
-        Ok(PkgMetadata { provides, rundeps })
+        let relations = match (info.get("relations_schema"), info.get("conflicts"), info.get("replaces")) {
+            (None, None, None) => None,
+            (Some(schema), Some(conflicts), Some(replaces)) => Some(PackageRelations {
+                schema: schema.parse().map_err(|_| "invalid .PKGINFO relations_schema")?,
+                conflicts: split_flat_list(conflicts, "conflicts")?, replaces: split_flat_list(replaces, "replaces")?,
+            }.normalized()?),
+            _ => return Err("incomplete .PKGINFO package relations: schema, conflicts and replaces are all required".into()),
+        };
+        let metadata = PkgMetadata {
+            provides,
+            rundeps,
+            relations,
+        };
+        metadata.validate_relations()?;
+        Ok(metadata)
+    }
+
+    pub(crate) fn validate_relations(&self) -> Result<(), String> {
+        if let Some(relations) = &self.relations {
+            relations.normalized()?;
+        }
+        if let RunDeps::Declared(deps) = &self.rundeps {
+            for dep in deps {
+                if Requirement::parse(dep)?.comparison.is_some() && self.relations.is_none() {
+                    return Err("versioned dependencies require an explicit package relations declaration and signed index v5".into());
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -144,6 +215,7 @@ pub(crate) fn metadata_from_options(
         return Ok(PkgMetadata::unknown());
     }
     Ok(PkgMetadata {
+        relations: None,
         provides: match provides {
             None => Provides::Unknown,
             Some(values) => Provides::parse_all(&normalize_provides(values)?)?,
@@ -153,6 +225,17 @@ pub(crate) fn metadata_from_options(
             Some(values) => RunDeps::Declared(normalize_rundeps(values)?),
         },
     })
+}
+
+pub(crate) fn metadata_from_repository(
+    rundeps: Option<&Vec<String>>,
+    provides: Option<&Vec<String>>,
+    relations: Option<&PackageRelations>,
+) -> Result<PkgMetadata, String> {
+    let mut metadata = metadata_from_options(rundeps, provides)?;
+    metadata.relations = relations.map(PackageRelations::normalized).transpose()?;
+    metadata.validate_relations()?;
+    Ok(metadata)
 }
 
 /// Split one flat-format list value into entries. `.PKGINFO` is a `key =
@@ -197,6 +280,16 @@ pub(crate) fn split_flat_list(value: &str, field: &'static str) -> Result<Vec<St
 /// this check only guards the v4 duplication against tooling bugs, so a
 /// mismatch is refused, never silently resolved by preferring one side.
 pub(crate) fn check_chain(index: &PkgMetadata, archive: &PkgMetadata) -> Result<(), String> {
+    match (&index.relations, &archive.relations) {
+        (None, Some(_)) => return Err("archive declares package relations but the authenticated index leaves them unknown".into()),
+        (Some(_), None) => return Err("index declares package relations but the archive .PKGINFO has no relations declaration".into()),
+        _ => {}
+    }
+    if let (Some(expected), Some(actual)) = (&index.relations, &archive.relations) {
+        if actual.normalized()? != expected.normalized()? {
+            return Err("index and archive .PKGINFO disagree on package relations".into());
+        }
+    }
     if let Provides::Declared(expected) = &index.provides {
         let found = match &archive.provides {
             Provides::Unknown => {
@@ -273,6 +366,8 @@ pub(crate) struct IndexEntryV4 {
     pub(crate) rundeps: Vec<String>,
     /// Provided capability identities. Required, same rule as `rundeps`.
     pub(crate) provides: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) relations: Option<PackageRelations>,
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -350,10 +445,11 @@ impl IndexEntryV4 {
     /// fields — [`Provides::Unknown`] / [`RunDeps::Unknown`] never arise
     /// from a v4 record.
     pub(crate) fn metadata(&self) -> Result<PkgMetadata, String> {
-        Ok(PkgMetadata {
-            provides: Provides::parse_all(&self.provides)?,
-            rundeps: RunDeps::Declared(self.rundeps.clone()),
-        })
+        metadata_from_repository(
+            Some(&self.rundeps),
+            Some(&self.provides),
+            self.relations.as_ref(),
+        )
     }
 }
 
@@ -383,6 +479,7 @@ mod tests {
         PkgMetadata {
             provides: Provides::parse_all(&caps).unwrap(),
             rundeps: RunDeps::Declared(deps),
+            relations: None,
         }
     }
 
@@ -422,6 +519,26 @@ provides = ["init-system=runit"]
         assert_eq!(md, PkgMetadata::unknown());
         assert_eq!(md.provides, Provides::Unknown);
         assert_eq!(md.rundeps, RunDeps::Unknown);
+    }
+
+    #[test]
+    fn relation_metadata_is_complete_normalized_and_compared_across_the_chain() {
+        let info = pkginfo(&[
+            ("rundeps", "lib >= 2-1"),
+            ("provides", ""),
+            ("relations_schema", "1"),
+            ("conflicts", "old < 2-1"),
+            ("replaces", "old<2-1"),
+        ]);
+        let metadata = PkgMetadata::from_pkginfo_map(&info).unwrap();
+        assert_eq!(metadata.rundeps, RunDeps::Declared(vec!["lib>=2-1".into()]));
+        let mut changed = metadata.clone();
+        changed.relations.as_mut().unwrap().conflicts.clear();
+        assert!(check_chain(&metadata, &changed).is_err());
+        let mut incomplete = info;
+        incomplete.remove("replaces");
+        assert!(PkgMetadata::from_pkginfo_map(&incomplete).is_err());
+        assert!(PkgMetadata::from_pkginfo_map(&pkginfo(&[("rundeps", "lib>=2-1")])).is_err());
     }
 
     #[test]
@@ -649,6 +766,7 @@ provides = ["init-system=runit"]
         let index = PkgMetadata {
             provides: Provides::Unknown,
             rundeps: RunDeps::Declared(vec!["glibc".to_string()]),
+            relations: None,
         };
         let err = check_chain(&index, &PkgMetadata::unknown()).unwrap_err();
         assert!(err.contains("no rundeps field"), "{err}");

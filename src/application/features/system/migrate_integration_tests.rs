@@ -36,7 +36,7 @@ impl Fixture {
             std::fs::write(stage.join("usr/share/fixture").join(name), name).unwrap();
             let file = format!("{name}-1-1.nawa.tar.zst");
             let archive = repository.join(&file);
-            crate::adapters::archive::create(&stage, &format!("pkgname = {name}\npkgver = 1\npkgrel = 1\narch = x86_64\nrundeps = {deps}\nprovides = {provides}\n"), &archive).unwrap();
+            crate::adapters::archive::create(&stage, &format!("pkgname = {name}\npkgver = 1\npkgrel = 1\narch = x86_64\nrundeps = {deps}\nprovides = {provides}\nrelations_schema = 1\nconflicts = \nreplaces = \n"), &archive).unwrap();
             let sha256 = crate::adapters::checksum::sha256_of_file(&archive).unwrap();
             let size = std::fs::metadata(&archive).unwrap().len();
             let url = format!("https://invalid.example.test/approved/{file}");
@@ -66,6 +66,11 @@ impl Fixture {
                 } else {
                     vec![provides.into()]
                 }),
+                relations: Some(crate::domain::package::relations::PackageRelations {
+                    schema: 1,
+                    conflicts: vec![],
+                    replaces: vec![],
+                }),
             });
             artifacts.push(ArtifactPin {
                 kind: PackageActionKind::Install,
@@ -88,7 +93,7 @@ impl Fixture {
         let index = crate::repo::Index {
             generated: Some(crate::adapters::artifact::now_secs()),
             expires: Some(crate::adapters::artifact::now_secs() + 3600),
-            repository: Some(crate::repo::RepositoryMeta::v4_per_package_url()),
+            repository: Some(crate::repo::RepositoryMeta::v5_per_package_url()),
             recipes: None,
             groups: None,
             packages: entries,
@@ -380,4 +385,29 @@ fn index_and_signing_key_changes_cannot_replace_the_approved_source() {
     crate::adapters::sign::trust(&public, &fixture.root).unwrap();
     crate::adapters::sign::sign(&path, &secret).unwrap();
     assert!(fixture.stage().is_err());
+}
+
+#[test]
+fn trust_store_changes_after_staging_are_rechecked_under_the_coordinator_lock() {
+    let fixture = Fixture::new("pinned-trust-recheck");
+    let plan = fixture.stage().unwrap();
+    std::fs::remove_dir_all(crate::adapters::sign::trust_dir(&fixture.root)).unwrap();
+    assert!(migrate_coordinator::prepare(
+        &fixture.ctx(),
+        migrate_coordinator::PreparationRequest {
+            definition: &migrate_apply::builtin_definition(),
+            plan,
+            ui: &ui(),
+        },
+    )
+    .is_err());
+    assert!(
+        crate::adapters::migration_record::load(&fixture.root, &fixture.pin.migration_id)
+            .unwrap()
+            .is_none()
+    );
+    assert!(crate::adapters::db::Db::new(&fixture.root)
+        .entry("systemd")
+        .unwrap()
+        .is_none());
 }

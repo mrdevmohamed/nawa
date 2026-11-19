@@ -28,6 +28,8 @@ pub(crate) struct Recipe {
     #[serde(default)]
     pub capabilities: Option<Capabilities>,
     #[serde(default)]
+    pub relations: Option<crate::domain::package::relations::PackageRelations>,
+    #[serde(default)]
     pub build: Build,
     #[serde(default)]
     pub hooks: Hooks,
@@ -58,6 +60,7 @@ pub(crate) struct Recipe {
 /// this value as the marker: required with the new tables, rejected
 /// without them, and never staged.
 pub(crate) const SCHEMA_MARKER: &str = "local:/nawa-schema-2-requires-a-newer-nawa";
+pub(crate) const RELATIONS_MARKER: &str = "local:/nawa-package-relations-1-requires-a-newer-nawa";
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct Package {

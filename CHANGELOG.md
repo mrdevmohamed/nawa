@@ -15,6 +15,18 @@
 - Keep production migration blocked pending real firmware/initramfs and rescue
   acceptance. No reboot, old-provider removal or automatic rollback is introduced.
 
+## Unreleased — package relations schema 1 / signed repository index v5
+
+- Add normalized runtime package-version requirements, conflicts and explicit
+  replacements through recipe metadata, `.PKGINFO` and signed repository v5.
+- Extend the existing deterministic resolver with range propagation, projected
+  conflict checks and explicit dependent-first replacement actions in the current
+  package transaction/WAL. Legacy v1-v4 relation metadata remains unknown.
+- Require trusted v5 metadata for migration plans/approval; migrations reject
+  all package removals and never use relations to retire an init provider.
+- Preserve v1-v4 repositories and ordinary package behavior; v5 is opt-in and
+  publishers cannot downgrade/drop an archive's declared relation metadata.
+
 ## Unreleased — removed: runit service subsystem (`nawa service`)
 
 - `nawa service` (list/status/enable/disable/start/stop/restart) is gone,

@@ -33,6 +33,7 @@ pub(crate) fn check_index_freshness(
     remote: bool,
     force: bool,
     authenticated: bool,
+    persist_seen: bool,
 ) -> Result<()> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -70,7 +71,7 @@ pub(crate) fn check_index_freshness(
         }
         // Best effort, as before: failing to record the marker must not fail
         // the upgrade. The write is atomic so a crash cannot leave a torn file.
-        if authenticated && !future {
+        if authenticated && !future && persist_seen {
             let part = seen_path.with_extension("seen.part");
             let recorded = std::fs::write(&part, gen.to_string())
                 .and_then(|()| std::fs::rename(&part, &seen_path));
@@ -79,6 +80,8 @@ pub(crate) fn check_index_freshness(
             }
         }
     }
+    // Offline planning against a remote source uses cached bytes only. The
+    // selected target root must never receive a network-refresh marker.
     if let Some(exp) = index.expires {
         if now > exp {
             if remote && !force {

@@ -180,6 +180,9 @@ impl SystemPlanPin {
                 PackageActionKind::Keep if artifact.current.as_ref() != Some(&artifact.target) => {
                     return Err("keep action changes the version".into())
                 }
+                PackageActionKind::Keep if !self.installed_identities.iter().any(|i| i.name == artifact.name && i.sha256 == artifact.sha256) => {
+                    return Err("retained package has no authenticated installed archive identity matching approval".into())
+                }
                 _ => {}
             }
         }

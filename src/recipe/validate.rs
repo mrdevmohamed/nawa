@@ -30,13 +30,54 @@ impl Recipe {
         // ---- new schema vs legacy (§4.1/§4.2, §19) — checked first, so
         // a mixed recipe reports the real problem instead of a legacy one
         self.validate_schema_marker()?;
-        if self.is_new_schema() {
+        if self.is_fetch_schema() {
             self.validate_new_schema_sources()?;
         }
         self.validate_assets()?;
         self.validate_fetch_tables()?;
         self.validate_mirrors()?;
         self.validate_capabilities()?;
+        if let Some(relations) = &self.relations {
+            relations.normalized().map_err(anyhow::Error::msg)?;
+            if self.package.sources.is_empty()
+                && self.package.source == RELATIONS_MARKER
+                && self.package.source_date_epoch.is_none()
+            {
+                bail!("a relation-only recipe uses the schema marker instead of an external source and must pin package.source_date_epoch");
+            }
+        }
+        for dep in self
+            .depends
+            .run
+            .iter()
+            .chain(&self.depends.build)
+            .chain(&self.depends.check)
+        {
+            let requirement = crate::domain::package::relations::Requirement::parse(dep)
+                .map_err(anyhow::Error::msg)?;
+            if requirement.comparison.is_some() && self.relations.is_none() {
+                bail!("versioned dependencies require [relations] schema = 1 and its fail-closed source marker");
+            }
+        }
+        crate::domain::package::metadata::normalize_rundeps(&self.depends.run)
+            .map_err(|e| anyhow::anyhow!("recipe {}: {e}", self.package.name))?;
+        for dep in self.depends.build.iter().chain(&self.depends.check) {
+            if !crate::domain::package::relations::valid_name(dep) {
+                bail!(
+                    "recipe {} has invalid build/check dependency {dep:?}",
+                    self.package.name
+                );
+            }
+        }
+        for dep in self.depends.build.iter().chain(&self.depends.check) {
+            if crate::domain::package::relations::Requirement::parse(dep)
+                .map_err(anyhow::Error::msg)?
+                .comparison
+                .is_some()
+            {
+                bail!("relations schema 1 permits version requirements on runtime dependencies only; build/check dependencies must be package names");
+            }
+        }
         // names/versions become directory and archive file names
         crate::adapters::db::check_name(&self.package.name)?;
         if !crate::adapters::db::valid_version(&self.package.version) {
@@ -53,7 +94,13 @@ impl Recipe {
     /// schema marker in `package.source` must match the tables actually used.
     fn validate_schema_marker(&self) -> Result<()> {
         let new_schema = self.is_new_schema();
-        let marker = self.package.source == SCHEMA_MARKER;
+        let expected_marker = if self.relations.is_some() {
+            RELATIONS_MARKER
+        } else {
+            SCHEMA_MARKER
+        };
+        let marker =
+            self.package.source == SCHEMA_MARKER || self.package.source == RELATIONS_MARKER;
         if !self.package.workdir.is_empty() && self.package.sources.is_empty() {
             bail!(
                 "recipe {} sets [package] workdir, which is valid only together with \
@@ -61,12 +108,12 @@ impl Recipe {
                 self.package.name
             );
         }
-        if new_schema && !marker {
+        if new_schema && self.package.source != expected_marker {
             bail!(
                 "recipe {} uses new-schema tables but package.source does not carry the \
                  fail-closed schema marker (fetch-phase.md §19):\n  {}",
                 self.package.name,
-                SCHEMA_MARKER
+                expected_marker
             );
         }
         if marker && !new_schema {

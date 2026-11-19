@@ -31,6 +31,7 @@
 use anyhow::{bail, Result};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use crate::domain::package::relations::{PackageRelations, Requirement};
 use crate::domain::package::version::vercmp;
 use crate::domain::system::capability::Provides;
 use crate::domain::system::profile::SystemProfile;
@@ -80,6 +81,7 @@ pub(crate) struct Candidate {
     pub(crate) origin: CandidateOrigin,
     /// Capability declarations from the trusted metadata chain.
     pub(crate) provides: Provides,
+    pub(crate) relations: Option<PackageRelations>,
 }
 
 /// Result of looking for packages that provide one exact capability.
@@ -198,11 +200,21 @@ pub(crate) struct Resolution {
     pub(crate) items: Vec<ResolvedItem>,
     /// requested targets that need no work — reported, not rebuilt
     pub(crate) up_to_date: Vec<String>,
+    pub(crate) retained_dependencies: Vec<String>,
     /// package candidates whose dependency closure is incomplete because
     /// runtime dependency metadata was not declared by their source.
     pub(crate) unknown_dependencies: Vec<String>,
+    pub(crate) unknown_relations: Vec<String>,
+    pub(crate) removals: Vec<Replacement>,
     /// the init-provider decision the target profile makes (§8.2)
     pub(crate) init: InitSelection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Replacement {
+    pub(crate) name: String,
+    pub(crate) current: String,
+    pub(crate) by: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -242,6 +254,7 @@ pub(crate) fn install_plan(
     };
     let mut done: HashSet<String> = HashSet::new();
     let mut visiting: Vec<String> = Vec::new();
+    let selected = constrained_selection(targets, installed, known, with_deps)?;
 
     for t in targets {
         visit(
@@ -251,12 +264,193 @@ pub(crate) fn install_plan(
             known,
             target_why,
             with_deps,
+            &selected,
             &mut done,
             &mut visiting,
             &mut resolution,
         )?;
     }
+    resolve_relations(&wanted, installed, known, &mut resolution)?;
     Ok(resolution)
+}
+
+/// Monotone constraint propagation within the shared resolver. Nawa exposes
+/// one source-selected candidate per name; an incompatible range fails rather
+/// than silently choosing a different source, older archive or downgrade.
+fn constrained_selection(
+    targets: &[String],
+    installed: &HashMap<String, String>,
+    known: &BTreeMap<String, Candidate>,
+    with_deps: bool,
+) -> Result<HashSet<String>> {
+    let mut required: BTreeMap<String, Vec<Requirement>> = BTreeMap::new();
+    for target in targets {
+        required
+            .entry(target.clone())
+            .or_default()
+            .push(Requirement::parse(target).map_err(anyhow::Error::msg)?);
+    }
+    let mut selected = HashSet::new();
+    loop {
+        let mut changed = false;
+        for (name, constraints) in required.clone() {
+            let candidate = known.get(&name);
+            let current = installed.get(&name);
+            let installed_satisfies =
+                current.is_some_and(|v| constraints.iter().all(|r| r.matches(v)));
+            let target_newer = targets.contains(&name)
+                && candidate
+                    .zip(current)
+                    .is_some_and(|(c, v)| vercmp(&c.full(), v).is_gt());
+            if installed_satisfies && !target_newer {
+                continue;
+            }
+            let Some(candidate) = candidate else {
+                if constraints.iter().any(|r| r.comparison.is_some()) {
+                    bail!("no candidate satisfies the version requirements for {name}");
+                }
+                continue; // visit retains the established missing/cycle diagnostics
+            };
+            if !constraints.iter().all(|r| r.matches(&candidate.full())) {
+                bail!(
+                    "selected candidate {} {} does not satisfy [{}]",
+                    name,
+                    candidate.full(),
+                    constraints
+                        .iter()
+                        .map(Requirement::canonical)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+            if current.is_some_and(|v| vercmp(&candidate.full(), v).is_lt()) {
+                bail!("dependency constraints would require downgrading {name}; explicit downgrade policy is required");
+            }
+            if selected.insert(name.clone()) {
+                changed = true;
+                if with_deps {
+                    for dep in &candidate.deps {
+                        let requirement = Requirement::parse(dep).map_err(anyhow::Error::msg)?;
+                        if requirement.comparison.is_some() && candidate.relations.is_none() {
+                            bail!("versioned dependency in {name} has unknown package relations metadata");
+                        }
+                        let list = required.entry(requirement.name.clone()).or_default();
+                        if !list.contains(&requirement) {
+                            list.push(requirement);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    Ok(selected)
+}
+
+fn resolve_relations(
+    wanted: &HashSet<&str>,
+    installed: &HashMap<String, String>,
+    known: &BTreeMap<String, Candidate>,
+    resolution: &mut Resolution,
+) -> Result<()> {
+    let selected: std::collections::BTreeSet<_> =
+        resolution.items.iter().map(|i| i.name.as_str()).collect();
+    let mut removals: BTreeMap<String, Replacement> = BTreeMap::new();
+    for item in &resolution.items {
+        let candidate = &known[&item.name];
+        let Some(relations) = &candidate.relations else {
+            resolution.unknown_relations.push(item.name.clone());
+            continue;
+        };
+        let relations = relations.normalized().map_err(anyhow::Error::msg)?;
+        for raw in &relations.replaces {
+            let requirement = Requirement::parse(raw).map_err(anyhow::Error::msg)?;
+            if requirement.name == item.name {
+                bail!("{} cannot replace itself", item.name);
+            }
+            if let Some(current) = installed
+                .get(&requirement.name)
+                .filter(|v| requirement.matches(v))
+            {
+                if !wanted.contains(item.name.as_str()) {
+                    bail!(
+                        "replacement by {} must be an explicitly requested target",
+                        item.name
+                    );
+                }
+                if selected.contains(requirement.name.as_str()) {
+                    bail!("{} is both selected and replaced", requirement.name);
+                }
+                let removal = Replacement {
+                    name: requirement.name.clone(),
+                    current: current.clone(),
+                    by: item.name.clone(),
+                };
+                if let Some(other) = removals.insert(requirement.name.clone(), removal) {
+                    if other.by != item.name {
+                        bail!(
+                            "ambiguous replacements for {} by {} and {}",
+                            requirement.name,
+                            other.by,
+                            item.name
+                        );
+                    }
+                }
+            }
+        }
+    }
+    let mut projected: BTreeMap<_, _> = installed
+        .iter()
+        .map(|(n, v)| (n.clone(), v.clone()))
+        .collect();
+    for name in removals.keys() {
+        projected.remove(name);
+    }
+    for item in &resolution.items {
+        projected.insert(item.name.clone(), known[&item.name].full());
+    }
+    for (name, version) in &projected {
+        // Never apply a newer repository candidate's relations to an older
+        // installed package. Its missing declaration remains unknown.
+        let Some(candidate) = known.get(name).filter(|c| c.full() == *version) else {
+            continue;
+        };
+        let Some(relations) = &candidate.relations else {
+            continue;
+        };
+        for raw in &relations.conflicts {
+            let requirement = Requirement::parse(raw).map_err(anyhow::Error::msg)?;
+            if requirement.name == *name {
+                bail!("{name} cannot conflict with itself");
+            }
+            if requirement.name != *name
+                && projected
+                    .get(&requirement.name)
+                    .is_some_and(|v| requirement.matches(v))
+            {
+                bail!(
+                    "package conflict: {name} conflicts with {}",
+                    requirement.canonical()
+                );
+            }
+        }
+        if selected.contains(name.as_str()) {
+            for dep in &candidate.deps {
+                let req = Requirement::parse(dep).map_err(anyhow::Error::msg)?;
+                if removals.contains_key(&req.name) {
+                    bail!(
+                        "replacement would remove dependency {} required by {name}",
+                        req.name
+                    );
+                }
+            }
+        }
+    }
+    resolution.removals = removals.into_values().collect();
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -267,6 +461,7 @@ fn visit(
     known: &BTreeMap<String, Candidate>,
     target_why: Why,
     with_deps: bool,
+    selected: &HashSet<String>,
     done: &mut HashSet<String>,
     visiting: &mut Vec<String>,
     resolution: &mut Resolution,
@@ -280,6 +475,8 @@ fn visit(
         None if installed.contains_key(name) && !is_target => {
             // installed from somewhere else (seed, third-party repo): satisfied
             done.insert(name.to_string());
+            resolution.unknown_relations.push(name.to_string());
+            resolution.retained_dependencies.push(name.to_string());
             return Ok(());
         }
         None => {
@@ -296,14 +493,17 @@ fn visit(
     // an installed package only needs work when it is a requested target and
     // the candidate is newer; installed dependencies are simply satisfied
     let current = installed.get(name);
-    if let Some(have) = current {
-        if !is_target || vercmp(&cand.full(), have) != std::cmp::Ordering::Greater {
-            if is_target {
-                resolution.up_to_date.push(name.to_string());
-            }
-            done.insert(name.to_string());
-            return Ok(());
+    if current.is_some() && !selected.contains(name) {
+        if is_target {
+            resolution.up_to_date.push(name.to_string());
+        } else {
+            resolution.retained_dependencies.push(name.to_string());
         }
+        if cand.relations.is_none() {
+            resolution.unknown_relations.push(name.to_string());
+        }
+        done.insert(name.to_string());
+        return Ok(());
     }
 
     if with_deps && !cand.dependencies_known {
@@ -321,8 +521,18 @@ fn visit(
     visiting.push(name.to_string());
     if with_deps {
         for dep in &cand.deps {
+            let requirement = Requirement::parse(dep).map_err(anyhow::Error::msg)?;
             visit(
-                dep, wanted, installed, known, target_why, with_deps, done, visiting, resolution,
+                &requirement.name,
+                wanted,
+                installed,
+                known,
+                target_why,
+                with_deps,
+                selected,
+                done,
+                visiting,
+                resolution,
             )?;
         }
     }
@@ -380,6 +590,7 @@ mod tests {
             dependencies_known: true,
             origin: CandidateOrigin::Recipe,
             provides: Provides::Unknown,
+            relations: None,
         }
     }
 
@@ -392,6 +603,7 @@ mod tests {
             dependencies_known: known,
             origin: CandidateOrigin::Repository,
             provides: Provides::Unknown,
+            relations: None,
         }
     }
 
@@ -414,6 +626,179 @@ mod tests {
         assert_eq!(version_rel("1.2.3", 4), "1.2.3-4");
     }
 
+    fn related(name: &str, version: &str, deps: &[&str]) -> Candidate {
+        let mut candidate = cand(name, version, 1, deps);
+        candidate.relations = Some(PackageRelations {
+            schema: 1,
+            conflicts: vec![],
+            replaces: vec![],
+        });
+        candidate
+    }
+
+    #[test]
+    fn version_requirements_upgrade_installed_dependencies_before_dependents() {
+        let known = tree(vec![
+            related("app", "1", &["lib>=2-1", "lib<3-1"]),
+            related("lib", "2", &[]),
+        ]);
+        let result = install_plan(
+            &["app".into()],
+            &inst(&[("lib", "1-1")]),
+            &known,
+            None,
+            Why::Explicit,
+            true,
+        )
+        .unwrap();
+        assert_eq!(names(&result), ["lib", "app"]);
+        assert_eq!(result.items[0].replaces.as_deref(), Some("1-1"));
+        assert_eq!(result.items[0].why, Why::Dependency);
+    }
+
+    #[test]
+    fn requirements_from_later_targets_are_not_hidden_by_a_previous_visit() {
+        let known = tree(vec![
+            related("first", "1", &["lib>=1-1"]),
+            related("second", "1", &["lib>=2-1"]),
+            related("lib", "2", &[]),
+        ]);
+        let result = install_plan(
+            &["first".into(), "second".into()],
+            &inst(&[("lib", "1-1")]),
+            &known,
+            None,
+            Why::Explicit,
+            true,
+        )
+        .unwrap();
+        assert_eq!(names(&result), ["lib", "first", "second"]);
+        let mut incompatible = known.clone();
+        incompatible
+            .get_mut("first")
+            .unwrap()
+            .deps
+            .push("lib<2-1".into());
+        assert!(install_plan(
+            &["first".into(), "second".into()],
+            &inst(&[("lib", "1-1")]),
+            &incompatible,
+            None,
+            Why::Explicit,
+            true
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn conflicts_are_checked_in_both_directions_at_the_projected_versions() {
+        let mut old = related("old", "1", &[]);
+        old.relations.as_mut().unwrap().conflicts = vec!["new>=1-1".into()];
+        let known = tree(vec![old, related("new", "1", &[])]);
+        assert!(install_plan(
+            &["new".into()],
+            &inst(&[("old", "1-1")]),
+            &known,
+            None,
+            Why::Explicit,
+            true
+        )
+        .is_err());
+        assert!(install_plan(
+            &["new".into(), "old".into()],
+            &HashMap::new(),
+            &known,
+            None,
+            Why::Explicit,
+            true
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn replacements_are_explicit_versioned_and_ambiguity_is_rejected() {
+        let mut candidate = related("new", "2", &[]);
+        candidate.relations.as_mut().unwrap().replaces = vec!["old<2-1".into()];
+        candidate.relations.as_mut().unwrap().conflicts = vec!["old".into()];
+        let known = tree(vec![candidate.clone()]);
+        let result = install_plan(
+            &["new".into()],
+            &inst(&[("old", "1-1")]),
+            &known,
+            None,
+            Why::Explicit,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            result.removals,
+            [Replacement {
+                name: "old".into(),
+                current: "1-1".into(),
+                by: "new".into()
+            }]
+        );
+        assert!(install_plan(
+            &["new".into()],
+            &inst(&[("old", "2-1")]),
+            &known,
+            None,
+            Why::Explicit,
+            true
+        )
+        .is_err());
+        candidate.name = "also-new".into();
+        let mut ambiguous = known;
+        ambiguous.insert(candidate.name.clone(), candidate);
+        assert!(install_plan(
+            &["new".into(), "also-new".into()],
+            &inst(&[("old", "1-1")]),
+            &ambiguous,
+            None,
+            Why::Explicit,
+            true
+        )
+        .is_err());
+        ambiguous.insert("app".into(), related("app", "1", &["new"]));
+        assert!(install_plan(
+            &["app".into()],
+            &inst(&[("old", "1-1")]),
+            &ambiguous,
+            None,
+            Why::Explicit,
+            true
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn missing_legacy_relations_remain_unknown_and_constraints_fail_closed() {
+        let known = tree(vec![cand("legacy", "1", 1, &[])]);
+        let result = install_plan(
+            &["legacy".into()],
+            &HashMap::new(),
+            &known,
+            None,
+            Why::Explicit,
+            true,
+        )
+        .unwrap();
+        assert_eq!(result.unknown_relations, ["legacy"]);
+        let known = tree(vec![
+            cand("app", "1", 1, &["lib>=1-1"]),
+            cand("lib", "1", 1, &[]),
+        ]);
+        assert!(install_plan(
+            &["app".into()],
+            &HashMap::new(),
+            &known,
+            None,
+            Why::Explicit,
+            true
+        )
+        .is_err());
+    }
+
     #[test]
     fn provider_lookup_is_domain_generic_and_keeps_unknown_separate() {
         let requested =
@@ -427,6 +812,7 @@ mod tests {
                 dependencies_known: true,
                 origin: CandidateOrigin::Recipe,
                 provides: Provides::parse_all(&["network-stack=networkd".to_string()]).unwrap(),
+                relations: None,
             },
             Candidate {
                 name: "dual-network".to_string(),
@@ -440,6 +826,7 @@ mod tests {
                     "network-stack=netifd".to_string(),
                 ])
                 .unwrap(),
+                relations: None,
             },
             cand("legacy-provider", "1", 1, &[]),
             Candidate {
@@ -450,6 +837,7 @@ mod tests {
                 dependencies_known: true,
                 origin: CandidateOrigin::Recipe,
                 provides: Provides::parse_all(&["init-system=systemd".to_string()]).unwrap(),
+                relations: None,
             },
         ]);
         let result = providers_for(&candidates, &requested);

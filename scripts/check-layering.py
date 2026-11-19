@@ -12,7 +12,11 @@ Checks (production code only; `#[cfg(test)]` items are ignored):
      explicitly allowlisted legacy edges below; use-case code under
      `application/features/` may never import presentation, allowlist or
      not. Stale allowlist entries (edges that no longer exist) also fail:
-     the list must shrink as use cases are extracted.
+      the list must shrink as use cases are extracted.
+  4. the domain layer imports only domain code (plus its documented small
+     pure helpers); it cannot reach application, presentation or adapters;
+  5. feature use cases cannot reach into unrelated feature internals except
+     for the three explicit package/system integration boundaries below.
 
 Run from the repository root:  python3 scripts/check-layering.py
 Standard library only.
@@ -54,6 +58,18 @@ LEGACY_PRESENTATION_IMPORTS = {
     ("install", "presentation"),
     ("plugins", "presentation"),
     ("upgrade", "presentation"),
+}
+
+# Intentional feature-to-feature edges. They must name both the concrete file
+# and target feature so a new package cannot smuggle in another feature's
+# policy. These are the supported composition seams, not a folder-wide grant.
+FEATURE_BOUNDARIES = {
+    # Package installs receive the sealed migration permit; the coordinator
+    # calls the ordinary package executor with its held guard.
+    ("application/features/package/apply_transaction.rs", "system"),
+    ("application/features/system/migrate_coordinator.rs", "package"),
+    # Package planning consumes the effective system profile policy.
+    ("application/features/package/plan_install.rs", "system"),
 }
 
 
@@ -165,6 +181,39 @@ def main():
                     print(f"error: use-case code must not import presentation {t}:")
                     print(f"    {p}")
 
+    # The domain is the innermost layer. It cannot depend on infrastructure,
+    # orchestration or presentation; pure shared helpers (suggest/version)
+    # remain separate leaf utilities and may be used by domain algorithms.
+    DOMAIN_FORBIDDEN = frozenset({"adapters", "application", "presentation", "commands", "cli", "install", "transaction", "repo", "upgrade", "fetch", "build"})
+    for path in sorted(modules.get("domain", [])):
+        for line_no, line in enumerate(strip_tests(open(path).read()), 1):
+            for hit in re.finditer(r"crate::([a-z_][a-z_0-9]*)", line):
+                target = hit.group(1)
+                if target in DOMAIN_FORBIDDEN:
+                    failed = True
+                    print(f"error: domain code depends on outer layer {target}: {path}:{line_no}")
+
+    feature_edge_paths = collections.defaultdict(set)
+    feature_target_edges = collections.defaultdict(set)
+    for path in [p for paths in modules.values() for p in paths if features_file(p)]:
+        rel = os.path.relpath(path, SRC).replace(os.sep, "/")
+        source_feature = rel.split("/")[2]
+        for line_no, line in enumerate(strip_tests(open(path).read()), 1):
+            for hit in re.finditer(r"crate::application::features::([a-z_][a-z_0-9]*)", line):
+                target_feature = hit.group(1)
+                if source_feature != target_feature:
+                    feature_edge_paths[(rel, target_feature)].add(f"{path}:{line_no}")
+                    feature_target_edges[(source_feature, target_feature)].add(path)
+    for edge, locations in sorted(feature_edge_paths.items()):
+        if edge not in FEATURE_BOUNDARIES:
+            failed = True
+            print(f"error: feature code reaches into unrelated feature `{edge[1]}`: {edge[0]}")
+            for location in sorted(locations): print(f"    {location}")
+    for source, target in sorted(FEATURE_BOUNDARIES):
+        if not feature_edge_paths.get((source, target)):
+            failed = True
+            print(f"error: stale feature boundary ({source} -> {target}); remove the exception")
+
     # direction rules: nothing outside presentation imports presentation code
     def presentation_edge(m, t):
         return t in PRESENTATION and m not in PRESENTATION and (m, t) not in LEGACY_PRESENTATION_IMPORTS
@@ -210,6 +259,10 @@ def main():
                 f"error: stale layering allowlist entry ({entry[0]}, {entry[1]}):"
                 " the edge is gone — remove the exception"
             )
+    for entry in sorted(FEATURE_BOUNDARIES):
+        if not feature_edge_paths.get(entry):
+            failed = True
+            print(f"error: stale feature boundary allowlist entry {entry}")
 
     if failed:
         return 1

@@ -15,8 +15,8 @@ pub(crate) fn load_index(path: &Path) -> Result<Index> {
     load_index_bytes(&raw).with_context(|| format!("parse index {}", path.display()))
 }
 
-/// A strict schema-v4 index document. The loose [`Index`] parser stays the
-/// compatibility reader for v1–v3; for v4 the entries are parsed through the
+/// A strict schema-v4/v5 index document. The loose [`Index`] parser stays the
+/// compatibility reader for v1–v3; for v4/v5 the entries are parsed through the
 /// domain model's `IndexEntryV4` so unknown fields are rejected
 /// (`deny_unknown_fields`) and `rundeps`/`provides` are mandatory.
 // The fields exist only so the strict parse accepts everything the loose
@@ -45,10 +45,10 @@ pub(crate) fn load_index_bytes(raw: &[u8]) -> Result<Index> {
     if idx
         .repository
         .as_ref()
-        .is_some_and(|m| m.schema == INDEX_SCHEMA_V4)
+        .is_some_and(|m| matches!(m.schema, INDEX_SCHEMA_V4 | INDEX_SCHEMA_V5))
     {
         let strict: StrictIndexV4 =
-            toml::from_str(text).context("parse schema-v4 repository index TOML")?;
+            toml::from_str(text).context("parse strict schema-v4/v5 repository index TOML")?;
         for entry in &strict.packages {
             // Both the entry rules and the normalized metadata must parse:
             // a v4 reader must be able to solve from these fields alone.
@@ -68,6 +68,11 @@ impl Index {
 
     /// Validate schema and the stronger invariants required by v2.
     pub fn validate(&self) -> Result<()> {
+        if self.repository.as_ref().map(|m| m.schema) != Some(INDEX_SCHEMA_V5)
+            && self.packages.iter().any(|p| p.relations.is_some())
+        {
+            bail!("package relations require signed index schema-v5");
+        }
         let meta = match &self.repository {
             None => {
                 if self.groups.is_some() {
@@ -79,10 +84,10 @@ impl Index {
         };
         if !matches!(
             meta.schema,
-            INDEX_SCHEMA_V2 | INDEX_SCHEMA_V3 | INDEX_SCHEMA_V4
+            INDEX_SCHEMA_V2 | INDEX_SCHEMA_V3 | INDEX_SCHEMA_V4 | INDEX_SCHEMA_V5
         ) {
             bail!(
-                "unsupported repository index schema {}; this Nawa supports schemas 2, 3 and 4",
+                "unsupported repository index schema {}; this Nawa supports schemas 2 through 5",
                 meta.schema
             );
         }
@@ -184,7 +189,7 @@ impl Index {
                     p.file
                 );
             }
-            if meta.schema == INDEX_SCHEMA_V4 {
+            if meta.schema >= INDEX_SCHEMA_V4 {
                 // B3 chain §5: both solving fields are mandatory in v4; a
                 // missing field is a parse error, never "unknown".
                 let rundeps = p.rundeps.as_ref().with_context(|| {
@@ -197,6 +202,18 @@ impl Index {
                     .map_err(|e| anyhow::anyhow!("schema-v4 package {}: {e}", p.name))?;
                 crate::domain::package::metadata::normalize_provides(provides)
                     .map_err(|e| anyhow::anyhow!("schema-v4 package {}: {e}", p.name))?;
+                if meta.schema == INDEX_SCHEMA_V4 && p.relations.is_some() {
+                    bail!("schema-v4 cannot declare package relations; publish schema-v5");
+                }
+                if meta.schema == INDEX_SCHEMA_V5 && p.relations.is_none() {
+                    bail!("schema-v5 package {} has unknown package relations", p.name);
+                }
+                crate::domain::package::metadata::metadata_from_repository(
+                    Some(rundeps),
+                    Some(provides),
+                    p.relations.as_ref(),
+                )
+                .map_err(anyhow::Error::msg)?;
             }
         }
         if let Some(r) = &self.recipes {

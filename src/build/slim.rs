@@ -117,6 +117,10 @@ pub(crate) fn derive_pkginfo(main: &str, main_name: &str, sub_name: &str, size: 
             // B3 chain §4: sub-packages never inherit the main package's
             // capabilities. They declare none explicitly.
             out.push_str("provides = \n");
+        } else if line.starts_with("conflicts = ") {
+            out.push_str("conflicts = \n");
+        } else if line.starts_with("replaces = ") {
+            out.push_str("replaces = \n");
         } else if line.starts_with("size = ") {
             out.push_str(&format!("size = {size}\n"));
         } else {

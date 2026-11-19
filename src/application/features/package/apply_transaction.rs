@@ -57,6 +57,7 @@ pub(crate) struct ApplyRequest<'a> {
 
 /// Details for one staged archive installation.
 struct InstallRequest<'a> {
+    replacements: &'a [crate::domain::planning::install::Replacement],
     reason: crate::adapters::db::InstallReason,
     what: &'a str,
     number: usize,
@@ -214,6 +215,7 @@ pub(crate) fn apply_transaction(
                     ctx,
                     &archive,
                     InstallRequest {
+                        replacements: &plan.removals,
                         reason: it.why.db_reason(),
                         what: &id,
                         number: n,
@@ -256,6 +258,7 @@ pub(crate) fn apply_transaction(
                     ctx,
                     &archive,
                     InstallRequest {
+                        replacements: &plan.removals,
                         reason,
                         what: &what,
                         number: n,
@@ -384,10 +387,12 @@ fn install_one(
     let before = db.entry(&package)?;
     // A package that was explicitly requested must stay explicit even when
     // a group later upgrades it. "keep" preserves the existing DB reason.
-    let effective_reason = if details.reason == crate::adapters::db::InstallReason::Group
-        && before.as_ref().is_some_and(|entry| {
-            entry.reason == crate::adapters::db::InstallReason::Explicit.as_str()
-        }) {
+    let effective_reason = if (details.reason == crate::adapters::db::InstallReason::Dependency
+        && before.is_some())
+        || (details.reason == crate::adapters::db::InstallReason::Group
+            && before.as_ref().is_some_and(|entry| {
+                entry.reason == crate::adapters::db::InstallReason::Explicit.as_str()
+            })) {
         crate::adapters::db::InstallReason::Keep
     } else {
         details.reason
@@ -413,6 +418,162 @@ fn install_one(
         }
         Some(_) => transaction::history::StepAction::Reinstall,
     };
+    let replacements: Vec<_> = details
+        .replacements
+        .iter()
+        .filter(|r| r.by == package)
+        .collect();
+    if !replacements.is_empty() {
+        if details.force {
+            bail!(
+                "generic --force cannot be combined with an authenticated package replacement plan"
+            );
+        }
+        // Authenticate the replacement archive before removing anything. The
+        // installer still snapshots/rechecks the same pinned bytes afterwards.
+        if !details.signed_index {
+            crate::adapters::sign::verify_for_install(
+                archive,
+                &ctx.root,
+                None,
+                details.allow_unsigned,
+            )?;
+        }
+        let info = crate::adapters::archive::parse_pkginfo(
+            &crate::adapters::archive::read_pkginfo(archive)?,
+        )?;
+        let metadata = crate::domain::package::metadata::PkgMetadata::from_pkginfo_map(&info)
+            .map_err(anyhow::Error::msg)?;
+        let relations = metadata
+            .relations
+            .as_ref()
+            .context("replacement archive has unknown package relations")?;
+        if details.signed_index {
+            let open = open_repo
+                .context("signed replacement archive has no authenticated repository proof")?;
+            let signer = open
+                .signer_public
+                .as_deref()
+                .context("signed replacement archive has no trusted signer")?;
+            let signature = open
+                .index_signature
+                .as_deref()
+                .context("signed replacement archive has no index signature")?;
+            crate::adapters::sign::verify_trusted_index_proof(
+                &open.index_bytes,
+                signature,
+                &crate::adapters::checksum::sha256_bytes(signer),
+                &ctx.root,
+            )?;
+            let indexed = open
+                .index
+                .find(&package)
+                .context("signed index has no replacement package entry")?;
+            if Some(indexed.sha256.as_str()) != details.index_sha256
+                || std::fs::metadata(archive)?.len() != indexed.size
+            {
+                bail!("replacement archive identity differs from its authenticated index entry");
+            }
+            let indexed_metadata = open
+                .metadata_for(&package)
+                .context("signed index has no complete metadata for the replacement package")?;
+            crate::domain::package::metadata::check_chain(&indexed_metadata, &metadata)
+                .map_err(anyhow::Error::msg)
+                .context("replacement archive metadata does not match its authenticated index")?;
+        }
+        let projected = db
+            .installed()?
+            .into_iter()
+            .filter(|e| !replacements.iter().any(|r| r.name == e.name))
+            .map(|e| (e.name, format!("{}-{}", e.version, e.rel)))
+            .collect();
+        metadata
+            .verify_installed(&package, &projected)
+            .map_err(anyhow::Error::msg)?;
+        // Validate the complete removal set before its first side effect.
+        for replacement in &replacements {
+            let current = db
+                .entry(&replacement.name)?
+                .context("replacement package is no longer installed")?;
+            if crate::domain::planning::install::version_rel(&current.version, current.rel)
+                != replacement.current
+            {
+                bail!(
+                    "installed replacement target changed after planning: {}",
+                    replacement.name
+                );
+            }
+            if !relations.replaces.iter().any(|raw| {
+                crate::domain::package::relations::Requirement::parse(raw)
+                    .is_ok_and(|r| r.name == replacement.name && r.matches(&replacement.current))
+            }) {
+                bail!(
+                    "archive does not authorize the displayed replacement of {}",
+                    replacement.name
+                );
+            }
+            let files = db.files(&replacement.name)?;
+            if matches!(
+                replacement.name.as_str(),
+                "runit" | "runit-services" | "systemd"
+            ) || files.iter().any(|p| {
+                matches!(
+                    p.trim_start_matches('/'),
+                    "usr/bin/init"
+                        | "sbin/init"
+                        | "usr/sbin/init"
+                        | "usr/bin/runit"
+                        | "usr/lib/systemd/systemd"
+                )
+            }) {
+                bail!("ordinary package replacement cannot retire an init provider; a separately approved migration cleanup is required");
+            }
+            if db.installed()?.iter().any(|e| {
+                e.name != replacement.name
+                    && e.run.iter().any(|raw| {
+                        crate::domain::package::relations::Requirement::parse(raw)
+                            .is_ok_and(|r| r.name == replacement.name)
+                    })
+            }) {
+                bail!(
+                    "replacement target {} still has installed dependents",
+                    replacement.name
+                );
+            }
+        }
+        for replacement in replacements {
+            let old = db.entry(&replacement.name)?;
+            let mut recorder = op.recorder();
+            let number = recorder.step_intent(
+                &replacement.name,
+                transaction::history::StepAction::Remove,
+                old.as_ref(),
+                None,
+                old.as_ref()
+                    .map(|e| e.artifact_sha256.as_str())
+                    .unwrap_or(""),
+            )?;
+            let journal = install::FileJournalId::for_step(recorder.tx(), number);
+            let result = install::remove_with_linked(&replacement.name, &ctx.root, false, journal)
+                .and_then(|()| {
+                    if db.entry(&replacement.name)?.is_some() {
+                        bail!("replacement removal failed its database postcondition");
+                    }
+                    Ok(())
+                });
+            install::record_remove_outcome(
+                &mut recorder,
+                &ctx.root,
+                number,
+                &replacement.name,
+                transaction::history::StepAction::Remove,
+                old.as_ref(),
+                "approved-replacement",
+                &result,
+            )?;
+            result?;
+        }
+    }
     let mut recorder = op.recorder();
     let step_no = recorder.step_intent_state(
         &package,
@@ -432,7 +593,7 @@ fn install_one(
                 // Repository URLs can contain credentials; durable migration
                 // provenance lives in the plan's source fingerprint instead.
                 repo_id: if details.legacy_init_handoff.is_some() {
-                    None
+                    Some(details.source)
                 } else {
                     open.base_url.as_deref()
                 },
@@ -525,6 +686,7 @@ pub(crate) fn install_for_migration(
         ctx,
         request.archive,
         InstallRequest {
+            replacements: &[],
             reason: request.reason,
             what: request.what,
             number: request.number,
@@ -577,6 +739,20 @@ fn plan_view(
     sourcing: &Sourcing,
 ) -> PlanView {
     let mut rows: Vec<PlanRow> = Vec::with_capacity(plan.items.len() + extras.len());
+    for removal in &plan.removals {
+        rows.push(PlanRow {
+            name: removal.name.clone(),
+            ver: removal.current.clone(),
+            tag: "remove",
+            dl: 0,
+            inst: 0,
+            note: format!(
+                "explicitly replaced by {} before its installation",
+                removal.by
+            ),
+            sha256: None,
+        });
+    }
     for action in ordered_steps(plan, extras.len()) {
         match action {
             plan::PlanStep::Recipe(index) => {
@@ -638,6 +814,12 @@ fn plan_view(
             }
         }
     }
+    for row in &mut rows {
+        if plan.unknown_relations.contains(&row.name) {
+            row.note
+                .push_str(" (legacy conflicts/replacements unknown)");
+        }
+    }
     PlanView {
         repository: sourcing
             .open
@@ -687,6 +869,7 @@ mod tests {
             installed_size: 0,
             rundeps: None,
             provides: None,
+            relations: None,
         }
     }
 
@@ -884,6 +1067,133 @@ mod tests {
         assert_eq!(view.rows[1].note, "explicit");
         assert_eq!(view.rows[1].sha256, None);
         assert_eq!(view.repository, None);
+    }
+
+    fn replacement_archive(root: &Path, name: &str, relations: &str) -> PathBuf {
+        let stage = root.join(format!("stage-{name}"));
+        std::fs::create_dir_all(stage.join("usr/share/replacement")).unwrap();
+        std::fs::write(stage.join("usr/share/replacement/file"), name).unwrap();
+        let archive = root.join(format!("{name}-1-1.nawa.tar.zst"));
+        crate::adapters::archive::create(
+            &stage,
+            &format!(
+                "pkgname = {name}\npkgver = 1\npkgrel = 1\narch = x86_64\nrundeps = \n{relations}"
+            ),
+            &archive,
+        )
+        .unwrap();
+        archive
+    }
+
+    #[test]
+    fn explicit_replacement_reuses_the_package_remove_and_install_wal() {
+        let root = crate::testutil::tmpdir("package-relations-replacement");
+        let old = replacement_archive(&root, "old", "");
+        install::install_archive(&old, &root, false, false, None, db::InstallReason::Explicit)
+            .unwrap();
+        let new = replacement_archive(
+            &root,
+            "new",
+            "provides = \nrelations_schema = 1\nconflicts = old\nreplaces = old<2-1\n",
+        );
+        let removal = crate::domain::planning::install::Replacement {
+            name: "old".into(),
+            current: "1-1".into(),
+            by: "new".into(),
+        };
+        let mut operation = transaction::begin_operation(
+            &root,
+            transaction::OperationCommand::Install,
+            &["new".into()],
+            &[],
+        )
+        .unwrap();
+        let recorder = Recorder::default();
+        install_one(
+            &ctx_with(&root),
+            &new,
+            InstallRequest {
+                replacements: &[removal],
+                reason: db::InstallReason::Explicit,
+                what: "new",
+                number: 1,
+                total: 1,
+                force: false,
+                allow_unsigned: false,
+                index_sha256: None,
+                signed_index: false,
+                source: "local-build",
+                legacy_init_handoff: None,
+            },
+            None,
+            &mut operation,
+            &recorder.ui(true, 'b'),
+            LockOwnership::PerStep,
+        )
+        .unwrap();
+        operation.finish(None).unwrap();
+        let db = db::Db::new(&root);
+        assert!(db.entry("old").unwrap().is_none());
+        assert!(db.entry("new").unwrap().is_some());
+        assert_eq!(
+            std::fs::read_to_string(root.join("usr/share/replacement/file")).unwrap(),
+            "new"
+        );
+        let records = transaction::history::list_records(&root).unwrap();
+        let record = transaction::history::load_record(&root, records[0].id).unwrap();
+        assert_eq!(
+            record
+                .package_changes
+                .iter()
+                .map(|c| (c.name.as_str(), c.action.as_str(), c.status.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("old", "remove", "committed"),
+                ("new", "install", "committed")
+            ]
+        );
+    }
+
+    #[test]
+    fn an_invalid_replacement_archive_cannot_remove_the_old_package() {
+        let root = crate::testutil::tmpdir("package-relations-invalid-replacement");
+        let old = replacement_archive(&root, "old", "");
+        install::install_archive(&old, &root, false, false, None, db::InstallReason::Explicit)
+            .unwrap();
+        let new = replacement_archive(&root, "new", "");
+        let mut operation = no_history();
+        let recorder = Recorder::default();
+        assert!(install_one(
+            &ctx_with(&root),
+            &new,
+            InstallRequest {
+                replacements: &[crate::domain::planning::install::Replacement {
+                    name: "old".into(),
+                    current: "1-1".into(),
+                    by: "new".into()
+                }],
+                reason: db::InstallReason::Explicit,
+                what: "new",
+                number: 1,
+                total: 1,
+                force: true,
+                allow_unsigned: false,
+                index_sha256: None,
+                signed_index: false,
+                source: "local-build",
+                legacy_init_handoff: None,
+            },
+            None,
+            &mut operation,
+            &recorder.ui(true, 'b'),
+            LockOwnership::PerStep
+        )
+        .is_err());
+        assert!(db::Db::new(&root).entry("old").unwrap().is_some());
+        assert_eq!(
+            std::fs::read_to_string(root.join("usr/share/replacement/file")).unwrap(),
+            "old"
+        );
     }
 
     #[test]

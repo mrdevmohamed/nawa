@@ -736,4 +736,53 @@ mod tests {
         assert_eq!(record.package_changes[0].status, "failed");
         let _ = std::fs::remove_dir_all(&base);
     }
+
+    #[test]
+    fn remove_committed_before_result_is_recovered_as_partial() {
+        let base = tmpdir("rm-committed-without-result");
+        let root = base.join("root");
+        journal::write_tx_state(
+            &root,
+            &journal::TxState {
+                schema: 1,
+                tx: 8,
+                command: "install".into(),
+                started_at: 10,
+            },
+        )
+        .unwrap();
+        journal::write_intent(
+            &root,
+            &journal::StepIntent {
+                schema: SCHEMA_VERSION,
+                tx: 8,
+                step: 1,
+                package: "old".into(),
+                action: "remove".into(),
+                precondition: Some(PackageState {
+                    version: Some("1.0".into()),
+                    rel: Some(1),
+                    arch: String::new(),
+                    reason: "explicit".to_string(),
+                    artifact_sha256: "a".repeat(64),
+                }),
+                target: None,
+                artifact_sha256: String::new(),
+            },
+        )
+        .unwrap();
+
+        // A crash after the remover commits the db deletion but before it
+        // persists the step result leaves the package absent. Recovery must
+        // recognize that removal as committed rather than replaying it.
+        reconcile_incomplete(&root).unwrap();
+        let record = crate::transaction::history::load_record(&root, 8).unwrap();
+        assert_eq!(record.status().unwrap(), TxStatus::Partial);
+        assert_eq!(record.package_changes.len(), 1);
+        assert_eq!(record.package_changes[0].name, "old");
+        assert_eq!(record.package_changes[0].action, "remove");
+        assert_eq!(record.package_changes[0].status, "committed");
+        assert!(record.package_changes[0].after.is_none());
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

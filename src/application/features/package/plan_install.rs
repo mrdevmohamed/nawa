@@ -424,6 +424,7 @@ mod tests {
             installed_size: 0,
             rundeps: Some(Vec::new()),
             provides: None,
+            relations: None,
         }
     }
 

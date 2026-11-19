@@ -724,7 +724,12 @@ pub(crate) fn cmd_remove(ctx: &Ctx, name: &str, force: bool, yes: bool) -> Resul
     let dependents: Vec<String> = db
         .installed()?
         .into_iter()
-        .filter(|e| e.name != name && e.run.iter().any(|r| r == name))
+        .filter(|e| {
+            e.name != name
+                && e.run
+                    .iter()
+                    .any(|r| crate::domain::package::relations::depends_on(r, name))
+        })
         .map(|e| e.name)
         .collect();
     let nfiles = db.files(name)?.len();

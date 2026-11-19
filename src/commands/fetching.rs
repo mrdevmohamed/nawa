@@ -120,7 +120,7 @@ pub(crate) fn cmd_fetch(
 /// verification. `local:` paths are host files and meta recipes have none.
 fn fetchable_legacy(rec: &recipe::Recipe) -> bool {
     let s = &rec.package.source;
-    !s.is_empty() && !s.starts_with("local:") && !rec.is_new_schema()
+    !s.is_empty() && !s.starts_with("local:") && !rec.is_fetch_schema()
 }
 
 fn info_mode(recs: &[recipe::Recipe], sources_only: bool, offline: bool) {

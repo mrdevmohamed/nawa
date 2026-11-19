@@ -28,6 +28,7 @@ use crate::repo;
 mod source;
 pub(crate) mod system_transition;
 
+pub(crate) use source::open_repo_cached;
 pub(crate) use source::{archive_download_url, fetch_entry, open_repo, ArchiveAuth, OpenRepo};
 pub(crate) use system_transition::{
     plan as plan_system_transition, render as render_system_transition, PackageActionKind,
@@ -107,6 +108,7 @@ fn upgrade_inner(
 struct PlannedUpgrade<'a> {
     entry: &'a repo::RepoEntry,
     new_version: String,
+    reason: crate::domain::planning::install::Why,
 }
 
 struct UpgradePlan<'a> {
@@ -150,6 +152,79 @@ fn build_plan<'a>(root: &Path, index: &'a repo::Index, recipes: &Path) -> Result
         });
     }
 
+    if index
+        .repository
+        .as_ref()
+        .is_some_and(|m| m.schema == repo::INDEX_SCHEMA_V5)
+    {
+        let mut known = std::collections::BTreeMap::new();
+        for entry in &index.packages {
+            if !crate::adapters::sys::arch_fits(&entry.arch) {
+                continue;
+            }
+            let metadata = crate::domain::package::metadata::metadata_from_repository(
+                entry.rundeps.as_ref(),
+                entry.provides.as_ref(),
+                entry.relations.as_ref(),
+            )
+            .map_err(anyhow::Error::msg)?;
+            let crate::domain::package::metadata::RunDeps::Declared(deps) = metadata.rundeps else {
+                anyhow::bail!("schema-v5 runtime dependencies are unknown");
+            };
+            known.insert(
+                entry.name.clone(),
+                crate::domain::planning::install::Candidate {
+                    name: entry.name.clone(),
+                    version: entry.version.clone(),
+                    rel: entry.rel,
+                    deps,
+                    dependencies_known: true,
+                    provides: metadata.provides,
+                    relations: metadata.relations,
+                    origin: crate::domain::planning::install::CandidateOrigin::Repository,
+                },
+            );
+        }
+        let installed = installed_map
+            .iter()
+            .map(|(name, e)| (name.clone(), format!("{}-{}", e.version, e.rel)))
+            .collect();
+        let targets = candidates
+            .iter()
+            .map(|(e, _)| e.name.clone())
+            .collect::<Vec<_>>();
+        let resolved = crate::domain::planning::install::install_plan(
+            &targets,
+            &installed,
+            &known,
+            None,
+            crate::domain::planning::install::Why::Update,
+            true,
+        )?;
+        if !resolved.removals.is_empty() {
+            anyhow::bail!("repository upgrade requires package replacements; review them explicitly with nawa install (init retirement is never automatic)");
+        }
+        let upgrades = resolved
+            .items
+            .into_iter()
+            .map(|item| {
+                let entry = index
+                    .find(&item.name)
+                    .expect("resolved authenticated entry");
+                PlannedUpgrade {
+                    entry,
+                    new_version: format!("{}-{}-{}", entry.name, entry.version, entry.rel),
+                    reason: item.why,
+                }
+            })
+            .collect();
+        return Ok(UpgradePlan {
+            installed: installed_map,
+            upgrades,
+            system_transition: None,
+        });
+    }
+
     // dependency order when the recipe tree is available; packages that have
     // no recipe (third-party repo content) are appended alphabetically so a
     // partial tree never aborts the upgrade
@@ -180,6 +255,7 @@ fn build_plan<'a>(root: &Path, index: &'a repo::Index, recipes: &Path) -> Result
             PlannedUpgrade {
                 entry,
                 new_version: new_version.clone(),
+                reason: crate::domain::planning::install::Why::Update,
             }
         })
         .collect();
@@ -247,6 +323,16 @@ fn apply_plan(
             break;
         }
         let before = db_here.entry(name)?;
+        let reason = if before.is_some() {
+            crate::adapters::db::InstallReason::Keep
+        } else {
+            upgrade.reason.db_reason()
+        };
+        let action = if before.is_some() {
+            crate::transaction::history::StepAction::Upgrade
+        } else {
+            crate::transaction::history::StepAction::Install
+        };
         let target = crate::transaction::history::PackageState {
             version: Some(re.version.clone()),
             rel: Some(re.rel),
@@ -254,32 +340,28 @@ fn apply_plan(
             reason: before
                 .as_ref()
                 .map(|entry| entry.reason.clone())
-                .unwrap_or_else(|| "explicit".to_string()),
+                .unwrap_or_else(|| reason.as_str().to_string()),
             artifact_sha256: re.sha256.clone(),
         };
         let mut recorder = op.recorder();
-        let step_no = recorder.step_intent_state(
-            name,
-            crate::transaction::history::StepAction::Upgrade,
-            before.as_ref(),
-            Some(&target),
-            &re.sha256,
-        )?;
+        let step_no =
+            recorder.step_intent_state(name, action, before.as_ref(), Some(&target), &re.sha256)?;
         let file_journal = install::FileJournalId::for_step(recorder.tx(), step_no);
         let outcome = fetch_entry(root, open, re, opts.allow_unsigned).and_then(|src| {
             if open.archive_auth == ArchiveAuth::SignedIndexSha256 {
+                let metadata = open.metadata_for(name);
                 install::install_archive_from_index_proof(
                     &src,
                     root,
                     opts.force,
                     &re.sha256,
-                    crate::adapters::db::InstallReason::Keep,
+                    reason,
                     Some(install::IndexProof {
                         index_bytes: Some(&open.index_bytes),
                         index_signature: open.index_signature.as_deref(),
                         signer_public: open.signer_public.as_deref(),
                         repo_id: None,
-                        metadata: None,
+                        metadata: metadata.as_ref(),
                     }),
                     file_journal,
                 )
@@ -291,7 +373,7 @@ fn apply_plan(
                         force: opts.force,
                         allow_unsigned: opts.allow_unsigned,
                         key: None,
-                        reason: crate::adapters::db::InstallReason::Keep,
+                        reason,
                         pinned_sha: Some(&re.sha256),
                         file_journal,
                     },
@@ -303,7 +385,7 @@ fn apply_plan(
             root,
             step_no,
             name,
-            crate::transaction::history::StepAction::Upgrade,
+            action,
             before.as_ref(),
             &target,
             "repository",
@@ -650,6 +732,7 @@ mod tests {
             installed_size: 0,
             rundeps: None,
             provides: None,
+            relations: None,
         };
         assert!(check_archive_matches_index(&a, &ok, false).is_ok());
         let newer = repo::RepoEntry {
@@ -722,16 +805,16 @@ mod tests {
             groups: None,
             packages: vec![],
         };
-        assert!(check_index_freshness(&base, &idx(100), true, false, true).is_err());
-        assert!(check_index_freshness(&base, &idx(300), true, false, true).is_ok());
+        assert!(check_index_freshness(&base, &idx(100), true, false, true, true).is_err());
+        assert!(check_index_freshness(&base, &idx(300), true, false, true, true).is_ok());
         assert_eq!(
             std::fs::read_to_string(base.join("index.seen")).unwrap(),
             "300"
         );
         // local repos are not tracked
-        assert!(check_index_freshness(&base, &idx(1), false, false, true).is_ok());
+        assert!(check_index_freshness(&base, &idx(1), false, false, true, true).is_ok());
         // an unauthenticated index must not move the marker
-        assert!(check_index_freshness(&base, &idx(999), true, false, false).is_ok());
+        assert!(check_index_freshness(&base, &idx(999), true, false, false, true).is_ok());
         assert_eq!(
             std::fs::read_to_string(base.join("index.seen")).unwrap(),
             "300"
@@ -782,10 +865,10 @@ mod tests {
             groups: None,
             packages: vec![],
         };
-        assert!(check_index_freshness(&base, &idx, true, false, true).is_err());
-        assert!(check_index_freshness(&base, &idx, true, true, true).is_ok());
+        assert!(check_index_freshness(&base, &idx, true, false, true, true).is_err());
+        assert!(check_index_freshness(&base, &idx, true, true, true, true).is_ok());
         // local repos only warn
-        assert!(check_index_freshness(&base, &idx, false, false, true).is_ok());
+        assert!(check_index_freshness(&base, &idx, false, false, true, true).is_ok());
         let _ = std::fs::remove_dir_all(&base);
     }
     #[test]
@@ -805,7 +888,7 @@ mod tests {
             packages: vec![],
         };
         // a clock that runs behind the publisher still gets a usable index ...
-        assert!(check_index_freshness(&base, &idx, true, false, true).is_ok());
+        assert!(check_index_freshness(&base, &idx, true, false, true, true).is_ok());
         // ... but the future value is never recorded as the newest seen
         assert!(!base.join("index.seen").exists());
 
@@ -817,7 +900,7 @@ mod tests {
             groups: None,
             packages: vec![],
         };
-        assert!(check_index_freshness(&base, &current, true, false, true).is_ok());
+        assert!(check_index_freshness(&base, &current, true, false, true, true).is_ok());
         assert_eq!(
             std::fs::read_to_string(base.join("index.seen")).unwrap(),
             now.saturating_sub(1).to_string()

@@ -28,6 +28,8 @@ pub(crate) struct RepoEntry {
     /// legacy v1–v3 entries, which normalize to "unknown".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provides: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relations: Option<crate::domain::package::relations::PackageRelations>,
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -88,11 +90,19 @@ impl RepositoryMeta {
             ..Self::v3_per_package_url()
         }
     }
+
+    pub fn v5_per_package_url() -> Self {
+        Self {
+            schema: INDEX_SCHEMA_V5,
+            ..Self::v3_per_package_url()
+        }
+    }
 }
 
 pub(crate) const INDEX_SCHEMA_V2: u32 = 2;
 pub(crate) const INDEX_SCHEMA_V3: u32 = 3;
 pub(crate) const INDEX_SCHEMA_V4: u32 = 4;
+pub(crate) const INDEX_SCHEMA_V5: u32 = 5;
 pub(crate) const ARCHIVE_LOCATION_BASE_URL: &str = "base-url";
 pub(crate) const ARCHIVE_LOCATION_PER_PACKAGE_URL: &str = "per-package-url";
 pub(crate) const ARCHIVE_AUTH_SIGNED_INDEX: &str = "signed-index";

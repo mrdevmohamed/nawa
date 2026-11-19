@@ -292,8 +292,8 @@ pub(crate) enum Cmd {
         /// Signing key for --sign
         #[arg(long)]
         key: Option<PathBuf>,
-        /// Repository index schema (1 = legacy, 2 = signed-index hashes, 3 = distributed per-archive HTTPS URLs)
-        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=3))]
+        /// Repository schema: 1 legacy, 2 signed hashes, 3 URLs, 4 capabilities/runtime deps, 5 package relations
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=5))]
         index_version: u32,
         /// TOML manifest containing package_urls and recipe_urls (required for schema 3)
         #[arg(long)]

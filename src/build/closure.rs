@@ -37,7 +37,22 @@ pub(crate) fn closure_of(
 ) -> Result<Vec<String>> {
     let mut out: BTreeSet<String> = BTreeSet::new();
     let mut stack: Vec<String> = seeds.to_vec();
-    while let Some(name) = stack.pop() {
+    while let Some(raw) = stack.pop() {
+        let requirement = crate::domain::package::relations::Requirement::parse(&raw)
+            .map_err(anyhow::Error::msg)?;
+        let name = requirement.name.clone();
+        let candidate = known
+            .get(&name)
+            .with_context(|| format!("closure member `{name}` has no recipe"))?;
+        if !requirement.matches(&format!(
+            "{}-{}",
+            candidate.package.version, candidate.package.rel
+        )) {
+            bail!(
+                "build closure candidate does not satisfy {}",
+                requirement.canonical()
+            );
+        }
         if !out.insert(name.clone()) {
             continue;
         }
