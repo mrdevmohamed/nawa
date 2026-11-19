@@ -134,6 +134,32 @@
   `26deba1` includes PR #60; its latest published ISO is November 16, 2026,
   before that November 18 merge. No installed-disk acceptance is inferred.
   Production `HANDLER_BLOCKERS` remain in place.
+* **Successor validation (2026-11-20):** The old rel32 source-to-package
+  chain is reconciled through stripping, the staged root, the ISO, and the
+  installed UEFI executable. The separate `95a9936` build was not shipped;
+  its difference is unexplained. The verified rel33 recipe pins committed
+  `207fb56`: the upstream archive matched all 228 files and modes, without
+  packaging dirty assessment files. The locked/offline recipe build passed
+  with isolation explicitly set to `none`. The archived executable passed
+  eight CLI fixtures and parsed the actual ISO-derived profile; bootstrap
+  verified and extracted the new pin, and a repeat fetch was a no-op.
+* The candidate root still contains rel32. The next action requires explicit
+  user approval to install that exact unsigned rel33 archive with
+  `--allow-unsigned` **only in the new disposable test root**. Documentation
+  and commit authorization does not grant that exception. No rel33 install,
+  new ISO, or new UEFI boot has occurred. BIOS/GRUB debugging is deferred per
+  request, not fixed or accepted; UEFI logind, rescue, and rollback are open.
+  Keep production apply/resume blocked and preserve `stable` and `stable-v3`;
+  do not publish `stable-v5` or treat missing metadata as empty.
+* The current Nawa worktree passed 4 targeted unit and 3 integration
+  assessment cases. The Faseela harness CLI/dry-run and all 94 installer
+  mock assertions passed. These are not full-suite, hosted CI, or firmware
+  acceptance. Nawa remains one crate. The original handoff baseline is
+  unavailable, cached refs are not live, saved suite results are historical,
+  and the hosted API check failed.
+* Retained evidence (exact artifact identities, commands, and logs):
+  `/var/tmp/faseela-integration-validation/nawa-docs-commit-HOZA58h3/successor-validation-observed.md`
+  and `/var/tmp/faseela-integration-validation/nawa-profile-candidate-m41sgifi/CANDIDATE-PREPARED.md`.
 
 ### Earlier execution history
 
