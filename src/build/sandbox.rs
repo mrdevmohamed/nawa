@@ -18,10 +18,16 @@ pub(crate) fn layer_cache_dir(opts: &BuildOpts) -> Option<PathBuf> {
     if std::env::var_os("NAWA_NO_LAYER_CACHE").is_some() {
         return None;
     }
-    let dir = std::env::var_os("NAWA_LAYER_CACHE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| opts.root.join("var/cache/nawa"));
-    match std::fs::create_dir_all(&dir) {
+    let (dir, created) = if let Some(cache) = std::env::var_os("NAWA_LAYER_CACHE") {
+        let dir = PathBuf::from(cache);
+        let created = std::fs::create_dir_all(&dir);
+        (dir, created)
+    } else {
+        let dir = opts.root.join("var/cache/nawa");
+        let created = crate::adapters::pathutil::create_managed_dirs(&dir);
+        (dir, created)
+    };
+    match created {
         Ok(()) => Some(dir),
         Err(e) => {
             eprintln!(

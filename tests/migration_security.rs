@@ -7,8 +7,11 @@
 //! already being privileged.
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+mod support;
 
 fn nawa_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_nawa"))
@@ -66,9 +69,9 @@ fn records_dir(root: &Path) -> PathBuf {
 /// Seed one record in the store's exact schema-1 format.
 fn seed(root: &Path, id: &str, state: &str, handler: &str) -> PathBuf {
     let dir = records_dir(root);
-    fs::create_dir_all(&dir).unwrap();
+    support::create_state_dirs(&dir);
     let path = dir.join(format!("{id}.toml"));
-    fs::write(
+    support::write_record(
         &path,
         format!(
             "schema = 1\nid = \"{id}\"\ndefinition_version = 1\n\
@@ -76,8 +79,7 @@ fn seed(root: &Path, id: &str, state: &str, handler: &str) -> PathBuf {
              to = {{ domain = \"init-system\", identity = \"systemd\" }}\n\
              handler = \"{handler}\"\nstate = \"{state}\"\n"
         ),
-    )
-    .unwrap();
+    );
     path
 }
 
@@ -87,7 +89,7 @@ fn seed(root: &Path, id: &str, state: &str, handler: &str) -> PathBuf {
 fn an_unreadable_record_directory_fails_the_gate_closed_for_mutations() {
     let root = scratch("unreadable-dir");
     let state = root.join("var/lib/nawa");
-    fs::create_dir_all(&state).unwrap();
+    support::create_state_dirs(&state);
     // a *file* where the record directory should be: no-follow validation
     // rejects it before enumerating or trusting its contents.
     fs::write(records_dir(&root), "not a directory").unwrap();
@@ -180,7 +182,7 @@ fn a_symlinked_record_cannot_redirect_gate_state_outside_the_root() {
     )
     .unwrap();
     let dir = records_dir(&root);
-    fs::create_dir_all(&dir).unwrap();
+    support::create_state_dirs(&dir);
     std::os::unix::fs::symlink(&target, dir.join("evil.toml")).unwrap();
 
     // no-follow: the symlink is refused, so gate verification fails closed.
@@ -204,10 +206,38 @@ fn terminal_records_do_not_block_mutations() {
     let (_stdout, stderr, ok) = run(&root, &["remove", "not-installed", "--yes"], false);
     assert!(!ok);
     assert!(
-        !stderr.contains("holds the package mutation gate"),
+        stderr.contains("not installed"),
         "terminal states keep no gate: {stderr}"
     );
     let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn existing_writable_state_ancestors_are_refused_without_changing_permissions() {
+    for parent in ["var", "var/lib", "var/lib/nawa"] {
+        let root = scratch("writable-parent");
+        let dir = root.join(parent);
+        support::create_state_dirs(&dir);
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o775)).unwrap();
+
+        let (_, stderr, ok) = run(&root, &["remove", "anything", "--yes"], false);
+        assert!(!ok);
+        assert!(
+            stderr.contains("persistent migration mutation gate"),
+            "{stderr}"
+        );
+        assert!(stderr.contains("group- or world-writable"), "{stderr}");
+        assert!(
+            stderr.contains(&format!("{} is", dir.display())),
+            "{stderr}"
+        );
+        assert_eq!(
+            fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o775
+        );
+        assert!(!root.join("var/lib/nawa/local").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
 }
 
 // ---- Lock ownership / authority ------------------------------------------

@@ -193,7 +193,7 @@ fn materialize_repository(
         RepoRef::Remote(url) => {
             require_trust_for_remote(root, url, allow_unsigned)?;
             let cache = fetch::remote_cache_dir(root, url);
-            std::fs::create_dir_all(&cache)
+            crate::adapters::pathutil::create_managed_dirs(&cache)
                 .with_context(|| format!("create cache {}", cache.display()))?;
             let index_refresh_unavailable = refresh_remote_index(url, &cache)?;
             refresh_remote_signature(url, &cache, index_refresh_unavailable)?;
@@ -404,7 +404,7 @@ pub(crate) fn fetch_entry(
             let source_url =
                 archive_download_url("", &open.index, &re.file, re.download_url.as_deref())?;
             let cache = fetch::remote_cache_dir(root, &source_url);
-            std::fs::create_dir_all(&cache)
+            crate::adapters::pathutil::create_managed_dirs(&cache)
                 .with_context(|| format!("create archive cache {}", cache.display()))?;
             let dest = cache.join(&re.file);
             fetch::download_cached(&source_url, &dest, Some(&re.sha256))?;

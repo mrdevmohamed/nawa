@@ -1,4 +1,4 @@
-//! Path containment helpers (P2 dedupe).
+//! Filesystem path helpers.
 //!
 //! Several callers need "is this path under that root, following symlinks?"
 //! with slightly different error handling (bail vs skip). The helpers here
@@ -6,7 +6,19 @@
 //! canonicalization logic lives in one place.
 
 use anyhow::{bail, Context, Result};
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
+
+/// Create missing Nawa state and cache directories with at most 0755.
+/// Both can be the first writer of `<root>/var`, which the migration gate
+/// requires to be free of group and other write permissions. The umask can
+/// further restrict the mode. Existing directories keep their permissions.
+pub(crate) fn create_managed_dirs(path: &Path) -> std::io::Result<()> {
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o755)
+        .create(path)
+}
 
 /// Resolve `path` to its nearest existing ancestor, following symlinks,
 /// returning an error if a dangling/looping symlink is encountered that

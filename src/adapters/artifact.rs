@@ -34,6 +34,8 @@ use std::io::{Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+use crate::adapters::pathutil::create_managed_dirs;
+
 /// `<root>/var/cache/nawa/objects/sha256` — the immutable object store root.
 pub(crate) fn store_dir(root: &Path) -> PathBuf {
     root.join("var/cache/nawa/objects/sha256")
@@ -102,7 +104,7 @@ impl StagedObject {
     /// Start staging an object for `root`'s store.
     pub fn create(root: &Path) -> Result<Self> {
         let dir = store_dir(root);
-        std::fs::create_dir_all(&dir)
+        create_managed_dirs(&dir)
             .with_context(|| format!("create object store {}", dir.display()))?;
         for _ in 0..64 {
             let tmp = dir.join(format!(".obj-{}.tmp", random_suffix()));
@@ -181,7 +183,7 @@ impl StagedObject {
         let digest = self.digest.clone().expect("publish before absorb");
         let dest = object_path(&self.root, &digest)?;
         if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)
+            create_managed_dirs(parent)
                 .with_context(|| format!("create object fan {}", parent.display()))?;
         }
         // The staging file must survive until the hard link is made; Drop
@@ -483,7 +485,7 @@ pub(crate) fn save_provenance(root: &Path, prov: &Provenance) -> Result<()> {
         );
     }
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        create_managed_dirs(parent)?;
     }
     let tmp = path.with_file_name(format!(
         ".{}.{}.tmp",
@@ -672,6 +674,18 @@ mod tests {
         let mut staged = StagedObject::create(&root).unwrap();
         assert!(staged.absorb(&src2, Some(&digest)).is_err());
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn staging_into_a_fresh_root_leaves_safe_state_ancestry() {
+        let root = tmpdir("stage-before-lock");
+        let source = write_source(&root, b"staged before the database lock");
+        store_verified_copy(&root, &source, None).unwrap();
+
+        use crate::adapters::lock::{acquire, Mode};
+        let guard = acquire(&root, Mode::Exclusive).unwrap().unwrap();
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

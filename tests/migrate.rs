@@ -9,6 +9,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod support;
+
 fn nawa_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_nawa"))
 }
@@ -67,17 +69,16 @@ fn records_dir(root: &Path) -> PathBuf {
 /// optional `[[steps]]` block appended verbatim.
 fn seed(root: &Path, id: &str, state: &str, steps_toml: &str) {
     let dir = records_dir(root);
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(
-        dir.join(format!("{id}.toml")),
+    support::create_state_dirs(&dir);
+    support::write_record(
+        &dir.join(format!("{id}.toml")),
         format!(
             "schema = 1\nid = \"{id}\"\ndefinition_version = 1\n\
              from = {{ domain = \"init-system\", identity = \"runit\" }}\n\
              to = {{ domain = \"init-system\", identity = \"systemd\" }}\n\
              handler = \"faseela.init.runit_to_systemd\"\nstate = \"{state}\"\n{steps_toml}"
         ),
-    )
-    .unwrap();
+    );
 }
 
 /// A `[[steps]]` block with one succeeded, one failed and one interrupted
@@ -130,7 +131,7 @@ fn list_on_a_fresh_root_reports_no_record_and_creates_nothing() {
 #[test]
 fn list_on_an_empty_record_directory_reports_no_record() {
     let root = scratch("list-empty");
-    fs::create_dir_all(records_dir(&root)).unwrap();
+    support::create_state_dirs(&records_dir(&root));
     let (stdout, _stderr, ok) = run(&root, &["system", "migrate", "list"]);
     assert!(ok, "list on an empty directory succeeds: {stdout}");
     assert!(stdout.contains("no migration record exists"), "{stdout}");
@@ -162,7 +163,7 @@ fn list_fails_loudly_when_a_record_is_corrupt_but_shows_the_readable_ones() {
     let root = scratch("list-corrupt");
     seed(&root, "good-migration", "planned", "");
     let dir = records_dir(&root);
-    fs::write(dir.join("broken-migration.toml"), "not [ valid toml").unwrap();
+    support::write_record(&dir.join("broken-migration.toml"), "not [ valid toml");
 
     let (stdout, stderr, ok) = run(&root, &["system", "migrate", "list"]);
     assert!(!ok, "a corrupt record must not pass silently: {stdout}");
@@ -311,8 +312,8 @@ fn status_without_a_gate_reports_not_blocked_and_exits_zero() {
 fn status_reports_a_corrupt_record_as_a_fail_closed_block_and_exits_zero() {
     let root = scratch("status-corrupt");
     let dir = records_dir(&root);
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("broken-migration.toml"), "not [ valid toml").unwrap();
+    support::create_state_dirs(&dir);
+    support::write_record(&dir.join("broken-migration.toml"), "not [ valid toml");
 
     let (stdout, _stderr, ok) = run(&root, &["system", "migrate", "status"]);
     assert!(ok, "status is informational and always exits 0: {stdout}");

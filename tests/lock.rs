@@ -7,6 +7,8 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+mod support;
+
 fn nawa() -> Command {
     Command::new(PathBuf::from(env!("CARGO_BIN_EXE_nawa")))
 }
@@ -29,7 +31,7 @@ fn have_flock() -> bool {
 /// the lock. Here the shell opens fd 9, locks it, then `exec`s `sleep`, so the
 /// `Child` itself owns the lock and killing it releases the lock.
 fn hold(root: &std::path::Path, secs: u32) -> Child {
-    fs::create_dir_all(root.join("var/lib/nawa")).unwrap();
+    support::create_state_dirs(&root.join("var/lib/nawa"));
     let c = Command::new("sh")
         .args([
             "-c",
@@ -236,9 +238,9 @@ fn mutating_command_without_the_marker_uses_its_own_lock() {
 /// `<root>/var/lib/nawa/migrations`, not to anything in-process.
 fn seed_gate(root: &std::path::Path, id: &str, state: &str) -> PathBuf {
     let dir = root.join("var/lib/nawa/migrations");
-    fs::create_dir_all(&dir).unwrap();
+    support::create_state_dirs(&dir);
     let path = dir.join(format!("{id}.toml"));
-    fs::write(
+    support::write_record(
         &path,
         format!(
             "schema = 1\nid = \"{id}\"\ndefinition_version = 1\n\
@@ -246,8 +248,7 @@ fn seed_gate(root: &std::path::Path, id: &str, state: &str) -> PathBuf {
              to = {{ domain = \"init-system\", identity = \"systemd\" }}\n\
              handler = \"faseela.init.runit_to_systemd\"\nstate = \"{state}\"\n"
         ),
-    )
-    .unwrap();
+    );
     path
 }
 

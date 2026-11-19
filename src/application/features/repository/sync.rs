@@ -11,6 +11,7 @@
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
+use crate::adapters::pathutil::create_managed_dirs;
 use crate::fetch::{self, RepoRef};
 use crate::{repo, upgrade};
 
@@ -67,7 +68,7 @@ pub(crate) fn sync(root: &Path, repo_ref: &RepoRef, dest: &Path, opts: &SyncOpts
                 rec.download_url.as_deref(),
             )?;
             let cache = fetch::remote_cache_dir(root, &source_url);
-            std::fs::create_dir_all(&cache)
+            create_managed_dirs(&cache)
                 .with_context(|| format!("create recipe archive cache {}", cache.display()))?;
             let path = cache.join(&rec.file);
             fetch::download_cached(&source_url, &path, Some(&rec.sha256))?;
@@ -149,7 +150,7 @@ pub(crate) fn sync(root: &Path, repo_ref: &RepoRef, dest: &Path, opts: &SyncOpts
     let _ = std::fs::remove_dir_all(&old);
 
     if let Some(dir) = rev_path.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+        create_managed_dirs(dir).with_context(|| format!("create {}", dir.display()))?;
     }
     let tmp = rev_path.with_extension("rev.part");
     std::fs::write(&tmp, format!("{}\n", rec.rev))?;

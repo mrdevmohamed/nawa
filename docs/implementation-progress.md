@@ -16,7 +16,7 @@
 | 4 — System profiles & planning | **PINNED TRANSACTION INTEGRATION IMPLEMENTED**: one explicit approval, v2 ordered evidence identity, exact staging, signed-index proof retained by the existing installer, inventory revalidated under the coordinator lock. Non-init policy semantics remain open. |
 | 5 — Migration engine | **INTEGRATED; PRODUCTION BOOT EXECUTION BLOCKED**: schema-2 pinned records, pre-package write-ahead snapshot capture, manifest/root binding and recovery evidence checks are implemented. Firmware/initramfs preparation and rescue acceptance remain blocked; apply and resume fail closed. |
 | 6 — Faseela runit→systemd migration | **BLOCKED** (current Faseela HEAD already uses systemd; the legacy runit migration is for older installations. Real BIOS/UEFI boot acceptance and rescue/recovery contracts remain open.) |
-| 7 — Platform verification | **LOCAL CHECKS PASS; BRANCH CI PENDING**: migration integration passed all 11 CI jobs on `78aaa08` ([run 44417724775](https://github.com/mrdevmohamed/nawa/actions/runs/44417724775)). Schema-v5, solver, recovery-evidence and layering-checker changes pass the full local suite, smoke tests, all isolation levels and static MUSL validation. Real BIOS/UEFI acceptance remains external and separately blocked. |
+| 7 — Platform verification | **LOCAL CHECKS PASSED UNDER `umask 0002`** for the fresh-root permissions fix. The schema-v5 milestone passed all 11 CI jobs on `7af3a03`. [CI run #44453182797](https://github.com/mrdevmohamed/nawa/actions/runs/44453182797) |
 | System Intelligence platform | **IN PROGRESS** — accepted direction: System Intelligence is the umbrella; migration is one high-risk feature within it. |
 
 ## Accepted platform direction (2026-11-18)
@@ -49,10 +49,9 @@
   Refused apply and unresolved resume now return the normal non-success CLI
   exit (1). `system migrate plan` displays the same SystemPlan identity as
   `system plan`. Offline remote planning does not create a cache or write.
-* **Local verification complete (2026-11-19; branch-head CI pending):** the
-  release suite discovered 791 unit tests: 790 passed, 0 failed, and 1 ignored;
-  every integration-test target completed successfully (including the
-  explicitly ignored expensive real-package build). `scripts/ci-no-skips.sh`
+* The November 19 local integration run passed 790 unit tests and ignored one.
+  Every integration-test target succeeded, with the real-package build left
+  ignored in the standard suite. `scripts/ci-no-skips.sh`
   accepted the full-suite log with only the two documented host/root-context
   skips. Release Clippy (`--release --all-targets --locked -- -D warnings`),
   formatting, layering, and diff checks passed. Both `smoke-v05.sh` and
@@ -88,12 +87,32 @@
   dependencies on outer layers and unrelated feature-to-feature imports; only
   three file-specific package/system integration boundaries are allowlisted,
   and stale entries fail CI.
-* **Earlier test invocation note:** one migration integration run using the
-  shell's non-CI umask had 11 fixture-permission failures; these were not
-  treated as passes. The complete successful suite was subsequently run with
-  `umask 022`, matching CI, and is the result recorded above.
-* **Schema v5/solver implementation (local, branch CI pending):** recipes use a
-  dedicated relation source marker and exact `[relations] schema = 1` with
+* The full retest on `7af3a03` passed under `umask 0022`. Under `umask 0002`,
+  26 unit tests and eight integration targets failed. The first archive
+  install reproduced the failure in `smoke-v05.sh`. The lock initializer
+  created group-writable state ancestry that the migration gate rejected.
+* The permissions fix caps new directories created by the lock, repository
+  and recipe caches, object store, sync revision tracking, and default layer
+  cache at `0755` before applying the umask. The gate still refuses existing
+  group- or world-writable state ancestry. Regression coverage exercises a
+  first archive install, a signed HTTP by-name install, archive staging before
+  locking, and a first install after a closure build.
+* The permissions fix passed the locked release suite under `umask 0002` on
+  November 19, 2026. 791 unit tests and 154 integration tests passed, with one
+  intentionally ignored test in each group. `scripts/ci-no-skips.sh` reported
+  zero unexpected skips and two documented context skips. Release build,
+  release Clippy with warnings denied, formatting, layering, shell syntax, and
+  diff checks passed. The full-suite log is at
+  `/tmp/opencode/nawa-permissions-verified.2CLeCRld.log`.
+* Both CLI smokes and all four isolation levels (`none`, `env`, `sandbox`, and
+  `closure`) passed under `umask 0002` with degradation disabled on both native
+  and freshly built `x86_64-unknown-linux-musl` binaries. The MUSL binary passed
+  `scripts/check-static.sh`. A first install after signed recipe sync passed
+  with both a local repository and a loopback HTTP repository. System
+  Intelligence inspection left an empty disposable root untouched, and both
+  plan commands reported the same plan identity.
+* Schema v5 recipes use a dedicated relation source marker and exact
+  `[relations] schema = 1` with
   required `conflicts`/`replaces` lists. Runtime requirement syntax is
   `NAME` or `NAME OP VERSION-REL` (`=`, `!=`, `<`, `<=`, `>`, `>=`), normalized
   and checked with the shared `vercmp`. Signed index schema 5 requires the
@@ -103,8 +122,11 @@
   conflicts fail closed; explicitly requested replacement packages produce
   ordered remove actions through the existing package WAL/history and installer.
   Legacy ordinary operations remain supported. Migration requires trusted v5
-  metadata and refuses replacement/removal actions. Focused relation tests and
-  the full suite passed locally; branch-head CI is pending.
+  metadata and refuses replacement/removal actions.
+* All 11 CI jobs passed on `78aaa08` for migration integration and on
+  `7af3a03` for the schema-v5, solver, recovery-evidence, and layering changes.
+  [CI run #44417724775](https://github.com/mrdevmohamed/nawa/actions/runs/44417724775)
+  and [CI run #44453182797](https://github.com/mrdevmohamed/nawa/actions/runs/44453182797)
 * **Layering enforcement:** domain outer-layer imports and unrelated feature
   internals are now checked; the three intentional package/system use-case
   seams are file-specific with stale-entry detection. Checker passed locally.
@@ -736,7 +758,7 @@ the handlers own only parsing, rendering and prompts.
 
 ## Current state
 
-**Local implementation and verification are complete; branch-head CI and Phase 6 boot acceptance remain pending.** The branch includes read-only `system status`, `system profile show`, `system plan` and `system explain init-system` commands, plus a pinned migration workflow integrated with the existing installer, transaction history, WAL, locks and snapshot adapter. Signed index v5 adds explicit runtime version requirements, conflicts and replacements to the shared package resolver; legacy v1-v4 relation metadata remains unknown. The production runit-to-systemd apply/resume path remains fail-closed until installed-disk BIOS/UEFI boot and rescue/rollback acceptance is independently verified.
+All 11 CI jobs passed on `7af3a03`. The branch includes read-only `system status`, `system profile show`, `system plan` and `system explain init-system` commands, plus a pinned migration workflow integrated with the existing installer, transaction history, WAL, locks and snapshot adapter. Signed index v5 adds explicit runtime version requirements, conflicts and replacements to the shared package resolver. Legacy v1-v4 relation metadata remains unknown. Phase 6 requires independent installed-disk BIOS/UEFI boot and rescue/rollback acceptance. [CI run #44453182797](https://github.com/mrdevmohamed/nawa/actions/runs/44453182797)
 Historical Phase 3–6 notes are retained as an implementation log; later
 entries and the blocker table record the current state.
 
@@ -2045,7 +2067,7 @@ The last preview integration was repaired without weakening the module-layering 
 |---|---|---|---|
 | B1 | **explicit SAQ init selection — MERGED; INSTALLED-DISK RUN PENDING**: Faseela #59 and SAQ #4 are merged. Installed GRUB entries pass `init=/usr/lib/systemd/systemd`, and SAQ tries explicit `init=` before generic fallbacks. Faseela PR #60 adds a BIOS+UEFI install-to-disk harness and makes the release workflow require both `pid1=systemd` and `system-profile=systemd` markers from the installed system. CI currently validates the harness and the installer test mode; no real release ISO has yet been run through that full two-firmware flow. | Faseela + SAQ | Phase 6 VM acceptance |
 | B2 | **legacy `/usr/bin/init` ownership collision — NARROW HANDOFF IMPLEMENTED; FINALIZATION PENDING**: the typed migration handoff accepts only the exact systemd payload path `/usr/bin/init`, sole owner `runit-services`, old symlink `/usr/bin/runit` and staged symlink `../lib/systemd/systemd`. Both package records retain the path through reboot. Production remains blocked until post-boot external boot/rescue acceptance and a separately authorized cleanup operation. | Nawa + Faseela Repo | Phase 6 legacy-package preparation |
-| B3 | **Metadata schemas v4/v5 — IMPLEMENTED; NEW SCHEMA TESTED LOCALLY**: v4 capabilities/dependencies and v5 explicit relations flow recipe → `.PKGINFO` → signed index → shared solver. v1-v4 absent relations remain unknown. Versioned runtime constraints, conflicts, and replacement actions are deterministic; broad versioned virtual-capability semantics remain open. | Nawa (this repo) | Phase 3 — branch CI pending |
+| B3 | **Metadata schemas v4/v5 implemented and tested in CI.** v4 capabilities/dependencies and v5 explicit relations flow from the recipe through `.PKGINFO` and the signed index to the shared solver. v1-v4 absent relations remain unknown. Versioned runtime constraints, conflicts, and replacement actions are deterministic. Broad versioned virtual-capability semantics remain open. | Nawa (this repo) | Phase 3 |
 | B4 | **System Profile — LOADER PATHS TESTED; INSTALLED-IMAGE ACCEPTANCE PENDING**: Faseela Repo #203 is merged and `base-files` writes `/usr/share/nawa/system-profile.toml` with schema 1, `distribution=faseela`, `architecture=x86_64` and `init-system=systemd`. Nawa's production `load_effective(root)` path now has a test using those exact locations; it verifies the administrator file at `/etc/nawa/system-profile.toml` overrides only the declared provider and is reported as the source. The test passed in Nawa CI (700 Rust tests, 0 failures). Faseela PR #60 adds an installed-disk marker for the same profile; actual BIOS/UEFI image execution remains pending. | Faseela Repo + Nawa integration | Phase 6 apply preflight |
 | B5 | **Boot artifact retention — FILESYSTEM INTEGRATION IMPLEMENTED; RESTORE/RESCUE ACCEPTANCE OPEN**: schema-3 snapshot capture is write-ahead ordered before package changes, bound to migration ID and root device/inode, then bound by manifest digest in schema-2 migration state. Recovery verifies manifest, payloads, and staged archive/index/signer/`.PKGINFO` identity. Pinned restore is idempotent and tested but is not an approved production compensation or reboot guarantee. BIOS raw sectors, EFI NVRAM, initramfs reconstruction and external Live-ISO rescue are unresolved. | Nawa + Faseela | Phase 6 handler |
 | B6 | **VM boot-test harness — BIOS+UEFI DISK PATH IMPLEMENTED; FAILURE-SCENARIO ACCEPTANCE OPEN**: Faseela PR #60 adds a harness that boots the ISO, installs to a disposable qcow2 disk, reboots without the ISO and requires actual PID 1 plus installed System Profile markers in both BIOS and UEFI. The release workflow invokes this after the existing Live ISO smoke test and uploads serial logs. PR CI validates CLI construction and test-only installer guards; it does not execute a real VM boot. Remaining: run the harness against a real release ISO in both firmware modes, then add snapshot-driven interrupted-install, failed-boot and restore scenarios required by §14.3. | Nawa/infra + Faseela | Phase 6 acceptance |
@@ -2053,12 +2075,10 @@ The last preview integration was repaired without weakening the module-layering 
 
 ## Exact next task
 
-**Commit and push the locally verified schema-v5/recovery/layering milestone,
-then verify the Actions run for its exact head SHA.** The separate, unresolved
-release gate is external BIOS/UEFI installed-disk and rescue/rollback
-acceptance; the latest Faseela ISO predates the merged BIOS+UEFI harness. Keep
-Nawa's apply/resume fail-closed until real post-merge ISO logs and rescue
-evidence are retained.
+The next production milestone requires retained BIOS and UEFI installed-disk
+logs from a Faseela release ISO built after PR #60 and verified rescue and
+rollback evidence. The latest release, `build-20261116-0622-r143`, predates
+the harness merge. Nawa's apply and resume gates require this acceptance.
 
 The real runit-to-systemd handler must remain fail-closed until the
 distribution-owned boot and recovery contracts are resolved:

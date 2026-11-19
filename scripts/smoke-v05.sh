@@ -29,8 +29,11 @@ test "$(stat -c %a "$KEYS/nawa.sec")" = 600
 A1=$(py_make demo 1.0 1 "v1")
 A2=$(py_make demo 2.0 1 "v2")
 
-echo "== 2. install unsigned v1 (no trust configured: bootstrap mode) =="
-$NAWA install --root "$ROOT" "$A1"
+echo "== 2. install unsigned v1 into a fresh root under umask 0002 =="
+(
+    umask 0002
+    "$NAWA" install --root "$ROOT" "$A1"
+)
 grep -q v1 "$ROOT/usr/bin/demo"
 
 echo "== 3. trust the key; unsigned installs must now be refused =="

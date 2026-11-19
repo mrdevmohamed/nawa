@@ -41,6 +41,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::adapters::migration_record as migrate;
+use crate::adapters::pathutil::create_managed_dirs;
 
 /// Set in the environment of hooks so nested nawa *read-only* calls skip
 /// locking. It is process state inherited by children and forgeable at
@@ -277,8 +278,7 @@ pub(crate) fn try_acquire(root: &Path, mode: Mode) -> Result<Attempt> {
     let file = match mode {
         Mode::Exclusive => {
             if let Some(dir) = path.parent() {
-                std::fs::create_dir_all(dir)
-                    .with_context(|| format!("create {}", dir.display()))?;
+                create_managed_dirs(dir).with_context(|| format!("create {}", dir.display()))?;
             }
             open_rw(&path).with_context(|| {
                 format!("cannot open the package database lock {}", path.display())
@@ -419,16 +419,18 @@ mod tests {
     /// durable state, not through the store's own API.
     fn seed_gate(root: &Path, id: &str, state: &str) -> PathBuf {
         let dir = root.join("var/lib/nawa/migrations");
-        std::fs::create_dir_all(&dir).unwrap();
+        create_managed_dirs(&dir).unwrap();
         let path = dir.join(format!("{id}.toml"));
-        std::fs::write(
+        crate::adapters::atomic::write_atomic(
             &path,
             format!(
                 "schema = 1\nid = \"{id}\"\ndefinition_version = 1\n\
                  from = {{ domain = \"init-system\", identity = \"runit\" }}\n\
                  to = {{ domain = \"init-system\", identity = \"systemd\" }}\n\
                  handler = \"faseela.init.runit_to_systemd\"\nstate = \"{state}\"\n"
-            ),
+            )
+            .as_bytes(),
+            0o600,
         )
         .unwrap();
         path

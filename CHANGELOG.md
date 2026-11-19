@@ -12,6 +12,9 @@
   require proven PID 1 and matching effective profile before considering completion.
 - Refused apply and unresolved resume return exit 1. Both plan commands display
   the approval identity; offline remote planning does not write repository caches.
+- First installs into a fresh root work under `umask 0002`. Nawa creates state
+  and cache directories without group or other write permissions. The migration
+  gate still rejects existing writable state directories as unsafe.
 - Keep production migration blocked pending real firmware/initramfs and rescue
   acceptance. No reboot, old-provider removal or automatic rollback is introduced.
 

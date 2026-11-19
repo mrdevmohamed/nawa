@@ -187,6 +187,8 @@ pub(crate) fn status(root: &Path) -> Status {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::atomic::write_atomic;
+    use crate::adapters::pathutil::create_managed_dirs;
     use crate::domain::system::capability::Capability;
     use crate::domain::system::migration::{
         HandlerId, MigrationDefinition, MigrationState, StepRecord,
@@ -252,13 +254,13 @@ mod tests {
     #[test]
     fn list_reports_a_corrupt_record_with_its_cause_and_keeps_the_rest() {
         let root = tmpdir("migrate-inspect-corrupt");
-        std::fs::create_dir_all(migration_record::migrations_dir(&root)).unwrap();
-        std::fs::write(
-            migration_record::migrations_dir(&root).join("broken-migration.toml"),
-            "not [ valid toml",
+        migration_record::save(&root, &record("good-migration", MigrationState::Planned)).unwrap();
+        write_atomic(
+            &migration_record::migrations_dir(&root).join("broken-migration.toml"),
+            b"not [ valid toml",
+            0o600,
         )
         .unwrap();
-        migration_record::save(&root, &record("good-migration", MigrationState::Planned)).unwrap();
 
         let listing = list(&root).unwrap();
         assert_eq!(listing.records.len(), 1);
@@ -305,15 +307,16 @@ mod tests {
     fn show_propagates_a_corrupt_record_with_its_exact_failure() {
         let root = tmpdir("migrate-inspect-show-corrupt");
         let dir = migration_record::migrations_dir(&root);
-        std::fs::create_dir_all(&dir).unwrap();
+        create_managed_dirs(&dir).unwrap();
         // every required field present except the state: the unknown
         // state name is the exact validation failure this record carries
-        std::fs::write(
-            dir.join("faseela-runit-to-systemd-v1.toml"),
-            "schema = 1\nid = \"m\"\ndefinition_version = 1\n\
+        write_atomic(
+            &dir.join("faseela-runit-to-systemd-v1.toml"),
+            b"schema = 1\nid = \"m\"\ndefinition_version = 1\n\
              from = { domain = \"init-system\", identity = \"runit\" }\n\
              to = { domain = \"init-system\", identity = \"systemd\" }\n\
              handler = \"faseela.init.runit_to_systemd\"\nstate = \"prepped\"\n",
+            0o600,
         )
         .unwrap();
         let error = show(&root, "faseela-runit-to-systemd-v1").unwrap_err();
@@ -365,8 +368,13 @@ mod tests {
         // status must report the block even without a gate-active state
         let root = tmpdir("migrate-inspect-status-corrupt");
         let dir = migration_record::migrations_dir(&root);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("broken-migration.toml"), "not [ valid toml").unwrap();
+        create_managed_dirs(&dir).unwrap();
+        write_atomic(
+            &dir.join("broken-migration.toml"),
+            b"not [ valid toml",
+            0o600,
+        )
+        .unwrap();
 
         let report = status(&root);
         assert!(report.blocked);
@@ -382,7 +390,7 @@ mod tests {
         // read; status reports exactly that instead of failing
         let root = tmpdir("migrate-inspect-status-dir-error");
         let dir = migration_record::migrations_dir(&root);
-        std::fs::create_dir_all(&dir).unwrap();
+        create_managed_dirs(&dir).unwrap();
         let path = dir.join("blocked-migration.toml");
         std::fs::create_dir(&path).unwrap(); // a directory in the file's place
 

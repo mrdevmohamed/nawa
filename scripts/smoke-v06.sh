@@ -46,6 +46,16 @@ for i in $(seq 1 50); do
     curl -fs -o /dev/null "http://127.0.0.1:$PORT/index.toml" 2>/dev/null && break
     sleep 0.1
 done
+# By-name installation can create the remote cache before it locks the DB.
+FRESH_ROOT=$WORK/remote-first-install
+(
+    umask 0002
+    "$NAWA" trust --root "$FRESH_ROOT" "$KEYS/nawa.pub" >/dev/null
+    "$NAWA" install --yes --from-repo --root "$FRESH_ROOT" --recipes "$RECIPES" \
+        --repo "http://127.0.0.1:$PORT" demo
+)
+grep -q v2 "$FRESH_ROOT/usr/bin/demo"
+
 $NAWA upgrade --yes --root "$ROOT" --recipes "$RECIPES" --repo "http://127.0.0.1:$PORT"
 grep -q v2 "$ROOT/usr/bin/demo"
 FNAME=$(awk '/^file/{gsub(/"/,"");print $3}' "$REPO/index.toml")

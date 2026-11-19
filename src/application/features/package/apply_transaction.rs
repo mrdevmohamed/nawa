@@ -1089,8 +1089,13 @@ mod tests {
     fn explicit_replacement_reuses_the_package_remove_and_install_wal() {
         let root = crate::testutil::tmpdir("package-relations-replacement");
         let old = replacement_archive(&root, "old", "");
-        install::install_archive(&old, &root, false, false, None, db::InstallReason::Explicit)
-            .unwrap();
+        {
+            let _guard = lock::acquire(&root, lock::Mode::Exclusive)
+                .unwrap()
+                .unwrap();
+            install::install_archive(&old, &root, false, false, None, db::InstallReason::Explicit)
+                .unwrap();
+        }
         let new = replacement_archive(
             &root,
             "new",

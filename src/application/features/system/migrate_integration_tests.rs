@@ -2,6 +2,7 @@
 //! the real package WAL/installer, exclusively under a disposable root.
 
 use super::{migrate_apply, migrate_coordinator, observation};
+use crate::adapters::pathutil::create_managed_dirs;
 use crate::domain::planning::install::Why;
 use crate::domain::system::plan::{
     ArtifactPin, PackageActionKind, PackageActionSource, SystemPlanPin,
@@ -44,7 +45,7 @@ impl Fixture {
             // access. Missing/corrupt cached artifacts still go through the
             // production fetch verifier and may never become replacements.
             let cache = crate::fetch::remote_cache_dir(&root, &url);
-            std::fs::create_dir_all(&cache).unwrap();
+            create_managed_dirs(&cache).unwrap();
             std::fs::copy(&archive, cache.join(&file)).unwrap();
             entries.push(crate::repo::RepoEntry {
                 name: name.into(),
@@ -256,21 +257,25 @@ fn inventory_changes_after_staging_are_refused_before_durable_intent() {
     let fixture = Fixture::new("pinned-stale-inventory");
     let plan = fixture.stage().unwrap();
     let directory = fixture.root.join("var/lib/nawa/local/changed");
-    std::fs::create_dir_all(&directory).unwrap();
+    create_managed_dirs(&directory).unwrap();
     std::fs::write(
         directory.join("desc"),
         "name='changed'\nversion='1'\nrel=1\n",
     )
     .unwrap();
-    assert!(migrate_coordinator::prepare(
+    let error = migrate_coordinator::prepare(
         &fixture.ctx(),
         migrate_coordinator::PreparationRequest {
             definition: &migrate_apply::builtin_definition(),
             plan,
             ui: &ui(),
-        }
+        },
     )
-    .is_err());
+    .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("installed package inventory changed before mutation"),
+        "{error:#}"
+    );
     assert!(
         crate::adapters::migration_record::load(&fixture.root, &fixture.pin.migration_id)
             .unwrap()
@@ -336,7 +341,7 @@ fn tampered_private_staging_cannot_open_the_mutation_window() {
 fn same_version_inventory_digest_changes_also_invalidate_approval() {
     let mut fixture = Fixture::new("pinned-inventory-identity");
     let directory = fixture.root.join("var/lib/nawa/local/runit");
-    std::fs::create_dir_all(&directory).unwrap();
+    create_managed_dirs(&directory).unwrap();
     std::fs::write(
         directory.join("desc"),
         format!(
@@ -359,15 +364,19 @@ fn same_version_inventory_digest_changes_also_invalidate_approval() {
         ),
     )
     .unwrap();
-    assert!(migrate_coordinator::prepare(
+    let error = migrate_coordinator::prepare(
         &fixture.ctx(),
         migrate_coordinator::PreparationRequest {
             definition: &migrate_apply::builtin_definition(),
             plan,
             ui: &ui(),
-        }
+        },
     )
-    .is_err());
+    .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("installed package inventory changed before mutation"),
+        "{error:#}"
+    );
 }
 
 #[test]

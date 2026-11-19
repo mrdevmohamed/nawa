@@ -2,6 +2,7 @@
 //! against meta recipes (no downloads) and a throwaway root.
 
 use std::fs;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -138,7 +139,11 @@ fn install_recovers_a_crashed_transaction_before_opening_its_own() {
     // and the transaction record is still "preparing".
     let history = d.join("root/var/lib/nawa/history");
     let ghost = d.join("root/var/lib/nawa/local/ghost");
-    fs::create_dir_all(&ghost).unwrap();
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o755)
+        .create(&ghost)
+        .unwrap();
     fs::write(
         ghost.join("desc"),
         "name = \"ghost\"\nversion = \"1\"\nrel = 1\narch = \"x86_64\"\n\

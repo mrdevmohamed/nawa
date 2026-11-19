@@ -645,8 +645,7 @@ mod tests {
         )
         .unwrap();
 
-        let dir = migrations_dir(&root);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = ensure_records_dir(&root).unwrap();
         std::os::unix::fs::symlink(&target, dir.join("faseela-runit-to-systemd-v1.toml")).unwrap();
         let error = load(&root, "faseela-runit-to-systemd-v1").unwrap_err();
         assert!(format!("{error:#}").contains("symlink"), "{error:#}");
@@ -661,14 +660,17 @@ mod tests {
 
         // a symlinked record directory is refused too
         let other = crate::testutil::tmpdir("migrate-store-real-dir");
-        let real = migrations_dir(&other);
-        std::fs::create_dir_all(&real).unwrap();
+        let real = ensure_records_dir(&other).unwrap();
         let swapped = crate::testutil::tmpdir("migrate-store-swapped");
         let swapped_dir = migrations_dir(&swapped);
         let _ = std::fs::remove_dir_all(&swapped_dir);
-        std::fs::create_dir_all(swapped_dir.parent().unwrap()).unwrap();
+        crate::adapters::pathutil::create_managed_dirs(swapped_dir.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(&real, &swapped_dir).unwrap();
-        assert!(record_ids(&swapped).is_err(), "no-follow on the directory");
+        let error = record_ids(&swapped).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("not a real directory"),
+            "{error:#}"
+        );
     }
 
     #[test]
@@ -695,11 +697,10 @@ mod tests {
     #[test]
     fn corrupt_or_unknown_records_fail_closed_naming_the_file() {
         let root = crate::testutil::tmpdir("migrate-store-corrupt");
-        let dir = root.join("var/lib/nawa/migrations");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = ensure_records_dir(&root).unwrap();
         let path = dir.join("faseela-runit-to-systemd-v1.toml");
 
-        std::fs::write(&path, "not [ valid toml").unwrap();
+        atomic::write_atomic(&path, b"not [ valid toml", 0o600).unwrap();
         let e = load(&root, "faseela-runit-to-systemd-v1").unwrap_err();
         assert!(
             format!("{e:#}").contains("faseela-runit-to-systemd-v1.toml"),
@@ -758,24 +759,14 @@ mod tests {
 
     #[test]
     fn symlinked_state_directory_ancestors_are_refused_by_all_store_operations() {
-        for component in ["var", "lib", "nawa"] {
-            let root = crate::testutil::tmpdir(&format!("migrate-store-parent-link-{component}"));
-            let outside =
-                crate::testutil::tmpdir(&format!("migrate-store-parent-outside-{component}"));
+        for component in ["var", "var/lib", "var/lib/nawa"] {
+            let tag = component.replace('/', "-");
+            let root = crate::testutil::tmpdir(&format!("migrate-store-parent-link-{tag}"));
+            let outside = crate::testutil::tmpdir(&format!("migrate-store-parent-outside-{tag}"));
             let record = MigrationRecord::new(&definition());
 
-            let link = match component {
-                "var" => root.join("var"),
-                "lib" => {
-                    std::fs::create_dir_all(root.join("var")).unwrap();
-                    root.join("var/lib")
-                }
-                "nawa" => {
-                    std::fs::create_dir_all(root.join("var/lib")).unwrap();
-                    root.join("var/lib/nawa")
-                }
-                _ => unreachable!(),
-            };
+            let link = root.join(component);
+            crate::adapters::pathutil::create_managed_dirs(link.parent().unwrap()).unwrap();
             std::os::unix::fs::symlink(&outside, &link).unwrap();
 
             assert!(save(&root, &record).is_err(), "save followed {component}");
@@ -827,7 +818,7 @@ mod tests {
     fn group_or_world_writable_state_paths_and_records_are_refused() {
         let root = crate::testutil::tmpdir("migrate-store-writable-state");
         let state_parent = root.join("var/lib/nawa");
-        std::fs::create_dir_all(&state_parent).unwrap();
+        crate::adapters::pathutil::create_managed_dirs(&state_parent).unwrap();
         std::fs::set_permissions(&state_parent, std::fs::Permissions::from_mode(0o777)).unwrap();
         assert!(
             record_ids(&root).is_err(),

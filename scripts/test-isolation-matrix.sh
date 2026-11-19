@@ -13,6 +13,7 @@
 #   sandbox+   : a recipe that reaches for the network cannot (netns)
 #   closure    : the build sees ONLY its dependency closure (deptool's lib is
 #                there, the host's gcc is not, bash comes from the closure)
+#                and its layer cache permits a subsequent first install
 #
 # Usage: scripts/test-isolation-matrix.sh <level>
 # Env:   NAWA=<path to nawa>   (default target/release/nawa)
@@ -156,7 +157,13 @@ if [[ $level == closure ]]; then
   ok "closure prerequisites (base-devel, deptool) built"
 fi
 
-nawa build probe --isolation "$level" "${degraded[@]}" > "$WORK/probe.log" 2>&1 \
+(
+  if [[ $level == closure ]]; then
+    umask 0002
+    unset NAWA_LAYER_CACHE NAWA_NO_LAYER_CACHE
+  fi
+  nawa build probe --isolation "$level" "${degraded[@]}"
+) > "$WORK/probe.log" 2>&1 \
   || { cat "$WORK/probe.log"; die "nawa build probe --isolation $level failed"; }
 cat "$WORK/probe.log"
 [[ -s $WORK/build/out/probe-1.0-1.nawa.tar.zst ]] \
@@ -169,6 +176,10 @@ if [[ $level == closure ]]; then
   grep -q 'deptool-lib=/usr/lib/libdeptool.so' "$WORK/probe.log" || die "closure: dependency lib missing inside the build"
   grep -q 'GCCC-PRESENT-IN-CLOSURE' "$WORK/probe.log"     && die "closure: the host toolchain leaked into the build"
   ok "closure: only the dependency closure is visible (no host gcc)"
+  [[ -d $WORK/target-root/var/cache/nawa ]] || die "default layer cache was not created"
+  (umask 0002; nawa install "$WORK/build/out/probe-1.0-1.nawa.tar.zst")
+  [[ -f $WORK/target-root/usr/bin/probe ]] || die "probe was not installed"
+  ok "first install after a closure build under umask 0002"
 fi
 
 if [[ $level == sandbox || $level == closure ]]; then
