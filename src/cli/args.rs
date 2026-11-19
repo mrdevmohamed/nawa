@@ -295,7 +295,7 @@ pub(crate) enum Cmd {
         /// Repository schema: 1 legacy, 2 signed hashes, 3 URLs, 4 capabilities/runtime deps, 5 package relations
         #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=5))]
         index_version: u32,
-        /// TOML manifest containing package_urls and recipe_urls (required for schema 3)
+        /// TOML manifest containing package_urls and recipe_urls (required for schemas 3–5)
         #[arg(long)]
         locations: Option<PathBuf>,
         /// Also pack this recipe tree into the repository (for `nawa sync`)

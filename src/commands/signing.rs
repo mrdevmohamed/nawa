@@ -25,14 +25,14 @@ pub(crate) fn cmd_repo_create(
     if index_version >= repo::INDEX_SCHEMA_V2 && !sign {
         bail!("repo-create --index-version {index_version} requires --sign; repository indexes v2 and newer must be authenticated");
     }
-    if index_version == repo::INDEX_SCHEMA_V3 && locations.is_none() {
-        bail!("repo-create --index-version 3 requires --locations");
+    if index_version >= repo::INDEX_SCHEMA_V3 && locations.is_none() {
+        bail!("repo-create --index-version {index_version} requires --locations");
     }
-    if index_version != repo::INDEX_SCHEMA_V3 && locations.is_some() {
-        bail!("repo-create --locations is only valid with --index-version 3");
+    if index_version < repo::INDEX_SCHEMA_V3 && locations.is_some() {
+        bail!("repo-create --locations is only valid with --index-version 3, 4, or 5");
     }
     if groups.is_some() && index_version < repo::INDEX_SCHEMA_V2 {
-        bail!("repo-create --groups requires --index-version 2 or 3");
+        bail!("repo-create --groups requires --index-version 2 through 5");
     }
     // Resolve the key before writing anything, so a missing signing
     // key cannot leave an unsigned v2 index in the repository.

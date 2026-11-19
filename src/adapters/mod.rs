@@ -15,6 +15,7 @@ pub(crate) mod checksum;
 pub(crate) mod config;
 pub(crate) mod db;
 pub(crate) mod fswalk;
+pub(crate) mod installed_metadata;
 pub(crate) mod interrupt;
 pub(crate) mod lock;
 pub(crate) mod migration_boot_snapshot;

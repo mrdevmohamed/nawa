@@ -9,3 +9,4 @@ pub(crate) mod diag;
 pub(crate) mod error;
 pub(crate) mod humanize;
 pub(crate) mod output;
+pub(crate) mod package_assessment;

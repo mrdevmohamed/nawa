@@ -24,13 +24,17 @@ pub(crate) struct SystemSnapshot {
     pub(crate) observed: ObservedSystem,
     pub(crate) packages: PackageInventory,
     pub(crate) installed_identities: Vec<crate::domain::system::plan::InstalledIdentity>,
+    pub(crate) package_states:
+        std::collections::BTreeMap<String, crate::domain::system::package_assessment::PackageState>,
 }
 
 pub(crate) fn observe(root: &Path, proc: &Path) -> SystemSnapshot {
     let observed = detect::observe(root, proc);
     let mut installed_identities = Vec::new();
+    let mut package_states = std::collections::BTreeMap::new();
     let packages = match crate::adapters::db::Db::new(root).installed() {
         Ok(entries) => {
+            package_states = crate::adapters::installed_metadata::capture(root, &entries);
             installed_identities = entries
                 .iter()
                 .map(|entry| crate::domain::system::plan::InstalledIdentity {
@@ -67,6 +71,7 @@ pub(crate) fn observe(root: &Path, proc: &Path) -> SystemSnapshot {
         observed,
         packages,
         installed_identities,
+        package_states,
     }
 }
 

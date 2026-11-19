@@ -81,11 +81,15 @@ fn upgrade_inner(
     plan.system_transition =
         observed.and_then(|observed| system_transition::plan(observed, &open, &installed_versions));
 
-    if plan.upgrades.is_empty() && plan.system_transition.is_none() {
+    if plan.upgrades.is_empty() && plan.system_transition.is_none() && !plan.assessment.blocked() {
         crate::nawa_info!("everything up to date ({} installed)", plan.installed.len());
         return Ok(());
     }
     print_plan(&plan);
+
+    if plan.assessment.blocked() {
+        anyhow::bail!("package upgrade assessment found incompatible state; review the reported dependencies, conflicts or replacements before retrying");
+    }
 
     if opts.dry_run {
         crate::nawa_info!("dry run — no changes made");
@@ -115,40 +119,111 @@ struct UpgradePlan<'a> {
     installed: HashMap<String, crate::adapters::db::Entry>,
     upgrades: Vec<PlannedUpgrade<'a>>,
     system_transition: Option<system_transition::Preview>,
+    assessment: crate::domain::system::package_assessment::PackageAssessment,
 }
 
-/// Compare the local database against the repository index and order the
-/// newer packages for installation. Returns `None` when everything is current.
 fn build_plan<'a>(root: &Path, index: &'a repo::Index, recipes: &Path) -> Result<UpgradePlan<'a>> {
-    let db = Db::new(root);
-    let installed_map: HashMap<String, crate::adapters::db::Entry> = db
-        .installed()?
-        .into_iter()
-        .map(|e| (e.name.clone(), e))
-        .collect();
+    let entries = Db::new(root).installed()?;
+    let states = crate::adapters::installed_metadata::capture(root, &entries);
+    let installed_map = entries.into_iter().map(|e| (e.name.clone(), e)).collect();
+    let selection = select_package_upgrades(index, &states, recipes)?;
+    let assessment = assess_selection(&selection, &states)?;
+    Ok(UpgradePlan {
+        installed: installed_map,
+        upgrades: selection.upgrades,
+        system_transition: None,
+        assessment,
+    })
+}
+
+struct PackageSelection<'a> {
+    upgrades: Vec<PlannedUpgrade<'a>>,
+    removals: Vec<String>,
+    resolution_error: Option<String>,
+}
+
+/// Both SystemPlan and upgrade consume this selection and the same pure
+/// assessment. Failed solves retain proposed targets for explanation only;
+/// the incompatible finding prevents execution, including with --force.
+pub(crate) fn assess_package_upgrades(
+    index: &repo::Index,
+    installed: &std::collections::BTreeMap<
+        String,
+        crate::domain::system::package_assessment::PackageState,
+    >,
+    recipes: &Path,
+) -> Result<crate::domain::system::package_assessment::PackageAssessment> {
+    let selection = select_package_upgrades(index, installed, recipes)?;
+    assess_selection(&selection, installed)
+}
+
+fn assess_selection(
+    selection: &PackageSelection<'_>,
+    installed: &std::collections::BTreeMap<
+        String,
+        crate::domain::system::package_assessment::PackageState,
+    >,
+) -> Result<crate::domain::system::package_assessment::PackageAssessment> {
+    use crate::domain::system::package_assessment::{self, PackageChange, PackageState};
+    let changes = selection
+        .upgrades
+        .iter()
+        .map(|upgrade| {
+            let entry = upgrade.entry;
+            let metadata = crate::domain::package::metadata::metadata_from_repository(
+                entry.rundeps.as_ref(),
+                entry.provides.as_ref(),
+                entry.relations.as_ref(),
+            )
+            .map_err(anyhow::Error::msg)?;
+            Ok(PackageChange {
+                name: entry.name.clone(),
+                current: installed.get(&entry.name).map(|p| p.version.clone()),
+                target: PackageState {
+                    version: format!("{}-{}", entry.version, entry.rel),
+                    metadata,
+                },
+                archive: entry.file.clone(),
+                sha256: entry.sha256.clone(),
+                size: entry.size,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(package_assessment::assess(
+        installed,
+        changes,
+        &selection.removals,
+        selection.resolution_error.as_deref(),
+    ))
+}
+
+fn select_package_upgrades<'a>(
+    index: &'a repo::Index,
+    installed_states: &std::collections::BTreeMap<
+        String,
+        crate::domain::system::package_assessment::PackageState,
+    >,
+    recipes: &Path,
+) -> Result<PackageSelection<'a>> {
     let mut candidates: Vec<(&repo::RepoEntry, String)> = Vec::new();
-    let mut entries: Vec<&crate::adapters::db::Entry> = installed_map.values().collect();
-    entries.sort_by(|a, b| a.name.cmp(&b.name));
-    for e in entries {
-        let re = match index.find(&e.name) {
+    for (name, state) in installed_states {
+        let re = match index.find(name) {
             Some(r) => r,
             None => continue, // not in this repo -> untouched
         };
         let new = format!("{}-{}-{}", re.name, re.version, re.rel);
-        if vercmp(
-            &format!("{}-{}", re.version, re.rel),
-            &format!("{}-{}", e.version, e.rel),
-        ) == std::cmp::Ordering::Greater
+        if vercmp(&format!("{}-{}", re.version, re.rel), &state.version)
+            == std::cmp::Ordering::Greater
         {
             candidates.push((re, new));
         }
     }
 
     if candidates.is_empty() {
-        return Ok(UpgradePlan {
-            installed: installed_map,
+        return Ok(PackageSelection {
             upgrades: Vec::new(),
-            system_transition: None,
+            removals: Vec::new(),
+            resolution_error: None,
         });
     }
 
@@ -185,9 +260,9 @@ fn build_plan<'a>(root: &Path, index: &'a repo::Index, recipes: &Path) -> Result
                 },
             );
         }
-        let installed = installed_map
+        let installed = installed_states
             .iter()
-            .map(|(name, e)| (name.clone(), format!("{}-{}", e.version, e.rel)))
+            .map(|(name, state)| (name.clone(), state.version.clone()))
             .collect();
         let targets = candidates
             .iter()
@@ -200,10 +275,25 @@ fn build_plan<'a>(root: &Path, index: &'a repo::Index, recipes: &Path) -> Result
             None,
             crate::domain::planning::install::Why::Update,
             true,
-        )?;
-        if !resolved.removals.is_empty() {
-            anyhow::bail!("repository upgrade requires package replacements; review them explicitly with nawa install (init retirement is never automatic)");
-        }
+        );
+        let resolved = match resolved {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                return Ok(PackageSelection {
+                    upgrades: candidates
+                        .into_iter()
+                        .map(|(entry, new_version)| PlannedUpgrade {
+                            entry,
+                            new_version,
+                            reason: crate::domain::planning::install::Why::Update,
+                        })
+                        .collect(),
+                    removals: Vec::new(),
+                    resolution_error: Some(format!("{error:#}")),
+                })
+            }
+        };
+        let removals = resolved.removals.iter().map(|r| r.name.clone()).collect();
         let upgrades = resolved
             .items
             .into_iter()
@@ -218,10 +308,10 @@ fn build_plan<'a>(root: &Path, index: &'a repo::Index, recipes: &Path) -> Result
                 }
             })
             .collect();
-        return Ok(UpgradePlan {
-            installed: installed_map,
+        return Ok(PackageSelection {
             upgrades,
-            system_transition: None,
+            removals,
+            resolution_error: None,
         });
     }
 
@@ -231,14 +321,10 @@ fn build_plan<'a>(root: &Path, index: &'a repo::Index, recipes: &Path) -> Result
     let names: Vec<String> = candidates.iter().map(|(r, _)| r.name.clone()).collect();
     let ordered: Vec<String> = match recipe::load_all(recipes) {
         Ok(tree) if !tree.is_empty() => {
-            let installed: HashSet<String> = installed_map.keys().cloned().collect();
+            let installed: HashSet<String> = installed_states.keys().cloned().collect();
             order_with_fallback(&names, &installed, &tree)
         }
         _ => {
-            crate::nawa_note_stderr!(
-                "no recipe tree at {} — applying in alphabetical order",
-                recipes.display()
-            );
             let mut n = names.clone();
             n.sort();
             n
@@ -259,10 +345,10 @@ fn build_plan<'a>(root: &Path, index: &'a repo::Index, recipes: &Path) -> Result
             }
         })
         .collect();
-    Ok(UpgradePlan {
-        installed: installed_map,
+    Ok(PackageSelection {
         upgrades,
-        system_transition: None,
+        removals: Vec::new(),
+        resolution_error: None,
     })
 }
 
@@ -287,6 +373,9 @@ fn print_plan(plan: &UpgradePlan<'_>) {
                 pal.ok(&upgrade.new_version),
             );
         }
+    }
+    for line in crate::presentation::package_assessment::render(&plan.assessment) {
+        println!("{line}");
     }
     if let Some(preview) = &plan.system_transition {
         println!();

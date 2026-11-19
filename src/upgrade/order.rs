@@ -28,7 +28,6 @@ pub(crate) fn order_with_fallback(
             .filter(|n| planned.contains(n))
             .collect(),
         Err(_) => {
-            crate::nawa_warn!("recipe graph incomplete for this plan — alphabetical order");
             let mut k = known.clone();
             k.sort();
             k

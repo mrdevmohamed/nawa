@@ -66,10 +66,264 @@ fn run(root: &Path, args: &[&str]) -> (String, String, bool) {
     )
 }
 
+fn run_with_config(root: &Path, config: &Path, args: &[&str]) -> (String, String, bool) {
+    let output = nawa()
+        .env_remove("NAWA_REPO")
+        .env("NAWA_CONFIG", config)
+        .args(["--root", root.to_str().unwrap()])
+        .args(args)
+        .output()
+        .unwrap();
+    (
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+        output.status.success(),
+    )
+}
+
 fn write_profile(root: &Path, relative: &str, content: &str) {
     let path = root.join(relative);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, content).unwrap();
+}
+
+fn write_package(
+    path: &Path,
+    name: &str,
+    version: &str,
+    rundeps: &[&str],
+    conflicts: &[&str],
+    replaces: &[&str],
+) {
+    let list = |values: &[&str]| values.join(",");
+    let pkginfo = format!(
+        "pkgname = {name}\npkgver = {version}\npkgrel = 1\narch = any\nrundeps = {}\nprovides = \nsize = 1\nrelations_schema = 1\nconflicts = {}\nreplaces = {}\n",
+        list(rundeps),
+        list(conflicts),
+        list(replaces),
+    );
+    write_archive(path, name, version, &pkginfo);
+}
+
+fn write_archive(path: &Path, name: &str, version: &str, pkginfo: &str) {
+    let file = fs::File::create(path).unwrap();
+    let encoder = zstd::stream::write::Encoder::new(file, 3).unwrap();
+    let mut tar = tar::Builder::new(encoder);
+    let mut info = tar::Header::new_gnu();
+    info.set_size(pkginfo.len() as u64);
+    info.set_mode(0o644);
+    info.set_cksum();
+    tar.append_data(&mut info, ".PKGINFO", pkginfo.as_bytes())
+        .unwrap();
+
+    let payload = format!("payload/usr/share/{name}");
+    let body = format!("{name}-{version}\n");
+    let mut payload_header = tar::Header::new_gnu();
+    payload_header.set_size(body.len() as u64);
+    payload_header.set_mode(0o644);
+    payload_header.set_cksum();
+    tar.append_data(&mut payload_header, payload, body.as_bytes())
+        .unwrap();
+    tar.into_inner().unwrap().finish().unwrap();
+}
+
+fn package_repo(dir: &Path, archive: &Path, key: &Path) {
+    let locations = dir.join("locations.toml");
+    let file = archive.file_name().unwrap().to_string_lossy();
+    fs::write(
+        &locations,
+        format!(
+            "schema = 1\n\n[package_urls]\n{file:?} = \"https://packages.example.test/{file}\"\n"
+        ),
+    )
+    .unwrap();
+    let output = nawa()
+        .args([
+            "repo-create",
+            dir.to_str().unwrap(),
+            "--index-version",
+            "5",
+            "--locations",
+            locations.to_str().unwrap(),
+            "--sign",
+            "--key",
+            key.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "repo-create failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn fixture(tag: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+    let base = scratch(tag);
+    let root = base.join("root");
+    let keys = base.join("keys");
+    let (stdout, stderr, success) = run(&root, &["keygen", "--out", keys.to_str().unwrap()]);
+    assert!(success, "{stderr}\n{stdout}");
+    let (stdout, stderr, success) = run(&root, &["trust", keys.join("nawa.pub").to_str().unwrap()]);
+    assert!(success, "{stderr}\n{stdout}");
+    let repository = base.join("repository");
+    fs::create_dir_all(&repository).unwrap();
+    let config = base.join("nawa.toml");
+    fs::write(
+        &config,
+        format!("repo = {:?}\n", repository.to_str().unwrap()),
+    )
+    .unwrap();
+    (base, root, keys.join("nawa.sec"), config)
+}
+
+fn install_fixture(root: &Path, archive: &Path) {
+    let (stdout, stderr, success) = run(
+        root,
+        &[
+            "install",
+            "--allow-unsigned",
+            "--yes",
+            archive.to_str().unwrap(),
+        ],
+    );
+    assert!(success, "{stderr}\n{stdout}");
+}
+
+fn assessment_lines(output: &str) -> Vec<&str> {
+    let mut lines = output
+        .lines()
+        .skip_while(|line| !line.starts_with("  Package assessment:"));
+    let mut report = vec![lines.next().expect(output)];
+    report.extend(lines.take_while(|line| line.starts_with("    ")));
+    report
+}
+
+fn compare_assessments(root: &Path, config: &Path, blocked: bool) -> String {
+    let (plan, stderr, success) = run_with_config(root, config, &["system", "plan"]);
+    assert!(success, "{stderr}\n{plan}");
+    for args in [
+        vec!["upgrade", "--dry-run"],
+        vec!["upgrade", "--dry-run", "--force"],
+    ] {
+        let (upgrade, stderr, success) = run_with_config(root, config, &args);
+        assert_eq!(success, !blocked, "{stderr}\n{upgrade}");
+        assert_eq!(assessment_lines(&plan), assessment_lines(&upgrade));
+        if blocked {
+            assert!(
+                stderr.contains("assessment found incompatible state"),
+                "{stderr}"
+            );
+            assert!(!upgrade.contains("dry run — no changes made"), "{upgrade}");
+        }
+    }
+    plan
+}
+
+#[test]
+fn shared_assessment_blocks_retained_reverse_dependencies_and_conflicts_even_with_force() {
+    let (base, root, key, config) = fixture("assessment-retained");
+    let old = base.join("openssl-1-1.nawa.tar.zst");
+    write_package(&old, "openssl", "1", &[], &[], &[]);
+    install_fixture(&root, &old);
+    let consumer = base.join("consumer-1-1.nawa.tar.zst");
+    write_package(
+        &consumer,
+        "consumer",
+        "1",
+        &["openssl<2-1"],
+        &["openssl>=2-1"],
+        &[],
+    );
+    install_fixture(&root, &consumer);
+    let next = base.join("repository/openssl-2-1.nawa.tar.zst");
+    write_package(&next, "openssl", "2", &[], &[], &[]);
+    package_repo(next.parent().unwrap(), &next, &key);
+
+    let desc = root.join("var/lib/nawa/local/openssl/desc");
+    let before = fs::read(&desc).unwrap();
+    let plan = compare_assessments(&root, &config, true);
+    assert!(plan.contains("incompatible: consumer: resulting package set does not satisfy runtime requirement openssl<2-1"), "{plan}");
+    assert!(plan.contains("incompatible: consumer: resulting package set still matches conflict/replacement openssl>=2-1"), "{plan}");
+    let (stdout, stderr, success) =
+        run_with_config(&root, &config, &["upgrade", "--force", "--yes"]);
+    assert!(!success, "{stderr}\n{stdout}");
+    assert!(
+        stderr.contains("assessment found incompatible state"),
+        "{stderr}"
+    );
+    assert_eq!(fs::read(desc).unwrap(), before);
+    assert_eq!(
+        fs::read_to_string(root.join("usr/share/openssl")).unwrap(),
+        "openssl-1\n"
+    );
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn shared_assessment_reports_legacy_installed_declarations_as_unknown() {
+    let (base, root, key, config) = fixture("assessment-legacy");
+    let old = base.join("linux-1-1.nawa.tar.zst");
+    write_archive(
+        &old,
+        "linux",
+        "1",
+        "pkgname = linux\npkgver = 1\npkgrel = 1\narch = any\nsize = 1\n",
+    );
+    install_fixture(&root, &old);
+    let next = base.join("repository/linux-2-1.nawa.tar.zst");
+    write_package(&next, "linux", "2", &[], &[], &[]);
+    package_repo(next.parent().unwrap(), &next, &key);
+    let retained = base.join("legacy-consumer-1-1.nawa.tar.zst");
+    write_archive(
+        &retained,
+        "legacy-consumer",
+        "1",
+        "pkgname = legacy-consumer\npkgver = 1\npkgrel = 1\narch = any\nsize = 1\n",
+    );
+    install_fixture(&root, &retained);
+    let plan = compare_assessments(&root, &config, false);
+    assert!(
+        plan.contains(
+            "unknown: linux: installed or candidate dependency declaration is unavailable"
+        ),
+        "{plan}"
+    );
+    assert!(
+        plan.contains("unknown: legacy-consumer: runtime dependencies are unknown"),
+        "{plan}"
+    );
+    assert!(
+        plan.contains("unknown: legacy-consumer: package relations are unknown"),
+        "{plan}"
+    );
+    assert!(
+        plan.contains("Reboot recommended after validation"),
+        "{plan}"
+    );
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn shared_assessment_uses_verified_installed_declarations_for_dependency_changes() {
+    let (base, root, key, config) = fixture("assessment-declarations");
+    let old = base.join("editor-1-1.nawa.tar.zst");
+    write_package(&old, "editor", "1", &[], &[], &[]);
+    install_fixture(&root, &old);
+    let library = base.join("library-1-1.nawa.tar.zst");
+    write_package(&library, "library", "1", &[], &[], &[]);
+    install_fixture(&root, &library);
+    let next = base.join("repository/editor-2-1.nawa.tar.zst");
+    write_package(&next, "editor", "2", &["library>=1-1"], &[], &[]);
+    package_repo(next.parent().unwrap(), &next, &key);
+    let plan = compare_assessments(&root, &config, false);
+    assert!(
+        plan.contains("review: editor: runtime requirement added or changed: library>=1-1"),
+        "{plan}"
+    );
+    assert!(!plan.contains("unknown: editor:"), "{plan}");
+    fs::remove_dir_all(base).unwrap();
 }
 
 #[test]

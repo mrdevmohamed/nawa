@@ -6,5 +6,6 @@ pub(crate) mod capability;
 pub(crate) mod identity;
 pub(crate) mod migration;
 pub(crate) mod observation;
+pub(crate) mod package_assessment;
 pub(crate) mod plan;
 pub(crate) mod profile;

@@ -56,7 +56,12 @@ fn print_system_profile(root: &Path) -> Result<()> {
 }
 
 fn print_system_plan(ctx: &Ctx) -> Result<()> {
-    let plan = system_plan::build(&ctx.root, Path::new("/proc"), ctx.repo.as_deref());
+    let plan = system_plan::build_with_recipes(
+        &ctx.root,
+        Path::new("/proc"),
+        ctx.repo.as_deref(),
+        &ctx.recipes,
+    );
     for line in render_system_plan(&plan.snapshot.observed) {
         println!("{line}");
     }
@@ -135,6 +140,10 @@ fn render_unified_system_plan(plan: &system_plan::SystemPlan) -> Vec<String> {
         }
     }
 
+    match &plan.packages {
+        Ok(report) => lines.extend(crate::presentation::package_assessment::render(report)),
+        Err(reason) => lines.push(format!("  Package assessment: unresolved — {reason}")),
+    }
     match &plan.transition {
         system_plan::TransitionAssessment::NotEvaluated { reason } => {
             lines.push(format!("  Transition: unresolved — {reason}"));

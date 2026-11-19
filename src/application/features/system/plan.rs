@@ -68,6 +68,8 @@ pub(crate) struct SystemPlan {
     pub(crate) repository: RepositoryAssessment,
     pub(crate) transition: TransitionAssessment,
     pub(crate) identity: String,
+    pub(crate) packages:
+        Result<crate::domain::system::package_assessment::PackageAssessment, String>,
 }
 
 /// Exact identities copied from the reviewed SystemPlan into migration approval.
@@ -75,7 +77,7 @@ pub(crate) struct SystemPlan {
 pub(crate) use crate::domain::system::plan::{ArtifactPin, SystemPlanPin};
 
 impl SystemPlan {
-    /// Only a fully resolved transition backed by a trusted signed v4 index
+    /// Only a fully resolved transition backed by a trusted signed v5 index
     /// can be turned into an explicit migration approval.
     pub(crate) fn approval_pin(&self, expected_migration_id: &str) -> Result<SystemPlanPin> {
         let pin = self.pin_evidence(expected_migration_id)?;
@@ -173,7 +175,18 @@ impl SystemPlan {
 }
 
 pub(crate) fn build(root: &Path, proc: &Path, repository: Option<&str>) -> SystemPlan {
+    build_with_recipes(root, proc, repository, &root.join("var/lib/nawa/recipes"))
+}
+
+pub(crate) fn build_with_recipes(
+    root: &Path,
+    proc: &Path,
+    repository: Option<&str>,
+    recipes: &Path,
+) -> SystemPlan {
     let snapshot = observation::observe(root, proc);
+    let mut packages =
+        Err("package assessment requires an available inventory and repository".into());
 
     let (repository, transition) = match &snapshot.packages {
         PackageInventory::Unavailable { reason } => (
@@ -219,6 +232,12 @@ pub(crate) fn build(root: &Path, proc: &Path, repository: Option<&str>) -> Syste
                             },
                         ),
                         Ok(open) => {
+                            packages = crate::upgrade::assess_package_upgrades(
+                                &open.index,
+                                &snapshot.package_states,
+                                recipes,
+                            )
+                            .map_err(|error| format!("{error:#}"));
                             let assessment = assess_repository(
                                 kind,
                                 source_fingerprint,
@@ -240,12 +259,13 @@ pub(crate) fn build(root: &Path, proc: &Path, repository: Option<&str>) -> Syste
         },
     };
 
-    let identity = plan_identity(&snapshot, &repository, &transition);
+    let identity = plan_identity(&snapshot, &repository, &transition, &packages);
     let mut plan = SystemPlan {
         snapshot,
         repository,
         transition,
         identity,
+        packages,
     };
     if let TransitionAssessment::Preview(SystemTransitionPreview::Candidate { id, .. }) =
         &plan.transition
@@ -478,6 +498,7 @@ fn plan_identity(
     snapshot: &SystemSnapshot,
     repository: &RepositoryAssessment,
     transition: &TransitionAssessment,
+    packages: &Result<crate::domain::system::package_assessment::PackageAssessment, String>,
 ) -> String {
     let mut material = String::from("nawa-system-plan-v1");
     append_part(&mut material, &format!("{:?}", snapshot.observed));
@@ -498,6 +519,7 @@ fn plan_identity(
     }
     append_part(&mut material, &format!("{repository:?}"));
     append_part(&mut material, &format!("{transition:?}"));
+    append_part(&mut material, &format!("{packages:?}"));
     format!("sp-{}", fingerprint(material.as_bytes()))
 }
 
@@ -568,6 +590,7 @@ mod tests {
                 "runit".to_string(),
                 "2.1-1".to_string(),
             )])),
+            package_states: std::collections::BTreeMap::new(),
         };
         let action = |name: &str, digest: &str| crate::upgrade::system_transition::PackageAction {
             kind: PackageActionKind::Install,
@@ -584,6 +607,7 @@ mod tests {
         };
         let mut plan = SystemPlan {
             snapshot,
+            packages: Ok(crate::domain::system::package_assessment::PackageAssessment::default()),
             repository: RepositoryAssessment::Opened {
                 kind: RepositoryKind::Remote,
                 source_fingerprint: "a".repeat(64),
