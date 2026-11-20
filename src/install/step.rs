@@ -9,7 +9,7 @@
 use anyhow::Result;
 use std::path::Path;
 
-use crate::db::{Db, Entry};
+use crate::adapters::db::{Db, Entry};
 use crate::transaction::context::RecorderHandle;
 use crate::transaction::history::{committed_hook_failed, PackageState, StepAction, StepStatus};
 
@@ -116,7 +116,7 @@ pub(crate) fn record_remove_outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::Db;
+    use crate::adapters::db::Db;
     use crate::testutil::{entry, tmpdir};
     use crate::transaction::context::{begin_operation, OperationCommand};
     use crate::transaction::history::{load_record, PackageState, TransactionRecord};
@@ -259,7 +259,7 @@ mod tests {
         let package = entry("demo", "1.0", &"a".repeat(64));
         let db = Db::new(&root);
         db.add(&package, &[], &Default::default()).unwrap();
-        let hooks = crate::archive::Hooks {
+        let hooks = crate::adapters::archive::Hooks {
             post_install: "true".to_string(),
             ..Default::default()
         };

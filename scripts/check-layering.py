@@ -5,7 +5,18 @@ Checks (production code only; `#[cfg(test)]` items are ignored):
 
   1. no dependency cycle between top-level modules (`crate::a` -> `crate::b`
      -> `crate::a`, however long the chain);
-  2. no `use crate::*` glob import, which hides the real dependencies.
+  2. no `use crate::*` glob import, which hides the real dependencies;
+  3. dependency direction: modules outside the presentation layer must not
+     import presentation modules (`cli`, `commands`, `output`, `color`,
+     `diag`, `humanize`, `confirm`, `bootstrap`, `main`), except for the
+     explicitly allowlisted legacy edges below; use-case code under
+     `application/features/` may never import presentation, allowlist or
+     not. Stale allowlist entries (edges that no longer exist) also fail:
+      the list must shrink as use cases are extracted.
+  4. the domain layer imports only domain code (plus its documented small
+     pure helpers); it cannot reach application, presentation or adapters;
+  5. feature use cases cannot reach into unrelated feature internals except
+     for the three explicit package/system integration boundaries below.
 
 Run from the repository root:  python3 scripts/check-layering.py
 Standard library only.
@@ -16,6 +27,50 @@ import re
 import sys
 
 SRC = "src"
+
+# Presentation renders, prompts and formats; everything else (application
+# policy, use cases, domain logic, adapters in transition) must not import
+# it. Presentation itself may import anything — rendering is the outermost
+# layer.
+PRESENTATION = frozenset({
+    "bootstrap",
+    "cli",
+    "commands",
+    "main",
+    "presentation",
+})
+
+# Legacy adapter -> presentation edges that predate the feature-oriented
+# split. Every entry is waiting on a specific extraction documented in
+# docs/implementation-progress.md; removing the edge removes the entry.
+# Entries must shrink: an edge that no longer exists fails the check.
+LEGACY_PRESENTATION_IMPORTS = {
+    # undo prompts inside the compensation flow; moves behind the user
+    # interaction port with the history use cases
+    ("undo", "presentation"),
+    # fetch/build (incl. ecosystem source staging and slimming)/install/
+    # plugins/upgrade print progress notes and format sizes inline; those
+    # notes move out with the remaining use-case extractions. `repositories`
+    # and `fetchrun` used to be top-level modules and are now under
+    # `commands` / `build`, so their entries were removed, not renamed.
+    ("fetch", "presentation"),
+    ("build", "presentation"),
+    ("install", "presentation"),
+    ("plugins", "presentation"),
+    ("upgrade", "presentation"),
+}
+
+# Intentional feature-to-feature edges. They must name both the concrete file
+# and target feature so a new package cannot smuggle in another feature's
+# policy. These are the supported composition seams, not a folder-wide grant.
+FEATURE_BOUNDARIES = {
+    # Package installs receive the sealed migration permit; the coordinator
+    # calls the ordinary package executor with its held guard.
+    ("application/features/package/apply_transaction.rs", "system"),
+    ("application/features/system/migrate_coordinator.rs", "package"),
+    # Package planning consumes the effective system profile policy.
+    ("application/features/package/plan_install.rs", "system"),
+}
 
 
 def strip_tests(text):
@@ -110,6 +165,105 @@ def main():
         print("error: `use crate::*` hides module dependencies; import items explicitly:")
         for g in globs:
             print(f"    {g}")
+
+    # use-case code under application/features/ is the new functional core:
+    # it never imports presentation, allowlist or not
+    def features_file(p):
+        return os.path.relpath(p, SRC).startswith("application/features/")
+
+    for m in sorted(names):
+        for t in sorted(edges[m]):
+            if t not in PRESENTATION:
+                continue
+            for p in sorted(edges[m][t]):
+                if features_file(p):
+                    failed = True
+                    print(f"error: use-case code must not import presentation {t}:")
+                    print(f"    {p}")
+
+    # The domain is the innermost layer. It cannot depend on infrastructure,
+    # orchestration or presentation; pure shared helpers (suggest/version)
+    # remain separate leaf utilities and may be used by domain algorithms.
+    DOMAIN_FORBIDDEN = frozenset({"adapters", "application", "presentation", "commands", "cli", "install", "transaction", "repo", "upgrade", "fetch", "build"})
+    for path in sorted(modules.get("domain", [])):
+        for line_no, line in enumerate(strip_tests(open(path).read()), 1):
+            for hit in re.finditer(r"crate::([a-z_][a-z_0-9]*)", line):
+                target = hit.group(1)
+                if target in DOMAIN_FORBIDDEN:
+                    failed = True
+                    print(f"error: domain code depends on outer layer {target}: {path}:{line_no}")
+
+    feature_edge_paths = collections.defaultdict(set)
+    feature_target_edges = collections.defaultdict(set)
+    for path in [p for paths in modules.values() for p in paths if features_file(p)]:
+        rel = os.path.relpath(path, SRC).replace(os.sep, "/")
+        source_feature = rel.split("/")[2]
+        for line_no, line in enumerate(strip_tests(open(path).read()), 1):
+            for hit in re.finditer(r"crate::application::features::([a-z_][a-z_0-9]*)", line):
+                target_feature = hit.group(1)
+                if source_feature != target_feature:
+                    feature_edge_paths[(rel, target_feature)].add(f"{path}:{line_no}")
+                    feature_target_edges[(source_feature, target_feature)].add(path)
+    for edge, locations in sorted(feature_edge_paths.items()):
+        if edge not in FEATURE_BOUNDARIES:
+            failed = True
+            print(f"error: feature code reaches into unrelated feature `{edge[1]}`: {edge[0]}")
+            for location in sorted(locations): print(f"    {location}")
+    for source, target in sorted(FEATURE_BOUNDARIES):
+        if not feature_edge_paths.get((source, target)):
+            failed = True
+            print(f"error: stale feature boundary ({source} -> {target}); remove the exception")
+
+    # direction rules: nothing outside presentation imports presentation code
+    def presentation_edge(m, t):
+        return t in PRESENTATION and m not in PRESENTATION and (m, t) not in LEGACY_PRESENTATION_IMPORTS
+
+    for m in sorted(names):
+        for t in sorted(edges[m]):
+            if not presentation_edge(m, t):
+                continue
+            general = [p for p in sorted(edges[m][t]) if not features_file(p)]
+            if not general:
+                continue  # covered by the application/features rule above
+            failed = True
+            print(
+                f"error: {m} imports presentation {t} — decide, render nothing:"
+                " move the message into the return value and print it in the handler,"
+                " or extend the documented allowlist if it is a legacy edge"
+            )
+            for p in general:
+                print(f"    {p}")
+
+    # The migration gate-crossing capability is minted only by the migration
+    # feature subtree. A call from any other module would let an ordinary
+    # package command cross a pending migration's gate (§10.3/§13).
+    MIGRATION_MINT = "migration_authority()"
+    MIGRATION_MINT_ALLOWED = "application/features/system/"
+    for m, paths in modules.items():
+        for p in paths:
+            for n, line in enumerate(strip_tests(open(p).read()), 1):
+                if MIGRATION_MINT in line:
+                    rel = os.path.relpath(p, SRC).replace(os.sep, "/")
+                    if rel not in ("lock.rs", "adapters/lock.rs") and not rel.startswith(MIGRATION_MINT_ALLOWED):
+                        failed = True
+                        print(
+                            "error: only migration feature code may mint the "
+                            f"migration gate-crossing capability: {p}:{n}"
+                        )
+
+    # the allowlist documents temporary exceptions and must shrink
+    for entry in sorted(LEGACY_PRESENTATION_IMPORTS):
+        if not edges[entry[0]].get(entry[1]):
+            failed = True
+            print(
+                f"error: stale layering allowlist entry ({entry[0]}, {entry[1]}):"
+                " the edge is gone — remove the exception"
+            )
+    for entry in sorted(FEATURE_BOUNDARIES):
+        if not feature_edge_paths.get(entry):
+            failed = True
+            print(f"error: stale feature boundary allowlist entry {entry}")
+
     if failed:
         return 1
     print(f"layering ok: {len(names)} modules, no cycles, no glob imports of the crate root")

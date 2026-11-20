@@ -5,8 +5,9 @@
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
-use crate::ctx::Ctx;
-use crate::{repo, sign};
+use crate::adapters::sign;
+use crate::application::context::Ctx;
+use crate::repo;
 
 /// `nawa repo-create`: index a directory of archives, optionally signed.
 #[allow(clippy::too_many_arguments)]
@@ -24,14 +25,14 @@ pub(crate) fn cmd_repo_create(
     if index_version >= repo::INDEX_SCHEMA_V2 && !sign {
         bail!("repo-create --index-version {index_version} requires --sign; repository indexes v2 and newer must be authenticated");
     }
-    if index_version == repo::INDEX_SCHEMA_V3 && locations.is_none() {
-        bail!("repo-create --index-version 3 requires --locations");
+    if index_version >= repo::INDEX_SCHEMA_V3 && locations.is_none() {
+        bail!("repo-create --index-version {index_version} requires --locations");
     }
-    if index_version != repo::INDEX_SCHEMA_V3 && locations.is_some() {
-        bail!("repo-create --locations is only valid with --index-version 3");
+    if index_version < repo::INDEX_SCHEMA_V3 && locations.is_some() {
+        bail!("repo-create --locations is only valid with --index-version 3, 4, or 5");
     }
     if groups.is_some() && index_version < repo::INDEX_SCHEMA_V2 {
-        bail!("repo-create --groups requires --index-version 2 or 3");
+        bail!("repo-create --groups requires --index-version 2 through 5");
     }
     // Resolve the key before writing anything, so a missing signing
     // key cannot leave an unsigned v2 index in the repository.
@@ -44,20 +45,28 @@ pub(crate) fn cmd_repo_create(
         None
     };
     // A relative --out lands inside the repo dir, not in the CWD.
-    let out = if out.is_absolute() { out } else { dir.join(out) };
+    let out = if out.is_absolute() {
+        out
+    } else {
+        dir.join(out)
+    };
     let tree = match (recipes, recipes_rev) {
         (Some(t), Some(r)) => Some((t, r)),
         _ => None,
     };
     repo::create_index_with_locations_and_groups(
-        dir, &out, tree, index_version, locations, groups
+        dir,
+        &out,
+        tree,
+        index_version,
+        locations,
+        groups,
     )?;
     if let Some(kp) = signing_key {
         let sp = sign::sign(&out, &kp)?;
         crate::nawa_info!("signed index -> {}", sp.display());
     }
     Ok(())
-
 }
 
 /// `nawa repo-update`: derive a new signed index from a verified base index.
@@ -83,15 +92,23 @@ pub(crate) fn cmd_repo_update(
     // Verify the exact bytes that are then parsed: an unverified base
     // must never flow into a signed index.
     let vk = sign::load_verify_key(trust_key)?;
-    let base_bytes = std::fs::read(base)
-        .with_context(|| format!("read base index {}", base.display()))?;
+    let base_bytes =
+        std::fs::read(base).with_context(|| format!("read base index {}", base.display()))?;
     let sf = sign::read_sig_file(&sign::sig_path_for(base))?;
     sign::verify_bytes(&base_bytes, &vk, &sf.sig).with_context(|| {
-        format!("base index {} is not signed by {}; refusing to update an unverified index", base.display(), trust_key.display())
+        format!(
+            "base index {} is not signed by {}; refusing to update an unverified index",
+            base.display(),
+            trust_key.display()
+        )
     })?;
     let base_index = repo::load_index_bytes(&base_bytes)
         .with_context(|| format!("parse base index {}", base.display()))?;
-    let out = if out.is_absolute() { out } else { dir.join(out) };
+    let out = if out.is_absolute() {
+        out
+    } else {
+        dir.join(out)
+    };
     let tree = match (recipes, recipes_rev) {
         (Some(t), Some(r)) => Some((t, r)),
         _ => None,
@@ -111,7 +128,6 @@ pub(crate) fn cmd_repo_update(
     let sp = sign::sign(&out, &signing_key)?;
     crate::nawa_info!("signed index -> {}", sp.display());
     Ok(())
-
 }
 
 /// `nawa keygen`
@@ -119,9 +135,11 @@ pub(crate) fn cmd_keygen(out: Option<PathBuf>) -> Result<()> {
     let dir = out.unwrap_or_else(sign::default_key_dir);
     let (sec, pub_) = sign::keygen(&dir)?;
     crate::nawa_info!("secret key  {}  (keep safe, mode 0600)", sec.display());
-    crate::nawa_info!("public key  {}  (share / `nawa trust` on targets)", pub_.display());
+    crate::nawa_info!(
+        "public key  {}  (share / `nawa trust` on targets)",
+        pub_.display()
+    );
     Ok(())
-
 }
 
 /// `nawa sign`
@@ -130,7 +148,6 @@ pub(crate) fn cmd_sign(file: &Path, key: Option<&Path>) -> Result<()> {
     let sp = sign::sign(file, &kp)?;
     crate::nawa_info!("signed {} -> {}", file.display(), sp.display());
     Ok(())
-
 }
 
 /// `nawa trust`
@@ -138,5 +155,4 @@ pub(crate) fn cmd_trust(ctx: &Ctx, keyfile: &Path) -> Result<()> {
     let dest = sign::trust(keyfile, &ctx.root)?;
     crate::nawa_info!("trusted key installed at {}", dest.display());
     Ok(())
-
 }

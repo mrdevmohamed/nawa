@@ -1,23 +1,22 @@
 //! `build` command handlers.
 
-use anyhow::{bail, Context, Result};
-use crate::ctx::Ctx;
-use crate::color::Palette;
-use std::path::PathBuf;
-use crate::cli::PlanFlags;
-use crate::color::Stream;
+use crate::adapters::db;
+use crate::adapters::lock;
+use crate::application::context::Ctx;
+use crate::application::features::package::plan;
+use crate::application::recovery;
 use crate::build;
-use crate::buildenv;
-use crate::db;
+use crate::build::buildenv;
+use crate::build::profile;
 use crate::cli::default_jobs;
+use crate::cli::PlanFlags;
 use crate::install;
-use crate::lock;
-use crate::plan;
-use crate::profile;
+use crate::presentation::color::Palette;
+use crate::presentation::color::Stream;
 use crate::recipe;
-use crate::recovery;
 use crate::transaction;
-
+use anyhow::{bail, Context, Result};
+use std::path::PathBuf;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn cmd_build(
@@ -85,28 +84,47 @@ pub(crate) fn cmd_build(
     )?;
     let db = db::Db::new(&ctx.root);
     let before = db.entry(name)?;
-    let target = install::inspect_archive_state(&archive, crate::db::InstallReason::Explicit, before.as_ref())?;
-    let actual_name = crate::archive::read_pkginfo(&archive)
+    let target = install::inspect_archive_state(
+        &archive,
+        crate::adapters::db::InstallReason::Explicit,
+        before.as_ref(),
+    )?;
+    let actual_name = crate::adapters::archive::read_pkginfo(&archive)
         .ok()
-        .and_then(|raw| crate::archive::parse_pkginfo(&raw).ok())
+        .and_then(|raw| crate::adapters::archive::parse_pkginfo(&raw).ok())
         .and_then(|info| info.get("pkgname").cloned())
         .unwrap_or_default();
     if actual_name != name {
-        bail!("built archive package name {actual_name:?} does not match requested recipe {name:?}");
+        bail!(
+            "built archive package name {actual_name:?} does not match requested recipe {name:?}"
+        );
     }
     let action = match &before {
         None => transaction::history::StepAction::Install,
-        Some(old) if old.version != target.version.clone().unwrap_or_default()
-            || Some(old.rel) != target.rel => transaction::history::StepAction::Upgrade,
+        Some(old)
+            if old.version != target.version.clone().unwrap_or_default()
+                || Some(old.rel) != target.rel =>
+        {
+            transaction::history::StepAction::Upgrade
+        }
         Some(_) => transaction::history::StepAction::Reinstall,
     };
     let digest = target.artifact_sha256.clone();
     let mut recorder = op.recorder();
-    let step_no = recorder.step_intent_state(name, action, before.as_ref(), Some(&target), &digest)?;
+    let step_no =
+        recorder.step_intent_state(name, action, before.as_ref(), Some(&target), &digest)?;
     let file_journal = install::FileJournalId::for_step(recorder.tx(), step_no);
     let result = install::install_archive_pinned(
-        &archive, &ctx.root,
-        install::InstallOpts { force: install_force, allow_unsigned: false, key: None, reason: crate::db::InstallReason::Explicit, pinned_sha: Some(&digest), file_journal },
+        &archive,
+        &ctx.root,
+        install::InstallOpts {
+            force: install_force,
+            allow_unsigned: false,
+            key: None,
+            reason: crate::adapters::db::InstallReason::Explicit,
+            pinned_sha: Some(&digest),
+            file_journal,
+        },
     );
     install::record_install_outcome(
         &mut recorder,

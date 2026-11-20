@@ -3,7 +3,6 @@
 //! Repository index creation and validation.
 use serde::{Deserialize, Serialize};
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RepoEntry {
     pub name: String,
@@ -21,6 +20,16 @@ pub(crate) struct RepoEntry {
     /// installed size in bytes, from the archive's size field; 0 = unknown
     #[serde(default, skip_serializing_if = "is_zero")]
     pub installed_size: u64,
+    /// B3 chain: runtime dependencies, required in schema v4. Absent in
+    /// legacy v1–v3 entries, which normalize to "unknown".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rundeps: Option<Vec<String>>,
+    /// B3 chain: provided capabilities, required in schema v4. Absent in
+    /// legacy v1–v3 entries, which normalize to "unknown".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provides: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relations: Option<crate::domain::package::relations::PackageRelations>,
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -44,7 +53,10 @@ pub(crate) struct RepositoryMeta {
     pub hash_algorithm: String,
     pub index_signature: String,
     /// How clients locate package and recipe archives.
-    #[serde(default = "default_archive_location", skip_serializing_if = "is_base_url")]
+    #[serde(
+        default = "default_archive_location",
+        skip_serializing_if = "is_base_url"
+    )]
     pub archive_location: String,
 }
 
@@ -68,10 +80,29 @@ impl RepositoryMeta {
             archive_location: ARCHIVE_LOCATION_PER_PACKAGE_URL.to_string(),
         }
     }
+
+    /// B3 chain: opt-in schema v4 uses the same signed-index authentication
+    /// and per-package URL scheme as v3; only the mandatory solving metadata
+    /// (`rundeps`/`provides`) and strict unknown-field rejection are new.
+    pub fn v4_per_package_url() -> Self {
+        Self {
+            schema: INDEX_SCHEMA_V4,
+            ..Self::v3_per_package_url()
+        }
+    }
+
+    pub fn v5_per_package_url() -> Self {
+        Self {
+            schema: INDEX_SCHEMA_V5,
+            ..Self::v3_per_package_url()
+        }
+    }
 }
 
 pub(crate) const INDEX_SCHEMA_V2: u32 = 2;
 pub(crate) const INDEX_SCHEMA_V3: u32 = 3;
+pub(crate) const INDEX_SCHEMA_V4: u32 = 4;
+pub(crate) const INDEX_SCHEMA_V5: u32 = 5;
 pub(crate) const ARCHIVE_LOCATION_BASE_URL: &str = "base-url";
 pub(crate) const ARCHIVE_LOCATION_PER_PACKAGE_URL: &str = "per-package-url";
 pub(crate) const ARCHIVE_AUTH_SIGNED_INDEX: &str = "signed-index";
@@ -124,4 +155,3 @@ pub(crate) struct Index {
 }
 
 pub(crate) const INDEX_VALIDITY_SECS: u64 = 90 * 24 * 3600;
-

@@ -3,19 +3,22 @@
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
-use crate::artifact;
-use crate::db::{Db, Entry};
+use crate::adapters::artifact;
+use crate::adapters::db::{Db, Entry};
+use crate::adapters::interrupt;
+use crate::adapters::sign;
 use crate::install::hooks::{load_hooks, run_hook};
 use crate::install::journal::Tx;
 use crate::install::payload::save_undo;
 use crate::install::previous::{resolve_previous, synthesize_entry};
-use crate::install::{inspect_archive_state, install_archive, install_archive_from_index_proof, install_archive_pinned, FileJournalId, InstallOpts};
-use crate::interrupt;
-use crate::sign;
+use crate::install::{
+    inspect_archive_state, install_archive, install_archive_from_index_proof,
+    install_archive_pinned, FileJournalId, InstallOpts,
+};
 
 pub(crate) fn rollback(name: &str, root: &Path) -> Result<()> {
     let db = Db::new(root);
-    crate::db::check_name(name)?;
+    crate::adapters::db::check_name(name)?;
     let previous = match resolve_previous(root, name)? {
         Some(previous) => previous,
         None => bail!("no undo record for `{name}` — nothing to roll back"),
@@ -27,12 +30,18 @@ pub(crate) fn rollback(name: &str, root: &Path) -> Result<()> {
     let before = db.entry(name)?;
     if let Some(cur) = &before {
         if cur.version_full() == prev.version_full() {
-            bail!("`{name}` is already at {} — nothing to roll back", cur.version_full());
+            bail!(
+                "`{name}` is already at {} — nothing to roll back",
+                cur.version_full()
+            );
         }
     }
     crate::nawa_info!(
         "rolling back {} -> {}",
-        before.as_ref().map(|e| e.version_full()).unwrap_or_else(|| "(removed)".into()),
+        before
+            .as_ref()
+            .map(|e| e.version_full())
+            .unwrap_or_else(|| "(removed)".into()),
         prev.version_full()
     );
 
@@ -48,7 +57,11 @@ pub(crate) fn rollback(name: &str, root: &Path) -> Result<()> {
     };
     // Preserve an installed package's current reason; reinstalls after removal
     // become explicit, matching the established "keep" behavior.
-    let target = inspect_archive_state(archive_for_snapshot, crate::db::InstallReason::Keep, before.as_ref())?;
+    let target = inspect_archive_state(
+        archive_for_snapshot,
+        crate::adapters::db::InstallReason::Keep,
+        before.as_ref(),
+    )?;
     let digest = target.artifact_sha256.clone();
     let mut operation = crate::transaction::begin_operation(
         root,
@@ -92,10 +105,22 @@ pub(crate) fn rollback(name: &str, root: &Path) -> Result<()> {
 
 /// Where the version being restored comes from, and how it is authenticated.
 enum RestoreSource {
-    SignedIndex { object: PathBuf, digest: String },
-    Detached { object: PathBuf, digest: String },
-    Pinned { object: PathBuf, digest: String, proof: String },
-    Legacy { archive: PathBuf },
+    SignedIndex {
+        object: PathBuf,
+        digest: String,
+    },
+    Detached {
+        object: PathBuf,
+        digest: String,
+    },
+    Pinned {
+        object: PathBuf,
+        digest: String,
+        proof: String,
+    },
+    Legacy {
+        archive: PathBuf,
+    },
 }
 
 /// Verify the exact archived bytes and the retained authentication evidence
@@ -103,10 +128,11 @@ enum RestoreSource {
 fn pick_restore_source(root: &Path, name: &str, prev: &Entry) -> Result<RestoreSource> {
     let source = if !prev.artifact_sha256.is_empty() {
         let digest = prev.artifact_sha256.clone();
-        let object = artifact::verify_stored(root, &digest)
-            .map_err(|e| e.context(format!(
+        let object = artifact::verify_stored(root, &digest).map_err(|e| {
+            e.context(format!(
                 "cannot verify the archived original of {name} — rollback refused"
-            )))?;
+            ))
+        })?;
         let provenance = artifact::load_provenance(root, &digest)?;
         match provenance.as_ref().map(|p| p.authentication.as_str()) {
             Some("signed-index") => {
@@ -118,18 +144,27 @@ fn pick_restore_source(root: &Path, name: &str, prev: &Entry) -> Result<RestoreS
                 RestoreSource::Detached { object, digest }
             }
             Some("local-build") | Some("unsigned-bootstrap") | None => {
-                let proof = provenance.as_ref()
+                let proof = provenance
+                    .as_ref()
                     .map(|p| p.authentication.clone())
                     .unwrap_or_else(|| "no provenance record".to_string());
-                RestoreSource::Pinned { object, digest, proof }
+                RestoreSource::Pinned {
+                    object,
+                    digest,
+                    proof,
+                }
             }
             Some(other) => bail!("unsupported provenance authentication {other:?}"),
         }
     } else {
-        let archive = root.join("var/cache/nawa")
+        let archive = root
+            .join("var/cache/nawa")
             .join(format!("{}.nawa.tar.zst", prev.version_full()));
         if !archive.exists() {
-            bail!("cached archive {} is missing — cannot roll back", archive.display());
+            bail!(
+                "cached archive {} is missing — cannot roll back",
+                archive.display()
+            );
         }
         let _ = artifact::import_legacy(root, &archive);
         RestoreSource::Legacy { archive }
@@ -151,34 +186,64 @@ fn install_restore_source(
                 root,
                 false,
                 &digest,
-                crate::db::InstallReason::Keep,
+                crate::adapters::db::InstallReason::Keep,
                 None,
                 file_journal,
             ),
             "signed-index proof re-verified".to_string(),
         ),
         RestoreSource::Detached { object, digest } => (
-            install_archive_pinned(&object, root, InstallOpts { force: false, allow_unsigned: true, key: None, reason: crate::db::InstallReason::Keep, pinned_sha: Some(&digest), file_journal }),
+            install_archive_pinned(
+                &object,
+                root,
+                InstallOpts {
+                    force: false,
+                    allow_unsigned: true,
+                    key: None,
+                    reason: crate::adapters::db::InstallReason::Keep,
+                    pinned_sha: Some(&digest),
+                    file_journal,
+                },
+            ),
             "detached signature re-verified".to_string(),
         ),
-        RestoreSource::Pinned { object, digest, proof } => (
-            install_archive_pinned(&object, root, InstallOpts { force: false, allow_unsigned: true, key: None, reason: crate::db::InstallReason::Keep, pinned_sha: Some(&digest), file_journal }),
+        RestoreSource::Pinned {
+            object,
+            digest,
+            proof,
+        } => (
+            install_archive_pinned(
+                &object,
+                root,
+                InstallOpts {
+                    force: false,
+                    allow_unsigned: true,
+                    key: None,
+                    reason: crate::adapters::db::InstallReason::Keep,
+                    pinned_sha: Some(&digest),
+                    file_journal,
+                },
+            ),
             proof,
         ),
         RestoreSource::Legacy { archive } => (
             // Legacy records carry no digest, so the modern linked installer
             // cannot verify them anyway; keep the established unsigned path.
-            install_archive(&archive, root, false, true, None, crate::db::InstallReason::Explicit),
+            install_archive(
+                &archive,
+                root,
+                false,
+                true,
+                None,
+                crate::adapters::db::InstallReason::Explicit,
+            ),
             "legacy cached archive (no recorded authentication proof)".to_string(),
         ),
     }
 }
 
 pub(crate) fn report_restored(entry: &Entry, how: &str) {
-    crate::nawa_success!(
-        "rolled back to {} (verified: {how})",
-        entry.version_full()
-    );
+    crate::nawa_success!("rolled back to {} (verified: {how})", entry.version_full());
 }
 
 /// Re-verify a retained signed-index proof bundle: the archived index bytes
@@ -277,7 +342,12 @@ pub(crate) fn remove_with_linked(
         let dependents: Vec<String> = db
             .installed()?
             .into_iter()
-            .filter(|e| e.name != name && e.run.iter().any(|r| r == name))
+            .filter(|e| {
+                e.name != name
+                    && e.run
+                        .iter()
+                        .any(|r| crate::domain::package::relations::depends_on(r, name))
+            })
             .map(|e| e.name)
             .collect();
         if !dependents.is_empty() {
@@ -301,7 +371,11 @@ pub(crate) fn remove_with_linked(
     let uniq = format!("{stamp}-{}", std::process::id());
     // paths another installed package also lists stay in place
     let shared = db.paths_claimed_by_others(name)?;
-    let mut files: Vec<String> = db.files(name)?.into_iter().filter(|f| !shared.contains(f)).collect();
+    let mut files: Vec<String> = db
+        .files(name)?
+        .into_iter()
+        .filter(|f| !shared.contains(f))
+        .collect();
     files.sort_by_key(|f| std::cmp::Reverse(f.len()));
     let mut tx = match file_journal {
         Some(id) => Tx::new_linked(root, root.join(".nawa").join(format!("rm-{uniq}")), id),

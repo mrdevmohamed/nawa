@@ -45,16 +45,14 @@ pub(crate) fn detect_source_format(path: &Path) -> Option<SourceFormat> {
     // (bzip2 in particular *errors* when its input ends mid-stream, so a
     // Take()-bounded prefix would never work here)
     if magic.starts_with(&[0x1f, 0x8b]) {
-        looks_like_tar(&mut flate2::read::GzDecoder::new(f))
-            .then_some(SourceFormat::TarGz)
+        looks_like_tar(&mut flate2::read::GzDecoder::new(f)).then_some(SourceFormat::TarGz)
     } else if magic.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
         match zstd::stream::read::Decoder::new(f) {
             Ok(mut dec) => looks_like_tar(&mut dec).then_some(SourceFormat::TarZst),
             Err(_) => None,
         }
     } else if magic.starts_with(b"BZh") && matches!(magic.get(3), Some(c) if c.is_ascii_digit()) {
-        looks_like_tar(&mut bzip2::read::BzDecoder::new(f))
-            .then_some(SourceFormat::TarBz2)
+        looks_like_tar(&mut bzip2::read::BzDecoder::new(f)).then_some(SourceFormat::TarBz2)
     } else {
         None
     }
@@ -183,7 +181,9 @@ pub(crate) fn extract_source_archive_stripped(
     // filesystem and no cross-device dance); it is transient
     let tmp = dest.with_file_name(format!(
         "{}.rewrite.tar",
-        dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+        dest.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
     ));
     let rewrite = rewrite_tar_stripped(decompressed_reader(tarball, fmt)?, &tmp, strip_components);
     let extracted = rewrite.and_then(|()| {
@@ -281,12 +281,13 @@ fn rewrite_tar_stripped<R: Read>(reader: R, tmp: &Path, strip: u32) -> Result<()
                 // the empty target — skipping is the fail-closed variant
                 continue;
             }
-            let ttarget: PathBuf = tcomps[strip as usize..]
-                .iter()
-                .fold(PathBuf::new(), |mut p, c| {
-                    p.push(c);
-                    p
-                });
+            let ttarget: PathBuf =
+                tcomps[strip as usize..]
+                    .iter()
+                    .fold(PathBuf::new(), |mut p, c| {
+                        p.push(c);
+                        p
+                    });
             if ttarget.as_os_str().is_empty() {
                 // exactly at the strip boundary: GNU errors on the emptied
                 // target; skipping keeps staging deterministic (fail-closed)
@@ -294,7 +295,11 @@ fn rewrite_tar_stripped<R: Read>(reader: R, tmp: &Path, strip: u32) -> Result<()
             }
             out.append_link(&mut header, &stripped, &ttarget)
                 .with_context(|| {
-                    format!("re-emit hard link {} -> {}", stripped.display(), ttarget.display())
+                    format!(
+                        "re-emit hard link {} -> {}",
+                        stripped.display(),
+                        ttarget.display()
+                    )
                 })?;
         } else if t.is_dir() || t.is_symlink() {
             // directories and symlinks carry no body in the extraction
@@ -355,8 +360,13 @@ fn unpack_tar_stream<R: Read>(reader: R, dest: &Path) -> Result<()> {
         // filesystem degrades to a plain copy, like bsdtar -H does not but
         // every build system expects to survive
         if std::fs::hard_link(&from, &to).is_err() {
-            std::fs::copy(&from, &to)
-                .with_context(|| format!("materialize hard link {} -> {}", from.display(), to.display()))?;
+            std::fs::copy(&from, &to).with_context(|| {
+                format!(
+                    "materialize hard link {} -> {}",
+                    from.display(),
+                    to.display()
+                )
+            })?;
         }
     }
     Ok(())
@@ -375,4 +385,3 @@ fn sanitize_entry_path(p: &Path) -> Result<PathBuf> {
     }
     Ok(out)
 }
-

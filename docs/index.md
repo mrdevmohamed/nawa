@@ -15,11 +15,19 @@ Nawa builds packages from declarative TOML recipes, can install prebuilt package
 
 - **Source builds:** build packages from TOML recipes with declared build and runtime dependencies.
 - **Binary repositories:** install package archives from local or remote repositories, with signed repository metadata.
+- **Package planning:** one deterministic solver handles authenticated runtime
+  package-version requirements and v5 conflict/replacement declarations;
+  legacy indexes remain readable with missing relations marked unknown.
 - **Controlled source fetching:** download SHA-256-verified sources and prepare Go Modules or Cargo dependencies before offline builds.
 - **Build isolation:** choose none, env, sandbox, or closure isolation.
 - **Package management:** install, update, remove, query, and inspect packages and their files.
 - **Recovery:** record package-changing operations, recover interrupted work, and undo supported transactions.
-- **System integration:** manage runit services and inspect broken ELF shared-library dependencies.
+- **System integration:** inspect broken ELF shared-library dependencies.
+- **System intelligence:** inspect attributable runtime/installed/profile state
+  and review immutable signed package plans. Migration transaction and snapshot
+  integration is tested in disposable roots; production boot migration remains
+  blocked pending installed-disk BIOS/UEFI and rescue acceptance. See the
+  [implementation tracker](implementation-progress.md).
 - **Extensibility:** discover and run external plugins through Nawa's plugin interface.
 
 Nawa does **not** ship a package recipe collection. A distribution or administrator supplies a recipe tree and, optionally, architecture-specific build profiles.

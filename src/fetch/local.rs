@@ -13,7 +13,7 @@ pub(crate) fn copy_local(src: &Path, dest: &Path) -> Result<()> {
         return Ok(());
     }
     std::fs::create_dir_all(dest).with_context(|| format!("create {}", dest.display()))?;
-    let as_root = crate::diag::is_root();
+    let as_root = crate::presentation::diag::is_root();
     let mut seen: HashMap<(u64, u64), PathBuf> = HashMap::new(); // (dev, ino) -> first copy
     let mut dir_times: Vec<(PathBuf, PathBuf)> = Vec::new();
     for entry in walkdir::WalkDir::new(src).follow_links(false) {
@@ -39,8 +39,9 @@ pub(crate) fn copy_local(src: &Path, dest: &Path) -> Result<()> {
             match seen.get(&key) {
                 Some(first) => {
                     let _ = std::fs::remove_file(&dst);
-                    std::fs::hard_link(first, &dst)
-                        .with_context(|| format!("hard link {} -> {}", first.display(), dst.display()))?;
+                    std::fs::hard_link(first, &dst).with_context(|| {
+                        format!("hard link {} -> {}", first.display(), dst.display())
+                    })?;
                     // shares an inode with the first copy, which already has
                     // its times set — nothing to do
                 }
@@ -66,8 +67,8 @@ pub(crate) fn copy_local(src: &Path, dest: &Path) -> Result<()> {
 }
 
 fn preserve_owner(dst: &Path, md: &std::fs::Metadata) {
-    use std::os::unix::fs::MetadataExt;
     use rustix::fs::{Gid, Uid};
+    use std::os::unix::fs::MetadataExt;
     // best effort, like cp -a on a filesystem that ignores ownership
     let _ = rustix::fs::chown(
         dst,

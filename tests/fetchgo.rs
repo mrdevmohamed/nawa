@@ -29,16 +29,29 @@ fn nawa_bin() -> PathBuf {
 fn nawa() -> Command {
     let mut c = Command::new(nawa_bin());
     for k in [
-        "NAWA_CONFIG", "NAWA_ROOT", "NAWA_RECIPES", "NAWA_BUILDDIR",
-        "NAWA_PROFILES", "NAWA_JOBS", "NAWA_REPO", "NAWA_INSTALL_MODE",
-        "NAWA_OFFLINE", "NAWA_SRCCACHE",
-        "NAWA_SRCROOT", "NAWA_ASSETSDIR",
+        "NAWA_CONFIG",
+        "NAWA_ROOT",
+        "NAWA_RECIPES",
+        "NAWA_BUILDDIR",
+        "NAWA_PROFILES",
+        "NAWA_JOBS",
+        "NAWA_REPO",
+        "NAWA_INSTALL_MODE",
+        "NAWA_OFFLINE",
+        "NAWA_SRCCACHE",
+        "NAWA_SRCROOT",
+        "NAWA_ASSETSDIR",
         // the fetch knobs must never leak into a run by accident
-        "NAWA_GOPROXY", "NAWA_FETCH_PATH", "NAWA_FETCH_TIMEOUT",
+        "NAWA_GOPROXY",
+        "NAWA_FETCH_PATH",
+        "NAWA_FETCH_TIMEOUT",
     ] {
         c.env_remove(k);
     }
-    c.env("NAWA_SYSCONFDIR", std::env::temp_dir().join("nawa-test-no-sysconf"));
+    c.env(
+        "NAWA_SYSCONFDIR",
+        std::env::temp_dir().join("nawa-test-no-sysconf"),
+    );
     c.env("NAWA_INSTALL_MODE", "build");
     c.current_dir(std::env::temp_dir());
     c
@@ -66,9 +79,7 @@ fn sha256(bytes: &[u8]) -> String {
 
 /// Serve a fixed route table (path → body); counts accepted connections so
 /// tests can prove who talked to the network. Same shape as tests/sources.rs.
-fn route_server(
-    routes: Vec<(&'static str, Option<Vec<u8>>)>,
-) -> (String, Arc<AtomicUsize>) {
+fn route_server(routes: Vec<(&'static str, Option<Vec<u8>>)>) -> (String, Arc<AtomicUsize>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let count = Arc::new(AtomicUsize::new(0));
@@ -79,7 +90,9 @@ fn route_server(
         .collect();
     let counter = count.clone();
     std::thread::spawn(move || loop {
-        let Ok((mut sock, _)) = l2.accept() else { break };
+        let Ok((mut sock, _)) = l2.accept() else {
+            break;
+        };
         counter.fetch_add(1, Ordering::SeqCst);
         let mut buf = [0u8; 4096];
         let n = std::io::Read::read(&mut sock, &mut buf).unwrap_or(0);
@@ -205,10 +218,21 @@ fn write_proxy_fixture(dir: &Path) {
         b"{\"Version\":\"v1.0.0\",\"Time\":\"2022-01-01T00:00:00Z\"}",
     )
     .unwrap();
-    fs::write(base.join("v1.0.0.mod"), b"module example.org/hello\n\ngo 1.16\n").unwrap();
+    fs::write(
+        base.join("v1.0.0.mod"),
+        b"module example.org/hello\n\ngo 1.16\n",
+    )
+    .unwrap();
     fs::write(
         base.join("v1.0.0.zip"),
-        fixture_proxy_zip("example.org/hello", "v1.0.0", &("hello.go", b"package hello\n\nfunc Hi() string { return \"hi-from-dep\" }\n" as &[u8])),
+        fixture_proxy_zip(
+            "example.org/hello",
+            "v1.0.0",
+            &(
+                "hello.go",
+                b"package hello\n\nfunc Hi() string { return \"hi-from-dep\" }\n" as &[u8],
+            ),
+        ),
     )
     .unwrap();
 }
@@ -260,7 +284,8 @@ fn fixture_tar_gz(top: &str, files: &[(String, Vec<u8>)]) -> Vec<u8> {
             h.set_mode(0o644);
             h.set_mtime(500_000);
             h.set_cksum();
-            b.append_data(&mut h, format!("{top}/{name}"), &data[..]).unwrap();
+            b.append_data(&mut h, format!("{top}/{name}"), &data[..])
+                .unwrap();
         }
         b.finish().unwrap();
     }
@@ -310,7 +335,10 @@ fn toolchain_dir() -> String {
             return p.trim().split(':').next().unwrap().to_string();
         }
     }
-    let probed = Command::new("sh").args(["-c", "command -v go"]).output().ok();
+    let probed = Command::new("sh")
+        .args(["-c", "command -v go"])
+        .output()
+        .ok();
     if let Some(o) = probed {
         if o.status.success() {
             let path = String::from_utf8_lossy(&o.stdout).trim().to_string();
@@ -362,7 +390,11 @@ fn run_fetch_build_with_isolation(
                 .map(|p| format!("file://{}", p.display()))
                 .unwrap_or_else(|| "https://proxy.invalid-hermetic-test".to_string()),
         )
-        .envs(extra_env.iter().map(|(k, v)| (k.to_string(), v.to_string())))
+        .envs(
+            extra_env
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string())),
+        )
         .output()
         .unwrap();
     (
@@ -410,11 +442,20 @@ fn go_backend_fetches_builds_offline_and_hits_the_cache() {
     // dependency out of the module cache view
     let (out, err, ok) = run_fetch_build(&s, Some(&proxy), &[], &[]);
     assert!(ok, "run 1 failed\nstdout:\n{out}\nstderr:\n{err}");
-    assert!(out.contains("hi-from-dep"), "the go build produced wrong output:\n{out}");
+    assert!(
+        out.contains("hi-from-dep"),
+        "the go build produced wrong output:\n{out}"
+    );
     let work = s.join("build/go-b-1.0-1");
-    assert!(work.join("fetch-go.log").is_file(), "the populate must run once (fetch log)");
+    assert!(
+        work.join("fetch-go.log").is_file(),
+        "the populate must run once (fetch log)"
+    );
     let hits1 = count.load(Ordering::SeqCst);
-    assert!(hits1 >= 1, "the source must be fetched over the route server");
+    assert!(
+        hits1 >= 1,
+        "the source must be fetched over the route server"
+    );
 
     // — the cache entry: <srccache>/fetch/go/<key> with marker, read-only,
     // and the hold-open lock file next to it (§11)
@@ -432,7 +473,11 @@ fn go_backend_fetches_builds_offline_and_hits_the_cache() {
     assert_eq!(key.len(), 64, "the key is a full sha256: {key}");
     use std::os::unix::fs::PermissionsExt;
     let mode = entry.symlink_metadata().unwrap().permissions().mode();
-    assert_eq!(mode & 0o222, 0, "the published entry must have no write bits");
+    assert_eq!(
+        mode & 0o222,
+        0,
+        "the published entry must have no write bits"
+    );
     assert!(
         entry.join("nawa-complete").is_file(),
         "the completion marker must exist in the entry"
@@ -457,10 +502,15 @@ fn go_backend_fetches_builds_offline_and_hits_the_cache() {
     // serves the build; the fetch never runs again, the source is not
     // re-downloaded (route server count unchanged)
     fs::remove_dir_all(&work).unwrap();
-    let (out2, err2, ok2) =
-        run_fetch_build(&s, Some(&proxy), &[("NAWA_OFFLINE", "1")], &[]);
-    assert!(ok2, "run 2 (--offline) failed\nstdout:\n{out2}\nstderr:\n{err2}");
-    assert!(out2.contains("hi-from-dep"), "the offline build resolved the dep:\n{out2}");
+    let (out2, err2, ok2) = run_fetch_build(&s, Some(&proxy), &[("NAWA_OFFLINE", "1")], &[]);
+    assert!(
+        ok2,
+        "run 2 (--offline) failed\nstdout:\n{out2}\nstderr:\n{err2}"
+    );
+    assert!(
+        out2.contains("hi-from-dep"),
+        "the offline build resolved the dep:\n{out2}"
+    );
     let work2 = work.clone();
     assert!(
         !work2.join("fetch-go.log").exists(),
@@ -471,16 +521,20 @@ fn go_backend_fetches_builds_offline_and_hits_the_cache() {
         hits1,
         "the --offline run must not re-download the source"
     );
-    assert_eq!(entries, {
-        let mut e2: Vec<PathBuf> = std::fs::read_dir(&cache)
-            .unwrap()
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.is_dir())
-            .collect();
-        e2.sort();
-        e2
-    }, "run 2 must not add an entry");
+    assert_eq!(
+        entries,
+        {
+            let mut e2: Vec<PathBuf> = std::fs::read_dir(&cache)
+                .unwrap()
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .collect();
+            e2.sort();
+            e2
+        },
+        "run 2 must not add an entry"
+    );
 
     // §16 Go: go.mod/go.sum unchanged — staged bytes equal fixture bytes
     let mod_file = work.join("src/m/go.mod");
@@ -500,7 +554,10 @@ fn go_backend_fetches_builds_offline_and_hits_the_cache() {
     // the whole build (fetch included) is skipped
     let captcount = count.load(Ordering::SeqCst);
     let (out3, err3, ok3) = run_fetch_build(&s, Some(&proxy), &[], &["--use-cache"]);
-    assert!(ok3, "use-cache run failed\nstdout:\n{out3}\nstderr:\n{err3}");
+    assert!(
+        ok3,
+        "use-cache run failed\nstdout:\n{out3}\nstderr:\n{err3}"
+    );
     assert!(
         out3.contains("build cache hit"),
         "the sidecar build id (with fetch-go=1) must match:\n{out3}\n{err3}"
@@ -574,9 +631,16 @@ fn the_ecosystem_key_follows_the_lockfile_bytes() {
     let (o2, e2, ok2) = run_fetch_build(&s, Some(&proxy), &[], &[]);
     assert!(ok2, "run 2 failed\n{o2}\n{e2}");
     let ds = dirs();
-    assert_eq!(ds.len(), 2, "the new lockfile bytes must get their own entry");
+    assert_eq!(
+        ds.len(),
+        2,
+        "the new lockfile bytes must get their own entry"
+    );
     for d in &ds {
-        assert!(d.join("nawa-complete").is_file(), "every published entry carries the marker");
+        assert!(
+            d.join("nawa-complete").is_file(),
+            "every published entry carries the marker"
+        );
     }
 }
 
@@ -653,13 +717,17 @@ fn vendored_go_skips_the_fetch_and_builds_from_the_tree() {
     let pkg = recipes.join("go-b");
     fs::create_dir_all(&pkg).unwrap();
 
-    let vendored_hello = b"package hello\n\nfunc Hi() string { return \"hi-from-dep\" }\n" as &[u8];
+    let vendored_hello =
+        b"package hello\n\nfunc Hi() string { return \"hi-from-dep\" }\n" as &[u8];
     let files = vec![
         (
             "vendor/modules.txt".to_string(),
             b"# example.org/hello v1.0.0\n## explicit\nexample.org/hello\n".to_vec(),
         ),
-        ("vendor/example.org/hello/hello.go".to_string(), vendored_hello.to_vec()),
+        (
+            "vendor/example.org/hello/hello.go".to_string(),
+            vendored_hello.to_vec(),
+        ),
     ];
     let tar = fixture_tar_gz("main-1.0", &main_fixture(&files, ""));
     let tar_sha = sha256(&tar);
@@ -769,7 +837,10 @@ fn a_missing_go_sum_is_a_hard_error() {
 
     // only go.mod + main.go — no go.sum
     let files = b"package main\n\nfunc main()\n".to_vec();
-    let bare = vec![("go.mod".to_string(), go_mod("")), ("main.go".to_string(), files)];
+    let bare = vec![
+        ("go.mod".to_string(), go_mod("")),
+        ("main.go".to_string(), files),
+    ];
     let tar = fixture_tar_gz("main-1.0", &bare);
     let tar_sha = sha256(&tar);
     let (addr, _) = route_server(vec![("/src.tar.gz", Some(tar))]);
@@ -793,7 +864,6 @@ fn a_missing_go_sum_is_a_hard_error() {
         "the error must name the missing lockfile:\n{e}"
     );
 }
-
 
 // ---------------------------------------------------------------------------
 // Fetch integration with strict sandbox isolation
@@ -820,18 +890,13 @@ fn go_fetch_and_offline_build_work_under_sandbox() {
     );
     fs::write(
         pkg.join("recipe.toml"),
-        recipe(
-            &source_sha,
-            &install,
-            "[fetch.go]\ndir = \"m\"\n",
-        )
-        .replace("%URL%", &addr)
-        .replace("%{GO}", &gobin),
+        recipe(&source_sha, &install, "[fetch.go]\ndir = \"m\"\n")
+            .replace("%URL%", &addr)
+            .replace("%{GO}", &gobin),
     )
     .unwrap();
 
-    let (out, err, ok) =
-        run_fetch_build_with_isolation(&s, isolation, Some(&proxy), &[], &[]);
+    let (out, err, ok) = run_fetch_build_with_isolation(&s, isolation, Some(&proxy), &[], &[]);
     assert!(
         ok,
         "Go fetch/build failed at isolation={isolation}\nstdout:\n{out}\nstderr:\n{err}"

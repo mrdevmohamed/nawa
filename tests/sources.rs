@@ -25,16 +25,27 @@ fn nawa_bin() -> PathBuf {
 fn nawa() -> Command {
     let mut c = Command::new(nawa_bin());
     for k in [
-        "NAWA_CONFIG", "NAWA_ROOT", "NAWA_RECIPES", "NAWA_BUILDDIR",
-        "NAWA_PROFILES", "NAWA_JOBS", "NAWA_REPO", "NAWA_INSTALL_MODE",
-        "NAWA_OFFLINE", "NAWA_SRCCACHE",
+        "NAWA_CONFIG",
+        "NAWA_ROOT",
+        "NAWA_RECIPES",
+        "NAWA_BUILDDIR",
+        "NAWA_PROFILES",
+        "NAWA_JOBS",
+        "NAWA_REPO",
+        "NAWA_INSTALL_MODE",
+        "NAWA_OFFLINE",
+        "NAWA_SRCCACHE",
         // the new names must come from the staging engine, never from the
         // ambient environment of whatever machine runs the tests
-        "NAWA_SRCROOT", "NAWA_ASSETSDIR",
+        "NAWA_SRCROOT",
+        "NAWA_ASSETSDIR",
     ] {
         c.env_remove(k);
     }
-    c.env("NAWA_SYSCONFDIR", std::env::temp_dir().join("nawa-test-no-sysconf"));
+    c.env(
+        "NAWA_SYSCONFDIR",
+        std::env::temp_dir().join("nawa-test-no-sysconf"),
+    );
     c.env("NAWA_INSTALL_MODE", "build");
     c.current_dir(std::env::temp_dir());
     c
@@ -71,7 +82,8 @@ fn fixture_tar_gz(top: &str, files: &[(&str, &[u8])], dir_mtime: u64) -> Vec<u8>
             h.set_mode(0o644);
             h.set_mtime(500_000);
             h.set_cksum();
-            b.append_data(&mut h, format!("{top}/{name}"), &data[..]).unwrap();
+            b.append_data(&mut h, format!("{top}/{name}"), &data[..])
+                .unwrap();
         }
         b.finish().unwrap();
     }
@@ -85,9 +97,7 @@ fn fixture_tar_gz(top: &str, files: &[(&str, &[u8])], dir_mtime: u64) -> Vec<u8>
 /// Serve a fixed route table for the whole test: `path → None` answers
 /// 404, `path → Some(body)` answers 200 with those bytes. Connections
 /// accepted are counted so tests can prove who called the network.
-fn route_server(
-    routes: Vec<(&'static str, Option<Vec<u8>>)>,
-) -> (String, Arc<AtomicUsize>) {
+fn route_server(routes: Vec<(&'static str, Option<Vec<u8>>)>) -> (String, Arc<AtomicUsize>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let count = Arc::new(AtomicUsize::new(0));
@@ -98,7 +108,9 @@ fn route_server(
         .collect();
     let counter = count.clone();
     std::thread::spawn(move || loop {
-        let Ok((mut sock, _)) = l2.accept() else { break };
+        let Ok((mut sock, _)) = l2.accept() else {
+            break;
+        };
         counter.fetch_add(1, Ordering::SeqCst);
         let mut buf = [0u8; 4096];
         let n = std::io::Read::read(&mut sock, &mut buf).unwrap_or(0);
@@ -122,9 +134,16 @@ fn route_server(
 /// The standard two-archives-plus-plain-file recipe (§4.2). `addr` is the
 /// route server base; `install` is the caller's build script.
 fn multisrc_recipe(addr: &str, install: &str) -> String {
-    let main = fixture_tar_gz("main-1.0", &[("hello.sh", b"#!/bin/sh\necho main-ok\n")], 1_400_000);
-    let patches =
-        fixture_tar_gz("patch-bundle", &[("fix.sh", b"#!/bin/sh\necho patch-ok\n")], 1_400_000);
+    let main = fixture_tar_gz(
+        "main-1.0",
+        &[("hello.sh", b"#!/bin/sh\necho main-ok\n")],
+        1_400_000,
+    );
+    let patches = fixture_tar_gz(
+        "patch-bundle",
+        &[("fix.sh", b"#!/bin/sh\necho patch-ok\n")],
+        1_400_000,
+    );
     let data = b"bootstrap data\n";
     format!(
         r#"
@@ -169,7 +188,12 @@ install = """
 }
 
 /// Build `recipe_name` with the given extra args; returns stdout/stderr.
-fn run_build(recipes: &Path, builddir: &Path, extra: &[&str], name: &str) -> (String, String, bool) {
+fn run_build(
+    recipes: &Path,
+    builddir: &Path,
+    extra: &[&str],
+    name: &str,
+) -> (String, String, bool) {
     let out = nawa()
         .args([
             "--recipes",
@@ -204,11 +228,19 @@ fn two_archives_and_a_plain_file_stage_into_the_workspace() {
     let (addr, _count) = route_server(vec![
         (
             "/src-main.tar.gz",
-            Some(fixture_tar_gz("main-1.0", &[("hello.sh", b"#!/bin/sh\necho main-ok\n")], 1_400_000)),
+            Some(fixture_tar_gz(
+                "main-1.0",
+                &[("hello.sh", b"#!/bin/sh\necho main-ok\n")],
+                1_400_000,
+            )),
         ),
         (
             "/patches.tar.gz",
-            Some(fixture_tar_gz("patch-bundle", &[("fix.sh", b"#!/bin/sh\necho patch-ok\n")], 1_400_000)),
+            Some(fixture_tar_gz(
+                "patch-bundle",
+                &[("fix.sh", b"#!/bin/sh\necho patch-ok\n")],
+                1_400_000,
+            )),
         ),
         ("/data/bootstrap.dat", Some(b"bootstrap data\n".to_vec())),
     ]);
@@ -233,10 +265,7 @@ cp %{srcdir}/hello.sh %{pkgdir}/usr/bin/hello
     .unwrap();
 
     let (stdout, stderr, ok) = run_build(&recipes, &s.join("build"), &[], "multisrc");
-    assert!(
-        ok,
-        "build failed:\n{stdout}\n--- stderr ---\n{stderr}"
-    );
+    assert!(ok, "build failed:\n{stdout}\n--- stderr ---\n{stderr}");
     let _ = fs::remove_dir_all(&s);
 }
 
@@ -252,11 +281,19 @@ fn plain_file_stamp_is_the_archive_epoch_env() {
     let (addr, count) = route_server(vec![
         (
             "/src-main.tar.gz",
-            Some(fixture_tar_gz("main-1.0", &[("hello.sh", b"#!/bin/sh\necho main-ok\n")], 1_400_000)),
+            Some(fixture_tar_gz(
+                "main-1.0",
+                &[("hello.sh", b"#!/bin/sh\necho main-ok\n")],
+                1_400_000,
+            )),
         ),
         (
             "/patches.tar.gz",
-            Some(fixture_tar_gz("patch-bundle", &[("fix.sh", b"#!/bin/sh\necho patch-ok\n")], 1_400_000)),
+            Some(fixture_tar_gz(
+                "patch-bundle",
+                &[("fix.sh", b"#!/bin/sh\necho patch-ok\n")],
+                1_400_000,
+            )),
         ),
         ("/data/bootstrap.dat", Some(b"bootstrap data\n".to_vec())),
     ]);
@@ -299,16 +336,28 @@ fn wrong_hash_fails_before_extraction_and_sections() {
     let (addr, count) = route_server(vec![
         (
             "/src-main.tar.gz",
-            Some(fixture_tar_gz("main-1.0", &[("hello.sh", b"#!/bin/sh\necho main-ok\n")], 1_400_000)),
+            Some(fixture_tar_gz(
+                "main-1.0",
+                &[("hello.sh", b"#!/bin/sh\necho main-ok\n")],
+                1_400_000,
+            )),
         ),
         (
             "/patches.tar.gz",
-            Some(fixture_tar_gz("patch-bundle", &[("fix.sh", b"#!/bin/sh\necho patch-ok\n")], 1_400_000)),
+            Some(fixture_tar_gz(
+                "patch-bundle",
+                &[("fix.sh", b"#!/bin/sh\necho patch-ok\n")],
+                1_400_000,
+            )),
         ),
         ("/data/bootstrap.dat", Some(b"bootstrap data\n".to_vec())),
     ]);
     // correct recipe except: the SECOND source's sha256 is wrong
-    let patches = fixture_tar_gz("patch-bundle", &[("fix.sh", b"#!/bin/sh\necho patch-ok\n")], 1_400_000);
+    let patches = fixture_tar_gz(
+        "patch-bundle",
+        &[("fix.sh", b"#!/bin/sh\necho patch-ok\n")],
+        1_400_000,
+    );
     let right = multisrc_recipe(
         &addr,
         r#"mkdir -p %{pkgdir}/usr
@@ -316,7 +365,8 @@ cp %{srcdir}/hello.sh %{pkgdir}/usr/h
 "#,
     );
     let broken = right.replace(&sha256(&patches), &"9".repeat(64));
-    assert!(broken.contains("sha256 = \"9999999999999999999999999999999999999999999999999999999999999999\""));
+    assert!(broken
+        .contains("sha256 = \"9999999999999999999999999999999999999999999999999999999999999999\""));
     fs::write(r.join("recipe.toml"), broken).unwrap();
 
     let (stdout, stderr, ok) = run_build(&recipes, &s.join("build"), &[], "multisrc");
@@ -355,10 +405,7 @@ fn destination_collision_is_rejected_naming_both_sources() {
     // two archives, both strip=1 into the workspace root, both providing C
     let a = fixture_tar_gz("main-1.0", &[("C", b"from main\n")], 1_400_000);
     let b = fixture_tar_gz("extra-1.0", &[("C", b"from extra\n")], 1_400_000);
-    let (addr, _count) = route_server(vec![
-        ("/a.tar.gz", Some(a)),
-        ("/b.tar.gz", Some(b)),
-    ]);
+    let (addr, _count) = route_server(vec![("/a.tar.gz", Some(a)), ("/b.tar.gz", Some(b))]);
     fs::write(
         r.join("recipe.toml"),
         format!(
@@ -385,8 +432,16 @@ strip_components = 1
 [build]
 install = "true"
 "#,
-            sha256(&fixture_tar_gz("main-1.0", &[("C", b"from main\n")], 1_400_000)),
-            sha256(&fixture_tar_gz("extra-1.0", &[("C", b"from extra\n")], 1_400_000)),
+            sha256(&fixture_tar_gz(
+                "main-1.0",
+                &[("C", b"from main\n")],
+                1_400_000
+            )),
+            sha256(&fixture_tar_gz(
+                "extra-1.0",
+                &[("C", b"from extra\n")],
+                1_400_000
+            )),
         ),
     )
     .unwrap();
@@ -413,7 +468,11 @@ fn wrong_bytes_mirror_is_refused_and_fallback_applies() {
     let recipes = s.join("recipes");
     let r = recipes.join("mirror");
     fs::create_dir_all(&r).unwrap();
-    let good = fixture_tar_gz("main-1.0", &[("hello.sh", b"#!/bin/sh\necho main-ok\n")], 1_400_000);
+    let good = fixture_tar_gz(
+        "main-1.0",
+        &[("hello.sh", b"#!/bin/sh\necho main-ok\n")],
+        1_400_000,
+    );
     let (addr, count) = route_server(vec![
         // primary 404s, mirror 1 serves wrong bytes, mirror 2 correct
         ("/a.tar.gz", None),
@@ -441,12 +500,19 @@ strip_components = 1
 [build]
 install = "set -e; mkdir -p %{{pkgdir}}/usr/bin; cp %{{srcdir}}/hello.sh %{{pkgdir}}/usr/bin/hello"
 "#,
-            sha256(&fixture_tar_gz("main-1.0", &[("hello.sh", b"#!/bin/sh\necho main-ok\n")], 1_400_000)),
+            sha256(&fixture_tar_gz(
+                "main-1.0",
+                &[("hello.sh", b"#!/bin/sh\necho main-ok\n")],
+                1_400_000
+            )),
         ),
     )
     .unwrap();
     let (stdout, stderr, ok) = run_build(&recipes, &s.join("build"), &[], "mirror");
-    assert!(ok, "mirror fallback must succeed:\n{stdout}\n--- stderr ---\n{stderr}");
+    assert!(
+        ok,
+        "mirror fallback must succeed:\n{stdout}\n--- stderr ---\n{stderr}"
+    );
     let combined = format!("{stdout}{stderr}");
     assert!(
         combined.contains("trying alternate mirror") || combined.contains("mirror"),
@@ -455,11 +521,19 @@ install = "set -e; mkdir -p %{{pkgdir}}/usr/bin; cp %{{srcdir}}/hello.sh %{{pkgd
     // the tampered bytes never reached the cache: the cache entry content
     // must be the verified good bytes only
     let cache = s.join("build/distfiles/sha256");
-    let digest = sha256(&fixture_tar_gz("main-1.0", &[("hello.sh", b"#!/bin/sh\necho main-ok\n")], 1_400_000));
+    let digest = sha256(&fixture_tar_gz(
+        "main-1.0",
+        &[("hello.sh", b"#!/bin/sh\necho main-ok\n")],
+        1_400_000,
+    ));
     let entry = cache.join(&digest);
     assert_eq!(
         fs::read(&entry).unwrap(),
-        fixture_tar_gz("main-1.0", &[("hello.sh", b"#!/bin/sh\necho main-ok\n")], 1_400_000),
+        fixture_tar_gz(
+            "main-1.0",
+            &[("hello.sh", b"#!/bin/sh\necho main-ok\n")],
+            1_400_000
+        ),
         "only verified bytes may be published"
     );
     // 1 (primary 404) + 1 (m1 wrong) + 1 (m2 good)
@@ -481,11 +555,19 @@ fn multi_source_with_plain_file_rebuild_check_passes() {
     let (addr, count) = route_server(vec![
         (
             "/src-main.tar.gz",
-            Some(fixture_tar_gz("main-1.0", &[("hello.sh", b"#!/bin/sh\necho main-ok\n")], 1_400_000)),
+            Some(fixture_tar_gz(
+                "main-1.0",
+                &[("hello.sh", b"#!/bin/sh\necho main-ok\n")],
+                1_400_000,
+            )),
         ),
         (
             "/patches.tar.gz",
-            Some(fixture_tar_gz("patch-bundle", &[("fix.sh", b"#!/bin/sh\necho patch-ok\n")], 1_400_000)),
+            Some(fixture_tar_gz(
+                "patch-bundle",
+                &[("fix.sh", b"#!/bin/sh\necho patch-ok\n")],
+                1_400_000,
+            )),
         ),
         ("/data/bootstrap.dat", Some(b"bootstrap data\n".to_vec())),
     ]);
@@ -514,7 +596,8 @@ cp %{srcroot}/data/bootstrap.dat %{pkgdir}/usr/share/bootstrap.dat
             "--builddir",
             s.join("build").to_str().unwrap(),
             "build",
-            "--isolation", "env",
+            "--isolation",
+            "env",
             "--rebuild-check",
             "multisrc",
         ])
@@ -591,8 +674,11 @@ install = "true"
 fn legacy_recipe_sees_no_srcroot_and_is_refused_with_the_placeholder() {
     let s = scratch("legacy");
     let recipes = s.join("recipes");
-    let tarball =
-        fixture_tar_gz("legacy-1.0", &[("hello.sh", b"#!/bin/sh\necho legacy-ok\n")], 1_400_000);
+    let tarball = fixture_tar_gz(
+        "legacy-1.0",
+        &[("hello.sh", b"#!/bin/sh\necho legacy-ok\n")],
+        1_400_000,
+    );
     let (addr, _count) = route_server(vec![("/legacy.tar.gz", Some(tarball))]);
     let r = recipes.join("legacy");
     fs::create_dir_all(&r).unwrap();
@@ -628,7 +714,10 @@ cp %{{srcdir}}/hello.sh %{{pkgdir}}/usr/bin/hello
     )
     .unwrap();
     let (stdout, stderr, ok) = run_build(&recipes, &s.join("build"), &[], "legacy");
-    assert!(ok, "legacy build failed:\n{stdout}\n--- stderr ---\n{stderr}");
+    assert!(
+        ok,
+        "legacy build failed:\n{stdout}\n--- stderr ---\n{stderr}"
+    );
 
     // (b) a legacy recipe referencing %{srcroot}: refused at build time
     let r2 = recipes.join("legacyph");
@@ -646,9 +735,9 @@ arch = ["x86_64"]
 install = """
 echo %{srcroot}
 """
-"#
-        )
-        .unwrap();
+"#,
+    )
+    .unwrap();
     let (_stdout, stderr2, ok2) = run_build(&recipes, &s.join("build"), &[], "legacyph");
     assert!(!ok2, "a legacy recipe with %{{srcroot}} must be refused");
     assert!(

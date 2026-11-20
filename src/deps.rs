@@ -112,7 +112,11 @@ mod tests {
             [build]
             install = "true"
             "#,
-            deps_list.iter().map(|d| format!("{:?}", d)).collect::<Vec<_>>().join(", ")
+            deps_list
+                .iter()
+                .map(|d| format!("{:?}", d))
+                .collect::<Vec<_>>()
+                .join(", ")
         );
         toml::from_str(&toml_src).unwrap()
     }
@@ -128,29 +132,27 @@ mod tests {
         .map(|(k, v)| (k.to_string(), v))
         .collect();
 
-        let order =
-            resolve(&["gcc".to_string()], &HashSet::new(), &known).unwrap();
+        let order = resolve(&["gcc".to_string()], &HashSet::new(), &known).unwrap();
         let names: Vec<&str> = order.iter().map(|r| r.package.name.as_str()).collect();
         assert_eq!(names, vec!["gmp", "mpfr", "gcc"]);
     }
 
     #[test]
     fn detects_cycles() {
-        let known: BTreeMap<String, Recipe> = [
-            ("a", rec("a", &["b"])),
-            ("b", rec("b", &["a"])),
-        ]
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v))
-        .collect();
+        let known: BTreeMap<String, Recipe> = [("a", rec("a", &["b"])), ("b", rec("b", &["a"]))]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
 
         assert!(resolve(&["a".to_string()], &HashSet::new(), &known).is_err());
     }
 
     #[test]
     fn missing_dep_errors() {
-        let known: BTreeMap<String, Recipe> =
-            [("a", rec("a", &["ghost"]))].into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+        let known: BTreeMap<String, Recipe> = [("a", rec("a", &["ghost"]))]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
         assert!(resolve(&["a".to_string()], &HashSet::new(), &known).is_err());
     }
 
@@ -159,7 +161,9 @@ mod tests {
     }
 
     fn graph(list: &[(&str, &[&str])]) -> BTreeMap<String, Recipe> {
-        list.iter().map(|(n, d)| (n.to_string(), rec(n, d))).collect()
+        list.iter()
+            .map(|(n, d)| (n.to_string(), rec(n, d)))
+            .collect()
     }
 
     fn set(list: &[&str]) -> HashSet<String> {
@@ -191,7 +195,9 @@ mod tests {
     #[test]
     fn installed_target_without_recipe_resolves_to_nothing() {
         let known = graph(&[]);
-        assert!(resolve_target("seedpkg", &set(&["seedpkg"]), &known).unwrap().is_empty());
+        assert!(resolve_target("seedpkg", &set(&["seedpkg"]), &known)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -211,12 +217,20 @@ mod tests {
             return; // running outside the repo checkout
         }
         let all = crate::recipe::load_all(&root).unwrap();
-        assert!(all.len() >= 100, "expected the full recipe tree, got {}", all.len());
+        assert!(
+            all.len() >= 100,
+            "expected the full recipe tree, got {}",
+            all.len()
+        );
         let targets: Vec<String> = all.keys().cloned().collect();
         let order = resolve(&targets, &HashSet::new(), &all).unwrap();
         let mut names: Vec<String> = order.iter().map(|r| r.package.name.clone()).collect();
         names.sort();
-        assert_eq!(names.len(), all.len(), "every recipe must appear exactly once");
+        assert_eq!(
+            names.len(),
+            all.len(),
+            "every recipe must appear exactly once"
+        );
         let dup = names.iter().zip(names.iter().skip(1)).find(|(a, b)| a == b);
         assert!(dup.is_none(), "duplicate entries in resolution order");
     }

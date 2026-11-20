@@ -10,12 +10,14 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-use crate::atomic;
 use super::history::{PackageState, SCHEMA_VERSION};
+use crate::adapters::atomic;
 
 /// `<root>/var/lib/nawa/history/journal/<id>/`
 fn journal_dir(root: &Path, tx: u64) -> PathBuf {
-    super::history::history_dir(root).join("journal").join(format!("{tx:010}"))
+    super::history::history_dir(root)
+        .join("journal")
+        .join(format!("{tx:010}"))
 }
 
 /// The intent of one not-yet-applied package step.
@@ -56,11 +58,15 @@ pub(crate) struct StepResult {
 }
 
 fn intent_path(root: &Path, tx: u64, step: u32) -> PathBuf {
-    journal_dir(root, tx).join("steps").join(format!("intent-{step:04}.toml"))
+    journal_dir(root, tx)
+        .join("steps")
+        .join(format!("intent-{step:04}.toml"))
 }
 
 fn result_path(root: &Path, tx: u64, step: u32) -> PathBuf {
-    journal_dir(root, tx).join("steps").join(format!("result-{step:04}.toml"))
+    journal_dir(root, tx)
+        .join("steps")
+        .join(format!("result-{step:04}.toml"))
 }
 
 /// Transaction-level marker: state.toml with the running status.
@@ -77,7 +83,7 @@ pub(crate) fn write_intent(root: &Path, intent: &StepIntent) -> Result<()> {
     if intent.schema != SCHEMA_VERSION {
         anyhow::bail!("unsupported step-intent schema {}", intent.schema);
     }
-    crate::db::check_name(&intent.package)?;
+    crate::adapters::db::check_name(&intent.package)?;
     let path = intent_path(root, intent.tx, intent.step);
     atomic::write_atomic(&path, toml::to_string_pretty(intent)?.as_bytes(), 0o600)
 }
@@ -87,7 +93,7 @@ pub(crate) fn write_result(root: &Path, result: &StepResult) -> Result<()> {
     if result.schema != SCHEMA_VERSION {
         anyhow::bail!("unsupported step-result schema {}", result.schema);
     }
-    crate::db::check_name(&result.package)?;
+    crate::adapters::db::check_name(&result.package)?;
     let path = result_path(root, result.tx, result.step);
     atomic::write_atomic(&path, toml::to_string_pretty(result)?.as_bytes(), 0o600)
 }
@@ -120,18 +126,25 @@ pub(crate) fn read_result(root: &Path, tx: u64, step: u32) -> Result<Option<Step
 }
 
 /// Every step intent paired with its durable result when one exists.
-pub(crate) fn transaction_steps(root: &Path, tx: u64) -> Result<Vec<(StepIntent, Option<StepResult>)>> {
+pub(crate) fn transaction_steps(
+    root: &Path,
+    tx: u64,
+) -> Result<Vec<(StepIntent, Option<StepResult>)>> {
     let dir = journal_dir(root, tx).join("steps");
     let rd = match std::fs::read_dir(&dir) {
         Ok(rd) => rd,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error).with_context(|| format!("read journal {}", dir.display())),
     };
-    let mut steps: Vec<u32> = rd.filter_map(|entry| entry.ok()).filter_map(|entry| {
-        let name = entry.file_name().to_string_lossy().to_string();
-        name.strip_prefix("intent-").and_then(|value| value.strip_suffix(".toml"))
-            .and_then(|value| value.parse::<u32>().ok())
-    }).collect();
+    let mut steps: Vec<u32> = rd
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            name.strip_prefix("intent-")
+                .and_then(|value| value.strip_suffix(".toml"))
+                .and_then(|value| value.parse::<u32>().ok())
+        })
+        .collect();
     steps.sort_unstable();
     steps.dedup();
     let mut out = Vec::with_capacity(steps.len());
@@ -143,8 +156,11 @@ pub(crate) fn transaction_steps(root: &Path, tx: u64) -> Result<Vec<(StepIntent,
         }
         let result = read_result(root, tx, step)?;
         if let Some(result) = &result {
-            if result.schema != SCHEMA_VERSION || result.tx != tx
-                || result.step != step || result.package != intent.package {
+            if result.schema != SCHEMA_VERSION
+                || result.tx != tx
+                || result.step != step
+                || result.package != intent.package
+            {
                 anyhow::bail!("journal result identity mismatch for transaction {tx}, step {step}");
             }
         }
@@ -155,7 +171,8 @@ pub(crate) fn transaction_steps(root: &Path, tx: u64) -> Result<Vec<(StepIntent,
 
 /// Every intent without a durable result.
 pub(crate) fn pending_steps(root: &Path, tx: u64) -> Result<Vec<(u32, StepIntent)>> {
-    Ok(transaction_steps(root, tx)?.into_iter()
+    Ok(transaction_steps(root, tx)?
+        .into_iter()
         .filter_map(|(intent, result)| result.is_none().then_some((intent.step, intent)))
         .collect())
 }
@@ -170,12 +187,7 @@ pub(crate) fn journaled_transactions(root: &Path) -> Result<Vec<u64>> {
     };
     for e in rd.filter_map(|e| e.ok()) {
         let n = e.file_name().to_string_lossy().to_string();
-        if let Some(id) = e
-            .path()
-            .is_dir()
-            .then(|| n.parse::<u64>().ok())
-            .flatten()
-        {
+        if let Some(id) = e.path().is_dir().then(|| n.parse::<u64>().ok()).flatten() {
             out.push(id);
         }
     }
@@ -188,8 +200,11 @@ pub(crate) fn journaled_transactions(root: &Path) -> Result<Vec<u64>> {
 pub(crate) fn clear_journal(root: &Path, tx: u64) -> Result<()> {
     let dir = journal_dir(root, tx);
     if dir.exists() {
-        std::fs::remove_dir_all(&dir).with_context(|| format!("remove journal {}", dir.display()))?;
-        if let Some(parent) = dir.parent() { atomic::sync_directory(parent)?; }
+        std::fs::remove_dir_all(&dir)
+            .with_context(|| format!("remove journal {}", dir.display()))?;
+        if let Some(parent) = dir.parent() {
+            atomic::sync_directory(parent)?;
+        }
     }
     Ok(())
 }
@@ -224,7 +239,16 @@ mod tests {
     fn intent_result_and_pending_steps() {
         let base = tmpdir("wal");
         let root = base.join("root");
-        write_tx_state(&root, &TxState { schema: 1, tx: 7, command: "install".into(), started_at: 5 }).unwrap();
+        write_tx_state(
+            &root,
+            &TxState {
+                schema: 1,
+                tx: 7,
+                command: "install".into(),
+                started_at: 5,
+            },
+        )
+        .unwrap();
         write_intent(&root, &intent(7, 1, "zlib")).unwrap();
         write_intent(&root, &intent(7, 2, "curl")).unwrap();
 
@@ -232,12 +256,25 @@ mod tests {
         assert_eq!(pending.len(), 2);
         assert_eq!(pending[0].1.package, "zlib");
 
-        write_result(&root, &StepResult {
-            schema: 1, tx: 7, step: 1, package: "zlib".into(),
-            outcome: "committed".into(), failure: None, hook: None,
-        }).unwrap();
+        write_result(
+            &root,
+            &StepResult {
+                schema: 1,
+                tx: 7,
+                step: 1,
+                package: "zlib".into(),
+                outcome: "committed".into(),
+                failure: None,
+                hook: None,
+            },
+        )
+        .unwrap();
         let pending = pending_steps(&root, 7).unwrap();
-        assert_eq!(pending.len(), 1, "a step with a result is no longer pending");
+        assert_eq!(
+            pending.len(),
+            1,
+            "a step with a result is no longer pending"
+        );
         assert_eq!(pending[0].1.package, "curl");
         let all = transaction_steps(&root, 7).unwrap();
         assert_eq!(all.len(), 2);

@@ -1,15 +1,15 @@
 //! Recipe parsing (split from monolithic recipe.rs).
 
-pub mod model;
-pub mod validate;
 pub mod expand;
 pub mod load;
+pub mod model;
+pub mod validate;
 
-pub(crate) use model::{Recipe, SourceSpec, FetchSpec, ExpandCtx};
+pub(crate) use load::{load_all, load_by_name, locate};
+pub(crate) use model::{ExpandCtx, FetchSpec, Recipe, SourceSpec};
 #[cfg(test)]
 pub(crate) use model::{CARGO_TOOLCHAIN, CA_BUNDLE, GO_TOOLCHAIN, SCHEMA_MARKER};
 pub(crate) use validate::is_lower_hex64;
-pub(crate) use load::{load_all, load_by_name, locate};
 
 #[cfg(test)]
 mod tests {
@@ -50,16 +50,44 @@ mod tests {
         );
         let rec: Recipe = toml::from_str(&with).unwrap();
         rec.validate().unwrap();
-        assert_eq!(rec.package.mirrors, vec!["https://m1.example/gzip-%{version}.tar.xz"]);
+        assert_eq!(
+            rec.package.mirrors,
+            vec!["https://m1.example/gzip-%{version}.tar.xz"]
+        );
+    }
+
+    #[test]
+    fn package_relations_require_their_own_fail_closed_recipe_marker() {
+        let text = "[package]\nname='app'\nversion='1'\nsource='local:/nawa-package-relations-1-requires-a-newer-nawa'\nsource_date_epoch=1\n[depends]\nrun=['lib >= 2-1']\n[capabilities]\nprovides=[]\n[relations]\nschema=1\nconflicts=['old<2-1']\nreplaces=['old<2-1']\n";
+        let recipe: Recipe = toml::from_str(text).unwrap();
+        recipe.validate().unwrap();
+        assert!(recipe.is_new_schema());
+        for marker in ["", super::model::SCHEMA_MARKER] {
+            let mut invalid = recipe.clone();
+            invalid.package.source = marker.into();
+            assert!(invalid.validate().is_err());
+        }
+        let mut invalid = recipe.clone();
+        invalid.relations.as_mut().unwrap().schema = 99;
+        assert!(invalid.validate().is_err());
+        assert!(toml::from_str::<Recipe>(&text.replace("replaces=['old<2-1']", "")).is_err());
+    }
+
+    #[test]
+    fn relation_only_recipe_does_not_enter_the_fetch_source_stager() {
+        let text = "[package]\nname='meta-relations'\nversion='1'\nsource='local:/nawa-package-relations-1-requires-a-newer-nawa'\nsource_date_epoch=1\n[relations]\nschema=1\nconflicts=[]\nreplaces=[]\n";
+        let recipe: Recipe = toml::from_str(text).unwrap();
+        recipe.validate().unwrap();
+        assert!(recipe.is_new_schema());
+        assert!(!recipe.is_fetch_schema());
     }
 
     #[test]
     fn mirrors_need_a_downloadable_source() {
-        let bad = SAMPLE
-            .replace(
-                "source = \"https://ftp.gnu.org/gnu/gzip/gzip-%{version}.tar.xz\"",
-                "source = \"local:/src/gzip\"\n        mirrors = [\"https://m1.example/x.tar.xz\"]",
-            );
+        let bad = SAMPLE.replace(
+            "source = \"https://ftp.gnu.org/gnu/gzip/gzip-%{version}.tar.xz\"",
+            "source = \"local:/src/gzip\"\n        mirrors = [\"https://m1.example/x.tar.xz\"]",
+        );
         let rec: Recipe = toml::from_str(&bad).unwrap();
         let err = rec.validate().unwrap_err().to_string();
         assert!(err.contains("package.mirrors"), "got: {err}");
@@ -143,7 +171,10 @@ mod tests {
             "dedup",
         );
         assert_eq!(
-            rec.build_deps().iter().filter(|d| **d == GO_TOOLCHAIN).count(),
+            rec.build_deps()
+                .iter()
+                .filter(|d| **d == GO_TOOLCHAIN)
+                .count(),
             1,
             "a declared toolchain dep must not be duplicated"
         );
@@ -204,7 +235,10 @@ mod tests {
             "the Rust toolchain must not declare [fetch.cargo], got: {err}"
         );
         let rec = new_schema_with_fetch("[fetch.go]\ndir = \".\"", GO_TOOLCHAIN);
-        assert!(rec.validate().is_err(), "[fetch.go] in the Go toolchain recipe");
+        assert!(
+            rec.validate().is_err(),
+            "[fetch.go] in the Go toolchain recipe"
+        );
     }
 
     #[test]
@@ -416,9 +450,7 @@ mod tests {
                 "workdir = \"kernel\"",
                 format!("workdir = \"kernel\"\n        {patch}").as_str(),
             );
-            let rec: Recipe = toml::from_str(&mixed).unwrap_or_else(|e| {
-                panic!("{label}: {e}")
-            });
+            let rec: Recipe = toml::from_str(&mixed).unwrap_or_else(|e| panic!("{label}: {e}"));
             let err = rec.validate().unwrap_err().to_string();
             assert!(
                 err.contains("mix") && err.contains(label),
@@ -440,13 +472,13 @@ mod tests {
         assert!(err.contains("duplicate"), "got: {err}");
 
         for bad in [
-            "UPPER",    // case
-            "",         // empty
-            "a/b",      // path separator
-            "-a",       // head not [a-z0-9]
-            "_a",       // head not [a-z0-9]
-            "a b",      // space
-            "a-b-c!",   // non-name char
+            "UPPER",  // case
+            "",       // empty
+            "a/b",    // path separator
+            "-a",     // head not [a-z0-9]
+            "_a",     // head not [a-z0-9]
+            "a b",    // space
+            "a-b-c!", // non-name char
         ] {
             let bad_name = NEW_SCHEMA.replace("name = \"main\"", &format!("name = \"{bad}\""));
             let rec: Recipe = toml::from_str(&bad_name).unwrap();
@@ -463,7 +495,8 @@ mod tests {
         for good in ["a", "main", "bootstrap-2.data", "x_y.z-1"] {
             let ok_name = NEW_SCHEMA.replace("name = \"main\"", &format!("name = \"{good}\""));
             let rec: Recipe = toml::from_str(&ok_name).unwrap();
-            rec.validate().unwrap_or_else(|e| panic!("`{good}` should be valid: {e}"));
+            rec.validate()
+                .unwrap_or_else(|e| panic!("`{good}` should be valid: {e}"));
         }
     }
 
@@ -487,10 +520,7 @@ mod tests {
     #[test]
     fn into_and_workdir_must_be_relative_and_safe() {
         for into in ["/abs", "../escape", "a/../b", "trailing/"] {
-            let mixed = NEW_SCHEMA.replace(
-                "into = \"kernel\"",
-                &format!("into = \"{into}\""),
-            );
+            let mixed = NEW_SCHEMA.replace("into = \"kernel\"", &format!("into = \"{into}\""));
             let rec: Recipe = toml::from_str(&mixed).unwrap();
             let err = rec.validate().unwrap_err();
             // the long-form error reports the failing field through the
@@ -498,13 +528,17 @@ mod tests {
             assert!(format!("{err:?}").contains("into"), "{into}: {err:?}");
         }
         for workdir in ["/usr", "../x", "a/../b", "end/"] {
-            let mixed = NEW_SCHEMA.replace(
-                "workdir = \"kernel\"",
-                &format!("workdir = \"{workdir}\""),
-            );
+            let mixed =
+                NEW_SCHEMA.replace("workdir = \"kernel\"", &format!("workdir = \"{workdir}\""));
             let rec: Recipe = toml::from_str(&mixed).unwrap();
             let err = rec.validate().unwrap_err().to_string();
-            assert!({ let e = format!("{err:#}"); e.contains("workdir") }, "{workdir}: {err}");
+            assert!(
+                {
+                    let e = format!("{err:#}");
+                    e.contains("workdir")
+                },
+                "{workdir}: {err}"
+            );
         }
     }
 
@@ -537,16 +571,11 @@ mod tests {
             );
         let rec: Recipe = toml::from_str(&plain).unwrap();
         assert_eq!(rec.package.sources.len(), 2);
-        assert!(rec
-            .package
-            .sources
-            .iter()
-            .all(|s| s.unpack == Some(false)));
+        assert!(rec.package.sources.iter().all(|s| s.unpack == Some(false)));
         let err = rec.validate().unwrap_err().to_string();
         assert!(err.contains("unpack = false"), "got: {err}");
         // ...and pinning it makes the recipe valid
-        let pinned = plain
-            .replace("rel = 1", "rel = 1\n        source_date_epoch = 1700000000");
+        let pinned = plain.replace("rel = 1", "rel = 1\n        source_date_epoch = 1700000000");
         let rec: Recipe = toml::from_str(&pinned).unwrap();
         rec.validate().unwrap();
     }
@@ -557,9 +586,7 @@ mod tests {
     /// typo'd `include` must not silently stage nothing).
     #[test]
     fn assets_parse_and_deny_unknown_fields() {
-        let with = NEW_SCHEMA
-            .replace("    \"#;", "")
-            .replace("</沉默>", "")
+        let with = NEW_SCHEMA.replace("    \"#;", "").replace("</沉默>", "")
             + r#"
         [assets]
         include = ["patches/fix-build.patch", "config/x86_64.fragment"]
@@ -573,7 +600,8 @@ mod tests {
         assert!(toml::from_str::<Recipe>(&with.replace(
             "[assets]\n        include = [\"patches/fix-build.patch\", \"config/x86_64.fragment\"]",
             "assets = \"patches\""
-        )).is_err());
+        ))
+        .is_err());
     }
 
     /// An `[assets]` table alone is a new-schema table: the marker is
@@ -627,15 +655,11 @@ mod tests {
     fn assets_include_paths_are_validated() {
         for bad in ["", "  ", "/abs/config", "../escape", "kernel.config/"] {
             let bad_line = format!("include = [\"{bad}\"]");
-            let with = NEW_SCHEMA.replace("    \"#;", "") + format!(
-                "\n        [assets]\n        {bad_line}\n    "
-            ).as_str();
+            let with = NEW_SCHEMA.replace("    \"#;", "")
+                + format!("\n        [assets]\n        {bad_line}\n    ").as_str();
             let rec: Recipe = toml::from_str(&with).unwrap();
             let err = format!("{:#}", rec.validate().unwrap_err());
-            assert!(
-                err.contains("[assets] include"),
-                "{bad:?}: {err}"
-            );
+            assert!(err.contains("[assets] include"), "{bad:?}: {err}");
         }
     }
 
@@ -659,7 +683,8 @@ mod tests {
         assert!(err.contains("NAWA_ASSETSDIR"), "got: {err}");
         // assets but no sources: %{srcroot} is refused (see above) and the
         // combined recipe passes
-        let both = NEW_SCHEMA.replace("    \"#;", "") + r#"
+        let both = NEW_SCHEMA.replace("    \"#;", "")
+            + r#"
         [assets]
         include = ["config/x86_64.fragment"]
     "#;
@@ -697,5 +722,40 @@ dir = "rust"
         assert!(deps.contains(&"golang".to_string()), "{deps:?}");
         assert!(deps.contains(&"rust".to_string()), "{deps:?}");
         assert!(deps.contains(&"ca-certificates".to_string()), "{deps:?}");
+    }
+
+    #[test]
+    fn capabilities_are_additive_and_normalized_once() {
+        let legacy: Recipe = toml::from_str(SAMPLE).unwrap();
+        assert!(legacy.capabilities.is_none(), "absent table means unknown");
+
+        let declared: Recipe = toml::from_str(&SAMPLE.replace(
+            "[depends]",
+            "[capabilities]\nprovides = [\"init-system=runit\"]\n\n[depends]",
+        ))
+        .unwrap();
+        declared.validate().unwrap();
+        let caps = declared.capabilities.as_ref().unwrap();
+        assert_eq!(
+            crate::domain::package::metadata::normalize_provides(&caps.provides).unwrap(),
+            vec!["init-system=runit".to_string()]
+        );
+    }
+
+    #[test]
+    fn capabilities_reject_commas_duplicates_and_unparseable_entries() {
+        for bad in [
+            "provides = [\"init-system=runit,init-system=systemd\"]",
+            "provides = [\"init-system=runit\", \"init-system=runit\"]",
+            "provides = [\"not-a-capability\"]",
+            "provides = [\"\"]",
+            "surprise = true",
+        ] {
+            let raw = SAMPLE.replace("[depends]", &format!("[capabilities]\n{bad}\n\n[depends]"));
+            let result = toml::from_str::<Recipe>(&raw)
+                .map_err(anyhow::Error::msg)
+                .and_then(|rec| rec.validate());
+            assert!(result.is_err(), "{bad} must be rejected");
+        }
     }
 }

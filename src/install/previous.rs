@@ -10,7 +10,7 @@
 use anyhow::{bail, Context, Result};
 use std::path::Path;
 
-use crate::db::{Db, Entry};
+use crate::adapters::db::{Db, Entry};
 use crate::transaction::history::{self, PackageChange, PackageState, TransactionRecord, TxStatus};
 
 /// How much later the legacy slot may claim to be before we treat it as
@@ -101,7 +101,7 @@ fn describe_state(name: &str, state: &PackageState) -> String {
 /// version. Must be called while no other nawa process can mutate the root
 /// (the caller holds the exclusive database lock).
 pub(crate) fn resolve_previous(root: &Path, name: &str) -> Result<Option<PreviousVersion>> {
-    crate::db::check_name(name)?;
+    crate::adapters::db::check_name(name)?;
     let current = Db::new(root).entry(name)?;
     let desc_path = root.join("var/lib/nawa/undo").join(name).join("desc");
     let legacy = read_legacy(&desc_path)?;
@@ -407,7 +407,7 @@ mod tests {
     }
 
     fn record(id: u64, status: &str, changes: Vec<PackageChange>) -> TransactionRecord {
-        let now = crate::artifact::now_secs();
+        let now = crate::adapters::artifact::now_secs();
         TransactionRecord {
             schema: SCHEMA_VERSION,
             id,
@@ -653,7 +653,7 @@ mod tests {
                 Some(state("3.0", &"c".repeat(64))),
             )],
         );
-        let past = crate::artifact::now_secs().saturating_sub(3600);
+        let past = crate::adapters::artifact::now_secs().saturating_sub(3600);
         old.started_at = past;
         old.finished_at = Some(past);
         write_history(&base, &old);
@@ -754,7 +754,7 @@ mod tests {
                 schema: 1,
                 tx: 7,
                 command: "install".into(),
-                started_at: crate::artifact::now_secs(),
+                started_at: crate::adapters::artifact::now_secs(),
             },
         )
         .unwrap();

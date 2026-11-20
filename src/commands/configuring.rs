@@ -1,12 +1,11 @@
 //! `config show` and `init`.
 
+use crate::adapters::config;
+use crate::application::context::Ctx;
+use crate::presentation::color::Palette;
+use crate::presentation::color::Stream;
 use anyhow::{bail, Context, Result};
-use crate::ctx::Ctx;
-use crate::color::Palette;
 use std::path::PathBuf;
-use crate::color::Stream;
-use crate::config;
-
 
 pub(crate) fn cmd_config_show(ctx: &Ctx) -> Result<()> {
     // the config resolved at startup, flags included, so sources are truthful
@@ -18,12 +17,33 @@ pub(crate) fn cmd_config_show(ctx: &Ctx) -> Result<()> {
         pal.dim("(precedence: flag > env > nawa.toml > /etc/nawa/nawa.toml > default)")
     );
     let show = |key: &str, value: String, source: &str| {
-        println!("{:<10} {:<40} {}", pal.header(key), value, pal.dim(&format!("({source})")));
+        println!(
+            "{:<10} {:<40} {}",
+            pal.header(key),
+            value,
+            pal.dim(&format!("({source})"))
+        );
     };
-    show("root", ctx.root.display().to_string(), cfg.source_of("root"));
-    show("recipes", ctx.recipes.display().to_string(), cfg.source_of("recipes"));
-    show("builddir", ctx.builddir.display().to_string(), cfg.source_of("builddir"));
-    show("profiles", ctx.profiles.display().to_string(), cfg.source_of("profiles"));
+    show(
+        "root",
+        ctx.root.display().to_string(),
+        cfg.source_of("root"),
+    );
+    show(
+        "recipes",
+        ctx.recipes.display().to_string(),
+        cfg.source_of("recipes"),
+    );
+    show(
+        "builddir",
+        ctx.builddir.display().to_string(),
+        cfg.source_of("builddir"),
+    );
+    show(
+        "profiles",
+        ctx.profiles.display().to_string(),
+        cfg.source_of("profiles"),
+    );
     let jobs = ctx
         .jobs
         .map(|j| j.to_string())
@@ -31,14 +51,24 @@ pub(crate) fn cmd_config_show(ctx: &Ctx) -> Result<()> {
     show("jobs", jobs, cfg.source_of("jobs"));
     show(
         "repo",
-        ctx.repo.clone().unwrap_or_else(|| "(switched off — pass --repo to use one)".into()),
+        ctx.repo
+            .clone()
+            .unwrap_or_else(|| "(switched off — pass --repo to use one)".into()),
         cfg.source_of("repo"),
     );
-    show("install_mode", ctx.install_mode.as_str().to_string(), cfg.source_of("install_mode"));
+    show(
+        "install_mode",
+        ctx.install_mode.as_str().to_string(),
+        cfg.source_of("install_mode"),
+    );
     if let Some(f) = &cfg.file {
         println!("{:<10} {}", pal.header("config"), f.display());
     } else {
-        println!("{:<10} {}", pal.header("config"), pal.dim("(no project nawa.toml — run `nawa init` to create one)"));
+        println!(
+            "{:<10} {}",
+            pal.header("config"),
+            pal.dim("(no project nawa.toml — run `nawa init` to create one)")
+        );
     }
     match &cfg.system_file {
         Some(f) => println!("{:<10} {}", pal.header("system"), f.display()),

@@ -30,20 +30,34 @@ fn nawa_bin() -> PathBuf {
 fn nawa() -> Command {
     let mut c = Command::new(nawa_bin());
     for k in [
-        "NAWA_CONFIG", "NAWA_ROOT", "NAWA_RECIPES", "NAWA_BUILDDIR",
-        "NAWA_PROFILES", "NAWA_JOBS", "NAWA_REPO", "NAWA_INSTALL_MODE",
-        "NAWA_OFFLINE", "NAWA_SRCCACHE",
-        "NAWA_SRCROOT", "NAWA_ASSETSDIR",
-        "NAWA_GOPROXY", "NAWA_FETCH_PATH", "NAWA_FETCH_TIMEOUT",
+        "NAWA_CONFIG",
+        "NAWA_ROOT",
+        "NAWA_RECIPES",
+        "NAWA_BUILDDIR",
+        "NAWA_PROFILES",
+        "NAWA_JOBS",
+        "NAWA_REPO",
+        "NAWA_INSTALL_MODE",
+        "NAWA_OFFLINE",
+        "NAWA_SRCCACHE",
+        "NAWA_SRCROOT",
+        "NAWA_ASSETSDIR",
+        "NAWA_GOPROXY",
+        "NAWA_FETCH_PATH",
+        "NAWA_FETCH_TIMEOUT",
         "CARGO_HOME",
         // the root CI job points CARGO_TARGET_DIR at /var/tmp for the *outer*
         // `cargo test`; inherited by the recipe's own `cargo build` it would
         // move target/release/ away from where the recipes copy it from
-        "CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR",
+        "CARGO_TARGET_DIR",
+        "CARGO_BUILD_TARGET_DIR",
     ] {
         c.env_remove(k);
     }
-    c.env("NAWA_SYSCONFDIR", std::env::temp_dir().join("nawa-test-no-sysconf"));
+    c.env(
+        "NAWA_SYSCONFDIR",
+        std::env::temp_dir().join("nawa-test-no-sysconf"),
+    );
     c.env("NAWA_INSTALL_MODE", "build");
     c.current_dir(std::env::temp_dir());
     c
@@ -72,9 +86,7 @@ fn sha256(bytes: &[u8]) -> String {
 /// Serve a fixed route table (path → body); counts accepted connections so
 /// tests can prove who talked to the network. Same shape as the other
 /// suite harnesses.
-fn route_server(
-    routes: Vec<(&'static str, Option<Vec<u8>>)>,
-) -> (String, Arc<AtomicUsize>) {
+fn route_server(routes: Vec<(&'static str, Option<Vec<u8>>)>) -> (String, Arc<AtomicUsize>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let count = Arc::new(AtomicUsize::new(0));
@@ -85,7 +97,9 @@ fn route_server(
         .collect();
     let counter = count.clone();
     std::thread::spawn(move || loop {
-        let Ok((mut sock, _)) = l2.accept() else { break };
+        let Ok((mut sock, _)) = l2.accept() else {
+            break;
+        };
         counter.fetch_add(1, Ordering::SeqCst);
         let mut buf = [0u8; 4096];
         let n = std::io::Read::read(&mut sock, &mut buf).unwrap_or(0);
@@ -124,7 +138,8 @@ fn fixture_tar_gz(top: &str, files: &[(String, Vec<u8>)]) -> Vec<u8> {
             h.set_mode(0o644);
             h.set_mtime(500_000);
             h.set_cksum();
-            b.append_data(&mut h, format!("{top}/{name}"), &data[..]).unwrap();
+            b.append_data(&mut h, format!("{top}/{name}"), &data[..])
+                .unwrap();
         }
         b.finish().unwrap();
     }
@@ -156,7 +171,10 @@ fn cargo_dir() -> String {
     if let Some(dir) = rustup_toolchain_dir() {
         return dir;
     }
-    let probed = Command::new("sh").args(["-c", "command -v cargo"]).output().ok();
+    let probed = Command::new("sh")
+        .args(["-c", "command -v cargo"])
+        .output()
+        .ok();
     if let Some(o) = probed {
         if o.status.success() {
             let path = String::from_utf8_lossy(&o.stdout).trim().to_string();
@@ -200,7 +218,10 @@ fn git_in(dir: &Path, args: &[&str]) -> (bool, String) {
         .env("GIT_COMMITTER_NAME", "nawa")
         .output()
         .unwrap();
-    (out.status.success(), String::from_utf8_lossy(&out.stdout).trim().to_string())
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).trim().to_string(),
+    )
 }
 
 /// A git-dependency repo fixture: a crate whose `greeting()` returns
@@ -232,8 +253,10 @@ fn git_dep_repo(dir: &Path, marker: &str) -> String {
 /// is never touched.
 fn cargo_cmd(cg_home: &Path) -> Command {
     let mut c = Command::new(Path::new(&cargo_dir()).join("cargo"));
-    c.env("CARGO_HOME", cg_home)
-        .env("HOME", cg_home.parent().unwrap_or_else(|| Path::new("/tmp")));
+    c.env("CARGO_HOME", cg_home).env(
+        "HOME",
+        cg_home.parent().unwrap_or_else(|| Path::new("/tmp")),
+    );
     c
 }
 
@@ -342,7 +365,11 @@ fn run_fetch_build_with_isolation(
         .arg("cargo-b")
         .env("NAWA_SRCCACHE", s.join("srccache"))
         .env("NAWA_FETCH_PATH", cargo_dir())
-        .envs(extra_env.iter().map(|(k, v)| (k.to_string(), v.to_string())))
+        .envs(
+            extra_env
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string())),
+        )
         .output()
         .unwrap();
     (
@@ -354,17 +381,17 @@ fn run_fetch_build_with_isolation(
 
 /// Serve a main crate (`manifest_dir` + lock bytes), run one online build,
 /// and expect `needle` in the build output.
-fn serve_and_build(
-    s: &Path,
-    manifest_dir: &Path,
-    lock: &[u8],
-    cargo: &str,
-    needle: &str,
-) {
+fn serve_and_build(s: &Path, manifest_dir: &Path, lock: &[u8], cargo: &str, needle: &str) {
     let files = vec![
-        ("Cargo.toml".to_string(), fs::read(manifest_dir.join("Cargo.toml")).unwrap()),
+        (
+            "Cargo.toml".to_string(),
+            fs::read(manifest_dir.join("Cargo.toml")).unwrap(),
+        ),
         ("Cargo.lock".to_string(), lock.to_vec()),
-        ("src/main.rs".to_string(), fs::read(manifest_dir.join("src/main.rs")).unwrap()),
+        (
+            "src/main.rs".to_string(),
+            fs::read(manifest_dir.join("src/main.rs")).unwrap(),
+        ),
     ];
     let tar = fixture_tar_gz("main-1.0", &files);
     let tar_sha = sha256(&tar);
@@ -375,7 +402,10 @@ fn serve_and_build(
          && cp target/release/testmain %{{pkgdir}}/usr/bin/ \
          && %{{pkgdir}}/usr/bin/testmain"
     );
-    write_recipe(&s.join("recipes/cargo-b"), &recipe(&tar_sha, &addr, &install));
+    write_recipe(
+        &s.join("recipes/cargo-b"),
+        &recipe(&tar_sha, &addr, &install),
+    );
     let (out, err, ok) = run_fetch_build(s, &[], &[]);
     assert!(ok, "fetch build failed\nstdout:\n{out}\nstderr:\n{err}");
     assert!(
@@ -401,7 +431,10 @@ fn cargo_keys(s: &Path) -> Vec<PathBuf> {
 fn entry_snapshot(entry: &Path) -> Vec<(String, u32, String)> {
     use std::os::unix::fs::PermissionsExt;
     let mut v: Vec<(String, u32, String)> = Vec::new();
-    for e in walkdir::WalkDir::new(entry).into_iter().filter_map(|e| e.ok()) {
+    for e in walkdir::WalkDir::new(entry)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
         let mode = e.metadata().unwrap().permissions().mode() & 0o777;
         let sha = if e.file_type().is_dir() {
             String::new()
@@ -442,8 +475,10 @@ fn cargo_backend_fetches_builds_offline_and_hits_the_cache() {
     prepare_main(&main, &repo);
     let lock = generate_lock(&main, &cg_home);
     assert!(
-        String::from_utf8_lossy(&lock)
-            .contains(&format!("git+file://{}?branch=master#{rev}", repo.display())),
+        String::from_utf8_lossy(&lock).contains(&format!(
+            "git+file://{}?branch=master#{rev}",
+            repo.display()
+        )),
         "the generated lock must pin the fixture rev:\n{}",
         String::from_utf8_lossy(&lock)
     );
@@ -455,19 +490,37 @@ fn cargo_backend_fetches_builds_offline_and_hits_the_cache() {
          && mkdir -p %{{pkgdir}}/usr/bin && cp target/release/testmain %{{pkgdir}}/usr/bin/"
     );
     let files: Vec<(String, Vec<u8>)> = vec![
-        ("Cargo.toml".to_string(), fs::read(main.join("Cargo.toml")).unwrap()),
+        (
+            "Cargo.toml".to_string(),
+            fs::read(main.join("Cargo.toml")).unwrap(),
+        ),
         ("Cargo.lock".to_string(), lock.clone()),
-        ("src/main.rs".to_string(), fs::read(main.join("src/main.rs")).unwrap()),
+        (
+            "src/main.rs".to_string(),
+            fs::read(main.join("src/main.rs")).unwrap(),
+        ),
     ];
     let tar = fixture_tar_gz("main-1.0", &files);
     let tar_sha = sha256(&tar);
     let (addr, count) = route_server(vec![("/src.tar.gz", Some(tar))]);
-    write_recipe(&s.join("recipes/cargo-b"), &recipe(&tar_sha, &addr, &install));
+    write_recipe(
+        &s.join("recipes/cargo-b"),
+        &recipe(&tar_sha, &addr, &install),
+    );
     let (out, err, ok) = run_fetch_build(&s, &[], &[]);
     assert!(ok, "run 1 failed\nstdout:\n{out}\nstderr:\n{err}");
-    assert!(out.contains("dep-ok-v1"), "the offline build resolved the git dep:\n{out}\n{err}");
-    assert!(out.contains("NET=true"), "CARGO_NET_OFFLINE must reach the build:\n{out}\n{err}");
-    assert!(out.contains("GM=[]"), "Go env names must not ride a cargo recipe:\n{out}\n{err}");
+    assert!(
+        out.contains("dep-ok-v1"),
+        "the offline build resolved the git dep:\n{out}\n{err}"
+    );
+    assert!(
+        out.contains("NET=true"),
+        "CARGO_NET_OFFLINE must reach the build:\n{out}\n{err}"
+    );
+    assert!(
+        out.contains("GM=[]"),
+        "Go env names must not ride a cargo recipe:\n{out}\n{err}"
+    );
     assert!(
         out.contains("CH=") && out.contains("fetch/cargo"),
         "CARGO_HOME must be the per-build view:\n{out}\n{err}"
@@ -478,7 +531,10 @@ fn cargo_backend_fetches_builds_offline_and_hits_the_cache() {
     );
 
     let work = s.join("build/cargo-b-1.0-1");
-    assert!(work.join("fetch-cargo.log").is_file(), "the populate ran once (log)");
+    assert!(
+        work.join("fetch-cargo.log").is_file(),
+        "the populate ran once (log)"
+    );
     let hits1 = count.load(Ordering::SeqCst);
     assert!(hits1 >= 1, "the source tarball came from the route server");
 
@@ -491,12 +547,20 @@ fn cargo_backend_fetches_builds_offline_and_hits_the_cache() {
     use std::os::unix::fs::PermissionsExt;
     let mode = entry.symlink_metadata().unwrap().permissions().mode();
     assert_eq!(mode & 0o222, 0, "published entries carry no write bits");
-    assert!(entry.join("nawa-complete").is_file(), "the completion marker exists");
     assert!(
-        s.join("srccache/fetch/cargo").join(format!("{key}.lock")).is_file(),
+        entry.join("nawa-complete").is_file(),
+        "the completion marker exists"
+    );
+    assert!(
+        s.join("srccache/fetch/cargo")
+            .join(format!("{key}.lock"))
+            .is_file(),
         "the hold-open flock file exists"
     );
-    assert!(entry.join("git").is_dir(), "cargo fetch populated git/ into the entry");
+    assert!(
+        entry.join("git").is_dir(),
+        "cargo fetch populated git/ into the entry"
+    );
     assert!(
         entry.join("git/db").is_dir(),
         "the Git database must be directly under the published CARGO_HOME root"
@@ -509,7 +573,10 @@ fn cargo_backend_fetches_builds_offline_and_hits_the_cache() {
         view.join("git/db").is_dir(),
         "the offline build view must expose Cargo's Git database at CARGO_HOME/git/db"
     );
-    assert!(!view.join("nawa-complete").exists(), "the marker stays in the entry");
+    assert!(
+        !view.join("nawa-complete").exists(),
+        "the marker stays in the entry"
+    );
     let snapshot = entry_snapshot(&entry);
 
     // — run 2: --offline with the work dir wiped — served from the entry;
@@ -517,10 +584,23 @@ fn cargo_backend_fetches_builds_offline_and_hits_the_cache() {
     // view instead of the entry
     fs::remove_dir_all(&work).unwrap();
     let (out2, err2, ok2) = run_fetch_build(&s, &[("NAWA_OFFLINE", "1")], &[]);
-    assert!(ok2, "run 2 (--offline) failed\nstdout:\n{out2}\nstderr:\n{err2}");
-    assert!(out2.contains("dep-ok-v1"), "the offline run rebuilt from the entry:\n{out2}\n{err2}");
-    assert!(!work.join("fetch-cargo.log").exists(), "no populate on the second build");
-    assert_eq!(count.load(Ordering::SeqCst), hits1, "nothing was re-downloaded");
+    assert!(
+        ok2,
+        "run 2 (--offline) failed\nstdout:\n{out2}\nstderr:\n{err2}"
+    );
+    assert!(
+        out2.contains("dep-ok-v1"),
+        "the offline run rebuilt from the entry:\n{out2}\n{err2}"
+    );
+    assert!(
+        !work.join("fetch-cargo.log").exists(),
+        "no populate on the second build"
+    );
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        hits1,
+        "nothing was re-downloaded"
+    );
     assert!(
         view.join(".package-cache").exists() || view.join(".package-cache-mutate").exists(),
         "cargo's cache mutation must land in the disposable view"
@@ -533,18 +613,29 @@ fn cargo_backend_fetches_builds_offline_and_hits_the_cache() {
 
     // §16 Cargo 1: Cargo.lock unchanged through the whole cycle
     let staged = work.join("src/m/Cargo.lock");
-    assert_eq!(fs::read(&staged).unwrap(), lock, "the lock must come out byte-identical");
+    assert_eq!(
+        fs::read(&staged).unwrap(),
+        lock,
+        "the lock must come out byte-identical"
+    );
 
     // — run 3: --use-cache — the sidecar build id (fetch-cargo=1) matches
     // and the whole build is skipped
     let hits3 = count.load(Ordering::SeqCst);
     let (out3, err3, ok3) = run_fetch_build(&s, &[], &["--use-cache"]);
-    assert!(ok3, "use-cache run failed\nstdout:\n{out3}\nstderr:\n{err3}");
+    assert!(
+        ok3,
+        "use-cache run failed\nstdout:\n{out3}\nstderr:\n{err3}"
+    );
     assert!(
         out3.contains("build cache hit"),
         "the sidecar build id with fetch-cargo=1 must match:\n{out3}\n{err3}"
     );
-    assert_eq!(count.load(Ordering::SeqCst), hits3, "a cache hit touches no network");
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        hits3,
+        "a cache hit touches no network"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -591,7 +682,10 @@ fn the_cargo_key_follows_the_lockfile_bytes() {
         "every lockfile byte set earns its own entry (§11): {keys:?}"
     );
     for k in &keys {
-        assert!(k.join("nawa-complete").is_file(), "every entry carries the marker");
+        assert!(
+            k.join("nawa-complete").is_file(),
+            "every entry carries the marker"
+        );
     }
 }
 
@@ -615,9 +709,15 @@ fn the_cargo_version_is_part_of_the_key() {
     let lock = generate_lock(&main, &cg_home);
 
     let files = vec![
-        ("Cargo.toml".to_string(), fs::read(main.join("Cargo.toml")).unwrap()),
+        (
+            "Cargo.toml".to_string(),
+            fs::read(main.join("Cargo.toml")).unwrap(),
+        ),
         ("Cargo.lock".to_string(), lock),
-        ("src/main.rs".to_string(), fs::read(main.join("src/main.rs")).unwrap()),
+        (
+            "src/main.rs".to_string(),
+            fs::read(main.join("src/main.rs")).unwrap(),
+        ),
     ];
     let tar = fixture_tar_gz("main-1.0", &files);
     let tar_sha = sha256(&tar);
@@ -628,7 +728,10 @@ fn the_cargo_version_is_part_of_the_key() {
          && cp target/release/testmain %{{pkgdir}}/usr/bin/ \
          && %{{pkgdir}}/usr/bin/testmain"
     );
-    write_recipe(&s.join("recipes/cargo-b"), &recipe(&tar_sha, &addr, &install));
+    write_recipe(
+        &s.join("recipes/cargo-b"),
+        &recipe(&tar_sha, &addr, &install),
+    );
 
     // A forwarder dir in the rustup-shim model: `cargo` fakes the
     // `--version` line and forwards everything else; `rustc` forwards too,
@@ -650,10 +753,7 @@ fn the_cargo_version_is_part_of_the_key() {
         let rustc_fwd = dir.join("rustc");
         fs::write(
             &rustc_fwd,
-            format!(
-                "#!/bin/sh\nexec \"{}/rustc\" \"$@\"\n",
-                cargo_dir()
-            ),
+            format!("#!/bin/sh\nexec \"{}/rustc\" \"$@\"\n", cargo_dir()),
         )
         .unwrap();
         {
@@ -696,7 +796,10 @@ fn the_source_tree_config_rules() {
             "[source.crates-io]\nregistry = \"sparse+https://example.invalid/index/\"\n",
             "[source.crates-io]",
         ),
-        ("[registries]\nindex = \"https://example.invalid/\"\n", "[registries]"),
+        (
+            "[registries]\nindex = \"https://example.invalid/\"\n",
+            "[registries]",
+        ),
         ("[net]\nretry = 3\n", "[net]"),
         ("[http]\nproxy = \"http://example.invalid\"\n", "[http]"),
         (
@@ -716,17 +819,32 @@ fn the_source_tree_config_rules() {
         fs::write(main.join("src/main.rs"), b"fn main() {}\n").unwrap();
         fs::write(main.join("Cargo.lock"), b"# no deps\n").unwrap();
         let files = vec![
-            ("Cargo.toml".to_string(), fs::read(main.join("Cargo.toml")).unwrap()),
-            ("Cargo.lock".to_string(), fs::read(main.join("Cargo.lock")).unwrap()),
-            ("src/main.rs".to_string(), fs::read(main.join("src/main.rs")).unwrap()),
+            (
+                "Cargo.toml".to_string(),
+                fs::read(main.join("Cargo.toml")).unwrap(),
+            ),
+            (
+                "Cargo.lock".to_string(),
+                fs::read(main.join("Cargo.lock")).unwrap(),
+            ),
+            (
+                "src/main.rs".to_string(),
+                fs::read(main.join("src/main.rs")).unwrap(),
+            ),
             (".cargo/config.toml".to_string(), cfg.as_bytes().to_vec()),
         ];
         let tar = fixture_tar_gz("main-1.0", &files);
         let tar_sha = sha256(&tar);
         let (addr, _) = route_server(vec![("/src.tar.gz", Some(tar))]);
-        write_recipe(&s.join("recipes/cargo-b"), &recipe(&tar_sha, &addr, "echo built"));
+        write_recipe(
+            &s.join("recipes/cargo-b"),
+            &recipe(&tar_sha, &addr, "echo built"),
+        );
         let (_, err, ok) = run_fetch_build(&s, &[], &[]);
-        assert!(!ok, "case {idx}: the offending config must fail the fetch phase");
+        assert!(
+            !ok,
+            "case {idx}: the offending config must fail the fetch phase"
+        );
         assert!(
             err.contains(needle) && err.contains("§8"),
             "case {idx}: the error must name the offender and §8:\n{err}"
@@ -768,7 +886,11 @@ fn a_vendored_directory_source_skips_the_fetch() {
         b"pub fn greeting() -> &'static str { \"dep-ok-vendored\" }\n",
     )
     .unwrap();
-    fs::write(main.join("vendor/testdep/.cargo-checksum.json"), CHECKSUM_JSON).unwrap();
+    fs::write(
+        main.join("vendor/testdep/.cargo-checksum.json"),
+        CHECKSUM_JSON,
+    )
+    .unwrap();
     let cargo = cargo_dir();
     let cg_home = s.join("cg-setup");
     fs::create_dir_all(&cg_home).unwrap();
@@ -780,16 +902,28 @@ fn a_vendored_directory_source_skips_the_fetch() {
     );
 
     let files = vec![
-        ("Cargo.toml".to_string(), fs::read(main.join("Cargo.toml")).unwrap()),
+        (
+            "Cargo.toml".to_string(),
+            fs::read(main.join("Cargo.toml")).unwrap(),
+        ),
         ("Cargo.lock".to_string(), lock),
         ("src/main.rs".to_string(), MAIN_RS.to_vec()),
-        (".cargo/config.toml".to_string(), fs::read(main.join(".cargo/config.toml")).unwrap()),
-        ("vendor/testdep/Cargo.toml".to_string(), DEP_CARGO_TOML.to_vec()),
+        (
+            ".cargo/config.toml".to_string(),
+            fs::read(main.join(".cargo/config.toml")).unwrap(),
+        ),
+        (
+            "vendor/testdep/Cargo.toml".to_string(),
+            DEP_CARGO_TOML.to_vec(),
+        ),
         (
             "vendor/testdep/src/lib.rs".to_string(),
             b"pub fn greeting() -> &'static str { \"dep-ok-vendored\" }\n".to_vec(),
         ),
-        ("vendor/testdep/.cargo-checksum.json".to_string(), CHECKSUM_JSON.to_vec()),
+        (
+            "vendor/testdep/.cargo-checksum.json".to_string(),
+            CHECKSUM_JSON.to_vec(),
+        ),
     ];
     let tar = fixture_tar_gz("main-1.0", &files);
     let tar_sha = sha256(&tar);
@@ -800,11 +934,20 @@ fn a_vendored_directory_source_skips_the_fetch() {
          && cp target/release/testmain %{{pkgdir}}/usr/bin/ \
          && %{{pkgdir}}/usr/bin/testmain && echo vendored-ok"
     );
-    write_recipe(&s.join("recipes/cargo-b"), &recipe(&tar_sha, &addr, &install));
+    write_recipe(
+        &s.join("recipes/cargo-b"),
+        &recipe(&tar_sha, &addr, &install),
+    );
 
     let (out, err, ok) = run_fetch_build(&s, &[], &[]);
-    assert!(ok, "the vendored build must succeed with no proxy:\n{out}\n{err}");
-    assert!(out.contains("dep-ok-vendored"), "the build resolved the vendor tree:\n{out}\n{err}");
+    assert!(
+        ok,
+        "the vendored build must succeed with no proxy:\n{out}\n{err}"
+    );
+    assert!(
+        out.contains("dep-ok-vendored"),
+        "the build resolved the vendor tree:\n{out}\n{err}"
+    );
     let work = s.join("build/cargo-b-1.0-1");
     assert!(
         !work.join("fetch-cargo.log").exists(),
@@ -838,7 +981,8 @@ fn a_vendored_directory_source_skips_the_fetch() {
 }
 
 const MAIN_RS: &[u8] = b"fn main() { println!(\"{}\", testdep::greeting()) }\n";
-const DEP_CARGO_TOML: &[u8] = b"[package]\nname = \"testdep\"\nversion = \"0.1.0\"\n\n[dependencies]\n";
+const DEP_CARGO_TOML: &[u8] =
+    b"[package]\nname = \"testdep\"\nversion = \"0.1.0\"\n\n[dependencies]\n";
 const CHECKSUM_JSON: &[u8] = b"{\"files\":{},\"package\":null}\n";
 
 // ---------------------------------------------------------------------------
@@ -857,13 +1001,22 @@ fn a_missing_cargo_lock_is_a_hard_error() {
     .unwrap();
     fs::write(main.join("src/main.rs"), b"fn main() {}\n").unwrap();
     let files = vec![
-        ("Cargo.toml".to_string(), fs::read(main.join("Cargo.toml")).unwrap()),
-        ("src/main.rs".to_string(), fs::read(main.join("src/main.rs")).unwrap()),
+        (
+            "Cargo.toml".to_string(),
+            fs::read(main.join("Cargo.toml")).unwrap(),
+        ),
+        (
+            "src/main.rs".to_string(),
+            fs::read(main.join("src/main.rs")).unwrap(),
+        ),
     ];
     let tar = fixture_tar_gz("main-1.0", &files);
     let tar_sha = sha256(&tar);
     let (addr, _) = route_server(vec![("/src.tar.gz", Some(tar))]);
-    write_recipe(&s.join("recipes/cargo-b"), &recipe(&tar_sha, &addr, "echo built"));
+    write_recipe(
+        &s.join("recipes/cargo-b"),
+        &recipe(&tar_sha, &addr, "echo built"),
+    );
     let (_, err, ok) = run_fetch_build(&s, &[], &[]);
     assert!(!ok, "a missing Cargo.lock must fail the fetch phase");
     assert!(
@@ -892,9 +1045,18 @@ fn a_replacement_to_a_missing_directory_is_not_vendored_silently() {
     .unwrap();
     fs::write(main.join("Cargo.lock"), b"# no deps\n").unwrap();
     let files = vec![
-        ("Cargo.toml".to_string(), fs::read(main.join("Cargo.toml")).unwrap()),
-        ("Cargo.lock".to_string(), fs::read(main.join("Cargo.lock")).unwrap()),
-        ("src/main.rs".to_string(), fs::read(main.join("src/main.rs")).unwrap()),
+        (
+            "Cargo.toml".to_string(),
+            fs::read(main.join("Cargo.toml")).unwrap(),
+        ),
+        (
+            "Cargo.lock".to_string(),
+            fs::read(main.join("Cargo.lock")).unwrap(),
+        ),
+        (
+            "src/main.rs".to_string(),
+            fs::read(main.join("src/main.rs")).unwrap(),
+        ),
         (
             ".cargo/config.toml".to_string(),
             fs::read(main.join(".cargo/config.toml")).unwrap(),
@@ -903,9 +1065,15 @@ fn a_replacement_to_a_missing_directory_is_not_vendored_silently() {
     let tar = fixture_tar_gz("main-1.0", &files);
     let tar_sha = sha256(&tar);
     let (addr, _) = route_server(vec![("/src.tar.gz", Some(tar))]);
-    write_recipe(&s.join("recipes/cargo-b"), &recipe(&tar_sha, &addr, "echo built"));
+    write_recipe(
+        &s.join("recipes/cargo-b"),
+        &recipe(&tar_sha, &addr, "echo built"),
+    );
     let (_, err, ok) = run_fetch_build(&s, &[], &[]);
-    assert!(!ok, "a replacement to a missing directory must fail the fetch phase");
+    assert!(
+        !ok,
+        "a replacement to a missing directory must fail the fetch phase"
+    );
     assert!(
         err.contains("must be an existing directory") && err.contains("§8"),
         "the error must explain the vendored rule:\n{err}"
@@ -948,13 +1116,14 @@ fn an_offline_cargo_miss_names_the_expected_entry() {
     // the online run recovers
     let (o3, e3, ok3) = run_fetch_build(&s, &[], &[]);
     assert!(ok3, "recovery run failed\n{o3}\n{e3}");
-    assert!(o3.contains("dep-ok-v1"), "the recovered build resolves the dep:\n{o3}\n{e3}");
+    assert!(
+        o3.contains("dep-ok-v1"),
+        "the recovered build resolves the dep:\n{o3}\n{e3}"
+    );
 }
 
-
 #[test]
-fn inherited_cargo_home_config_is_ignored_by_fetch()
-{
+fn inherited_cargo_home_config_is_ignored_by_fetch() {
     let s = scratch("ambient-config");
     let repo = s.join("dep");
     let cargo = cargo_dir();
@@ -978,9 +1147,15 @@ fn inherited_cargo_home_config_is_ignored_by_fetch()
     .unwrap();
 
     let files = vec![
-        ("Cargo.toml".to_string(), fs::read(main.join("Cargo.toml")).unwrap()),
+        (
+            "Cargo.toml".to_string(),
+            fs::read(main.join("Cargo.toml")).unwrap(),
+        ),
         ("Cargo.lock".to_string(), lock),
-        ("src/main.rs".to_string(), fs::read(main.join("src/main.rs")).unwrap()),
+        (
+            "src/main.rs".to_string(),
+            fs::read(main.join("src/main.rs")).unwrap(),
+        ),
     ];
     let tar = fixture_tar_gz("main-1.0", &files);
     let tar_sha = sha256(&tar);
@@ -991,19 +1166,21 @@ fn inherited_cargo_home_config_is_ignored_by_fetch()
          && cp target/release/testmain %{{pkgdir}}/usr/bin/ \\
          && %{{pkgdir}}/usr/bin/testmain"
     );
-    write_recipe(&s.join("recipes/cargo-b"), &recipe(&tar_sha, &addr, &install));
-    let (out, err, ok) = run_fetch_build(
-        &s,
-        &[("CARGO_HOME", hostile_home.to_str().unwrap())],
-        &[],
+    write_recipe(
+        &s.join("recipes/cargo-b"),
+        &recipe(&tar_sha, &addr, &install),
     );
+    let (out, err, ok) =
+        run_fetch_build(&s, &[("CARGO_HOME", hostile_home.to_str().unwrap())], &[]);
     assert!(
         ok,
         "ambient Cargo configuration must not affect fetch resolution:\n{out}\n{err}"
     );
-    assert!(out.contains("dep-ok-v1"), "the isolated fetch built the dependency:\n{out}\n{err}");
+    assert!(
+        out.contains("dep-ok-v1"),
+        "the isolated fetch built the dependency:\n{out}\n{err}"
+    );
 }
-
 
 #[test]
 fn ambient_parent_cargo_config_is_rejected_before_fetch() {
@@ -1028,9 +1205,15 @@ fn ambient_parent_cargo_config_is_rejected_before_fetch() {
     .unwrap();
 
     let files = vec![
-        ("Cargo.toml".to_string(), fs::read(main.join("Cargo.toml")).unwrap()),
+        (
+            "Cargo.toml".to_string(),
+            fs::read(main.join("Cargo.toml")).unwrap(),
+        ),
         ("Cargo.lock".to_string(), lock),
-        ("src/main.rs".to_string(), fs::read(main.join("src/main.rs")).unwrap()),
+        (
+            "src/main.rs".to_string(),
+            fs::read(main.join("src/main.rs")).unwrap(),
+        ),
     ];
     let tar = fixture_tar_gz("main-1.0", &files);
     let tar_sha = sha256(&tar);
@@ -1041,7 +1224,10 @@ fn ambient_parent_cargo_config_is_rejected_before_fetch() {
          && cp target/release/testmain %{{pkgdir}}/usr/bin/ \\
          && %{{pkgdir}}/usr/bin/testmain"
     );
-    write_recipe(&s.join("recipes/cargo-b"), &recipe(&tar_sha, &addr, &install));
+    write_recipe(
+        &s.join("recipes/cargo-b"),
+        &recipe(&tar_sha, &addr, &install),
+    );
     let (out, err, ok) = run_fetch_build(&s, &[], &[]);
     assert!(!ok, "ambient Cargo config must be rejected:\n{out}\n{err}");
     assert!(
@@ -1049,7 +1235,6 @@ fn ambient_parent_cargo_config_is_rejected_before_fetch() {
         "expected the hermeticity diagnostic:\n{out}\n{err}"
     );
 }
-
 
 // ---------------------------------------------------------------------------
 // Real package smoke test: build Nawa from its own source recipe
@@ -1066,10 +1251,7 @@ fn nawa_source_tar_gz() -> Vec<u8> {
         let mut builder = tar::Builder::new(&mut tar_bytes);
         for file in ["Cargo.toml", "Cargo.lock"] {
             builder
-                .append_path_with_name(
-                    root.join(file),
-                    PathBuf::from("nawa-1.0.0").join(file),
-                )
+                .append_path_with_name(root.join(file), PathBuf::from("nawa-1.0.0").join(file))
                 .unwrap();
         }
         for directory in ["src"] {
@@ -1223,7 +1405,6 @@ install -Dm755 {target_q}/release/nawa %{{pkgdir}}/usr/bin/nawa
     let _ = fs::remove_dir_all(&s);
 }
 
-
 // ---------------------------------------------------------------------------
 // Fetch integration with strict sandbox isolation
 // ---------------------------------------------------------------------------
@@ -1245,9 +1426,15 @@ fn cargo_fetch_and_offline_build_work_under_sandbox() {
     );
 
     let files = vec![
-        ("Cargo.toml".to_string(), fs::read(main.join("Cargo.toml")).unwrap()),
+        (
+            "Cargo.toml".to_string(),
+            fs::read(main.join("Cargo.toml")).unwrap(),
+        ),
         ("Cargo.lock".to_string(), lock),
-        ("src/main.rs".to_string(), fs::read(main.join("src/main.rs")).unwrap()),
+        (
+            "src/main.rs".to_string(),
+            fs::read(main.join("src/main.rs")).unwrap(),
+        ),
     ];
     let tar = fixture_tar_gz("main-1.0", &files);
     let tar_sha = sha256(&tar);
@@ -1258,7 +1445,9 @@ fn cargo_fetch_and_offline_build_work_under_sandbox() {
     // A rustup toolchain below a masked path is invisible inside it, which
     // used to surface only as an opaque "cargo: command not found".
     assert!(
-        !["/home/", "/root/", "/mnt/"].iter().any(|m| cargo.starts_with(m)),
+        !["/home/", "/root/", "/mnt/"]
+            .iter()
+            .any(|m| cargo.starts_with(m)),
         "cargo lives at {cargo}, which the sandbox masks. Put the toolchain \
          outside /home, /root and /mnt (CI sets RUSTUP_HOME=/usr/local/rustup; \
          locally: `RUSTUP_HOME=/usr/local/rustup rustup toolchain install stable`) \
@@ -1270,10 +1459,12 @@ fn cargo_fetch_and_offline_build_work_under_sandbox() {
          && cp target/release/testmain %{{pkgdir}}/usr/bin/ \
          && %{{pkgdir}}/usr/bin/testmain"
     );
-    write_recipe(&s.join("recipes/cargo-b"), &recipe(&tar_sha, &addr, &install));
+    write_recipe(
+        &s.join("recipes/cargo-b"),
+        &recipe(&tar_sha, &addr, &install),
+    );
 
-    let (out, err, ok) =
-        run_fetch_build_with_isolation(&s, isolation, &[], &[]);
+    let (out, err, ok) = run_fetch_build_with_isolation(&s, isolation, &[], &[]);
     assert!(
         ok,
         "Cargo fetch/build failed at isolation={isolation}\nstdout:\n{out}\nstderr:\n{err}"
@@ -1288,7 +1479,6 @@ fn cargo_fetch_and_offline_build_work_under_sandbox() {
     );
     let _ = fs::remove_dir_all(&s);
 }
-
 
 // ---------------------------------------------------------------------------
 // Fetch env must reach the build at `--isolation none` (the default)
@@ -1314,9 +1504,15 @@ fn cargo_fetch_env_reaches_the_build_at_isolation_none() {
     );
 
     let files = vec![
-        ("Cargo.toml".to_string(), fs::read(main.join("Cargo.toml")).unwrap()),
+        (
+            "Cargo.toml".to_string(),
+            fs::read(main.join("Cargo.toml")).unwrap(),
+        ),
         ("Cargo.lock".to_string(), lock),
-        ("src/main.rs".to_string(), fs::read(main.join("src/main.rs")).unwrap()),
+        (
+            "src/main.rs".to_string(),
+            fs::read(main.join("src/main.rs")).unwrap(),
+        ),
     ];
     let tar = fixture_tar_gz("main-1.0", &files);
     let tar_sha = sha256(&tar);
@@ -1329,7 +1525,10 @@ fn cargo_fetch_env_reaches_the_build_at_isolation_none() {
          && cp target/release/testmain %{{pkgdir}}/usr/bin/ \
          && %{{pkgdir}}/usr/bin/testmain"
     );
-    write_recipe(&s.join("recipes/cargo-b"), &recipe(&tar_sha, &addr, &install));
+    write_recipe(
+        &s.join("recipes/cargo-b"),
+        &recipe(&tar_sha, &addr, &install),
+    );
 
     let (out, err, ok) = run_fetch_build_with_isolation(&s, "none", &[], &[]);
     assert!(
@@ -1350,7 +1549,6 @@ fn cargo_fetch_env_reaches_the_build_at_isolation_none() {
     );
     let _ = fs::remove_dir_all(&s);
 }
-
 
 // ---------------------------------------------------------------------------
 // Relative paths passed to the fetch runner
@@ -1376,14 +1574,23 @@ fn fetch_all_resolves_relative_builddir_before_running_cargo() {
     fs::create_dir_all(&cg_home).unwrap();
     let lock = generate_lock(&main, &cg_home);
     let files = vec![
-        ("Cargo.toml".to_string(), fs::read(main.join("Cargo.toml")).unwrap()),
+        (
+            "Cargo.toml".to_string(),
+            fs::read(main.join("Cargo.toml")).unwrap(),
+        ),
         ("Cargo.lock".to_string(), lock),
-        ("src/main.rs".to_string(), fs::read(main.join("src/main.rs")).unwrap()),
+        (
+            "src/main.rs".to_string(),
+            fs::read(main.join("src/main.rs")).unwrap(),
+        ),
     ];
     let tar = fixture_tar_gz("main-1.0", &files);
     let tar_sha = sha256(&tar);
     let (addr, _) = route_server(vec![("/src.tar.gz", Some(tar))]);
-    write_recipe(&s.join("recipes/cargo-b"), &recipe(&tar_sha, &addr, "echo built"));
+    write_recipe(
+        &s.join("recipes/cargo-b"),
+        &recipe(&tar_sha, &addr, "echo built"),
+    );
 
     // Deliberately use relative recipe/build paths and leave NAWA_SRCCACHE
     // unset so the default build/distfiles path is covered as well.
@@ -1391,11 +1598,14 @@ fn fetch_all_resolves_relative_builddir_before_running_cargo() {
     let output = nawa()
         .current_dir(&s)
         .args([
-            "--recipes", "recipes",
-            "--builddir", "build",
+            "--recipes",
+            "recipes",
+            "--builddir",
+            "build",
             "fetch",
             "--all",
-            "--isolation", "env",
+            "--isolation",
+            "env",
         ])
         .env("NAWA_FETCH_PATH", &cargo)
         .output()

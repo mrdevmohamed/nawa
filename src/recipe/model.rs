@@ -21,6 +21,14 @@ pub(crate) struct Recipe {
     pub fetch: Fetch,
     #[serde(default)]
     pub depends: Depends,
+    /// Declared capabilities (design §6.3, B3 chain §3): additive table,
+    /// absent in legacy recipes. `None` means *unknown* (no `provides` line
+    /// in the archive); `Some` with an empty list is an explicit empty
+    /// declaration. The distinction is part of the chain contract (§7).
+    #[serde(default)]
+    pub capabilities: Option<Capabilities>,
+    #[serde(default)]
+    pub relations: Option<crate::domain::package::relations::PackageRelations>,
     #[serde(default)]
     pub build: Build,
     #[serde(default)]
@@ -28,9 +36,10 @@ pub(crate) struct Recipe {
     #[serde(default)]
     pub sandbox: Sandbox,
     /// Per-recipe opt-outs of the post-install slimming passes
-    /// (`[slim] strip = false`, ...). See `slim.rs`.
+    /// (`[slim] strip = false`, ...). The model lives here with the rest of
+    /// the recipe schema; the passes themselves are in the build pipeline.
     #[serde(default)]
-    pub slim: crate::slim::Slim,
+    pub slim: Slim,
     /// The raw recipe.toml bytes, kept for the deterministic build id
     /// (§7 of docs/design/build-isolation.md). Not part of the TOML.
     #[serde(skip)]
@@ -51,6 +60,7 @@ pub(crate) struct Recipe {
 /// this value as the marker: required with the new tables, rejected
 /// without them, and never staged.
 pub(crate) const SCHEMA_MARKER: &str = "local:/nawa-schema-2-requires-a-newer-nawa";
+pub(crate) const RELATIONS_MARKER: &str = "local:/nawa-package-relations-1-requires-a-newer-nawa";
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct Package {
@@ -203,6 +213,42 @@ fn default_rel() -> u32 {
     1
 }
 
+/// The additive `[capabilities]` table (B3 chain §3). `provides` is a list of
+/// `domain=identity` capabilities; unknown keys are an error, like the index
+/// v4 entry rules, so a future extension cannot be silently misread.
+fn yes() -> bool {
+    true
+}
+
+/// The recipe's `[slim]` table: every pass is on unless the recipe says no.
+/// This is recipe schema, not build logic, so it lives with the other tables.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct Slim {
+    #[serde(default = "yes")]
+    pub strip: bool,
+    #[serde(default = "yes")]
+    pub cleanup: bool,
+    #[serde(default = "yes")]
+    pub split: bool,
+}
+
+impl Default for Slim {
+    fn default() -> Self {
+        Slim {
+            strip: true,
+            cleanup: true,
+            split: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Capabilities {
+    #[serde(default)]
+    pub provides: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub(crate) struct Depends {
     /// Build dependencies. At the `closure` isolation level this means
@@ -272,4 +318,3 @@ pub(crate) struct ExpandCtx {
     /// as above: recipes without `[assets]` never see the name.
     pub assetsdir: Option<PathBuf>,
 }
-

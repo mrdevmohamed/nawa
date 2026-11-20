@@ -6,8 +6,8 @@ use std::fs::{File, OpenOptions};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-use crate::checksum::verify_sha256;
 use super::http::{check_offline, download, offline};
+use crate::adapters::checksum::verify_sha256;
 
 pub(crate) fn digest_cache_dir(src_cache: &Path) -> PathBuf {
     src_cache.join("sha256")
@@ -51,7 +51,7 @@ pub(crate) fn lock_digest_entry(path: &Path) -> Result<CacheLock> {
 /// gets its own file name so two concurrent builds of the same digest can
 /// never corrupt each other's partial bytes.
 pub(crate) fn unique_part_path(dest: &Path) -> PathBuf {
-    let seq = crate::unique::next();
+    let seq = crate::adapters::unique::next();
     let base = dest
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -133,14 +133,12 @@ pub(crate) fn download_content_addressed(
                     // `dest` is not atomic and fails with EACCES when a
                     // corrupt, read-only entry (0444) already sits there.
                     let part = unique_part_path(dest);
-                    let migrated = std::fs::copy(&legacy, &part)
-                        .and_then(|_| std::fs::rename(&part, dest));
+                    let migrated =
+                        std::fs::copy(&legacy, &part).and_then(|_| std::fs::rename(&part, dest));
                     if let Err(e) = migrated {
                         let _ = std::fs::remove_file(&part);
-                        return Err(anyhow::Error::new(e).context(format!(
-                            "migrate legacy cache entry {}",
-                            legacy.display()
-                        )));
+                        return Err(anyhow::Error::new(e)
+                            .context(format!("migrate legacy cache entry {}", legacy.display())));
                     }
                     strip_write_permission(dest);
                     crate::nawa_info!(
@@ -191,6 +189,16 @@ impl RepoRef {
     pub fn parse(s: &str) -> Result<Self> {
         let s = s.trim();
         if s.starts_with("http://") || s.starts_with("https://") {
+            let parsed =
+                url::Url::parse(s).map_err(|_| anyhow::anyhow!("invalid remote repository URL"))?;
+            if parsed.host_str().is_none()
+                || !parsed.username().is_empty()
+                || parsed.password().is_some()
+                || parsed.query().is_some()
+                || parsed.fragment().is_some()
+            {
+                bail!("remote repository URLs must not contain credentials, query parameters, or fragments; configure secrets outside the URL");
+            }
             Ok(RepoRef::Remote(s.trim_end_matches('/').to_string()))
         } else if s.contains("://") {
             bail!("unsupported repository `{s}` — use http(s):// or a local path");
@@ -313,7 +321,10 @@ pub(crate) fn download_cached_with_mirrors(
                 if verify_sha256(dest, expected).is_ok() {
                     return Ok(()); // cache hit
                 }
-                crate::nawa_info_stderr!("cached {} failed sha256 — re-downloading", dest.display());
+                crate::nawa_info_stderr!(
+                    "cached {} failed sha256 — re-downloading",
+                    dest.display()
+                );
             }
             None => return Ok(()), // unpinned cache hit (index: signature checked separately)
         }

@@ -20,7 +20,6 @@ use super::protocol::{self, EventRequest, HelloRequest, HelloResponse, RunReques
 /// Default wall-clock limit for each plugin handshake, command, or event.
 pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
-
 type PendingWrite = (Vec<u8>, mpsc::Sender<std::result::Result<(), String>>);
 
 /// A live sandboxed plugin process. Worker threads exclusively own its pipes,
@@ -63,9 +62,18 @@ impl PluginProcess {
     ) -> Result<Self> {
         let sandboxed = super::sandbox::spawn(&manifest.executable, protected_paths)?;
         let super::sandbox::SandboxedChild { mut child, cleanup } = sandboxed;
-        let stdin = child.stdin.take().context("plugin sandbox stdin pipe disappeared")?;
-        let stdout = child.stdout.take().context("plugin sandbox stdout pipe disappeared")?;
-        let stderr = child.stderr.take().context("plugin sandbox stderr pipe disappeared")?;
+        let stdin = child
+            .stdin
+            .take()
+            .context("plugin sandbox stdin pipe disappeared")?;
+        let stdout = child
+            .stdout
+            .take()
+            .context("plugin sandbox stdout pipe disappeared")?;
+        let stderr = child
+            .stderr
+            .take()
+            .context("plugin sandbox stderr pipe disappeared")?;
 
         let (request_tx, request_rx) = mpsc::channel::<PendingWrite>();
         spawn_writer(stdin, request_rx);
@@ -100,8 +108,10 @@ impl PluginProcess {
             },
         };
 
-        let granted_names: Vec<String> =
-            granted.iter().map(|capability| capability.as_str().to_string()).collect();
+        let granted_names: Vec<String> = granted
+            .iter()
+            .map(|capability| capability.as_str().to_string())
+            .collect();
         let request = HelloRequest {
             protocol: protocol::PROTOCOL_NAME,
             protocol_version: 1,
@@ -134,7 +144,10 @@ impl PluginProcess {
         commands.sort();
         commands.dedup();
         if commands != manifest.commands {
-            bail!("plugin {} handshake command list does not match its manifest", manifest.id);
+            bail!(
+                "plugin {} handshake command list does not match its manifest",
+                manifest.id
+            );
         }
         process.hello = hello;
         Ok(process)
@@ -158,7 +171,10 @@ impl PluginProcess {
             Ok(Err(error)) => bail!("write plugin request: {error}"),
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 let _ = self.child.kill();
-                bail!("plugin stopped reading input before the {} second timeout", timeout.as_secs());
+                bail!(
+                    "plugin stopped reading input before the {} second timeout",
+                    timeout.as_secs()
+                );
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 bail!("plugin input worker exited unexpectedly");
@@ -179,7 +195,7 @@ impl PluginProcess {
                     return Err(error).context("read plugin response");
                 }
                 return Err(error).context(format!("read plugin response{detail}"));
-            },
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 let _ = self.child.kill();
                 let detail = self.stderr_summary();
@@ -198,11 +214,16 @@ impl PluginProcess {
     }
 
     fn stderr_summary(&self) -> String {
-        let Ok(saved) = self.stderr_tail.lock() else { return String::new() };
+        let Ok(saved) = self.stderr_tail.lock() else {
+            return String::new();
+        };
         if saved.is_empty() {
             String::new()
         } else {
-            format!("; plugin stderr: {}", String::from_utf8_lossy(&saved).trim())
+            format!(
+                "; plugin stderr: {}",
+                String::from_utf8_lossy(&saved).trim()
+            )
         }
     }
 
@@ -217,7 +238,7 @@ impl PluginProcess {
             "run-{}-{}-{}",
             std::process::id(),
             self.hello.plugin_id,
-            crate::unique::next()
+            crate::adapters::unique::next()
         );
         let request = RunRequest {
             protocol: protocol::PROTOCOL_NAME,
@@ -241,14 +262,17 @@ impl PluginProcess {
             "event-{}-{}-{}",
             std::process::id(),
             self.hello.plugin_id,
-            crate::unique::next()
+            crate::adapters::unique::next()
         );
         let request = EventRequest {
             protocol: protocol::PROTOCOL_NAME,
             protocol_version: 1,
             request_id: &request_id,
             method: "event",
-            params: super::protocol::EventParams { event_type, payload },
+            params: super::protocol::EventParams {
+                event_type,
+                payload,
+            },
         };
         self.exchange(&request, &request_id, timeout)
     }

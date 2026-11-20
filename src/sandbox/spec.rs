@@ -129,7 +129,11 @@ pub(crate) struct RootSpec {
 
 impl Default for RootSpec {
     fn default() -> Self {
-        RootSpec { mode: default_root_mode(), dir: String::new(), layers: Vec::new() }
+        RootSpec {
+            mode: default_root_mode(),
+            dir: String::new(),
+            layers: Vec::new(),
+        }
     }
 }
 
@@ -203,7 +207,9 @@ impl SandboxSpec {
         for path in spec.readonly_paths.iter().chain(spec.writable_paths.iter()) {
             let parsed = Path::new(path);
             if !parsed.is_absolute()
-                || parsed.components().any(|part| matches!(part, std::path::Component::ParentDir))
+                || parsed
+                    .components()
+                    .any(|part| matches!(part, std::path::Component::ParentDir))
             {
                 bail!("sandbox mount path must be absolute and must not contain '..': {path:?}");
             }
@@ -324,7 +330,11 @@ scratch = "/w/sb"
 
         assert!(SandboxSpec::parse(&base.replace("run_gid = 65534\n", "")).is_err());
         assert!(SandboxSpec::parse(&base.replace("/build/src", "../escape")).is_err());
-        assert!(SandboxSpec::parse(&base.replace("writable_paths = [\"/tmp\", \"/build/home\"]", "writable_paths = []")).is_err());
+        assert!(SandboxSpec::parse(&base.replace(
+            "writable_paths = [\"/tmp\", \"/build/home\"]",
+            "writable_paths = []"
+        ))
+        .is_err());
     }
 
     /// §5.3: extra binds are raw data of the spec, `serde(default)` so older
@@ -359,8 +369,7 @@ kind = "file"
         assert_eq!(spec.extra_binds[1].kind, "file");
 
         // serde default: a spec without extra_binds (older revision) parses
-        let legacy =
-            SandboxSpec::parse(base.split("[[extra_binds]]").next().unwrap()).unwrap();
+        let legacy = SandboxSpec::parse(base.split("[[extra_binds]]").next().unwrap()).unwrap();
         assert!(legacy.extra_binds.is_empty());
 
         assert!(SandboxSpec::parse(&base.replace("/build/assets", "assets")).is_err());

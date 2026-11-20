@@ -15,14 +15,23 @@ fn nawa_bin() -> PathBuf {
 fn nawa() -> Command {
     let mut c = Command::new(nawa_bin());
     for k in [
-        "NAWA_CONFIG", "NAWA_ROOT", "NAWA_RECIPES", "NAWA_BUILDDIR",
-        "NAWA_PROFILES", "NAWA_JOBS", "NAWA_REPO", "NAWA_INSTALL_MODE",
+        "NAWA_CONFIG",
+        "NAWA_ROOT",
+        "NAWA_RECIPES",
+        "NAWA_BUILDDIR",
+        "NAWA_PROFILES",
+        "NAWA_JOBS",
+        "NAWA_REPO",
+        "NAWA_INSTALL_MODE",
     ] {
         c.env_remove(k);
     }
     // never read the host's /etc/nawa/nawa.toml, and keep installs by name
     // deterministic (no network): these tests exercise the build path
-    c.env("NAWA_SYSCONFDIR", std::env::temp_dir().join("nawa-test-no-sysconf"));
+    c.env(
+        "NAWA_SYSCONFDIR",
+        std::env::temp_dir().join("nawa-test-no-sysconf"),
+    );
     c.env("NAWA_INSTALL_MODE", "build");
     c.current_dir(std::env::temp_dir());
     c
@@ -95,7 +104,11 @@ fn profile_flags_and_jobs_reach_the_build_and_cli_jobs_win() {
     .unwrap();
 
     let out = build(&d, &[], &[]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(seen(&d), "-O2 -pipe|-Wl,-O1|3");
 
     let out = build(&d, &["--jobs", "7"], &[]);
@@ -122,7 +135,10 @@ fn output_is_streamed_to_console_and_log() {
     assert!(out.status.success());
     let so = String::from_utf8_lossy(&out.stdout);
     assert!(so.contains("out-line-from-compile"), "stdout: {so}");
-    assert!(so.contains("err-line-from-compile"), "stderr must be merged: {so}");
+    assert!(
+        so.contains("err-line-from-compile"),
+        "stderr must be merged: {so}"
+    );
     let log = fs::read_to_string(d.join("build/probe-1.0-1/build-compile.log")).unwrap();
     assert!(log.contains("out-line-from-compile") && log.contains("err-line-from-compile"));
     let _ = fs::remove_dir_all(&d);
@@ -146,7 +162,11 @@ fn check_is_skipped_by_default_fatal_with_flag_and_warns_with_nonfatal() {
 
     // --check-nonfatal: runs, warns, build still produces the archive
     let out = build(&d, &[], &["--check-nonfatal"]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(String::from_utf8_lossy(&out.stderr).contains("warning: check failed"));
     assert!(d.join("build/out/probe-1.0-1.nawa.tar.zst").exists());
     let _ = fs::remove_dir_all(&d);

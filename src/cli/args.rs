@@ -1,0 +1,976 @@
+//! The clap command-line definition: `Cli`, `Cmd` and every subcommand
+//! enum. Pure move out of `cli.rs`; no behaviour change.
+
+use std::path::PathBuf;
+
+use clap::{Parser, Subcommand, ValueEnum};
+use std::ffi::OsString;
+
+#[derive(Parser)]
+#[command(
+    name = "nawa",
+    version,
+    about = "nawa — source-based package manager for a from-scratch Linux distribution",
+    after_help = "Global flags (--root --recipes --builddir --profiles --jobs) work \
+                  anywhere on the line and may come from $NAWA_* variables or a nawa.toml \
+                  config file (see `nawa init`, inspect with `nawa config show`).\n\
+                  System-wide defaults (repository, install mode, ...) live in \
+                  /etc/nawa/nawa.toml.
+
+Examples:
+  nawa search zip                        find recipes matching \"zip\"
+  nawa info zstd                         full package details
+  nawa install curl                      install curl (+ missing deps): from the
+                                        repository when it has them, else build
+  nawa install --build curl              always build from the recipes
+  nawa install --from-repo curl          repository only (error if not there)
+  nawa install -n curl                   show that plan, change nothing
+  nawa outdated / nawa update             see and apply newer recipe versions
+  nawa update --from repo                use the configured binary repository
+  nawa update --from auto                prefer repo, build when it is not current
+  nawa autoremove                        drop dependencies nothing needs
+  nawa build --install curl              build and install ONE recipe
+  nawa install --root /mnt/root a.nawa.tar.zst
+  nawa why --tree curl                   who needs curl (installed + recipe tree)"
+)]
+pub(crate) struct Cli {
+    /// Target root filesystem (use a throwaway dir for testing)
+    #[arg(long, global = true)]
+    pub(crate) root: Option<PathBuf>,
+
+    /// Root of the recipes tree
+    #[arg(long, global = true)]
+    pub(crate) recipes: Option<PathBuf>,
+
+    /// Scratch/build directory
+    #[arg(long, global = true)]
+    pub(crate) builddir: Option<PathBuf>,
+
+    /// Directory with per-architecture build profiles (`<arch>.toml`)
+    #[arg(long, global = true)]
+    pub(crate) profiles: Option<PathBuf>,
+
+    /// Parallel build jobs (default: the profile's `jobs`, else the CPU count)
+    #[arg(long, global = true)]
+    pub(crate) jobs: Option<u32>,
+
+    #[command(subcommand)]
+    pub(crate) cmd: Cmd,
+}
+
+pub(crate) fn default_jobs() -> u32 {
+    std::thread::available_parallelism()
+        .map(|n| n.get() as u32)
+        .unwrap_or(4)
+}
+
+#[derive(Subcommand)]
+pub(crate) enum Cmd {
+    /// Build a package from its recipe (by name inside --recipes)
+    Build {
+        name: String,
+        /// Run the recipe's `check` section (test suite) after compiling;
+        /// a failing check aborts the build
+        #[arg(long)]
+        check: bool,
+        /// Like --check, but a failing test suite only prints a warning
+        #[arg(long)]
+        check_nonfatal: bool,
+        /// Isolation level for the build: none | env | sandbox | closure
+        /// (default: the profile's [build] isolation, else none)
+        #[arg(long)]
+        isolation: Option<String>,
+        /// Build twice in different directories and compare archive hashes
+        /// (reproducibility check; implies at least env isolation)
+        #[arg(long)]
+        rebuild_check: bool,
+        /// Permit a recipe's [sandbox] network = true (recorded as impure)
+        #[arg(long)]
+        allow_network: bool,
+        /// Continue when the host kernel refuses an isolation feature
+        /// (by default the build stops instead of silently weakening)
+        #[arg(long)]
+        allow_degraded: bool,
+        /// Per-section wall-clock limit in seconds (sandbox levels)
+        #[arg(long)]
+        timeout: Option<u64>,
+        /// Skip the build when an archive for this package already exists
+        /// and its recorded build_id matches the current inputs
+        /// (recipe bytes, source sha256, closure, profile flags)
+        #[arg(long)]
+        use_cache: bool,
+        /// Refuse every download: only entries `nawa fetch` (or an earlier
+        /// online build) populated may be used — the CI gate of §15
+        #[arg(long)]
+        offline: bool,
+        /// Install the freshly built archive into --root when the build
+        /// succeeds (replaces the manual find-the-archive + install dance)
+        #[arg(long)]
+        install: bool,
+        /// With --install: overwrite files owned by other packages
+        #[arg(long, requires = "install")]
+        force: bool,
+    },
+
+    /// Install packages by name — from the binary repository when it has
+    /// them, otherwise built from the recipes (dependencies included, after
+    /// showing the plan) — or install built .nawa.tar.zst archives
+    Install {
+        /// package names (`nawa install curl`) or archive paths
+        /// (`nawa install build/out/curl-8.9-1.nawa.tar.zst`)
+        #[arg(required = true)]
+        targets: Vec<String>,
+        #[command(flatten)]
+        flags: PlanFlags,
+        /// By name: install only the named packages, skip their dependencies
+        #[arg(long)]
+        no_deps: bool,
+        /// Archives only: verify the signature against this public key
+        /// instead of the trust store
+        #[arg(long)]
+        key: Option<PathBuf>,
+        /// Always build from the recipes (same as `--from build`)
+        #[arg(short = 'b', long, conflicts_with_all = ["from_repo", "from"])]
+        build: bool,
+        /// Install from the repository only; a package it lacks is an error
+        /// (same as `--from repo`)
+        #[arg(short = 'r', long = "from-repo", conflicts_with = "from")]
+        from_repo: bool,
+        /// Where packages come from: auto | repo | build | ask
+        /// (default: `install_mode` in nawa.toml, else auto)
+        #[arg(long, value_name = "MODE")]
+        from: Option<String>,
+        /// Repository directory or http(s) URL for this run
+        /// (default: the `repo` key in nawa.toml / $NAWA_REPO / built-in)
+        #[arg(long, value_name = "DIR_OR_URL")]
+        repo: Option<String>,
+    },
+
+    /// List installed packages whose recipe has a newer version
+    Outdated,
+
+    /// Update installed packages whose local recipes are newer; defaults to building
+    /// from source, with an optional repository source
+    Update {
+        /// only update these packages (default: every outdated one)
+        names: Vec<String>,
+        #[command(flatten)]
+        flags: PlanFlags,
+        /// Always build from the recipes (the default)
+        #[arg(short = 'b', long, conflicts_with_all = ["from_repo", "from"])]
+        build: bool,
+        /// Use only the binary repository; fail if it cannot provide an update
+        #[arg(short = 'r', long = "from-repo", conflicts_with = "from")]
+        from_repo: bool,
+        /// Package source: build | repo | auto | ask
+        #[arg(long, value_name = "MODE")]
+        from: Option<String>,
+        /// Repository directory or http(s) URL for this run
+        #[arg(long, value_name = "DIR_OR_URL")]
+        repo: Option<String>,
+    },
+
+    /// Remove dependency packages that nothing needs any more
+    Autoremove {
+        /// show what would be removed, change nothing
+        #[arg(short = 'n', long)]
+        dry_run: bool,
+        /// do not ask for confirmation (non-interactive runs REQUIRE this)
+        #[arg(short = 'y', long)]
+        yes: bool,
+        /// also remove build-only dependencies (compilers, -dev libraries);
+        /// by default those are kept because the next rebuild needs them
+        #[arg(long)]
+        build_deps: bool,
+    },
+
+    /// Search the recipes tree by name or summary (substring, or --glob)
+    Search {
+        term: String,
+        /// Match the name against a glob pattern (`*` and `?`), not a substring
+        #[arg(long)]
+        glob: bool,
+    },
+
+    /// Show everything known about a recipe and its installed state
+    Info { name: String },
+
+    /// Show which installed packages (and, with --tree, which recipes)
+    /// depend on a package — the reverse of `deps`
+    Why {
+        name: String,
+        /// also scan the whole recipes tree for dependents
+        #[arg(long)]
+        tree: bool,
+    },
+
+    /// Print the dependency resolution order for a package: what is not
+    /// installed yet, dependencies first, the package itself last. The
+    /// package is walked even when it is installed (a rebuild of glibc still
+    /// needs its build tools).
+    Deps { name: String },
+
+    /// Print the global build order for ALL recipes in the tree
+    /// (one bare package name per line — script-friendly). Packages already
+    /// recorded in the local db are skipped (use --include-installed to list
+    /// them too, e.g. for a full world rebuild).
+    DepsAll {
+        /// also list packages already recorded in the local db
+        /// (the default skips them, which is what a resuming stage2 wants;
+        /// a stage3 world rebuild needs every recipe)
+        #[arg(long)]
+        include_installed: bool,
+    },
+
+    /// Remove an installed package (asks for confirmation unless --yes)
+    Remove {
+        name: String,
+        /// remove even if other packages depend on it
+        #[arg(long)]
+        force: bool,
+        /// do not ask for confirmation (non-interactive runs REQUIRE this)
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+
+    /// List installed packages (optionally filtered by name substring)
+    #[command(alias = "list")]
+    Query {
+        /// only show packages whose name contains this (case-insensitive)
+        pattern: Option<String>,
+        /// only packages you installed yourself (not pulled in as dependencies)
+        #[arg(short = 'e', long, conflicts_with = "deps")]
+        explicit: bool,
+        /// only packages that were installed as dependencies
+        #[arg(short = 'd', long)]
+        deps: bool,
+    },
+
+    /// List files owned by an installed package
+    Files { name: String },
+
+    /// Find which installed package owns a file
+    Owner { file: String },
+
+    /// Check installed ELF files for broken shared-library links
+    /// (missing libraries / interpreter) and list the packages to rebuild
+    Revdep {
+        /// only these packages (default: every installed package)
+        names: Vec<String>,
+        /// extra library directory, searched before the system ones
+        #[arg(long = "lib-dir", value_name = "DIR")]
+        lib_dirs: Vec<String>,
+        /// do not report missing libraries matching this glob (repeatable)
+        #[arg(long, value_name = "GLOB")]
+        ignore: Vec<String>,
+        /// do not report broken symlinks
+        #[arg(long)]
+        no_symlinks: bool,
+        /// also scan files that no package owns (/usr /bin /sbin /lib /lib64 /opt)
+        #[arg(long)]
+        unowned: bool,
+        /// scan this directory for unowned files (repeatable, implies --unowned)
+        #[arg(long = "scan-dir", value_name = "DIR")]
+        scan_dirs: Vec<String>,
+        /// machine-readable output: one JSON document on stdout
+        #[arg(long)]
+        json: bool,
+        /// do not look for the packages that provide missing libraries
+        #[arg(long)]
+        no_suggest: bool,
+    },
+
+    /// Create a repository index from a directory of archives
+    #[command(name = "repo-create")]
+    RepoCreate {
+        dir: PathBuf,
+        #[arg(long, default_value = "index.toml")]
+        out: PathBuf,
+        /// Sign index.toml after writing it
+        #[arg(long)]
+        sign: bool,
+        /// Signing key for --sign
+        #[arg(long)]
+        key: Option<PathBuf>,
+        /// Repository schema: 1 legacy, 2 signed hashes, 3 URLs, 4 capabilities/runtime deps, 5 package relations
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=5))]
+        index_version: u32,
+        /// TOML manifest containing package_urls and recipe_urls (required for schemas 3–5)
+        #[arg(long)]
+        locations: Option<PathBuf>,
+        /// Also pack this recipe tree into the repository (for `nawa sync`)
+        #[arg(long, requires = "recipes_rev")]
+        recipes: Option<PathBuf>,
+        /// Revision recorded for --recipes (commit sha or tag)
+        #[arg(long, requires = "recipes")]
+        recipes_rev: Option<String>,
+        /// Publish this validated group catalog as signed index metadata
+        #[arg(long, requires = "sign")]
+        groups: Option<PathBuf>,
+    },
+
+    /// Update a signed repository index incrementally; no archive is opened
+    #[command(name = "repo-update")]
+    RepoUpdate {
+        /// directory that receives the recipe snapshot (--recipes) and holds a relative --out
+        dir: PathBuf,
+        /// previous index (index.toml); its signature must verify with --trust-key
+        #[arg(long)]
+        base: PathBuf,
+        /// public key that must have signed --base; the update refuses otherwise
+        #[arg(long)]
+        trust_key: PathBuf,
+        #[arg(long, default_value = "index.toml")]
+        out: PathBuf,
+        /// TOML file with [[package]] entries for the new archives
+        #[arg(long)]
+        add_entries: Option<PathBuf>,
+        /// archive file that left the repository (repeatable)
+        #[arg(long = "remove", value_name = "FILE")]
+        remove: Vec<String>,
+        /// package whose entry is dropped on purpose (repeatable)
+        #[arg(long = "drop", value_name = "NAME")]
+        drop: Vec<String>,
+        /// TOML manifest with package_urls and recipe_urls (schema-3 base index)
+        #[arg(long)]
+        locations: Option<PathBuf>,
+        /// Also pack this recipe tree into the repository (for `nawa sync`)
+        #[arg(long, requires = "recipes_rev")]
+        recipes: Option<PathBuf>,
+        /// Revision recorded for --recipes (commit sha or tag)
+        #[arg(long, requires = "recipes")]
+        recipes_rev: Option<String>,
+        /// Signing key; the updated index is always signed
+        #[arg(long)]
+        key: Option<PathBuf>,
+    },
+
+    /// Fetch the newest recipe tree from the repository (signature-checked)
+    Sync {
+        /// Repository (dir or URL); default: `repo` from the config
+        #[arg(long)]
+        repo: Option<String>,
+        /// Accept an expired repository index
+        #[arg(long)]
+        force: bool,
+        /// Accept an unsigned index (only when no trusted keys are configured)
+        #[arg(long)]
+        allow_unsigned: bool,
+    },
+
+    /// Generate an ed25519 signing keypair (nawa.sec + nawa.pub)
+    Keygen {
+        /// Directory for the keypair (default: /etc/nawa/keys or ~/.config/nawa/keys)
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+
+    /// Sign a package archive or index.toml (writes <file>.sig)
+    Sign {
+        file: PathBuf,
+        /// Signing key (default: NAWA_SIGN_KEY / /etc/nawa/keys/nawa.sec)
+        #[arg(long)]
+        key: Option<PathBuf>,
+    },
+
+    /// Verify a signature on a package archive or index
+    Verify {
+        file: PathBuf,
+        /// Verify against this public key (default: trust store, then embedded key)
+        #[arg(long)]
+        key: Option<PathBuf>,
+    },
+
+    /// Add a public key to the trust store (<root>/etc/nawa/trusted-keys)
+    Trust { keyfile: PathBuf },
+
+    /// Upgrade installed packages from a repository (index.toml); shows the
+    /// plan and asks for confirmation unless --yes is passed
+    Upgrade {
+        /// Repository directory or http(s) URL containing index.toml
+        /// (default: the `repo` key in nawa.toml / $NAWA_REPO / built-in)
+        #[arg(long)]
+        repo: Option<String>,
+        /// Show the upgrade plan without changing anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Overwrite files owned by other packages
+        #[arg(long)]
+        force: bool,
+        /// Accept unsigned archives when trust keys exist
+        #[arg(long)]
+        allow_unsigned: bool,
+        /// do not ask for confirmation (non-interactive runs REQUIRE this)
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+
+    /// Roll a package back to the version recorded in its undo log
+    Rollback { name: String },
+
+    /// List configured repositories and their state (no downloads)
+    Repolist {
+        /// include disabled repositories
+        #[arg(long)]
+        all: bool,
+    },
+
+    /// Refresh repository metadata caches (signature + freshness checked)
+    Makecache {
+        /// accept unsigned indexes when no trusted keys exist
+        #[arg(long)]
+        allow_unsigned: bool,
+        /// accept an expired repository index
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Download and verify external sources, then run the ecosystem
+    /// fetch backends ([fetch.go] / [fetch.cargo]) — the pre-seed step so
+    /// that later `--offline` builds have everything ready (§15)
+    Fetch {
+        /// package names
+        names: Vec<String>,
+        /// every recipe with a remote source or a fetch table (§15);
+        /// legacy recipes included
+        #[arg(long)]
+        all: bool,
+        /// Isolation level for the fetch runs: none | env | sandbox | closure
+        /// (the same levels as build; the toolchain lives at closure)
+        #[arg(long)]
+        isolation: Option<String>,
+        /// skip the ecosystem step: download and verify sources only
+        /// (needs no toolchain; the CI pre-seed mode)
+        #[arg(long)]
+        sources_only: bool,
+        /// verify-only: validate that every cached artifact and cache
+        /// entry exists and is complete; downloads are refused and a
+        /// missing entry is a hard error naming it (§15)
+        #[arg(long)]
+        offline: bool,
+        /// Continue when the host kernel refuses an isolation feature
+        #[arg(long)]
+        allow_degraded: bool,
+    },
+
+    /// Inspect and check recipes (local files only, no network)
+    Recipe {
+        #[command(subcommand)]
+        action: RecipeCmd,
+    },
+
+    /// Query repository metadata without downloading any archive
+    Repoquery {
+        name: String,
+        /// restrict the query to this repository id
+        #[arg(long)]
+        repo_id: Option<String>,
+        /// full package info instead of a one-line result
+        #[arg(long)]
+        info: bool,
+    },
+
+    /// Garbage-collect caches, keeping everything referenced
+    Clean {
+        category: String,
+        /// show what would be removed, remove nothing
+        #[arg(short = 'n', long)]
+        dry_run: bool,
+    },
+
+    /// Install/remove groups of packages (metadata resolves to names)
+    Group {
+        #[command(subcommand)]
+        action: GroupCmd,
+    },
+
+    /// Manage and run plugins (list / info / enable / disable / run)
+    Plugin {
+        #[command(subcommand)]
+        action: PluginCmd,
+    },
+
+    /// Show the package transaction history (newest first)
+    History {
+        #[command(subcommand)]
+        action: Option<HistoryCmd>,
+        /// show at most this many transactions (default 20)
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+
+    /// Show the effective configuration and where each value comes from
+    Config {
+        #[command(subcommand)]
+        action: ConfigCmd,
+    },
+
+    /// Inspect the system state recorded under the selected root
+    /// (read-only: nothing is created, changed or executed)
+    System {
+        #[command(subcommand)]
+        action: SystemCmd,
+    },
+
+    /// Write a commented nawa.toml template into the current directory
+    /// (or, with --system, the system-wide /etc/nawa/nawa.toml)
+    Init {
+        /// overwrite an existing nawa.toml
+        #[arg(long)]
+        force: bool,
+        /// write /etc/nawa/nawa.toml (repository + install mode) instead
+        #[arg(long)]
+        system: bool,
+    },
+
+    /// Print shell completion scripts: nawa completions bash|zsh|fish
+    Completions {
+        #[arg(value_enum)]
+        shell: Shell,
+    },
+
+    /// Run one sandbox spec (internal; used by `nawa build`)
+    #[command(hide = true)]
+    SandboxInit {
+        /// path to the spec.toml written by the build engine
+        spec: PathBuf,
+    },
+
+    /// Report which sandbox features this kernel allows (internal/tests)
+    #[command(hide = true)]
+    SandboxProbe {
+        /// run a single probe: userns | mounts | ro-bind | proc | pivot | netns-lo
+        op: Option<String>,
+    },
+
+    /// List every known package name (recipes + installed) for shell
+    /// completion — one bare name per line (internal, used by completions)
+    #[command(name = "__complete_pkgs", hide = true)]
+    CompletePkgs,
+
+    /// Unknown commands are offered to explicitly registered plugins.
+    #[command(external_subcommand)]
+    External(Vec<OsString>),
+}
+
+/// Flags shared by the commands that build and install by name.
+#[derive(clap::Args, Clone)]
+pub(crate) struct PlanFlags {
+    /// Overwrite files owned by other packages
+    #[arg(long)]
+    pub(crate) force: bool,
+    /// Accept packages without a signature (rejected when trust keys exist)
+    #[arg(long)]
+    pub(crate) allow_unsigned: bool,
+    /// Do not ask for confirmation (non-interactive runs REQUIRE this)
+    #[arg(short = 'y', long)]
+    pub(crate) yes: bool,
+    /// Show the plan and stop: nothing is built or installed
+    #[arg(short = 'n', long)]
+    pub(crate) dry_run: bool,
+    /// Skip a build whose archive already exists with identical inputs
+    /// (needs --isolation env or higher, see `nawa build --use-cache`)
+    #[arg(long)]
+    pub(crate) use_cache: bool,
+    /// Isolation level for the builds: none | env | sandbox | closure
+    #[arg(long)]
+    pub(crate) isolation: Option<String>,
+    /// Continue when the host kernel refuses an isolation feature
+    #[arg(long)]
+    pub(crate) allow_degraded: bool,
+    /// Refuse every download: only cached, verified artifacts may be used
+    /// (`nawa fetch` populates them); also settable through `NAWA_OFFLINE`
+    #[arg(long)]
+    pub(crate) offline: bool,
+}
+
+impl Cmd {
+    /// The application-layer view of this command for the lifecycle policy:
+    /// which package-database lock it needs (see
+    /// `application::lifecycle::lock_mode`). The CLI translates its parsed
+    /// arguments into a typed request; the application layer owns the
+    /// policy. The match is exhaustive, so a new `Cmd` variant cannot be
+    /// added without a lock decision.
+    pub(crate) fn lock_request(&self) -> crate::application::lifecycle::Request {
+        use crate::application::lifecycle::Request;
+        match self {
+            // installing archives holds the lock for the whole command;
+            // installing by name builds first, so (like `build --install`)
+            // it locks around each install step only
+            Cmd::Install { targets, .. } => {
+                if targets
+                    .iter()
+                    .all(|t| crate::adapters::pathutil::is_archive_arg(t))
+                {
+                    Request::InstallArchives
+                } else {
+                    Request::InstallByName
+                }
+            }
+            Cmd::Remove { .. }
+            | Cmd::Rollback { .. }
+            | Cmd::Autoremove { .. }
+            | Cmd::History { .. } => Request::MutateDb,
+            Cmd::Upgrade { dry_run, .. } => Request::Upgrade { dry_run: *dry_run },
+            // `build --install` / `update` lock themselves around the install
+            // step only (holding the db lock through a full build would starve
+            // readers)
+            Cmd::Build { .. } | Cmd::Update { .. } => Request::PerStep,
+            // fetch and recipe check never touch the package database
+            Cmd::Fetch { .. } | Cmd::Recipe { .. } => Request::NoDb,
+            Cmd::Outdated => Request::ReadDb,
+            Cmd::Query { .. }
+            | Cmd::Info { .. }
+            | Cmd::Why { .. }
+            | Cmd::Files { .. }
+            | Cmd::Owner { .. }
+            | Cmd::Revdep { .. }
+            | Cmd::Deps { .. }
+            | Cmd::DepsAll { .. } => Request::ReadDb, // repo/sign tooling and everything below touches no package database
+            // `system migrate` inspection reads the migration records under
+            // `<root>/var/lib/nawa` (the state directory the lock covers):
+            // a shared lock excludes the coordinator's record updates, so
+            // `list` shows one coherent snapshot. Readers are never
+            // gate-checked (§10.3: read-only inspection stays available
+            // while a migration is pending), and a fresh root needs no
+            // lock at all — the shared path never creates state.
+            // inspection is a coherent shared-lock snapshot; `resume` takes
+            // its own exclusive lock through the migration capability so it
+            // can cross the gate — an outer lock here would deadlock against
+            // that non-reentrant flock.
+            Cmd::System {
+                action:
+                    SystemCmd::Migrate {
+                        action: MigrateCmd::Resume | MigrateCmd::Apply { .. },
+                    },
+            } => Request::NoDb,
+            Cmd::System { .. } => Request::ReadDb,
+            Cmd::RepoCreate { .. }
+            | Cmd::RepoUpdate { .. }
+            | Cmd::Keygen { .. }
+            | Cmd::Sign { .. }
+            | Cmd::Verify { .. }
+            | Cmd::Trust { .. }
+            | Cmd::Sync { .. }
+            | Cmd::Search { .. }
+            | Cmd::Completions { .. }
+            | Cmd::Config { .. }
+            | Cmd::Init { .. }
+            | Cmd::CompletePkgs => Request::NoDb,
+            // Group install delegates to the ordinary install path, which
+            // acquires short per-transaction locks itself. Holding an
+            // outer lock here would deadlock that path.
+            Cmd::Group { action } => match action {
+                GroupCmd::List | GroupCmd::Info { .. } | GroupCmd::Install { .. } => {
+                    Request::InstallByName
+                }
+                GroupCmd::Remove { .. } => Request::GroupRemove,
+            },
+            Cmd::Repolist { .. }
+            | Cmd::Repoquery { .. }
+            | Cmd::Makecache { .. }
+            | Cmd::Clean { .. }
+            | Cmd::Plugin { .. }
+            | Cmd::SandboxInit { .. }
+            | Cmd::SandboxProbe { .. }
+            | Cmd::External(_) => Request::NoDb,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+pub(crate) enum RecipeCmd {
+    /// Run the source-independent checks of §14B (warnings only): assets,
+    /// unknown tables and keys, unknown placeholders, fetch anti-patterns
+    Check {
+        /// one recipe name (exclusive with --all)
+        name: Option<String>,
+        /// every recipe in the recipes tree
+        #[arg(long)]
+        all: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum GroupCmd {
+    /// List installed groups
+    List,
+    /// Show a group's recorded membership
+    Info { id: String },
+    /// Install a group's packages through the normal planner
+    Install {
+        id: String,
+        /// Include optional packages listed by the group definition
+        #[arg(long)]
+        with_optional: bool,
+        #[command(flatten)]
+        flags: PlanFlags,
+    },
+    /// Remove a group's membership and its now-unneeded packages
+    Remove {
+        id: String,
+        /// do not ask for confirmation (non-interactive runs REQUIRE this)
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum PluginCmd {
+    /// List discovered plugins and their state
+    List,
+    /// Show one plugin's manifest details
+    Info { id: String },
+    /// Enable a plugin (stored in the [plugins] table of nawa.toml)
+    Enable { id: String },
+    /// Disable a plugin
+    Disable { id: String },
+    /// Grant a requested capability using system administrator policy
+    Grant { id: String, capability: String },
+    /// Revoke an administrator capability grant
+    Revoke { id: String, capability: String },
+    /// Run one of a plugin's commands with the given arguments
+    Run {
+        id: String,
+        command: String,
+        /// arguments passed through to the plugin (argv-preserving)
+        args: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum HistoryCmd {
+    /// List transactions (the default `nawa history` view)
+    List,
+    /// Show the full story of one transaction
+    Info { id: u64 },
+    /// Compensate a previous transaction with a new one
+    Undo {
+        id: u64,
+        /// do not ask for confirmation (non-interactive runs REQUIRE this)
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum ConfigCmd {
+    /// Print the effective configuration, annotated with each value's source
+    Show,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum SystemCmd {
+    /// Inspect the observed runtime, installed init candidates and desired system profile
+    Status,
+    /// Inspect the effective distribution and administrator system profile
+    Profile {
+        #[command(subcommand)]
+        action: SystemProfileCmd,
+    },
+    /// Build a read-only reconciliation plan for the selected root
+    Plan,
+    /// Explain one supported system capability
+    Explain {
+        /// The capability to explain (currently: init-system)
+        topic: String,
+    },
+    /// Manage the built-in system migration lifecycle
+    Migrate {
+        #[command(subcommand)]
+        action: MigrateCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum SystemProfileCmd {
+    /// Show the effective profile and the source of each provider declaration
+    Show,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum MigrateCmd {
+    /// List every migration record under the selected root: id, durable
+    /// state, source/target capability and definition version
+    List,
+    /// Show one migration record in full, including its write-ahead steps
+    Show {
+        /// the migration id (the record name without its `.toml`)
+        id: String,
+    },
+    /// Whether package mutations are currently blocked by the persistent
+    /// migration gate, and by which migration (informational; always
+    /// exits 0)
+    Status,
+    /// Show the read-only migration plan for a built-in migration id
+    /// (works on an offline root; nothing is persisted or executed, §12.1–2)
+    Plan {
+        /// the migration id (the built-in definition names one migration)
+        id: String,
+    },
+    /// Apply a migration (live host only, explicit per-migration
+    /// authorization; a generic --yes is never enough, §12.4)
+    Apply {
+        /// the migration id, repeated in the authorization
+        id: String,
+        /// the exact source capability being migrated from
+        #[arg(long)]
+        from: String,
+        /// the exact target capability being migrated to
+        #[arg(long)]
+        to: String,
+        /// the SystemPlan identity shown by nawa system plan
+        #[arg(long, value_name = "sp-<sha256>")]
+        plan_id: String,
+        /// acknowledge that the migration needs a reboot boundary
+        #[arg(long)]
+        acknowledge_reboot: bool,
+        /// acknowledge the documented recovery path
+        #[arg(long)]
+        acknowledge_recovery: bool,
+    },
+    /// Reconcile an interrupted migration and, after reboot, verify the
+    /// target init and finalize the durable record (live host only, explicit
+    /// operation — never automatic; design §10.3–§10.5, §12.2)
+    Resume,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub(crate) enum Shell {
+    Bash,
+    Zsh,
+    Fish,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::application::lifecycle::lock_need;
+    use clap::CommandFactory;
+
+    fn parsed_request(args: &[&str]) -> crate::application::lifecycle::Request {
+        let mut full = vec!["nawa"];
+        full.extend_from_slice(args);
+        Cli::try_parse_from(full).unwrap().cmd.lock_request()
+    }
+
+    #[test]
+    fn reserved_commands_cover_every_builtin_cli_command() {
+        let command = Cli::command();
+        for subcommand in command.get_subcommands() {
+            let name = subcommand.get_name();
+            assert!(
+                crate::plugins::manifest::RESERVED_COMMANDS.contains(&name),
+                "built-in command {name:?} is missing from RESERVED_COMMANDS"
+            );
+        }
+    }
+
+    #[test]
+    fn system_inspection_commands_take_a_shared_lock() {
+        for args in [
+            &["system", "status"][..],
+            &["system", "profile", "show"][..],
+            &["system", "plan"][..],
+            &["system", "explain", "init-system"][..],
+            &["system", "migrate", "list"][..],
+        ] {
+            assert_eq!(
+                lock_need(&parsed_request(args)),
+                Some(crate::application::lifecycle::LockNeed::Shared),
+                "{args:?} is a read-only system inspection",
+            );
+        }
+    }
+
+    #[test]
+    fn migration_apply_requires_an_explicit_system_plan_identity() {
+        let base = [
+            "nawa",
+            "system",
+            "migrate",
+            "apply",
+            "faseela-runit-to-systemd-v1",
+            "--from",
+            "init-system=runit",
+            "--to",
+            "init-system=systemd",
+            "--acknowledge-reboot",
+            "--acknowledge-recovery",
+        ];
+        assert!(Cli::try_parse_from(base).is_err());
+        let mut approved = base.to_vec();
+        let plan_id = format!("sp-{}", "a".repeat(64));
+        approved.extend(["--plan-id", plan_id.as_str()]);
+        assert!(Cli::try_parse_from(approved).is_ok());
+    }
+
+    #[test]
+    fn archive_installs_take_one_exclusive_lock_name_installs_none() {
+        assert_eq!(
+            lock_need(&parsed_request(&[
+                "install",
+                "build/out/curl-8.9-1.nawa.tar.zst"
+            ])),
+            Some(crate::application::lifecycle::LockNeed::Exclusive)
+        );
+        assert_eq!(lock_need(&parsed_request(&["install", "curl"])), None);
+        // mixing names and archives is rejected later, but the lock policy
+        // still reads it as the by-name path
+        assert_eq!(
+            lock_need(&parsed_request(&["install", "curl", "a.nawa.tar.zst"])),
+            None
+        );
+    }
+
+    #[test]
+    fn group_install_delegates_group_remove_is_exclusive() {
+        assert_eq!(
+            lock_need(&parsed_request(&["group", "install", "dev"])),
+            None
+        );
+        assert_eq!(
+            lock_need(&parsed_request(&["group", "remove", "dev"])),
+            Some(crate::application::lifecycle::LockNeed::Exclusive)
+        );
+    }
+
+    #[test]
+    fn upgrade_dry_run_reads_the_database() {
+        assert_eq!(
+            lock_need(&parsed_request(&["upgrade", "--dry-run"])),
+            Some(crate::application::lifecycle::LockNeed::Shared)
+        );
+        assert_eq!(
+            lock_need(&parsed_request(&["upgrade"])),
+            Some(crate::application::lifecycle::LockNeed::Exclusive)
+        );
+    }
+
+    #[test]
+    fn query_family_reads_fetch_never_touches() {
+        for args in [
+            ["query"].as_slice(),
+            ["info", "curl"].as_slice(),
+            ["revdep", "curl"].as_slice(),
+            ["deps", "curl"].as_slice(),
+        ] {
+            assert_eq!(
+                lock_need(&parsed_request(args)),
+                Some(crate::application::lifecycle::LockNeed::Shared),
+                "{args:?} reads the installed database"
+            );
+        }
+        for args in [
+            ["fetch", "curl"].as_slice(),
+            ["search", "curl"].as_slice(),
+            ["completions", "bash"].as_slice(),
+        ] {
+            assert_eq!(
+                lock_need(&parsed_request(args)),
+                None,
+                "{args:?} needs no database"
+            );
+        }
+    }
+}

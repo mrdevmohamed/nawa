@@ -57,4 +57,3 @@ pub(crate) fn locate(root: &Path, name: &str) -> Result<(Recipe, PathBuf)> {
         crate::suggest::hint(name, &names)
     )
 }
-

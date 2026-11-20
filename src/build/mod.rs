@@ -1,23 +1,33 @@
 //! Build engine: fetch -> verify -> extract -> [assemble build root] ->
 //! run build sections (optionally inside the sandbox) -> stage into pkgdir
 //! -> lint -> create archive.
+//!
+//! This namespace owns the whole build pipeline: isolation levels and the
+//! build environment, source/asset staging, dependency-closure assembly,
+//! slimming/splitting, build profiles and ecosystem (`go`/`cargo`) source
+//! staging. The recipe *schema* stays in `recipe`; this module owns only the
+//! machinery that consumes it.
+
+pub(crate) mod assets;
+pub(crate) mod buildenv;
+pub(crate) mod closure;
+pub(crate) mod fetchrun;
+pub(crate) mod profile;
+pub(crate) mod slim;
+pub(crate) mod sources;
 
 use anyhow::{bail, Context, Result};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use crate::buildenv::{self, Isolation};
+use crate::build::buildenv::Isolation;
 use crate::fetch;
 use crate::recipe::{ExpandCtx, Recipe};
-use crate::slim;
 
-
-pub(crate) use crate::buildenv::{BuildOpts, CheckMode};
-
+pub(crate) use crate::build::buildenv::{BuildOpts, CheckMode};
 
 /// How many trailing output lines are quoted when a section fails.
 const FAIL_TAIL_LINES: usize = 25;
-
 
 pub(crate) struct BuildResult {
     pub archive: PathBuf,
@@ -26,7 +36,6 @@ pub(crate) struct BuildResult {
 // ---------------------------------------------------------------------------
 // work-tree lifecycle
 // ---------------------------------------------------------------------------
-
 
 /// Delete a previous run's `<work>` tree. The tree may hold *read-only*
 /// directories (the assets snapshot keeps its dirs at 0555, §5.3.1) and
@@ -41,7 +50,6 @@ pub(crate) struct BuildResult {
 pub(crate) fn wipe_work(work: &Path) -> Result<()> {
     wipe_tree(work).with_context(|| format!("wipe the previous work tree {}", work.display()))
 }
-
 
 fn wipe_tree(path: &Path) -> std::io::Result<()> {
     let md = match std::fs::symlink_metadata(path) {
@@ -67,7 +75,6 @@ fn wipe_tree(path: &Path) -> std::io::Result<()> {
         _ => Ok(()),
     }
 }
-
 
 pub(crate) fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
     // ---- offline gate (fetch-phase.md §12/§15) ----------------------------
@@ -95,7 +102,7 @@ pub(crate) fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
 
     // In live/env modes the toolchain comes from the host root, not a pinned
     // closure archive. Capture the exact fetch PATH versions before cache lookup.
-    let toolchain_identity = crate::fetchrun::build_toolchain_identity(rec, opts.isolation)?;
+    let toolchain_identity = crate::build::fetchrun::build_toolchain_identity(rec, opts.isolation)?;
     // Cache-only identity (never part of the legacy `.PKGINFO build_id`):
     // the effective isolation level and, for host-root builds, the C/C++
     // toolchain the build sections will actually invoke.
@@ -109,10 +116,14 @@ pub(crate) fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
     if opts.use_cache && opts.isolation >= Isolation::Env {
         let closure_paths: Vec<PathBuf> = if opts.isolation == Isolation::Closure {
             let known = crate::recipe::load_all(&opts.recipes_root)?;
-            let paths = crate::closure::buildroot(rec, &known, opts.check != CheckMode::Off)
+            let paths = crate::build::closure::buildroot(rec, &known, opts.check != CheckMode::Off)
                 .context("compute build root")?
                 .iter()
-                .filter_map(|n| known.get(n).map(|r| crate::closure::archive_for(r, &opts.outdir)))
+                .filter_map(|n| {
+                    known
+                        .get(n)
+                        .map(|r| crate::build::closure::archive_for(r, &opts.outdir))
+                })
                 .collect();
             closure_known = Some(known);
             paths
@@ -151,8 +162,11 @@ pub(crate) fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
     std::fs::create_dir_all(&pkg)?;
 
     // ---- source staging -------------------------------------------------
-    let StagedSource { srcdir, sources: staged, assets: staged_assets } =
-        stage::stage_source(rec, opts, &builddir, &work, &src, &pkg)?;
+    let StagedSource {
+        srcdir,
+        sources: staged,
+        assets: staged_assets,
+    } = stage::stage_source(rec, opts, &builddir, &work, &src, &pkg)?;
 
     // ---- isolation prep (docs/design/build-isolation.md) -----------------
     // §6: new-schema recipes carry the epoch from the sources engine (the
@@ -183,12 +197,26 @@ pub(crate) fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
 
     // ---- ecosystem fetch (fetch-phase.md §7, §11, §12) --------------------
     let fetch_env = buildroot::run_fetch_phase(
-        rec, opts, &builddir, &work, &src, sandboxed, &sandbox_base, assembled.as_ref(),
+        rec,
+        opts,
+        &builddir,
+        &work,
+        &src,
+        sandboxed,
+        &sandbox_base,
+        assembled.as_ref(),
     )?;
 
     // ---- environment ------------------------------------------------------
     let (env_vars, env_prefix) = buildroot::build_env(
-        rec, opts, sandboxed, &sandbox_base, &view, staged_assets.is_some(), sde, &fetch_env,
+        rec,
+        opts,
+        sandboxed,
+        &sandbox_base,
+        &view,
+        staged_assets.is_some(),
+        sde,
+        &fetch_env,
     );
 
     // ---- run build sections ---------------------------------------------
@@ -215,13 +243,28 @@ pub(crate) fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
             })
             .unwrap_or_default();
         Some(prepare_sandbox(
-            rec, opts, &work, &src, &pkg, &env_vars, &sandbox_base, &view.src, layers,
+            rec,
+            opts,
+            &work,
+            &src,
+            &pkg,
+            &env_vars,
+            &sandbox_base,
+            &view.src,
+            layers,
         )?)
     } else {
         None
     };
     run_sections(
-        rec, opts, &ctx, &srcdir, &work, &env_vars, env_prefix, sandbox_cfg.as_ref(),
+        rec,
+        opts,
+        &ctx,
+        &srcdir,
+        &work,
+        &env_vars,
+        env_prefix,
+        sandbox_cfg.as_ref(),
     )?;
 
     // ---- slim: cleanup, split off -doc/-lang, strip ----------------------
@@ -244,7 +287,13 @@ pub(crate) fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
     let (files, size) = package::collect_staged_files(&pkg)?;
     if opts.isolation >= Isolation::Env {
         package::lint_stage(
-            rec, opts, &pkg, &work, assembled.as_ref(), sandboxed, &sandbox_base,
+            rec,
+            opts,
+            &pkg,
+            &work,
+            assembled.as_ref(),
+            sandboxed,
+            &sandbox_base,
             staged_assets.is_some(),
         )?;
     }
@@ -283,7 +332,6 @@ pub(crate) fn build(rec: &Recipe, opts: &BuildOpts) -> Result<BuildResult> {
     Ok(BuildResult { archive: out_path })
 }
 
-
 /// Make the staged source tree writable for the build itself under
 /// `sandbox`/`closure` isolation: GNU tar run as root preserves the tarball's
 /// upstream ownership (many tarballs ship uid 1000/501), and the sandbox
@@ -311,14 +359,17 @@ pub(crate) fn grant_source_write(dir: &Path) {
         }
         let Ok(md) = e.metadata() else { continue };
         let mode = md.permissions().mode() & 0o7777;
-        let x = if md.is_dir() || mode & 0o111 != 0 { 0o100 } else { 0o000 };
+        let x = if md.is_dir() || mode & 0o111 != 0 {
+            0o100
+        } else {
+            0o000
+        };
         let want = (mode & !0o700) | 0o600 | x;
         if want != mode {
             let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(want));
         }
     }
 }
-
 
 /// Where the sandbox's build base lives (§4.2): `/build` — recipes always
 /// see `%{srcdir}`/`%{pkgdir}` as `/build/src`, `/build/pkg`, never a host
@@ -346,7 +397,6 @@ pub(crate) fn sandbox_inside_base(_work: &Path) -> String {
 // ---------------------------------------------------------------------------
 // Phase 5: layer cache + build_id cache hits (§5.3 v2, §7)
 // ---------------------------------------------------------------------------
-
 
 /// `nawa build --rebuild-check` (§6): build twice in different directories at
 /// different times and compare archive hashes — the regression test for the
@@ -390,9 +440,8 @@ pub(crate) fn rebuild_check(rec: &Recipe, opts: &BuildOpts) -> Result<()> {
     bail!("rebuild-check failed for {}", rec.id());
 }
 
-
-pub mod cache;
 mod buildroot;
+pub mod cache;
 mod package;
 pub mod sandbox;
 pub mod sections;
@@ -432,7 +481,10 @@ dir = "."
         let go_b = vec![("go", "go version go1.27.0 linux/amd64".to_string())];
         let id_a = build_id_for(&rec, &opts, &[], None, &go_a);
         let id_b = build_id_for(&rec, &opts, &[], None, &go_b);
-        assert_ne!(id_a, id_b, "a Go toolchain update must invalidate --use-cache");
+        assert_ne!(
+            id_a, id_b,
+            "a Go toolchain update must invalidate --use-cache"
+        );
     }
 
     #[test]
@@ -455,7 +507,10 @@ dir = "."
         let cargo_b = vec![("cargo", "cargo 1.89.0 (test-b)".to_string())];
         let id_a = build_id_for(&rec, &opts, &[], None, &cargo_a);
         let id_b = build_id_for(&rec, &opts, &[], None, &cargo_b);
-        assert_ne!(id_a, id_b, "a Cargo toolchain update must invalidate --use-cache");
+        assert_ne!(
+            id_a, id_b,
+            "a Cargo toolchain update must invalidate --use-cache"
+        );
     }
 
     #[test]
@@ -468,7 +523,10 @@ dir = "."
         assert_eq!(id_a, id_b);
         let updated_archives = vec![PathBuf::from("golang-1.27.4-1.nawa.tar.zst")];
         let id_updated = build_id_for(&rec, &opts, &updated_archives, None, &[]);
-        assert_ne!(id_a, id_updated, "a closure toolchain archive update must invalidate the id");
+        assert_ne!(
+            id_a, id_updated,
+            "a closure toolchain archive update must invalidate the id"
+        );
     }
 }
 
@@ -508,7 +566,7 @@ mod wipe_tests {
 #[cfg(test)]
 mod installed_sonames_tests {
     use super::sections::installed_sonames;
-    use crate::db::{Db, Entry};
+    use crate::adapters::db::{Db, Entry};
 
     fn entry(name: &str) -> Entry {
         Entry {
@@ -526,10 +584,7 @@ mod installed_sonames_tests {
 
     #[test]
     fn sonames_map_libs_to_their_owners() {
-        let root = std::env::temp_dir().join(format!(
-            "nawa-sonames-{}",
-            std::process::id()
-        ));
+        let root = std::env::temp_dir().join(format!("nawa-sonames-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let db = Db::new(&root);
         db.add(
@@ -556,7 +611,10 @@ mod installed_sonames_tests {
         let map = installed_sonames(&root).unwrap();
         assert_eq!(map.get("libfoo.so.1").map(String::as_str), Some("hello"));
         assert_eq!(map.get("libbar.so").map(String::as_str), Some("world"));
-        assert!(!map.contains_key("libbaz.so.a"), ".a files are not sonames: {map:?}");
+        assert!(
+            !map.contains_key("libbaz.so.a"),
+            ".a files are not sonames: {map:?}"
+        );
         assert_eq!(map.len(), 2, "only lib sonames, owners correct: {map:?}");
 
         let _ = std::fs::remove_dir_all(&root);

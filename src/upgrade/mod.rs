@@ -15,18 +15,25 @@ use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use crate::db::Db;
+use crate::adapters::db::Db;
+#[cfg(test)]
+use crate::adapters::sign;
+use crate::domain::package::version::vercmp;
+use crate::domain::system::observation::ObservedSystem;
 use crate::fetch::RepoRef;
 use crate::install;
 use crate::recipe;
 use crate::repo;
-#[cfg(test)]
-use crate::sign;
-use crate::version::vercmp;
 
 mod source;
+pub(crate) mod system_transition;
 
+pub(crate) use source::open_repo_cached;
 pub(crate) use source::{archive_download_url, fetch_entry, open_repo, ArchiveAuth, OpenRepo};
+pub(crate) use system_transition::{
+    plan as plan_system_transition, render as render_system_transition, PackageActionKind,
+    PackageActionSource, Preview as SystemTransitionPreview,
+};
 
 pub(crate) struct UpgradeOpts {
     pub dry_run: bool,
@@ -37,59 +44,175 @@ pub(crate) struct UpgradeOpts {
     pub yes: bool,
 }
 
-pub(crate) fn upgrade(
+#[cfg(test)]
+fn upgrade(root: &Path, repo_ref: &RepoRef, recipes: &Path, opts: &UpgradeOpts) -> Result<()> {
+    upgrade_inner(root, repo_ref, recipes, None, opts)
+}
+
+pub(crate) fn upgrade_with_observation(
     root: &Path,
     repo_ref: &RepoRef,
     recipes: &Path,
+    observed: &ObservedSystem,
+    opts: &UpgradeOpts,
+) -> Result<()> {
+    upgrade_inner(root, repo_ref, recipes, Some(observed), opts)
+}
+
+fn upgrade_inner(
+    root: &Path,
+    repo_ref: &RepoRef,
+    recipes: &Path,
+    observed: Option<&ObservedSystem>,
     opts: &UpgradeOpts,
 ) -> Result<()> {
     let open = open_repo(root, repo_ref, opts.allow_unsigned, opts.force)?;
-    let Some(plan) = build_plan(root, &open.index, recipes)? else {
+    let mut plan = build_plan(root, &open.index, recipes)?;
+    let installed_versions: HashMap<String, String> = plan
+        .installed
+        .iter()
+        .map(|(name, entry)| {
+            (
+                name.clone(),
+                crate::domain::planning::install::version_rel(&entry.version, entry.rel),
+            )
+        })
+        .collect();
+    plan.system_transition =
+        observed.and_then(|observed| system_transition::plan(observed, &open, &installed_versions));
+
+    if plan.upgrades.is_empty() && plan.system_transition.is_none() && !plan.assessment.blocked() {
+        crate::nawa_info!("everything up to date ({} installed)", plan.installed.len());
         return Ok(());
-    };
+    }
     print_plan(&plan);
+
+    if plan.assessment.blocked() {
+        anyhow::bail!("package upgrade assessment found incompatible state; review the reported dependencies, conflicts or replacements before retrying");
+    }
 
     if opts.dry_run {
         crate::nawa_info!("dry run — no changes made");
         return Ok(());
     }
+    if plan.upgrades.is_empty() {
+        crate::nawa_info!("no ordinary package upgrades to apply; any system migration remains a separate, explicitly authorized operation");
+        return Ok(());
+    }
 
-    // the plan is on the table; a real run needs an explicit go-ahead
-    // (scripts pass --yes; a piped stdin without it is refused, not guessed)
-    crate::confirm::confirm("nawa: proceed with the upgrade?", opts.yes)?;
+    // --yes authorizes only the ordinary package upgrade. The separately
+    // displayed system migration candidate is never applied by this command.
+    crate::presentation::confirm::confirm(
+        "nawa: proceed with the package upgrades? (system migration is not included)",
+        opts.yes,
+    )?;
     apply_plan(root, &open, &plan, opts)
 }
 
 struct PlannedUpgrade<'a> {
     entry: &'a repo::RepoEntry,
     new_version: String,
+    reason: crate::domain::planning::install::Why,
 }
 
 struct UpgradePlan<'a> {
-    installed: HashMap<String, crate::db::Entry>,
+    installed: HashMap<String, crate::adapters::db::Entry>,
     upgrades: Vec<PlannedUpgrade<'a>>,
+    system_transition: Option<system_transition::Preview>,
+    assessment: crate::domain::system::package_assessment::PackageAssessment,
 }
 
-/// Compare the local database against the repository index and order the
-/// newer packages for installation. Returns `None` when everything is current.
-fn build_plan<'a>(
-    root: &Path,
-    index: &'a repo::Index,
+fn build_plan<'a>(root: &Path, index: &'a repo::Index, recipes: &Path) -> Result<UpgradePlan<'a>> {
+    let entries = Db::new(root).installed()?;
+    let states = crate::adapters::installed_metadata::capture(root, &entries);
+    let installed_map = entries.into_iter().map(|e| (e.name.clone(), e)).collect();
+    let selection = select_package_upgrades(index, &states, recipes)?;
+    let assessment = assess_selection(&selection, &states)?;
+    Ok(UpgradePlan {
+        installed: installed_map,
+        upgrades: selection.upgrades,
+        system_transition: None,
+        assessment,
+    })
+}
+
+struct PackageSelection<'a> {
+    upgrades: Vec<PlannedUpgrade<'a>>,
+    removals: Vec<String>,
+    resolution_error: Option<String>,
+}
+
+/// Both SystemPlan and upgrade consume this selection and the same pure
+/// assessment. Failed solves retain proposed targets for explanation only;
+/// the incompatible finding prevents execution, including with --force.
+pub(crate) fn assess_package_upgrades(
+    index: &repo::Index,
+    installed: &std::collections::BTreeMap<
+        String,
+        crate::domain::system::package_assessment::PackageState,
+    >,
     recipes: &Path,
-) -> Result<Option<UpgradePlan<'a>>> {
-    let db = Db::new(root);
-    let installed_map: HashMap<String, crate::db::Entry> =
-        db.installed()?.into_iter().map(|e| (e.name.clone(), e)).collect();
+) -> Result<crate::domain::system::package_assessment::PackageAssessment> {
+    let selection = select_package_upgrades(index, installed, recipes)?;
+    assess_selection(&selection, installed)
+}
+
+fn assess_selection(
+    selection: &PackageSelection<'_>,
+    installed: &std::collections::BTreeMap<
+        String,
+        crate::domain::system::package_assessment::PackageState,
+    >,
+) -> Result<crate::domain::system::package_assessment::PackageAssessment> {
+    use crate::domain::system::package_assessment::{self, PackageChange, PackageState};
+    let changes = selection
+        .upgrades
+        .iter()
+        .map(|upgrade| {
+            let entry = upgrade.entry;
+            let metadata = crate::domain::package::metadata::metadata_from_repository(
+                entry.rundeps.as_ref(),
+                entry.provides.as_ref(),
+                entry.relations.as_ref(),
+            )
+            .map_err(anyhow::Error::msg)?;
+            Ok(PackageChange {
+                name: entry.name.clone(),
+                current: installed.get(&entry.name).map(|p| p.version.clone()),
+                target: PackageState {
+                    version: format!("{}-{}", entry.version, entry.rel),
+                    metadata,
+                },
+                archive: entry.file.clone(),
+                sha256: entry.sha256.clone(),
+                size: entry.size,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(package_assessment::assess(
+        installed,
+        changes,
+        &selection.removals,
+        selection.resolution_error.as_deref(),
+    ))
+}
+
+fn select_package_upgrades<'a>(
+    index: &'a repo::Index,
+    installed_states: &std::collections::BTreeMap<
+        String,
+        crate::domain::system::package_assessment::PackageState,
+    >,
+    recipes: &Path,
+) -> Result<PackageSelection<'a>> {
     let mut candidates: Vec<(&repo::RepoEntry, String)> = Vec::new();
-    let mut entries: Vec<&crate::db::Entry> = installed_map.values().collect();
-    entries.sort_by(|a, b| a.name.cmp(&b.name));
-    for e in entries {
-        let re = match index.find(&e.name) {
+    for (name, state) in installed_states {
+        let re = match index.find(name) {
             Some(r) => r,
             None => continue, // not in this repo -> untouched
         };
         let new = format!("{}-{}-{}", re.name, re.version, re.rel);
-        if vercmp(&format!("{}-{}", re.version, re.rel), &format!("{}-{}", e.version, e.rel))
+        if vercmp(&format!("{}-{}", re.version, re.rel), &state.version)
             == std::cmp::Ordering::Greater
         {
             candidates.push((re, new));
@@ -97,8 +220,99 @@ fn build_plan<'a>(
     }
 
     if candidates.is_empty() {
-        crate::nawa_info!("everything up to date ({} installed)", installed_map.len());
-        return Ok(None);
+        return Ok(PackageSelection {
+            upgrades: Vec::new(),
+            removals: Vec::new(),
+            resolution_error: None,
+        });
+    }
+
+    if index
+        .repository
+        .as_ref()
+        .is_some_and(|m| m.schema == repo::INDEX_SCHEMA_V5)
+    {
+        let mut known = std::collections::BTreeMap::new();
+        for entry in &index.packages {
+            if !crate::adapters::sys::arch_fits(&entry.arch) {
+                continue;
+            }
+            let metadata = crate::domain::package::metadata::metadata_from_repository(
+                entry.rundeps.as_ref(),
+                entry.provides.as_ref(),
+                entry.relations.as_ref(),
+            )
+            .map_err(anyhow::Error::msg)?;
+            let crate::domain::package::metadata::RunDeps::Declared(deps) = metadata.rundeps else {
+                anyhow::bail!("schema-v5 runtime dependencies are unknown");
+            };
+            known.insert(
+                entry.name.clone(),
+                crate::domain::planning::install::Candidate {
+                    name: entry.name.clone(),
+                    version: entry.version.clone(),
+                    rel: entry.rel,
+                    deps,
+                    dependencies_known: true,
+                    provides: metadata.provides,
+                    relations: metadata.relations,
+                    origin: crate::domain::planning::install::CandidateOrigin::Repository,
+                },
+            );
+        }
+        let installed = installed_states
+            .iter()
+            .map(|(name, state)| (name.clone(), state.version.clone()))
+            .collect();
+        let targets = candidates
+            .iter()
+            .map(|(e, _)| e.name.clone())
+            .collect::<Vec<_>>();
+        let resolved = crate::domain::planning::install::install_plan(
+            &targets,
+            &installed,
+            &known,
+            None,
+            crate::domain::planning::install::Why::Update,
+            true,
+        );
+        let resolved = match resolved {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                return Ok(PackageSelection {
+                    upgrades: candidates
+                        .into_iter()
+                        .map(|(entry, new_version)| PlannedUpgrade {
+                            entry,
+                            new_version,
+                            reason: crate::domain::planning::install::Why::Update,
+                        })
+                        .collect(),
+                    removals: Vec::new(),
+                    resolution_error: Some(format!("{error:#}")),
+                })
+            }
+        };
+        let removals = resolved.removals.iter().map(|r| r.name.clone()).collect();
+        let upgrades = resolved
+            .items
+            .into_iter()
+            .map(|item| {
+                let entry = index
+                    .find(&item.name)
+                    .expect("resolved authenticated entry");
+                PlannedUpgrade {
+                    entry,
+                    new_version: format!("{}-{}-{}", entry.name, entry.version, entry.rel),
+                    reason: item.why,
+                }
+            })
+            .collect();
+        return Ok(PackageSelection {
+            upgrades,
+            removals,
+            resolution_error: None,
+        });
     }
 
     // dependency order when the recipe tree is available; packages that have
@@ -107,11 +321,10 @@ fn build_plan<'a>(
     let names: Vec<String> = candidates.iter().map(|(r, _)| r.name.clone()).collect();
     let ordered: Vec<String> = match recipe::load_all(recipes) {
         Ok(tree) if !tree.is_empty() => {
-            let installed: HashSet<String> = installed_map.keys().cloned().collect();
+            let installed: HashSet<String> = installed_states.keys().cloned().collect();
             order_with_fallback(&names, &installed, &tree)
         }
         _ => {
-            crate::nawa_note_stderr!("no recipe tree at {} — applying in alphabetical order", recipes.display());
             let mut n = names.clone();
             n.sort();
             n
@@ -125,25 +338,50 @@ fn build_plan<'a>(
                 .iter()
                 .find(|(entry, _)| &entry.name == name)
                 .expect("ordered name came from the plan");
-            PlannedUpgrade { entry, new_version: new_version.clone() }
+            PlannedUpgrade {
+                entry,
+                new_version: new_version.clone(),
+                reason: crate::domain::planning::install::Why::Update,
+            }
         })
         .collect();
-    Ok(Some(UpgradePlan { installed: installed_map, upgrades }))
+    Ok(PackageSelection {
+        upgrades,
+        removals: Vec::new(),
+        resolution_error: None,
+    })
 }
 
 fn print_plan(plan: &UpgradePlan<'_>) {
-    let pal = crate::color::Palette::auto(crate::color::Stream::Stdout);
-    crate::nawa_info!("{} package(s) to upgrade:", plan.upgrades.len());
-    for upgrade in &plan.upgrades {
-        let name = &upgrade.entry.name;
-        let cur = plan.installed.get(name).map(|e| e.version_full()).unwrap_or_default();
-        println!(
-            "  {} {} {} {}",
-            pal.name(&format!("{name:<24}")),
-            pal.ver(&cur),
-            pal.dim("->"),
-            pal.ok(&upgrade.new_version),
-        );
+    let pal = crate::presentation::color::Palette::auto(crate::presentation::color::Stream::Stdout);
+    if plan.upgrades.is_empty() {
+        crate::nawa_info!("no ordinary package upgrades are required");
+    } else {
+        crate::nawa_info!("{} package(s) to upgrade:", plan.upgrades.len());
+        for upgrade in &plan.upgrades {
+            let name = &upgrade.entry.name;
+            let cur = plan
+                .installed
+                .get(name)
+                .map(|e| e.version_full())
+                .unwrap_or_default();
+            println!(
+                "  {} {} {} {}",
+                pal.name(&format!("{name:<24}")),
+                pal.ver(&cur),
+                pal.dim("->"),
+                pal.ok(&upgrade.new_version),
+            );
+        }
+    }
+    for line in crate::presentation::package_assessment::render(&plan.assessment) {
+        println!("{line}");
+    }
+    if let Some(preview) = &plan.system_transition {
+        println!();
+        for line in system_transition::render(preview) {
+            println!("{line}");
+        }
     }
 }
 
@@ -169,35 +407,50 @@ fn apply_plan(
         let re = upgrade.entry;
         // a Ctrl+C that arrived during the previous package was deferred
         // until it was complete; stop before starting the next one
-        if let Err(error) = crate::interrupt::check() {
+        if let Err(error) = crate::adapters::interrupt::check() {
             first_err = Some(error.into());
             break;
         }
         let before = db_here.entry(name)?;
+        let reason = if before.is_some() {
+            crate::adapters::db::InstallReason::Keep
+        } else {
+            upgrade.reason.db_reason()
+        };
+        let action = if before.is_some() {
+            crate::transaction::history::StepAction::Upgrade
+        } else {
+            crate::transaction::history::StepAction::Install
+        };
         let target = crate::transaction::history::PackageState {
-            version: Some(re.version.clone()), rel: Some(re.rel), arch: re.arch.clone(),
-            reason: before.as_ref().map(|entry| entry.reason.clone()).unwrap_or_else(|| "explicit".to_string()),
+            version: Some(re.version.clone()),
+            rel: Some(re.rel),
+            arch: re.arch.clone(),
+            reason: before
+                .as_ref()
+                .map(|entry| entry.reason.clone())
+                .unwrap_or_else(|| reason.as_str().to_string()),
             artifact_sha256: re.sha256.clone(),
         };
         let mut recorder = op.recorder();
-        let step_no = recorder.step_intent_state(
-            name, crate::transaction::history::StepAction::Upgrade,
-            before.as_ref(), Some(&target), &re.sha256,
-        )?;
+        let step_no =
+            recorder.step_intent_state(name, action, before.as_ref(), Some(&target), &re.sha256)?;
         let file_journal = install::FileJournalId::for_step(recorder.tx(), step_no);
         let outcome = fetch_entry(root, open, re, opts.allow_unsigned).and_then(|src| {
             if open.archive_auth == ArchiveAuth::SignedIndexSha256 {
+                let metadata = open.metadata_for(name);
                 install::install_archive_from_index_proof(
                     &src,
                     root,
                     opts.force,
                     &re.sha256,
-                    crate::db::InstallReason::Keep,
+                    reason,
                     Some(install::IndexProof {
                         index_bytes: Some(&open.index_bytes),
                         index_signature: open.index_signature.as_deref(),
                         signer_public: open.signer_public.as_deref(),
                         repo_id: None,
+                        metadata: metadata.as_ref(),
                     }),
                     file_journal,
                 )
@@ -205,7 +458,14 @@ fn apply_plan(
                 install::install_archive_pinned(
                     &src,
                     root,
-                    install::InstallOpts { force: opts.force, allow_unsigned: opts.allow_unsigned, key: None, reason: crate::db::InstallReason::Keep, pinned_sha: Some(&re.sha256), file_journal },
+                    install::InstallOpts {
+                        force: opts.force,
+                        allow_unsigned: opts.allow_unsigned,
+                        key: None,
+                        reason,
+                        pinned_sha: Some(&re.sha256),
+                        file_journal,
+                    },
                 )
             }
         });
@@ -214,7 +474,7 @@ fn apply_plan(
             root,
             step_no,
             name,
-            crate::transaction::history::StepAction::Upgrade,
+            action,
             before.as_ref(),
             &target,
             "repository",
@@ -230,23 +490,29 @@ fn apply_plan(
     }
     op.finish(first_err.as_ref())?;
     if let Some(e) = first_err {
-        return Err(e.context(format!("upgraded {done} of {} package(s) before the failure", ordered.len())));
+        return Err(e.context(format!(
+            "upgraded {done} of {} package(s) before the failure",
+            ordered.len()
+        )));
     }
     crate::nawa_info!("upgraded {done} package(s)");
     Ok(())
 }
 
-pub mod verify;
 pub mod order;
+pub mod verify;
 
 pub(crate) use order::order_with_fallback;
 #[cfg(test)]
-pub(crate) use verify::{check_archive_matches_index, check_index_freshness, require_trust_for_remote, validate_entry_filename};
+pub(crate) use verify::{
+    check_archive_matches_index, check_index_freshness, require_trust_for_remote,
+    validate_entry_filename,
+};
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::archive;
+    use crate::adapters::archive;
     use std::path::PathBuf;
 
     use crate::testutil::tmpdir;
@@ -286,9 +552,12 @@ mod tests {
         };
         assert_eq!(
             archive_download_url(
-                "https://example.test/stable", &index,
-                "bash-5.2-1.nawa.tar.zst", None
-            ).unwrap(),
+                "https://example.test/stable",
+                &index,
+                "bash-5.2-1.nawa.tar.zst",
+                None
+            )
+            .unwrap(),
             "https://example.test/stable/bash-5.2-1.nawa.tar.zst"
         );
 
@@ -296,15 +565,21 @@ mod tests {
         let url = "https://github.com/example/repo/releases/download/packages-0002/sha256-bash.nawa.tar.zst";
         assert_eq!(
             archive_download_url(
-                "https://example.test/stable", &index,
-                "bash-5.2-1.nawa.tar.zst", Some(url)
-            ).unwrap(),
+                "https://example.test/stable",
+                &index,
+                "bash-5.2-1.nawa.tar.zst",
+                Some(url)
+            )
+            .unwrap(),
             url
         );
         assert!(archive_download_url(
-            "https://example.test/stable", &index,
-            "bash-5.2-1.nawa.tar.zst", None
-        ).is_err());
+            "https://example.test/stable",
+            &index,
+            "bash-5.2-1.nawa.tar.zst",
+            None
+        )
+        .is_err());
     }
 
     #[test]
@@ -317,17 +592,25 @@ mod tests {
         std::fs::write(&locations, "schema = 1\n").unwrap();
         let index_path = repo_dir.join("index.toml");
         repo::create_index_with_locations(
-            &repo_dir, &index_path, None, repo::INDEX_SCHEMA_V3, Some(&locations)
-        ).unwrap();
+            &repo_dir,
+            &index_path,
+            None,
+            repo::INDEX_SCHEMA_V3,
+            Some(&locations),
+        )
+        .unwrap();
 
-        let (secret, _public) = crate::sign::keygen(&base.join("publisher")).unwrap();
-        crate::sign::sign(&index_path, &secret).unwrap();
+        let (secret, _public) = crate::adapters::sign::keygen(&base.join("publisher")).unwrap();
+        crate::adapters::sign::sign(&index_path, &secret).unwrap();
 
         let err = match open_repo(&root, &RepoRef::Local(repo_dir), true, false) {
             Ok(_) => panic!("untrusted distributed index must be rejected"),
             Err(err) => err,
         };
-        assert!(format!("{err:#}").contains("trusted signing key"), "{err:#}");
+        assert!(
+            format!("{err:#}").contains("trusted signing key"),
+            "{err:#}"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -338,30 +621,68 @@ mod tests {
 
         // v1.0 installed directly from an archive outside the repo
         let v1 = make_pkg(&base, "demo", "1.0", 1, b"one");
-        install::install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+        install::install_archive(
+            &v1,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
 
         // repo contains 1.0-2 (rel bump)
         let v2 = make_pkg(&base, "demo", "1.0", 2, b"two");
         let repo = setup_repo(&base, std::slice::from_ref(&v2));
 
         // dry run changes nothing
-        upgrade(&root, &RepoRef::Local(repo.clone()), &base.join("no-recipes"), &UpgradeOpts {
-            dry_run: true, force: false, allow_unsigned: true, yes: true,
-        }).unwrap();
+        upgrade(
+            &root,
+            &RepoRef::Local(repo.clone()),
+            &base.join("no-recipes"),
+            &UpgradeOpts {
+                dry_run: true,
+                force: false,
+                allow_unsigned: true,
+                yes: true,
+            },
+        )
+        .unwrap();
         assert_eq!(std::fs::read(root.join("bin")).unwrap(), b"one");
 
         // real upgrade
-        upgrade(&root, &RepoRef::Local(repo.clone()), &base.join("no-recipes"), &UpgradeOpts {
-            dry_run: false, force: false, allow_unsigned: true, yes: true,
-        }).unwrap();
+        upgrade(
+            &root,
+            &RepoRef::Local(repo.clone()),
+            &base.join("no-recipes"),
+            &UpgradeOpts {
+                dry_run: false,
+                force: false,
+                allow_unsigned: true,
+                yes: true,
+            },
+        )
+        .unwrap();
         assert_eq!(std::fs::read(root.join("bin")).unwrap(), b"two");
         let db = Db::new(&root);
-        assert_eq!(db.entry("demo").unwrap().unwrap().version_full(), "demo-1.0-2");
+        assert_eq!(
+            db.entry("demo").unwrap().unwrap().version_full(),
+            "demo-1.0-2"
+        );
 
         // second run: up to date
-        upgrade(&root, &RepoRef::Local(repo.clone()), &base.join("no-recipes"), &UpgradeOpts {
-            dry_run: false, force: false, allow_unsigned: true, yes: true,
-        }).unwrap();
+        upgrade(
+            &root,
+            &RepoRef::Local(repo.clone()),
+            &base.join("no-recipes"),
+            &UpgradeOpts {
+                dry_run: false,
+                force: false,
+                allow_unsigned: true,
+                yes: true,
+            },
+        )
+        .unwrap();
 
         // rollback to the pre-upgrade version
         crate::install::rollback("demo", &root).unwrap();
@@ -374,7 +695,15 @@ mod tests {
         let base = tmpdir("upgrade-tamper");
         let root = base.join("root");
         let v1 = make_pkg(&base, "demo", "1.0", 1, b"one");
-        install::install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+        install::install_archive(
+            &v1,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
         let v2 = make_pkg(&base, "demo", "2.0", 1, b"two");
         let repo = setup_repo(&base, &[v2]);
 
@@ -382,9 +711,17 @@ mod tests {
         let target = repo.join("demo-2.0-1.nawa.tar.zst");
         std::fs::write(&target, b"corrupted").unwrap();
 
-        let err = upgrade(&root, &RepoRef::Local(repo.clone()), &base.join("no-recipes"), &UpgradeOpts {
-            dry_run: false, force: false, allow_unsigned: true, yes: true,
-        });
+        let err = upgrade(
+            &root,
+            &RepoRef::Local(repo.clone()),
+            &base.join("no-recipes"),
+            &UpgradeOpts {
+                dry_run: false,
+                force: false,
+                allow_unsigned: true,
+                yes: true,
+            },
+        );
         assert!(err.is_err(), "tampered archive must not install");
         // system still intact at 1.0
         assert_eq!(std::fs::read(root.join("bin")).unwrap(), b"one");
@@ -393,8 +730,17 @@ mod tests {
 
     #[test]
     fn unsafe_index_paths_are_rejected() {
-        for bad in ["../evil.zst", "sub/dir.pkg.zst", ".hidden.zst", "", "a\\b.zst"] {
-            assert!(validate_entry_filename(bad).is_err(), "`{bad}` must be rejected");
+        for bad in [
+            "../evil.zst",
+            "sub/dir.pkg.zst",
+            ".hidden.zst",
+            "",
+            "a\\b.zst",
+        ] {
+            assert!(
+                validate_entry_filename(bad).is_err(),
+                "`{bad}` must be rejected"
+            );
         }
         assert!(validate_entry_filename("demo-1.0-1.nawa.tar.zst").is_ok());
     }
@@ -442,7 +788,11 @@ mod tests {
         let names = vec!["a".to_string(), "b".to_string()];
         let installed: HashSet<String> = names.iter().cloned().collect();
         let ordered = order_with_fallback(&names, &installed, &tree);
-        assert_eq!(ordered, vec!["b", "a"], "installed targets must still be ordered");
+        assert_eq!(
+            ordered,
+            vec!["b", "a"],
+            "installed targets must still be ordered"
+        );
     }
 
     #[test]
@@ -469,9 +819,15 @@ mod tests {
             download_url: None,
             size: 0,
             installed_size: 0,
+            rundeps: None,
+            provides: None,
+            relations: None,
         };
         assert!(check_archive_matches_index(&a, &ok, false).is_ok());
-        let newer = repo::RepoEntry { version: "2.0".into(), ..ok.clone() };
+        let newer = repo::RepoEntry {
+            version: "2.0".into(),
+            ..ok.clone()
+        };
         assert!(check_archive_matches_index(&a, &newer, false).is_err());
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -484,7 +840,15 @@ mod tests {
         let base = tmpdir("order-e2e");
         let root = base.join("root");
         let v1 = make_pkg(&base, "a", "1.0", 1, b"one");
-        install::install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+        install::install_archive(
+            &v1,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
         let v2 = make_pkg(&base, "a", "2.0", 1, b"two");
         let repo = setup_repo(&base, &[v2]);
 
@@ -502,9 +866,17 @@ mod tests {
             .unwrap();
         }
 
-        upgrade(&root, &RepoRef::Local(repo), &recipes, &UpgradeOpts {
-            dry_run: false, force: false, allow_unsigned: true, yes: true,
-        })
+        upgrade(
+            &root,
+            &RepoRef::Local(repo),
+            &recipes,
+            &UpgradeOpts {
+                dry_run: false,
+                force: false,
+                allow_unsigned: true,
+                yes: true,
+            },
+        )
         .unwrap();
         assert_eq!(std::fs::read(root.join("bin")).unwrap(), b"two");
         let _ = std::fs::remove_dir_all(&base);
@@ -514,15 +886,28 @@ mod tests {
     fn index_older_than_seen_is_rejected() {
         let base = tmpdir("freshness");
         std::fs::write(base.join("index.seen"), "200").unwrap();
-        let idx = |g| repo::Index { generated: Some(g), expires: None, repository: None, recipes: None, groups: None, packages: vec![] };
-        assert!(check_index_freshness(&base, &idx(100), true, false, true).is_err());
-        assert!(check_index_freshness(&base, &idx(300), true, false, true).is_ok());
-        assert_eq!(std::fs::read_to_string(base.join("index.seen")).unwrap(), "300");
+        let idx = |g| repo::Index {
+            generated: Some(g),
+            expires: None,
+            repository: None,
+            recipes: None,
+            groups: None,
+            packages: vec![],
+        };
+        assert!(check_index_freshness(&base, &idx(100), true, false, true, true).is_err());
+        assert!(check_index_freshness(&base, &idx(300), true, false, true, true).is_ok());
+        assert_eq!(
+            std::fs::read_to_string(base.join("index.seen")).unwrap(),
+            "300"
+        );
         // local repos are not tracked
-        assert!(check_index_freshness(&base, &idx(1), false, false, true).is_ok());
+        assert!(check_index_freshness(&base, &idx(1), false, false, true, true).is_ok());
         // an unauthenticated index must not move the marker
-        assert!(check_index_freshness(&base, &idx(999), true, false, false).is_ok());
-        assert_eq!(std::fs::read_to_string(base.join("index.seen")).unwrap(), "300");
+        assert!(check_index_freshness(&base, &idx(999), true, false, false, true).is_ok());
+        assert_eq!(
+            std::fs::read_to_string(base.join("index.seen")).unwrap(),
+            "300"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -546,7 +931,12 @@ mod tests {
             &empty,
             &RepoRef::Remote("http://127.0.0.1:1/x".into()),
             Path::new("recipes"),
-            &UpgradeOpts { dry_run: true, force: false, allow_unsigned: false, yes: true },
+            &UpgradeOpts {
+                dry_run: true,
+                force: false,
+                allow_unsigned: false,
+                yes: true,
+            },
         );
         assert!(r.unwrap_err().to_string().contains("no trusted keys"));
         let _ = std::fs::remove_dir_all(&base);
@@ -556,11 +946,18 @@ mod tests {
     #[test]
     fn expired_remote_index_is_refused_unless_forced() {
         let base = tmpdir("expiry");
-        let idx = repo::Index { generated: Some(1000), expires: Some(2000), repository: None, recipes: None, groups: None, packages: vec![] };
-        assert!(check_index_freshness(&base, &idx, true, false, true).is_err());
-        assert!(check_index_freshness(&base, &idx, true, true, true).is_ok());
+        let idx = repo::Index {
+            generated: Some(1000),
+            expires: Some(2000),
+            repository: None,
+            recipes: None,
+            groups: None,
+            packages: vec![],
+        };
+        assert!(check_index_freshness(&base, &idx, true, false, true, true).is_err());
+        assert!(check_index_freshness(&base, &idx, true, true, true, true).is_ok());
         // local repos only warn
-        assert!(check_index_freshness(&base, &idx, false, false, true).is_ok());
+        assert!(check_index_freshness(&base, &idx, false, false, true, true).is_ok());
         let _ = std::fs::remove_dir_all(&base);
     }
     #[test]
@@ -580,7 +977,7 @@ mod tests {
             packages: vec![],
         };
         // a clock that runs behind the publisher still gets a usable index ...
-        assert!(check_index_freshness(&base, &idx, true, false, true).is_ok());
+        assert!(check_index_freshness(&base, &idx, true, false, true, true).is_ok());
         // ... but the future value is never recorded as the newest seen
         assert!(!base.join("index.seen").exists());
 
@@ -592,12 +989,11 @@ mod tests {
             groups: None,
             packages: vec![],
         };
-        assert!(check_index_freshness(&base, &current, true, false, true).is_ok());
+        assert!(check_index_freshness(&base, &current, true, false, true, true).is_ok());
         assert_eq!(
             std::fs::read_to_string(base.join("index.seen")).unwrap(),
             now.saturating_sub(1).to_string()
         );
         let _ = std::fs::remove_dir_all(&base);
     }
-
 }

@@ -8,8 +8,8 @@ use std::path::Path;
 use super::sandbox::{layer_cache_dir, layer_paths_are_mountable, overlay_probe_ok};
 use super::stage::BuildView;
 use super::{BuildOpts, CheckMode};
-use crate::buildenv::{self, Isolation};
-use crate::closure::AssembledRoot;
+use crate::build::buildenv::{self, Isolation};
+use crate::build::closure::AssembledRoot;
 use crate::recipe::Recipe;
 
 /// Assemble the closure-level build root (§5): cached layers + one overlayfs
@@ -35,12 +35,12 @@ pub(super) fn assemble_build_root(
             }
         };
         let with_check = opts.check != CheckMode::Off;
-        let members =
-            crate::closure::buildroot(rec, known, with_check).context("compute build root")?;
+        let members = crate::build::closure::buildroot(rec, known, with_check)
+            .context("compute build root")?;
         crate::nawa_info!(
             "closure: {} package(s) in the build root ({}{}): {}",
             members.len(),
-            crate::closure::BASE_DEVEL,
+            crate::build::closure::BASE_DEVEL,
             if with_check { " + check deps" } else { "" },
             members.join(" ")
         );
@@ -97,9 +97,11 @@ pub(super) fn assemble_build_root(
                 ok
             };
         assembled = Some(if layered {
-            crate::nawa_info!("closure: assembling the build root from the layer cache (overlayfs)");
+            crate::nawa_info!(
+                "closure: assembling the build root from the layer cache (overlayfs)"
+            );
             let cache = layer_cache.expect("checked above");
-            crate::closure::assemble_cached(
+            crate::build::closure::assemble_cached(
                 &members,
                 known,
                 outdir,
@@ -111,7 +113,7 @@ pub(super) fn assemble_build_root(
             )?
         } else {
             crate::nawa_info!("closure: assembling the build root (extract-per-build)");
-            crate::closure::assemble(
+            crate::build::closure::assemble(
                 &members,
                 known,
                 outdir,
@@ -141,7 +143,7 @@ pub(super) fn run_fetch_phase(
     assembled: Option<&AssembledRoot>,
 ) -> Result<Vec<(String, String)>> {
     let fetch_env: Vec<(String, String)> = if rec.fetch.any() {
-        let srccache = crate::config::srccache_dir(builddir, None);
+        let srccache = crate::adapters::config::srccache_dir(builddir, None);
         // GOCACHE lives "under the HOME scratch" (§7): inside the sandbox
         // that is the mounted per-build home; at `env` the build runs on
         // the host and sees host paths (like NAWA_SRCDIR), so the scratch
@@ -151,7 +153,7 @@ pub(super) fn run_fetch_phase(
         } else {
             work.join("sb").join("home").to_string_lossy().into_owned()
         };
-        let fr = crate::fetchrun::FetchRun {
+        let fr = crate::build::fetchrun::FetchRun {
             rec,
             opts,
             work,
@@ -162,7 +164,7 @@ pub(super) fn run_fetch_phase(
             whitelist_home: &whitelist_home,
             assembled,
         };
-        crate::fetchrun::run(&fr)?
+        crate::build::fetchrun::run(&fr)?
     } else {
         Vec::new()
     };
@@ -211,7 +213,10 @@ pub(super) fn build_env(
             // the build's frame by the fetch runner
             fetch_env: fetch_env.to_vec(),
         };
-        (buildenv::whitelist(&spec_env), opts.isolation.script_prefix())
+        (
+            buildenv::whitelist(&spec_env),
+            opts.isolation.script_prefix(),
+        )
     } else {
         // `none`: the build runs with the profile env as-is, but the fetch
         // phase's additions (CARGO_HOME, GOFLAGS, ...) still have to reach

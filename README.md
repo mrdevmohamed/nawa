@@ -11,7 +11,7 @@ Nawa (نواة) is a source-based package manager for Linux distributions, writt
 - Binary repositories, signed indexes, package caching, and reproducible builds.
 - Atomic installation, upgrade, removal, and rollback.
 - Transaction history and recovery.
-- runit service management and external plugins.
+- External plugins.
 
 Nawa does not include a package recipe collection. Configure a recipe tree and build profiles with --recipes and --profiles, or in nawa.toml.
 

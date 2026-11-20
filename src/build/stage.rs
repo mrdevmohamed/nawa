@@ -5,7 +5,7 @@ use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
 use super::{grant_source_write, sandbox_inside_base, BuildOpts};
-use crate::buildenv::Isolation;
+use crate::build::buildenv::Isolation;
 use crate::fetch;
 use crate::recipe::{ExpandCtx, Recipe};
 
@@ -14,9 +14,9 @@ pub(super) struct StagedSource {
     /// The directory the build sections run in.
     pub(super) srcdir: PathBuf,
     /// The new-schema source workspace (`[[package.sources]]`), if any.
-    pub(super) sources: Option<crate::sources::SourcesStaged>,
+    pub(super) sources: Option<crate::build::sources::SourcesStaged>,
     /// The `[assets]` snapshot, if the recipe has any.
-    pub(super) assets: Option<crate::assets::AssetsStaged>,
+    pub(super) assets: Option<crate::build::assets::AssetsStaged>,
 }
 
 /// Download, verify and extract the recipe's sources (and snapshot its
@@ -29,8 +29,12 @@ pub(super) fn stage_source(
     src: &Path,
     pkg: &Path,
 ) -> Result<StagedSource> {
-    let (builddir, work, src, pkg) =
-        (builddir.to_path_buf(), work.to_path_buf(), src.to_path_buf(), pkg.to_path_buf());
+    let (builddir, work, src, pkg) = (
+        builddir.to_path_buf(),
+        work.to_path_buf(),
+        src.to_path_buf(),
+        pkg.to_path_buf(),
+    );
     let name = &rec.package.name;
     let ctx = ExpandCtx {
         jobs: opts.jobs,
@@ -43,20 +47,20 @@ pub(super) fn stage_source(
     };
 
     let source = &rec.package.source;
-    let mut staged: Option<crate::sources::SourcesStaged> = None;
-    let mut staged_assets: Option<crate::assets::AssetsStaged> = None;
-    let srcdir: PathBuf = if rec.is_new_schema() {
+    let mut staged: Option<crate::build::sources::SourcesStaged> = None;
+    let mut staged_assets: Option<crate::build::assets::AssetsStaged> = None;
+    let srcdir: PathBuf = if rec.is_fetch_schema() {
         // ---- new-schema staging (fetch-phase.md §4.2, §5, §6, §11) -------
         // §5.2: an unreadable/missing asset path fails BEFORE any download,
         // by the same sweep the snapshot will run (§16 Assets 3).
         if !rec.assets.include.is_empty() {
-            crate::assets::precheck(rec)?;
+            crate::build::assets::precheck(rec)?;
         }
         // All sources are downloaded, verified and extracted by the sources
         // engine; the workspace is `<work>/src` and `[package] workdir`
         // selects the section cwd through `staged.srcdir`.
-        let cache_dir = crate::config::srccache_dir(&builddir, None);
-        let s = crate::sources::stage_sources(rec, &work, &src, &cache_dir, opts.jobs)?;
+        let cache_dir = crate::adapters::config::srccache_dir(&builddir, None);
+        let s = crate::build::sources::stage_sources(rec, &work, &src, &cache_dir, opts.jobs)?;
         // normalise ownership/permissions for the sandbox's mapped identity
         grant_source_write(&s.srcroot);
         let sub_srcdir = s.srcdir.clone();
@@ -66,12 +70,15 @@ pub(super) fn stage_source(
         // (§3): the digest comes from the copy, and only the snapshot is
         // copied, never the checkout again
         if !rec.assets.include.is_empty() {
-            let a = crate::assets::snapshot(rec, &work)
+            let a = crate::build::assets::snapshot(rec, &work)
                 .with_context(|| format!("stage assets of recipe {}", name))?;
             staged_assets = Some(a);
         }
         sub_srcdir
-    } else if source.is_empty() {
+    } else if source.is_empty()
+        || source == crate::recipe::model::SCHEMA_MARKER
+        || source == crate::recipe::model::RELATIONS_MARKER
+    {
         src.clone() // meta package: run scripts directly in src
     } else if let Some(local) = source.strip_prefix("local:") {
         let p = PathBuf::from(local);
@@ -79,7 +86,7 @@ pub(super) fn stage_source(
             bail!("local source {} does not exist", p.display());
         }
         fetch::copy_local(&p, &src)?;
-        grant_source_write(&src);  // host copies can carry foreign owners too
+        grant_source_write(&src); // host copies can carry foreign owners too
         src.clone()
     } else {
         // expand %{version} & co. in the source URL itself
@@ -90,7 +97,7 @@ pub(super) fn stage_source(
         // persistent, content-keyed cache instead ($NAWA_SRCCACHE, default
         // <builddir>/distfiles). A hit is re-verified against the recipe's
         // sha256, so a corrupt/truncated entry is re-downloaded.
-        let cache_dir = crate::config::srccache_dir(&builddir, None);
+        let cache_dir = crate::adapters::config::srccache_dir(&builddir, None);
         std::fs::create_dir_all(&cache_dir)
             .with_context(|| format!("create source cache {}", cache_dir.display()))?;
         let sha = rec.package.sha256.as_str();
@@ -100,8 +107,12 @@ pub(super) fn stage_source(
         } else {
             crate::nawa_info!("downloading {source}");
         }
-        let mirrors: Vec<String> =
-            rec.package.mirrors.iter().map(|m| rec.expand(m, &ctx)).collect();
+        let mirrors: Vec<String> = rec
+            .package
+            .mirrors
+            .iter()
+            .map(|m| rec.expand(m, &ctx))
+            .collect();
         fetch::download_cached_with_mirrors(&source, &mirrors, &tarball, Some(sha))?;
         fetch::verify_sha256(&tarball, sha)?;
 
@@ -128,11 +139,19 @@ pub(super) fn stage_source(
                 rec.package.source_dir.clone()
             };
             let candidate = src.join(rec.expand(&dir, &ctx));
-            if candidate.is_dir() { candidate } else { src.clone() }
+            if candidate.is_dir() {
+                candidate
+            } else {
+                src.clone()
+            }
         }
     };
 
-    Ok(StagedSource { srcdir, sources: staged, assets: staged_assets })
+    Ok(StagedSource {
+        srcdir,
+        sources: staged,
+        assets: staged_assets,
+    })
 }
 
 /// Where the sandbox's build base lives for this build; empty when the build
@@ -151,7 +170,11 @@ pub(super) fn sandbox_base_for(opts: &BuildOpts, work: &Path) -> Result<String> 
         }
     }
     let sandboxed = opts.isolation >= Isolation::Sandbox;
-    Ok(if sandboxed { sandbox_inside_base(work) } else { String::new() })
+    Ok(if sandboxed {
+        sandbox_inside_base(work)
+    } else {
+        String::new()
+    })
 }
 
 /// The build's own view of the workspace paths (`%{srcdir}`, `%{pkgdir}`,
@@ -204,5 +227,10 @@ pub(super) fn build_view(
     } else {
         pkg.to_path_buf()
     };
-    BuildView { srcroot, src: view_src, pkg: view_pkg, assets }
+    BuildView {
+        srcroot,
+        src: view_src,
+        pkg: view_pkg,
+        assets,
+    }
 }

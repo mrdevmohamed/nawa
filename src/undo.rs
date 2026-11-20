@@ -63,7 +63,7 @@ pub(crate) fn plan_undo(root: &Path, id: u64) -> Result<UndoPlan> {
         bail!("transaction {id} has no committed package changes to compensate");
     }
 
-    let db = crate::db::Db::new(root);
+    let db = crate::adapters::db::Db::new(root);
     let prior_undos: Vec<_> = crate::transaction::history::list_records(root)?
         .into_iter()
         .filter(|candidate| candidate.undoes == Some(id))
@@ -78,7 +78,10 @@ pub(crate) fn plan_undo(root: &Path, id: u64) -> Result<UndoPlan> {
         bail!("transaction {id} has no compensable package changes");
     }
     let ordered = order_steps(&db, steps)?;
-    Ok(UndoPlan { original_id: id, steps: ordered })
+    Ok(UndoPlan {
+        original_id: id,
+        steps: ordered,
+    })
 }
 
 /// Load transaction `id` and check it can be undone at all: a supported
@@ -105,7 +108,10 @@ fn load_undoable_record(root: &Path, id: u64) -> Result<TransactionRecord> {
         if undo.undoes == Some(id)
             && crate::transaction::history::undo_restored_original(root, id, undo.id)?
         {
-            bail!("transaction {id} was already undone by transaction {}", undo.id);
+            bail!(
+                "transaction {id} was already undone by transaction {}",
+                undo.id
+            );
         }
     }
     Ok(record)
@@ -116,7 +122,7 @@ fn load_undoable_record(root: &Path, id: u64) -> Result<TransactionRecord> {
 /// operation and when the archived original cannot be verified.
 fn plan_step(
     root: &Path,
-    db: &crate::db::Db,
+    db: &crate::adapters::db::Db,
     id: u64,
     change: &crate::transaction::history::PackageChange,
     prior_undos: &[TransactionRecord],
@@ -131,7 +137,9 @@ fn plan_step(
     if was_compensated {
         let desired_before = change.before.clone().unwrap_or(PackageState::absent());
         let already_at_before = if desired_before.is_installed() {
-            current.as_ref().is_some_and(|entry| desired_before.matches_entry(entry))
+            current
+                .as_ref()
+                .is_some_and(|entry| desired_before.matches_entry(entry))
         } else {
             current.is_none()
         };
@@ -179,15 +187,19 @@ fn plan_step(
             name = change.name
         );
     } else if after.is_installed() {
-        UndoAction::RestorePrevious { digest: before.artifact_sha256.clone() }
+        UndoAction::RestorePrevious {
+            digest: before.artifact_sha256.clone(),
+        }
     } else {
-        UndoAction::Reinstall { digest: before.artifact_sha256.clone() }
+        UndoAction::Reinstall {
+            digest: before.artifact_sha256.clone(),
+        }
     };
     let before_snapshot = before.clone();
     // preflight every required archive object right here, before the
     // first mutation (roadmap §5.9 step 8)
     if let UndoAction::RestorePrevious { digest } | UndoAction::Reinstall { digest } = &action {
-        crate::artifact::verify_stored(root, digest).with_context(|| {
+        crate::adapters::artifact::verify_stored(root, digest).with_context(|| {
             format!(
                 "cannot undo transaction {id}: the archived original of `{}` \
                  is missing or fails verification",
@@ -207,7 +219,7 @@ fn plan_step(
 /// Preserve dependency-first order for upgrades. Undoing removals
 /// reinstalls dependencies first (reverse original removal order).
 /// Undoing new installs removes dependents first using the shared planner.
-fn order_steps(db: &crate::db::Db, steps: Vec<UndoStep>) -> Result<Vec<UndoStep>> {
+fn order_steps(db: &crate::adapters::db::Db, steps: Vec<UndoStep>) -> Result<Vec<UndoStep>> {
     let mut restore_previous = Vec::new();
     let mut reinstall = Vec::new();
     let mut remove = Vec::new();
@@ -222,13 +234,18 @@ fn order_steps(db: &crate::db::Db, steps: Vec<UndoStep>) -> Result<Vec<UndoStep>
     reinstall.reverse();
     let installed = db.installed()?;
     let names: Vec<String> = remove.iter().map(|step| step.package.clone()).collect();
-    let ordered_names = crate::plan::removal_order(&names, &installed);
-    let mut by_name: BTreeMap<String, UndoStep> =
-        remove.into_iter().map(|step| (step.package.clone(), step)).collect();
+    let ordered_names =
+        crate::application::features::package::plan::removal_order(&names, &installed);
+    let mut by_name: BTreeMap<String, UndoStep> = remove
+        .into_iter()
+        .map(|step| (step.package.clone(), step))
+        .collect();
     let mut ordered = restore_previous;
     ordered.extend(reinstall);
     for name in ordered_names {
-        if let Some(step) = by_name.remove(&name) { ordered.push(step); }
+        if let Some(step) = by_name.remove(&name) {
+            ordered.push(step);
+        }
     }
     ordered.extend(by_name.into_values());
     Ok(ordered)
@@ -248,38 +265,60 @@ pub(crate) struct AppliedStep {
 }
 
 pub(crate) fn apply_undo(
-    root: &Path, plan: &UndoPlan,
-    recorder: &mut crate::transaction::context::RecorderHandle<'_>, force: bool,
+    root: &Path,
+    plan: &UndoPlan,
+    recorder: &mut crate::transaction::context::RecorderHandle<'_>,
+    force: bool,
 ) -> Result<Vec<AppliedStep>> {
-    let db = crate::db::Db::new(root);
+    let db = crate::adapters::db::Db::new(root);
     let mut applied = Vec::new();
     for step in &plan.steps {
         let before_entry = db.entry(&step.package)?;
         let (action, target) = match &step.action {
-            UndoAction::Nothing => (StepAction::Reinstall, before_entry.as_ref().map(PackageState::from_entry)),
+            UndoAction::Nothing => (
+                StepAction::Reinstall,
+                before_entry.as_ref().map(PackageState::from_entry),
+            ),
             UndoAction::Remove => (StepAction::Remove, None),
-            UndoAction::RestorePrevious { .. } | UndoAction::Reinstall { .. } => (StepAction::Restore, step.before.clone()),
+            UndoAction::RestorePrevious { .. } | UndoAction::Reinstall { .. } => {
+                (StepAction::Restore, step.before.clone())
+            }
         };
-        let target_digest = target.as_ref().map(|state| state.artifact_sha256.as_str()).unwrap_or("");
+        let target_digest = target
+            .as_ref()
+            .map(|state| state.artifact_sha256.as_str())
+            .unwrap_or("");
         // WAL must be durable before touching package files or the database.
         let step_no = recorder.step_intent_state(
-            &step.package, action, before_entry.as_ref(), target.as_ref(), target_digest,
+            &step.package,
+            action,
+            before_entry.as_ref(),
+            target.as_ref(),
+            target_digest,
         )?;
         let file_journal = crate::install::FileJournalId::for_step(recorder.tx(), step_no);
         let (mut status, mut failure, mut hook) = (true, None, None);
         match &step.action {
             UndoAction::Nothing => {}
             UndoAction::Remove => {
-                let dependents: Vec<String> = db.installed()?.into_iter()
-                    .filter(|entry| entry.name != step.package
-                        && entry.run.iter().any(|dependency| dependency == &step.package))
-                    .map(|entry| entry.name).collect();
+                let dependents: Vec<String> = db
+                    .installed()?
+                    .into_iter()
+                    .filter(|entry| {
+                        entry.name != step.package
+                            && entry
+                                .run
+                                .iter()
+                                .any(|dependency| dependency == &step.package)
+                    })
+                    .map(|entry| entry.name)
+                    .collect();
                 if !dependents.is_empty() && !force {
                     status = false;
                     failure = Some(format!("still required by {}", dependents.join(", ")));
-                } else if let Err(error) = crate::install::remove_with_linked(
-                    &step.package, root, force, file_journal,
-                ) {
+                } else if let Err(error) =
+                    crate::install::remove_with_linked(&step.package, root, force, file_journal)
+                {
                     failure = Some(format!("{error:#}"));
                     if before_entry.is_some() && db.entry(&step.package)?.is_none() {
                         status = true;
@@ -290,37 +329,60 @@ pub(crate) fn apply_undo(
                 }
             }
             UndoAction::RestorePrevious { digest } | UndoAction::Reinstall { digest } => {
-                if let Err(error) = crate::artifact::verify_stored(root, digest)
+                if let Err(error) = crate::adapters::artifact::verify_stored(root, digest)
                     .map_err(|error| anyhow::anyhow!("object verification failed: {error:#}"))
                     .and_then(|object| {
-                        let reason = crate::db::InstallReason::parse(&step.reason)
-                            .unwrap_or(crate::db::InstallReason::Explicit);
+                        let reason = crate::adapters::db::InstallReason::parse(&step.reason)
+                            .unwrap_or(crate::adapters::db::InstallReason::Explicit);
                         restore_object(root, &object, digest, reason, file_journal)
                     })
                 {
                     failure = Some(format!("{error:#}"));
                     let current = db.entry(&step.package)?;
-                    if target.as_ref().is_some_and(|expected| current.as_ref()
-                        .is_some_and(|entry| expected.matches_entry(entry))) {
+                    if target.as_ref().is_some_and(|expected| {
+                        current
+                            .as_ref()
+                            .is_some_and(|entry| expected.matches_entry(entry))
+                    }) {
                         status = true;
                         hook = Some("failed".to_string());
-                    } else { status = false; }
+                    } else {
+                        status = false;
+                    }
                 }
             }
         }
         let after_entry = db.entry(&step.package)?;
-        let step_status = if !status { crate::transaction::history::StepStatus::Failed }
-            else if hook.is_some() { crate::transaction::history::StepStatus::CommittedHookFailed }
-            else { crate::transaction::history::StepStatus::Committed };
+        let step_status = if !status {
+            crate::transaction::history::StepStatus::Failed
+        } else if hook.is_some() {
+            crate::transaction::history::StepStatus::CommittedHookFailed
+        } else {
+            crate::transaction::history::StepStatus::Committed
+        };
         recorder.step_result(
-            step_no, &step.package, action, step_status,
-            before_entry.as_ref(), after_entry.as_ref(), "history-undo",
-            failure.clone(), hook,
+            step_no,
+            &step.package,
+            action,
+            step_status,
+            before_entry.as_ref(),
+            after_entry.as_ref(),
+            "history-undo",
+            failure.clone(),
+            hook,
         )?;
-        applied.push(AppliedStep { package: step.package.clone(), action, committed: status, failure });
+        applied.push(AppliedStep {
+            package: step.package.clone(),
+            action,
+            committed: status,
+            failure,
+        });
     }
-    let failed: Vec<String> = applied.iter().filter(|step| !step.committed)
-        .map(|step| step.package.clone()).collect();
+    let failed: Vec<String> = applied
+        .iter()
+        .filter(|step| !step.committed)
+        .map(|step| step.package.clone())
+        .collect();
     if !failed.is_empty() {
         bail!("undo of transaction {} partially failed for: {} (completed steps remain in effect and are recorded)",
             plan.original_id, failed.join(", "));
@@ -334,30 +396,52 @@ fn restore_object(
     root: &Path,
     object: &Path,
     digest: &str,
-    reason: crate::db::InstallReason,
+    reason: crate::adapters::db::InstallReason,
     file_journal: Option<crate::install::FileJournalId>,
 ) -> Result<()> {
-    let prov = crate::artifact::load_provenance(root, digest)?;
+    let prov = crate::adapters::artifact::load_provenance(root, digest)?;
     match prov.as_ref().map(|p| p.authentication.as_str()) {
         Some("signed-index") => {
             crate::install::verify_retained_index_proof(root, digest)?;
             crate::install::install_archive_from_index_proof(
-                object, root, false, digest, reason, None, file_journal,
+                object,
+                root,
+                false,
+                digest,
+                reason,
+                None,
+                file_journal,
             )?;
             Ok(())
         }
         Some("detached-signature") => {
             crate::install::verify_retained_detached_proof(root, digest)?;
             crate::install::install_archive_pinned(
-                object, root,
-                crate::install::InstallOpts { force: false, allow_unsigned: true, key: None, reason, pinned_sha: Some(digest), file_journal },
+                object,
+                root,
+                crate::install::InstallOpts {
+                    force: false,
+                    allow_unsigned: true,
+                    key: None,
+                    reason,
+                    pinned_sha: Some(digest),
+                    file_journal,
+                },
             )?;
             Ok(())
         }
         _ => {
             crate::install::install_archive_pinned(
-                object, root,
-                crate::install::InstallOpts { force: false, allow_unsigned: true, key: None, reason, pinned_sha: Some(digest), file_journal },
+                object,
+                root,
+                crate::install::InstallOpts {
+                    force: false,
+                    allow_unsigned: true,
+                    key: None,
+                    reason,
+                    pinned_sha: Some(digest),
+                    file_journal,
+                },
             )?;
             Ok(())
         }
@@ -370,26 +454,35 @@ pub(crate) fn history_undo(root: &Path, id: u64, yes: bool) -> Result<()> {
     // main::run owns the exclusive database lock for history commands.
     // A second flock on another open file description would deadlock here.
     let plan = plan_undo(root, id)?;
-    crate::nawa_info!("undoing transaction {id} ({}) — compensating steps:", plan.steps.len());
+    crate::nawa_info!(
+        "undoing transaction {id} ({}) — compensating steps:",
+        plan.steps.len()
+    );
     for step in &plan.steps {
         match &step.action {
             UndoAction::Remove => println!("  remove     {}", step.package),
             UndoAction::RestorePrevious { .. } => println!(
                 "  restore    {} to {}",
                 step.package,
-                step.before.as_ref().and_then(|b| b.version.clone()).unwrap_or_default()
+                step.before
+                    .as_ref()
+                    .and_then(|b| b.version.clone())
+                    .unwrap_or_default()
             ),
             UndoAction::Reinstall { .. } => println!(
                 "  reinstall  {} ({})",
                 step.package,
-                step.before.as_ref().and_then(|b| b.version.clone()).unwrap_or_default()
+                step.before
+                    .as_ref()
+                    .and_then(|b| b.version.clone())
+                    .unwrap_or_default()
             ),
             UndoAction::Nothing => {}
         }
     }
     crate::nawa_note!("package hooks and other external side effects are not reversed");
     if !yes {
-        crate::confirm::confirm(&format!("nawa: undo transaction {id}?"), false)?;
+        crate::presentation::confirm::confirm(&format!("nawa: undo transaction {id}?"), false)?;
     }
     let mut op = crate::transaction::context::begin_operation(
         root,
@@ -410,18 +503,21 @@ pub(crate) fn history_undo(root: &Path, id: u64, yes: bool) -> Result<()> {
             crate::nawa_info!("transaction {id} undone (recorded as transaction {undo_id})");
             Ok(())
         }
-        Err(error) => { op.finish(Some(&error))?; Err(error) }
+        Err(error) => {
+            op.finish(Some(&error))?;
+            Err(error)
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-    use crate::db::Db;
+    use crate::adapters::db::Db;
     use crate::testutil::{entry, tmpdir};
     use crate::transaction::context::{begin_operation, OperationCommand};
     use crate::transaction::history::{PackageChange, PackageState, StepStatus, SCHEMA_VERSION};
+    use std::path::PathBuf;
 
     fn make_pkg(dir: &Path, name: &str, version: &str, body: &[u8]) -> PathBuf {
         let staging = dir.join(format!("st-{name}-{version}"));
@@ -431,7 +527,7 @@ mod tests {
             "pkgname = {name}\npkgver = {version}\npkgrel = 1\narch = any\nrundeps = \nsize = 1\n"
         );
         let out = dir.join(format!("{name}-{version}-1.nawa.tar.zst"));
-        crate::archive::create(&staging, &pkginfo, &out).unwrap();
+        crate::adapters::archive::create(&staging, &pkginfo, &out).unwrap();
         out
     }
 
@@ -446,24 +542,51 @@ mod tests {
         db.add(&zlib, &[], &Default::default()).unwrap();
         db.add(&curl, &[], &Default::default()).unwrap();
         let record = crate::transaction::history::TransactionRecord {
-            schema: SCHEMA_VERSION, id: 1, command: "install".into(), status: "completed".into(),
-            started_at: 1, finished_at: Some(2), duration_seconds: Some(1),
-            initiated_by: "uid:0".into(), requested_packages: vec!["curl".into()],
+            schema: SCHEMA_VERSION,
+            id: 1,
+            command: "install".into(),
+            status: "completed".into(),
+            started_at: 1,
+            finished_at: Some(2),
+            duration_seconds: Some(1),
+            initiated_by: "uid:0".into(),
+            requested_packages: vec!["curl".into()],
             repository_ids: vec![],
             package_changes: vec![
-                PackageChange { name: "zlib".into(), action: "install".into(), status: "committed".into(),
-                    before: None, after: Some(PackageState::from_entry(&zlib)),
-                    source: "local-build".into(), failure: None, hook: None },
-                PackageChange { name: "curl".into(), action: "install".into(), status: "committed".into(),
-                    before: None, after: Some(PackageState::from_entry(&curl)),
-                    source: "local-build".into(), failure: None, hook: None },
+                PackageChange {
+                    name: "zlib".into(),
+                    action: "install".into(),
+                    status: "committed".into(),
+                    before: None,
+                    after: Some(PackageState::from_entry(&zlib)),
+                    source: "local-build".into(),
+                    failure: None,
+                    hook: None,
+                },
+                PackageChange {
+                    name: "curl".into(),
+                    action: "install".into(),
+                    status: "committed".into(),
+                    before: None,
+                    after: Some(PackageState::from_entry(&curl)),
+                    source: "local-build".into(),
+                    failure: None,
+                    hook: None,
+                },
             ],
-            undone_by: None, undoes: None, groups: vec![],
+            undone_by: None,
+            undoes: None,
+            groups: vec![],
         };
         crate::transaction::history::write_record(&root, &record).unwrap();
         let plan = plan_undo(&root, 1).unwrap();
-        assert_eq!(plan.steps.iter().map(|step| step.package.as_str()).collect::<Vec<_>>(),
-            vec!["curl", "zlib"]);
+        assert_eq!(
+            plan.steps
+                .iter()
+                .map(|step| step.package.as_str())
+                .collect::<Vec<_>>(),
+            vec!["curl", "zlib"]
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -475,7 +598,7 @@ mod tests {
 
         // The recorded transaction installed the package explicitly.
         let after = entry("demo", "1.0", &digest);
-        crate::db::Db::new(&root)
+        crate::adapters::db::Db::new(&root)
             .add(&after, &[], &Default::default())
             .unwrap();
 
@@ -534,38 +657,75 @@ mod tests {
         db.add(&zlib, &[], &Default::default()).unwrap();
         db.add(&curl, &[], &Default::default()).unwrap();
         let original = crate::transaction::history::TransactionRecord {
-            schema: SCHEMA_VERSION, id: 1, command: "install".into(), status: "completed".into(),
-            started_at: 1, finished_at: Some(2), duration_seconds: Some(1),
-            initiated_by: "uid:0".into(), requested_packages: vec!["curl".into()],
+            schema: SCHEMA_VERSION,
+            id: 1,
+            command: "install".into(),
+            status: "completed".into(),
+            started_at: 1,
+            finished_at: Some(2),
+            duration_seconds: Some(1),
+            initiated_by: "uid:0".into(),
+            requested_packages: vec!["curl".into()],
             repository_ids: vec![],
             package_changes: vec![
-                PackageChange { name: "zlib".into(), action: "install".into(), status: "committed".into(),
-                    before: None, after: Some(PackageState::from_entry(&zlib)),
-                    source: "local-build".into(), failure: None, hook: None },
-                PackageChange { name: "curl".into(), action: "install".into(), status: "committed".into(),
-                    before: None, after: Some(PackageState::from_entry(&curl)),
-                    source: "local-build".into(), failure: None, hook: None },
+                PackageChange {
+                    name: "zlib".into(),
+                    action: "install".into(),
+                    status: "committed".into(),
+                    before: None,
+                    after: Some(PackageState::from_entry(&zlib)),
+                    source: "local-build".into(),
+                    failure: None,
+                    hook: None,
+                },
+                PackageChange {
+                    name: "curl".into(),
+                    action: "install".into(),
+                    status: "committed".into(),
+                    before: None,
+                    after: Some(PackageState::from_entry(&curl)),
+                    source: "local-build".into(),
+                    failure: None,
+                    hook: None,
+                },
             ],
-            undone_by: None, undoes: None, groups: vec![],
+            undone_by: None,
+            undoes: None,
+            groups: vec![],
         };
         crate::transaction::history::write_record(&root, &original).unwrap();
 
         // Simulate a first undo that removed curl and then failed before zlib.
-        crate::db::Db::new(&root).remove("curl").unwrap();
-        crate::transaction::history::write_record(&root,
+        crate::adapters::db::Db::new(&root).remove("curl").unwrap();
+        crate::transaction::history::write_record(
+            &root,
             &crate::transaction::history::TransactionRecord {
-                schema: SCHEMA_VERSION, id: 2, command: "history-undo".into(), status: "partial".into(),
-                started_at: 3, finished_at: Some(4), duration_seconds: Some(1),
-                initiated_by: "uid:0".into(), requested_packages: vec![],
+                schema: SCHEMA_VERSION,
+                id: 2,
+                command: "history-undo".into(),
+                status: "partial".into(),
+                started_at: 3,
+                finished_at: Some(4),
+                duration_seconds: Some(1),
+                initiated_by: "uid:0".into(),
+                requested_packages: vec![],
                 repository_ids: vec![],
                 package_changes: vec![PackageChange {
-                    name: "curl".into(), action: "remove".into(), status: "committed".into(),
-                    before: Some(PackageState::from_entry(&curl)), after: None,
-                    source: "history-undo".into(), failure: None, hook: None,
+                    name: "curl".into(),
+                    action: "remove".into(),
+                    status: "committed".into(),
+                    before: Some(PackageState::from_entry(&curl)),
+                    after: None,
+                    source: "history-undo".into(),
+                    failure: None,
+                    hook: None,
                 }],
-                undone_by: None, undoes: Some(1), groups: vec![],
-            }
-        ).unwrap();
+                undone_by: None,
+                undoes: Some(1),
+                groups: vec![],
+            },
+        )
+        .unwrap();
 
         let plan = plan_undo(&root, 1).unwrap();
         assert_eq!(plan.steps.len(), 1);
@@ -578,21 +738,46 @@ mod tests {
         let base = tmpdir("rm");
         let root = base.join("root");
         let v1 = make_pkg(&base, "demo", "1.0", b"one");
-        crate::install::install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+        crate::install::install_archive(
+            &v1,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
         let digest = crate::fetch::sha256_of_file(&v1).unwrap();
         let db = Db::new(&root);
         let installed = db.entry("demo").unwrap().unwrap();
 
         // synthesize the transaction record for that install
-        let mut op = begin_operation(&root, OperationCommand::Install, &["demo".to_string()], &[]).unwrap();
+        let mut op =
+            begin_operation(&root, OperationCommand::Install, &["demo".to_string()], &[]).unwrap();
         {
             let mut rec = op.recorder();
-            let step = rec.step_intent("demo", StepAction::Install, None, Some(&installed), &digest).unwrap();
-            rec.step_result(step, "demo", StepAction::Install, StepStatus::Committed, None,
-                Some(&installed), "local-build", None, None).unwrap();
+            let step = rec
+                .step_intent("demo", StepAction::Install, None, Some(&installed), &digest)
+                .unwrap();
+            rec.step_result(
+                step,
+                "demo",
+                StepAction::Install,
+                StepStatus::Committed,
+                None,
+                Some(&installed),
+                "local-build",
+                None,
+                None,
+            )
+            .unwrap();
         }
         op.finish(None).unwrap();
-        let tx = crate::transaction::history::list_records(&root).unwrap().last().unwrap().id;
+        let tx = crate::transaction::history::list_records(&root)
+            .unwrap()
+            .last()
+            .unwrap()
+            .id;
 
         let plan = plan_undo(&root, tx).unwrap();
         assert_eq!(plan.steps.len(), 1);
@@ -608,7 +793,10 @@ mod tests {
         op.finish(None).unwrap();
         crate::transaction::history::mark_undone_by(&root, tx, undo_id).unwrap();
 
-        assert!(Db::new(&root).entry("demo").unwrap().is_none(), "package removed");
+        assert!(
+            Db::new(&root).entry("demo").unwrap().is_none(),
+            "package removed"
+        );
         let original = crate::transaction::history::load_record(&root, tx).unwrap();
         assert_eq!(original.undone_by, Some(tx + 1));
         let _ = std::fs::remove_dir_all(&base);
@@ -619,22 +807,43 @@ mod tests {
         let base = tmpdir("removed-dependency-reason");
         let root = base.join("root");
         let archive = make_pkg(&base, "demo", "1.0", b"dependency package");
-        crate::install::install_archive(&archive, &root, false, true, None, crate::db::InstallReason::Dependency).unwrap();
+        crate::install::install_archive(
+            &archive,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Dependency,
+        )
+        .unwrap();
         let before = Db::new(&root).entry("demo").unwrap().unwrap();
         assert_eq!(before.reason, "dependency");
         crate::install::remove_with("demo", &root, false).unwrap();
 
         let original = crate::transaction::history::TransactionRecord {
-            schema: SCHEMA_VERSION, id: 1, command: "remove".into(), status: "completed".into(),
-            started_at: 1, finished_at: Some(2), duration_seconds: Some(1),
-            initiated_by: "uid:0".into(), requested_packages: vec!["demo".into()],
+            schema: SCHEMA_VERSION,
+            id: 1,
+            command: "remove".into(),
+            status: "completed".into(),
+            started_at: 1,
+            finished_at: Some(2),
+            duration_seconds: Some(1),
+            initiated_by: "uid:0".into(),
+            requested_packages: vec!["demo".into()],
             repository_ids: vec![],
             package_changes: vec![PackageChange {
-                name: "demo".into(), action: "remove".into(), status: "committed".into(),
-                before: Some(PackageState::from_entry(&before)), after: None,
-                source: "remove".into(), failure: None, hook: None,
+                name: "demo".into(),
+                action: "remove".into(),
+                status: "committed".into(),
+                before: Some(PackageState::from_entry(&before)),
+                after: None,
+                source: "remove".into(),
+                failure: None,
+                hook: None,
             }],
-            undone_by: None, undoes: None, groups: vec![],
+            undone_by: None,
+            undoes: None,
+            groups: vec![],
         };
         crate::transaction::history::write_record(&root, &original).unwrap();
 
@@ -657,20 +866,58 @@ mod tests {
         let root = base.join("root");
         let v1 = make_pkg(&base, "demo", "1.0", b"one");
         let v2 = make_pkg(&base, "demo", "2.0", b"two");
-        crate::install::install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+        crate::install::install_archive(
+            &v1,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
         let before = Db::new(&root).entry("demo").unwrap().unwrap();
-        crate::install::install_archive(&v2, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+        crate::install::install_archive(
+            &v2,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
         let after = Db::new(&root).entry("demo").unwrap().unwrap();
 
         let mut op = begin_operation(&root, OperationCommand::Upgrade, &[], &[]).unwrap();
         {
             let mut rec = op.recorder();
-            let step = rec.step_intent("demo", StepAction::Upgrade, Some(&before), Some(&after), &after.artifact_sha256).unwrap();
-            rec.step_result(step, "demo", StepAction::Upgrade, StepStatus::Committed, Some(&before),
-                Some(&after), "local-build", None, None).unwrap();
+            let step = rec
+                .step_intent(
+                    "demo",
+                    StepAction::Upgrade,
+                    Some(&before),
+                    Some(&after),
+                    &after.artifact_sha256,
+                )
+                .unwrap();
+            rec.step_result(
+                step,
+                "demo",
+                StepAction::Upgrade,
+                StepStatus::Committed,
+                Some(&before),
+                Some(&after),
+                "local-build",
+                None,
+                None,
+            )
+            .unwrap();
         }
         op.finish(None).unwrap();
-        let tx = crate::transaction::history::list_records(&root).unwrap().last().unwrap().id;
+        let tx = crate::transaction::history::list_records(&root)
+            .unwrap()
+            .last()
+            .unwrap()
+            .id;
 
         let plan = plan_undo(&root, tx).unwrap();
         match &plan.steps[0].action {
@@ -681,7 +928,10 @@ mod tests {
         let mut rec = op.recorder();
         apply_undo(&root, &plan, &mut rec, false).unwrap();
         op.finish(None).unwrap();
-        assert_eq!(Db::new(&root).entry("demo").unwrap().unwrap().version, "1.0");
+        assert_eq!(
+            Db::new(&root).entry("demo").unwrap().unwrap().version,
+            "1.0"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -692,31 +942,95 @@ mod tests {
         let v1 = make_pkg(&base, "demo", "1.0", b"one");
         let v2 = make_pkg(&base, "demo", "2.0", b"two");
         let v3 = make_pkg(&base, "demo", "3.0", b"three");
-        crate::install::install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+        crate::install::install_archive(
+            &v1,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
         let b1 = Db::new(&root).entry("demo").unwrap().unwrap();
-        crate::install::install_archive(&v2, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+        crate::install::install_archive(
+            &v2,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
         let b2 = Db::new(&root).entry("demo").unwrap().unwrap();
 
         // transaction 1: upgrade 1.0 -> 2.0
         let mut op = begin_operation(&root, OperationCommand::Upgrade, &[], &[]).unwrap();
         {
             let mut rec = op.recorder();
-            let step = rec.step_intent("demo", StepAction::Upgrade, Some(&b1), Some(&b2), &b2.artifact_sha256).unwrap();
-            rec.step_result(step, "demo", StepAction::Upgrade, StepStatus::Committed, Some(&b1),
-                Some(&b2), "local-build", None, None).unwrap();
+            let step = rec
+                .step_intent(
+                    "demo",
+                    StepAction::Upgrade,
+                    Some(&b1),
+                    Some(&b2),
+                    &b2.artifact_sha256,
+                )
+                .unwrap();
+            rec.step_result(
+                step,
+                "demo",
+                StepAction::Upgrade,
+                StepStatus::Committed,
+                Some(&b1),
+                Some(&b2),
+                "local-build",
+                None,
+                None,
+            )
+            .unwrap();
         }
         op.finish(None).unwrap();
-        let tx1 = crate::transaction::history::list_records(&root).unwrap().last().unwrap().id;
+        let tx1 = crate::transaction::history::list_records(&root)
+            .unwrap()
+            .last()
+            .unwrap()
+            .id;
 
         // a LATER transaction upgrades 2.0 -> 3.0
-        crate::install::install_archive(&v3, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+        crate::install::install_archive(
+            &v3,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
         let b3 = Db::new(&root).entry("demo").unwrap().unwrap();
         let mut op = begin_operation(&root, OperationCommand::Upgrade, &[], &[]).unwrap();
         {
             let mut rec = op.recorder();
-            let step = rec.step_intent("demo", StepAction::Upgrade, Some(&b2), Some(&b3), &b3.artifact_sha256).unwrap();
-            rec.step_result(step, "demo", StepAction::Upgrade, StepStatus::Committed, Some(&b2),
-                Some(&b3), "local-build", None, None).unwrap();
+            let step = rec
+                .step_intent(
+                    "demo",
+                    StepAction::Upgrade,
+                    Some(&b2),
+                    Some(&b3),
+                    &b3.artifact_sha256,
+                )
+                .unwrap();
+            rec.step_result(
+                step,
+                "demo",
+                StepAction::Upgrade,
+                StepStatus::Committed,
+                Some(&b2),
+                Some(&b3),
+                "local-build",
+                None,
+                None,
+            )
+            .unwrap();
         }
         op.finish(None).unwrap();
 
@@ -732,28 +1046,72 @@ mod tests {
         let root = base.join("root");
         let v1 = make_pkg(&base, "demo", "1.0", b"one");
         let v2 = make_pkg(&base, "demo", "2.0", b"two");
-        crate::install::install_archive(&v1, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+        crate::install::install_archive(
+            &v1,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
         let b1 = Db::new(&root).entry("demo").unwrap().unwrap();
-        crate::install::install_archive(&v2, &root, false, true, None, crate::db::InstallReason::Explicit).unwrap();
+        crate::install::install_archive(
+            &v2,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
         let b2 = Db::new(&root).entry("demo").unwrap().unwrap();
         // destroy the old object so restoration is impossible
-        let obj = crate::artifact::object_path(&root, &b1.artifact_sha256).unwrap();
+        let obj = crate::adapters::artifact::object_path(&root, &b1.artifact_sha256).unwrap();
         std::fs::remove_file(&obj).unwrap();
 
         let mut op = begin_operation(&root, OperationCommand::Upgrade, &[], &[]).unwrap();
         {
             let mut rec = op.recorder();
-            let step = rec.step_intent("demo", StepAction::Upgrade, Some(&b1), Some(&b2), &b2.artifact_sha256).unwrap();
-            rec.step_result(step, "demo", StepAction::Upgrade, StepStatus::Committed, Some(&b1),
-                Some(&b2), "local-build", None, None).unwrap();
+            let step = rec
+                .step_intent(
+                    "demo",
+                    StepAction::Upgrade,
+                    Some(&b1),
+                    Some(&b2),
+                    &b2.artifact_sha256,
+                )
+                .unwrap();
+            rec.step_result(
+                step,
+                "demo",
+                StepAction::Upgrade,
+                StepStatus::Committed,
+                Some(&b1),
+                Some(&b2),
+                "local-build",
+                None,
+                None,
+            )
+            .unwrap();
         }
         op.finish(None).unwrap();
-        let tx = crate::transaction::history::list_records(&root).unwrap().last().unwrap().id;
+        let tx = crate::transaction::history::list_records(&root)
+            .unwrap()
+            .last()
+            .unwrap()
+            .id;
 
         let err = plan_undo(&root, tx).unwrap_err();
-        assert!(format!("{err:#}").contains("missing or fails verification"), "{err:#}");
+        assert!(
+            format!("{err:#}").contains("missing or fails verification"),
+            "{err:#}"
+        );
         // nothing changed
-        assert_eq!(Db::new(&root).entry("demo").unwrap().unwrap().version, "2.0");
+        assert_eq!(
+            Db::new(&root).entry("demo").unwrap().unwrap().version,
+            "2.0"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -762,16 +1120,24 @@ mod tests {
         let base = tmpdir("meta");
         let root = base.join("root");
         // a failed transaction cannot be undone at all
-        let op = begin_operation(&root, OperationCommand::Install, &["x".to_string()], &[]).unwrap();
+        let op =
+            begin_operation(&root, OperationCommand::Install, &["x".to_string()], &[]).unwrap();
         op.finish(Some(&anyhow::anyhow!("nope"))).unwrap();
         let err = plan_undo(&root, 1).unwrap_err();
-        assert!(format!("{err:#}").contains("only completed or partial"), "{err:#}");
+        assert!(
+            format!("{err:#}").contains("only completed or partial"),
+            "{err:#}"
+        );
 
         // a completed transaction with zero package changes has nothing to compensate
-        let op = begin_operation(&root, OperationCommand::Install, &["x".to_string()], &[]).unwrap();
+        let op =
+            begin_operation(&root, OperationCommand::Install, &["x".to_string()], &[]).unwrap();
         op.finish(None).unwrap();
         let err = plan_undo(&root, 2).unwrap_err();
-        assert!(format!("{err:#}").contains("no committed package changes"), "{err:#}");
+        assert!(
+            format!("{err:#}").contains("no committed package changes"),
+            "{err:#}"
+        );
 
         // nonexistent id
         assert!(plan_undo(&root, 99).is_err());
@@ -820,7 +1186,9 @@ mod tests {
             groups: vec![],
         };
         crate::transaction::history::write_record(&root, &record).unwrap();
-        Db::new(&root).add(&entry("demo", "2.0", ""), &[], &Default::default()).unwrap();
+        Db::new(&root)
+            .add(&entry("demo", "2.0", ""), &[], &Default::default())
+            .unwrap();
         let err = plan_undo(&root, 1).unwrap_err();
         assert!(format!("{err:#}").contains("nawa rollback"), "{err:#}");
         let _ = std::fs::remove_dir_all(&base);

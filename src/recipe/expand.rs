@@ -5,10 +5,12 @@ use anyhow::{bail, Result};
 use super::model::*;
 
 impl Recipe {
-
     /// Fully qualified version string: `name-version-rel`.
     pub fn id(&self) -> String {
-        format!("{}-{}-{}", self.package.name, self.package.version, self.package.rel)
+        format!(
+            "{}-{}-{}",
+            self.package.name, self.package.version, self.package.rel
+        )
     }
 
     pub fn arch(&self) -> String {
@@ -29,6 +31,13 @@ impl Recipe {
         !self.package.sources.is_empty()
             || !self.assets.include.is_empty()
             || self.fetch.any()
+            || self.relations.is_some()
+    }
+
+    /// Source-staging generation only. Package relations have their own
+    /// marker/metadata contract and do not change source staging semantics.
+    pub fn is_fetch_schema(&self) -> bool {
+        !self.package.sources.is_empty() || !self.assets.include.is_empty() || self.fetch.any()
     }
 
     /// §14C: `%{srcroot}` / `NAWA_SRCROOT` and `%{assetsdir}` /
@@ -116,8 +125,14 @@ impl Recipe {
     pub fn expand(&self, script: &str, ctx: &ExpandCtx) -> String {
         // Lookup table; `None` values (srcroot/assetsdir when not enabled)
         // mean "leave the placeholder literal".
-        let srcroot_str = ctx.srcroot.as_ref().map(|p| p.to_string_lossy().into_owned());
-        let assetsdir_str = ctx.assetsdir.as_ref().map(|p| p.to_string_lossy().into_owned());
+        let srcroot_str = ctx
+            .srcroot
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned());
+        let assetsdir_str = ctx
+            .assetsdir
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned());
         let pkgdir_str = ctx.pkgdir.to_string_lossy();
         let srcdir_str = ctx.srcdir.to_string_lossy();
         let jobs_str = ctx.jobs.to_string();
@@ -128,7 +143,10 @@ impl Recipe {
         let mut i = 0;
         while i < bytes.len() {
             // `%%{` escape: emit `%{` literally, skip the extra `%`
-            if bytes[i] == b'%' && bytes.get(i + 1) == Some(&b'%') && bytes.get(i + 2) == Some(&b'{') {
+            if bytes[i] == b'%'
+                && bytes.get(i + 1) == Some(&b'%')
+                && bytes.get(i + 2) == Some(&b'{')
+            {
                 out.push_str("%{");
                 i += 2;
                 continue;
@@ -173,5 +191,13 @@ impl Recipe {
 
 /// Length in bytes of the UTF-8 encoded char starting at `b`.
 fn utf8_len(b: u8) -> usize {
-    if b < 0x80 { 1 } else if b >> 5 == 0b110 { 2 } else if b >> 4 == 0b1110 { 3 } else { 4 }
+    if b < 0x80 {
+        1
+    } else if b >> 5 == 0b110 {
+        2
+    } else if b >> 4 == 0b1110 {
+        3
+    } else {
+        4
+    }
 }

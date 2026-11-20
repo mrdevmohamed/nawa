@@ -30,15 +30,57 @@ impl Recipe {
         // ---- new schema vs legacy (§4.1/§4.2, §19) — checked first, so
         // a mixed recipe reports the real problem instead of a legacy one
         self.validate_schema_marker()?;
-        if self.is_new_schema() {
+        if self.is_fetch_schema() {
             self.validate_new_schema_sources()?;
         }
         self.validate_assets()?;
         self.validate_fetch_tables()?;
         self.validate_mirrors()?;
+        self.validate_capabilities()?;
+        if let Some(relations) = &self.relations {
+            relations.normalized().map_err(anyhow::Error::msg)?;
+            if self.package.sources.is_empty()
+                && self.package.source == RELATIONS_MARKER
+                && self.package.source_date_epoch.is_none()
+            {
+                bail!("a relation-only recipe uses the schema marker instead of an external source and must pin package.source_date_epoch");
+            }
+        }
+        for dep in self
+            .depends
+            .run
+            .iter()
+            .chain(&self.depends.build)
+            .chain(&self.depends.check)
+        {
+            let requirement = crate::domain::package::relations::Requirement::parse(dep)
+                .map_err(anyhow::Error::msg)?;
+            if requirement.comparison.is_some() && self.relations.is_none() {
+                bail!("versioned dependencies require [relations] schema = 1 and its fail-closed source marker");
+            }
+        }
+        crate::domain::package::metadata::normalize_rundeps(&self.depends.run)
+            .map_err(|e| anyhow::anyhow!("recipe {}: {e}", self.package.name))?;
+        for dep in self.depends.build.iter().chain(&self.depends.check) {
+            if !crate::domain::package::relations::valid_name(dep) {
+                bail!(
+                    "recipe {} has invalid build/check dependency {dep:?}",
+                    self.package.name
+                );
+            }
+        }
+        for dep in self.depends.build.iter().chain(&self.depends.check) {
+            if crate::domain::package::relations::Requirement::parse(dep)
+                .map_err(anyhow::Error::msg)?
+                .comparison
+                .is_some()
+            {
+                bail!("relations schema 1 permits version requirements on runtime dependencies only; build/check dependencies must be package names");
+            }
+        }
         // names/versions become directory and archive file names
-        crate::db::check_name(&self.package.name)?;
-        if !crate::db::valid_version(&self.package.version) {
+        crate::adapters::db::check_name(&self.package.name)?;
+        if !crate::adapters::db::valid_version(&self.package.version) {
             bail!(
                 "recipe {} has an invalid package.version `{}`",
                 self.package.name,
@@ -52,7 +94,13 @@ impl Recipe {
     /// schema marker in `package.source` must match the tables actually used.
     fn validate_schema_marker(&self) -> Result<()> {
         let new_schema = self.is_new_schema();
-        let marker = self.package.source == SCHEMA_MARKER;
+        let expected_marker = if self.relations.is_some() {
+            RELATIONS_MARKER
+        } else {
+            SCHEMA_MARKER
+        };
+        let marker =
+            self.package.source == SCHEMA_MARKER || self.package.source == RELATIONS_MARKER;
         if !self.package.workdir.is_empty() && self.package.sources.is_empty() {
             bail!(
                 "recipe {} sets [package] workdir, which is valid only together with \
@@ -60,12 +108,12 @@ impl Recipe {
                 self.package.name
             );
         }
-        if new_schema && !marker {
+        if new_schema && self.package.source != expected_marker {
             bail!(
                 "recipe {} uses new-schema tables but package.source does not carry the \
                  fail-closed schema marker (fetch-phase.md §19):\n  {}",
                 self.package.name,
-                SCHEMA_MARKER
+                expected_marker
             );
         }
         if marker && !new_schema {
@@ -111,7 +159,11 @@ impl Recipe {
             }
             seen.push(&src.name);
             if src.url.trim().is_empty() {
-                bail!("recipe {} source `{}` has no url", self.package.name, src.name);
+                bail!(
+                    "recipe {} source `{}` has no url",
+                    self.package.name,
+                    src.name
+                );
             }
             if !is_lower_hex64(&src.sha256) {
                 bail!(
@@ -129,23 +181,14 @@ impl Recipe {
                     src.name
                 );
             }
-            check_rel_path(
-                "[[package.sources]] into",
-                &src.into,
-            )
-            .with_context(|| {
-                format!("recipe {} source `{}`", self.package.name, src.name)
-            })?;
+            check_rel_path("[[package.sources]] into", &src.into)
+                .with_context(|| format!("recipe {} source `{}`", self.package.name, src.name))?;
         }
         check_rel_path("[package] workdir", &self.package.workdir)?;
         // a build whose every input is a stamped plain file has no
         // reproducible mtime to derive the epoch from (§6)
         if !self.package.sources.is_empty()
-            && self
-                .package
-                .sources
-                .iter()
-                .all(|s| s.unpack == Some(false))
+            && self.package.sources.iter().all(|s| s.unpack == Some(false))
             && self.package.source_date_epoch.is_none()
         {
             bail!(
@@ -169,6 +212,16 @@ impl Recipe {
         Ok(())
     }
 
+    /// `[capabilities] provides` entries are normalized exactly once, here
+    /// (B3 chain §3): parseable `domain=identity`, no commas, no duplicates.
+    fn validate_capabilities(&self) -> Result<()> {
+        if let Some(caps) = &self.capabilities {
+            crate::domain::package::metadata::normalize_provides(&caps.provides)
+                .map_err(|e| anyhow::anyhow!("recipe {}: {e}", self.package.name))?;
+        }
+        Ok(())
+    }
+
     /// Declared `[assets] include` paths must stay inside the recipe directory.
     fn validate_assets(&self) -> Result<()> {
         // assets: declared paths must stay inside the recipe directory
@@ -178,11 +231,12 @@ impl Recipe {
             for p in &self.assets.include {
                 let kind = "[assets] include";
                 if p.trim().is_empty() {
-                    bail!("recipe {} has an empty entry in [assets] include", self.package.name);
+                    bail!(
+                        "recipe {} has an empty entry in [assets] include",
+                        self.package.name
+                    );
                 }
-                check_rel_path(kind, p).with_context(|| {
-                    format!("recipe {}", self.package.name)
-                })?;
+                check_rel_path(kind, p).with_context(|| format!("recipe {}", self.package.name))?;
             }
         }
         Ok(())
@@ -195,12 +249,16 @@ impl Recipe {
         // declare their own table (an implicit self-dependency).
         for (table, spec, toolchain, eco) in [
             ("[fetch.go]", self.fetch.go.as_ref(), GO_TOOLCHAIN, "go"),
-            ("[fetch.cargo]", self.fetch.cargo.as_ref(), CARGO_TOOLCHAIN, "cargo"),
+            (
+                "[fetch.cargo]",
+                self.fetch.cargo.as_ref(),
+                CARGO_TOOLCHAIN,
+                "cargo",
+            ),
         ] {
             let Some(spec) = spec else { continue };
-            check_rel_path(&format!("{table} dir"), &spec.dir).with_context(|| {
-                format!("recipe {}", self.package.name)
-            })?;
+            check_rel_path(&format!("{table} dir"), &spec.dir)
+                .with_context(|| format!("recipe {}", self.package.name))?;
             if self.package.name == toolchain {
                 bail!(
                     "recipe {} is the {eco} toolchain package and must not declare \
@@ -223,13 +281,15 @@ impl Recipe {
                 );
             }
             if self.package.mirrors.iter().any(|m| m.trim().is_empty()) {
-                bail!("recipe {} has an empty entry in package.mirrors", self.package.name);
+                bail!(
+                    "recipe {} has an empty entry in package.mirrors",
+                    self.package.name
+                );
             }
         }
         Ok(())
     }
 }
-
 
 /// Source names must match `[a-z0-9][a-z0-9._-]*` and are at most 64
 /// characters (§4.2). Hand-rolled — the name greps cleanly out of error
@@ -239,9 +299,7 @@ fn valid_source_name(name: &str) -> bool {
     let head_ok = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit();
     let tail_ok = |c: char| head_ok(c) || matches!(c, '.' | '_' | '-');
     match name.chars().next() {
-        Some(c) if head_ok(c) => {
-            name.chars().count() <= 64 && name.chars().skip(1).all(tail_ok)
-        }
+        Some(c) if head_ok(c) => name.chars().count() <= 64 && name.chars().skip(1).all(tail_ok),
         _ => false,
     }
 }
@@ -249,9 +307,7 @@ fn valid_source_name(name: &str) -> bool {
 /// Exactly 64 lowercase hex characters (§4.2): the digest doubles as a cache
 /// path component, so it must never carry `/` or `..` or any other shape.
 pub(crate) fn is_lower_hex64(s: &str) -> bool {
-    s.len() == 64
-        && s.bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// `into` / `workdir` are workspace-relative destinations (§4.2): never

@@ -4,10 +4,10 @@ use anyhow::Result;
 use std::path::{Path, PathBuf};
 
 use super::{BuildOpts, BuildResult};
-use crate::buildenv::{self, Isolation};
+use crate::adapters::archive;
+use crate::build::buildenv::{self, Isolation};
+use crate::build::slim;
 use crate::recipe::Recipe;
-use crate::archive;
-use crate::slim;
 
 /// Version tag of the `--use-cache` sidecar id. The tag is also part of the
 /// hash domain, so bumping it deliberately invalidates every existing sidecar
@@ -55,10 +55,13 @@ pub(crate) fn build_id_for(
         .map(|d| vec![("assets", d)])
         .unwrap_or_default();
     if rec.fetch.go.is_some() {
-        extras.push(("fetch-go", crate::fetchrun::FETCH_GO_SCHEMA_VERSION));
+        extras.push(("fetch-go", crate::build::fetchrun::FETCH_GO_SCHEMA_VERSION));
     }
     if rec.fetch.cargo.is_some() {
-        extras.push(("fetch-cargo", crate::fetchrun::FETCH_CARGO_SCHEMA_VERSION));
+        extras.push((
+            "fetch-cargo",
+            crate::build::fetchrun::FETCH_CARGO_SCHEMA_VERSION,
+        ));
     }
     if let Some((_, version)) = toolchain_identity.iter().find(|(name, _)| *name == "go") {
         extras.push(("toolchain-go", version.as_str()));
@@ -67,12 +70,7 @@ pub(crate) fn build_id_for(
         extras.push(("toolchain-cargo", version.as_str()));
     }
     if extras.is_empty() {
-        crate::lint::build_id(
-            rec.raw.as_bytes(),
-            &source_sha256,
-            closure_archives,
-            &flags,
-        )
+        crate::lint::build_id(rec.raw.as_bytes(), &source_sha256, closure_archives, &flags)
     } else {
         crate::lint::build_id_with(
             rec.raw.as_bytes(),
@@ -83,7 +81,6 @@ pub(crate) fn build_id_for(
         )
     }
 }
-
 
 /// The versioned id written to `<out>/<archive>.buildid` for `--use-cache`.
 ///
@@ -114,7 +111,6 @@ pub(crate) fn cache_id_for(
     }
     format!("{CACHE_ID_VERSION}:{}", hex::encode(h.finalize()))
 }
-
 
 /// Identity of the host C/C++ toolchain for the `--use-cache` sidecar at
 /// `env` and `sandbox` isolation. Probes the exact `PATH` build sections see
@@ -157,7 +153,6 @@ pub(crate) fn host_toolchain_identity(isolation: Isolation) -> Vec<(&'static str
     identity
 }
 
-
 /// The per-build fetch views the recipe's `[fetch.*]` tables bring into
 /// the sandbox as writable extra binds (§8/§11): `<work>/fetch/<eco>` →
 /// `<build_inside>/fetch/<eco>`, in ecosystem-table order for determinism.
@@ -172,7 +167,6 @@ pub(crate) fn fetch_ecosystems(rec: &Recipe) -> Vec<&'static str> {
     v
 }
 
-
 /// `<out>/<archive>.buildid` — the sidecar `--use-cache` compares against.
 pub(crate) fn buildid_sidecar(out_path: &Path) -> PathBuf {
     out_path.with_file_name(format!(
@@ -183,7 +177,6 @@ pub(crate) fn buildid_sidecar(out_path: &Path) -> PathBuf {
             .unwrap_or_default()
     ))
 }
-
 
 /// Return the existing archive when its sidecar build id matches the id the
 /// current inputs would produce (§7: "is this archive up to date?" becomes
@@ -209,12 +202,21 @@ pub(crate) fn try_cache_hit(
     let asset_digest: Option<String> = if rec.assets.include.is_empty() {
         None
     } else {
-        crate::assets::probe_digest(rec).ok()
+        crate::build::assets::probe_digest(rec).ok()
     };
-    let bid = build_id_for(rec, opts, closure_archives, asset_digest.as_deref(), toolchain_identity);
+    let bid = build_id_for(
+        rec,
+        opts,
+        closure_archives,
+        asset_digest.as_deref(),
+        toolchain_identity,
+    );
     let cache_id = cache_id_for(&bid, opts.isolation, host_toolchain);
     if stored.trim() != cache_id {
-        crate::nawa_info!("build cache: {} changed (build_id mismatch) — rebuilding", rec.id());
+        crate::nawa_info!(
+            "build cache: {} changed (build_id mismatch) — rebuilding",
+            rec.id()
+        );
         return Ok(None);
     }
     // A cache hit must still be a readable package archive.
@@ -226,7 +228,6 @@ pub(crate) fn try_cache_hit(
     Ok(Some(BuildResult { archive: out_path }))
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,7 +235,10 @@ mod tests {
     #[test]
     fn cache_id_is_versioned_and_covers_isolation_and_host_toolchain() {
         let env = cache_id_for("legacy-id", Isolation::Env, &[]);
-        assert!(env.starts_with("v2:"), "sidecar ids must be versioned: {env}");
+        assert!(
+            env.starts_with("v2:"),
+            "sidecar ids must be versioned: {env}"
+        );
         assert_ne!(
             env,
             cache_id_for("legacy-id", Isolation::Sandbox, &[]),
@@ -264,4 +268,3 @@ mod tests {
         );
     }
 }
-

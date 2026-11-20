@@ -176,17 +176,18 @@ pub(crate) struct PluginState {
 
 impl PluginState {
     pub fn load(cfg_file: Option<&Path>) -> Self {
-        let Some(path) = cfg_file else { return Self::default() };
-        let Ok(raw) = std::fs::read_to_string(path) else { return Self::default() };
+        let Some(path) = cfg_file else {
+            return Self::default();
+        };
+        let Ok(raw) = std::fs::read_to_string(path) else {
+            return Self::default();
+        };
         Self::from_config_text(&raw)
     }
 
     /// Merge project enable/disable preferences with administrator policy.
     /// Only a root-owned, non-writable system config can supply grants.
-    pub fn load_effective(
-        project_file: Option<&Path>,
-        system_file: Option<&Path>,
-    ) -> Self {
+    pub fn load_effective(project_file: Option<&Path>, system_file: Option<&Path>) -> Self {
         let project = Self::load(project_file);
         let system = if system_file.is_some_and(secure_admin_config) {
             Self::load(system_file)
@@ -206,7 +207,11 @@ impl PluginState {
                 disabled.push(id);
             }
         }
-        Self { enabled, disabled, grants: system.grants }
+        Self {
+            enabled,
+            disabled,
+            grants: system.grants,
+        }
     }
 
     pub fn has_grant(&self, id: &str, capability: super::manifest::Capability) -> bool {
@@ -215,7 +220,8 @@ impl PluginState {
         if capability == super::manifest::Capability::NotificationSend {
             return false;
         }
-        self.grants.get(id)
+        self.grants
+            .get(id)
             .is_some_and(|items| items.iter().any(|item| item == capability.as_str()))
     }
 
@@ -224,7 +230,11 @@ impl PluginState {
         id: &str,
         requested: &[super::manifest::Capability],
     ) -> Vec<super::manifest::Capability> {
-        requested.iter().copied().filter(|cap| self.has_grant(id, *cap)).collect()
+        requested
+            .iter()
+            .copied()
+            .filter(|cap| self.has_grant(id, *cap))
+            .collect()
     }
 
     pub fn grant(&mut self, id: &str, capability: super::manifest::Capability) {
@@ -259,13 +269,14 @@ impl PluginState {
 
     pub fn save(&self, cfg_file: Option<&Path>) -> Result<()> {
         let Some(path) = cfg_file else {
-            anyhow::bail!("no configuration file to store plugin state in — create one with `nawa init`");
+            anyhow::bail!(
+                "no configuration file to store plugin state in — create one with `nawa init`"
+            );
         };
         let existing = std::fs::read_to_string(path).unwrap_or_default();
         let updated = replace_plugins_table(&existing, self)
             .context("could not update the [plugins] table")?;
-        std::fs::write(path, updated)
-            .with_context(|| format!("write {}", path.display()))?;
+        std::fs::write(path, updated).with_context(|| format!("write {}", path.display()))?;
         Ok(())
     }
 
@@ -289,7 +300,9 @@ pub(crate) fn secure_admin_config(path: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     let mut current = Some(path);
     while let Some(entry) = current {
-        let Ok(meta) = std::fs::symlink_metadata(entry) else { return false };
+        let Ok(meta) = std::fs::symlink_metadata(entry) else {
+            return false;
+        };
         if meta.file_type().is_symlink() || meta.uid() != 0 || meta.mode() & 0o022 != 0 {
             return false;
         }
@@ -354,7 +367,7 @@ mod tests {
         // Root discovery correctly rejects fixtures under world-writable
         // /tmp. Put root-run tests under /root so they exercise the privileged
         // path without weakening the production directory policy.
-        let base = if crate::diag::is_root() {
+        let base = if crate::presentation::diag::is_root() {
             PathBuf::from("/root")
         } else {
             std::env::temp_dir()
@@ -402,14 +415,21 @@ mod tests {
         std::fs::create_dir_all(&broken_dir).unwrap();
         std::fs::write(broken_dir.join(MANIFEST_NAME), "not toml [[").unwrap();
 
-        std::env::set_var("NAWA_PLUGIN_PATH", format!("{}:{}", d1.display(), d2.display()));
+        std::env::set_var(
+            "NAWA_PLUGIN_PATH",
+            format!("{}:{}", d1.display(), d2.display()),
+        );
         let found = discover(false).unwrap();
         std::env::remove_var("NAWA_PLUGIN_PATH");
 
         assert_eq!(found.len(), 4);
-        let alpha_first = found.iter().find(|p| p.manifest.id == "alpha" && p.error.is_none());
+        let alpha_first = found
+            .iter()
+            .find(|p| p.manifest.id == "alpha" && p.error.is_none());
         assert!(alpha_first.is_some(), "first alpha is usable");
-        let alpha_dup = found.iter().find(|p| p.manifest.id == "alpha" && p.error.is_some());
+        let alpha_dup = found
+            .iter()
+            .find(|p| p.manifest.id == "alpha" && p.error.is_some());
         assert!(alpha_dup.is_some(), "second alpha is a duplicate error");
         let broken = found.iter().find(|p| p.dir.ends_with("broken"));
         assert!(broken.is_some() && broken.unwrap().error.is_some());
@@ -423,7 +443,10 @@ mod tests {
         st.disabled.push("x".to_string());
         assert!(!st.is_enabled("x"));
         st.enabled.push("y".to_string());
-        assert!(!st.is_enabled("z"), "once an enable-list exists, unknown ids are off");
+        assert!(
+            !st.is_enabled("z"),
+            "once an enable-list exists, unknown ids are off"
+        );
         assert!(st.is_enabled("y"));
         assert!(!st.is_enabled("x"), "disabled wins over enabled");
         st.grant("x", super::super::manifest::Capability::TransactionObserve);
@@ -461,15 +484,25 @@ mod tests {
         let effective = PluginState::load_effective(Some(&project), Some(&system));
         assert!(effective.is_enabled("audit"));
         assert!(!effective.has_grant("audit", super::super::manifest::Capability::CommandRegister));
-        assert!(!effective.has_grant("audit", super::super::manifest::Capability::TransactionObserve));
+        assert!(!effective.has_grant(
+            "audit",
+            super::super::manifest::Capability::TransactionObserve
+        ));
         let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
     fn plugins_table_replacement_preserves_the_rest() {
         let raw = "jobs = 4\n\n[plugins]\nenabled = [\"old\"]\n\n[other]\nkey = 1\n";
-        let mut st = PluginState { enabled: vec!["a".into()], disabled: vec![], grants: BTreeMap::new() };
-        st.grant("audit", super::super::manifest::Capability::TransactionObserve);
+        let mut st = PluginState {
+            enabled: vec!["a".into()],
+            disabled: vec![],
+            grants: BTreeMap::new(),
+        };
+        st.grant(
+            "audit",
+            super::super::manifest::Capability::TransactionObserve,
+        );
         let out = replace_plugins_table(raw, &st).unwrap();
         assert!(out.contains("jobs = 4"));
         assert!(out.contains("[other]"));
@@ -483,7 +516,10 @@ mod tests {
         let parsed = PluginState::from_config_text(&out);
         assert_eq!(parsed.enabled, vec!["a".to_string()]);
         assert!(parsed.disabled.is_empty());
-        assert!(parsed.has_grant("audit", super::super::manifest::Capability::TransactionObserve));
+        assert!(parsed.has_grant(
+            "audit",
+            super::super::manifest::Capability::TransactionObserve
+        ));
         // a config without [plugins] yields the default state
         let parsed = PluginState::from_config_text("jobs = 4\n");
         assert!(parsed.enabled.is_empty());

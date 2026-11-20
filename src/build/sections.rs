@@ -6,8 +6,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use super::{BuildOpts, CheckMode, FAIL_TAIL_LINES};
 use super::sandbox::SandboxCfg;
+use super::{BuildOpts, CheckMode, FAIL_TAIL_LINES};
 use crate::recipe::{ExpandCtx, Recipe};
 
 /// Walk two archives in lockstep and list members whose content hashes
@@ -30,7 +30,11 @@ pub(crate) fn diff_archives(a: &Path, b: &Path) -> Result<Vec<String>> {
     };
     let (ia, ib) = (index(a)?, index(b)?);
     let mut diffs = Vec::new();
-    for name in ia.keys().chain(ib.keys()).collect::<std::collections::BTreeSet<_>>() {
+    for name in ia
+        .keys()
+        .chain(ib.keys())
+        .collect::<std::collections::BTreeSet<_>>()
+    {
         let ha = ia.get(name).map(|s| s.as_str()).unwrap_or("<absent>");
         let hb = ib.get(name).map(|s| s.as_str()).unwrap_or("<absent>");
         if ha != hb {
@@ -40,15 +44,14 @@ pub(crate) fn diff_archives(a: &Path, b: &Path) -> Result<Vec<String>> {
     Ok(diffs)
 }
 
-
 /// The soname → owner index for `sandbox`-level lint: the installed db.
 pub(crate) fn installed_sonames(root: &Path) -> Result<BTreeMap<String, String>> {
-    let db = crate::db::Db::new(root);
+    let db = crate::adapters::db::Db::new(root);
     let mut out = BTreeMap::new();
     for entry in db.installed()? {
         for f in db.files(&entry.name)? {
             let rel = f.trim_start_matches('/');
-            if let Some(soname) = crate::closure::soname_of(rel) {
+            if let Some(soname) = crate::build::closure::soname_of(rel) {
                 out.entry(soname).or_insert_with(|| entry.name.clone());
             }
         }
@@ -59,7 +62,6 @@ pub(crate) fn installed_sonames(root: &Path) -> Result<BTreeMap<String, String>>
 // ---------------------------------------------------------------------------
 // Section execution
 // ---------------------------------------------------------------------------
-
 
 /// Run one build section under `bash -e` — directly at `none`/`env`, inside
 /// the sandbox at `sandbox`/`closure` — streaming its combined stdout+stderr
@@ -79,7 +81,12 @@ pub(crate) fn run_section(
     opts: &BuildOpts,
 ) -> Result<()> {
     let expanded = rec.expand(script, ctx);
-    crate::nawa_info!("[{}] running {} (isolation: {})", rec.id(), label, opts.isolation.as_str());
+    crate::nawa_info!(
+        "[{}] running {} (isolation: {})",
+        rec.id(),
+        label,
+        opts.isolation.as_str()
+    );
 
     let log_path = work.join(format!("build-{label}.log"));
     let mut log = std::fs::File::create(&log_path)
@@ -95,8 +102,8 @@ pub(crate) fn run_section(
         std::fs::write(&cfg.spec_path, toml::to_string_pretty(&spec)?)
             .with_context(|| format!("write {}", cfg.spec_path.display()))?;
         let exe = std::env::current_exe().context("locate the nawa binary")?;
-        let (child, sock) = crate::sandbox::spawn_init(&exe, &cfg.spec_path)
-            .context("spawn nawa sandbox-init")?;
+        let (child, sock) =
+            crate::sandbox::spawn_init(&exe, &cfg.spec_path).context("spawn nawa sandbox-init")?;
         // install the ranged uid map when we are root, then release the child
         crate::sandbox::parent_sync(&child, sock);
         child
@@ -111,7 +118,11 @@ pub(crate) fn run_section(
             // §4.3: the new-schema names are injected exactly like
             // NAWA_SRCDIR; a legacy recipe's ctx has no srcroot, so the
             // name never enters a legacy build
-            .envs(ctx.srcroot.iter().map(|r| ("NAWA_SRCROOT", r.to_string_lossy().into_owned())))
+            .envs(
+                ctx.srcroot
+                    .iter()
+                    .map(|r| ("NAWA_SRCROOT", r.to_string_lossy().into_owned())),
+            )
             // §5.3: same for the assets snapshot
             .envs(
                 ctx.assetsdir
@@ -188,8 +199,16 @@ pub(crate) fn run_sections(
                 CheckMode::Fatal => {}
                 CheckMode::Warn => {
                     if let Err(e) = run_section(
-                        rec, label, script, ctx, srcdir, work, env_vars, env_prefix,
-                        sandbox_cfg, opts,
+                        rec,
+                        label,
+                        script,
+                        ctx,
+                        srcdir,
+                        work,
+                        env_vars,
+                        env_prefix,
+                        sandbox_cfg,
+                        opts,
                     ) {
                         crate::nawa_warn!("check failed for {} (continuing): {e:#}", rec.id());
                     }
@@ -198,10 +217,17 @@ pub(crate) fn run_sections(
             }
         }
         run_section(
-            rec, label, script, ctx, srcdir, work, env_vars, env_prefix,
-            sandbox_cfg, opts,
+            rec,
+            label,
+            script,
+            ctx,
+            srcdir,
+            work,
+            env_vars,
+            env_prefix,
+            sandbox_cfg,
+            opts,
         )?;
     }
     Ok(())
 }
-

@@ -21,6 +21,8 @@ These documents describe architecture, implementation constraints, proposals, an
 
 - [Build isolation](build-isolation.md)
 - [Implementation status](design/IMPLEMENTATION-STATUS.md)
+- [System Intelligence and migration architecture](design/system-intelligence-and-migrations.md)
+- [System Intelligence implementation progress](implementation-progress.md)
 - [Fetch phase design](design/fetch-phase.md)
 - [Signed repository index design](design/signed-repository-index-v2.md)
 - [Plugin API v1](design/plugin-api-v1.md)

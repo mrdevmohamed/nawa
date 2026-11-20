@@ -1,12 +1,12 @@
 //! Plugin command handlers: management, capability policy and direct dispatch.
 
-use anyhow::{Result};
-use crate::ctx::Ctx;
-use crate::color::Palette;
-use std::path::PathBuf;
-use crate::color::Stream;
-use crate::config;
+use crate::adapters::config;
+use crate::application::context::Ctx;
 use crate::plugins;
+use crate::presentation::color::Palette;
+use crate::presentation::color::Stream;
+use anyhow::Result;
+use std::path::PathBuf;
 
 use anyhow::bail;
 
@@ -33,13 +33,16 @@ fn protected_paths(ctx: &Ctx) -> Vec<PathBuf> {
 /// List every discovered plugin without executing it.
 pub(crate) fn cmd_plugin_list(ctx: &Ctx) -> Result<()> {
     let state = effective_state(ctx);
-    let found = plugins::discovery::discover(crate::diag::is_root())?;
+    let found = plugins::discovery::discover(crate::presentation::diag::is_root())?;
     if found.is_empty() {
         crate::nawa_info!("no plugins discovered");
         return Ok(());
     }
     let pal = Palette::auto(Stream::Stdout);
-    println!("{:<14}  {:<8}  {:<9}  {:<7}  Source", "ID", "Version", "State", "API");
+    println!(
+        "{:<14}  {:<8}  {:<9}  {:<7}  Source",
+        "ID", "Version", "State", "API"
+    );
     println!("{}", "-".repeat(64));
     for plugin in &found {
         let (id, version, api) = if plugin.error.is_some() {
@@ -61,9 +64,13 @@ pub(crate) fn cmd_plugin_list(ctx: &Ctx) -> Result<()> {
             "{:<14}  {:<8}  {}  {:<7}  {}",
             pal.name(&id),
             pal.ver(&version),
-            if shown_state == "enabled" { pal.ok(&shown_state) }
-            else if shown_state == "invalid" { pal.warn(&shown_state) }
-            else { pal.dim(&shown_state) },
+            if shown_state == "enabled" {
+                pal.ok(&shown_state)
+            } else if shown_state == "invalid" {
+                pal.warn(&shown_state)
+            } else {
+                pal.dim(&shown_state)
+            },
             api,
             pal.dim(&plugin.dir.display().to_string()),
         );
@@ -74,7 +81,7 @@ pub(crate) fn cmd_plugin_list(ctx: &Ctx) -> Result<()> {
 /// Show a plugin manifest and the effective administrator grants.
 pub(crate) fn cmd_plugin_info(ctx: &Ctx, id: &str) -> Result<()> {
     let state = effective_state(ctx);
-    let found = plugins::discovery::discover(crate::diag::is_root())?
+    let found = plugins::discovery::discover(crate::presentation::diag::is_root())?
         .into_iter()
         .find(|plugin| plugin.manifest.id == id)
         .ok_or_else(|| anyhow::anyhow!("no plugin {id:?} discovered"))?;
@@ -83,20 +90,62 @@ pub(crate) fn cmd_plugin_info(ctx: &Ctx, id: &str) -> Result<()> {
     }
     let manifest = &found.manifest;
     println!("Plugin:      {} ({})", manifest.name, manifest.id);
-    println!("Version:     {} (API {})", manifest.version, manifest.api_version);
+    println!(
+        "Version:     {} (API {})",
+        manifest.version, manifest.api_version
+    );
     println!("Executable:  {}", manifest.executable.display());
     println!("Directory:   {}", found.dir.display());
     if !manifest.description.is_empty() {
         println!("Description: {}", manifest.description);
     }
-    println!("State:       {}", if state.is_enabled(id) { "enabled" } else { "disabled" });
-    println!("Commands:    {}", if manifest.commands.is_empty() { "(none)".into() } else { manifest.commands.join(", ") });
-    println!("Events:      {}", if manifest.events.is_empty() { "(none)".into() } else { manifest.events.join(", ") });
-    let requested: Vec<&str> = manifest.requested_capabilities.iter().map(|cap| cap.as_str()).collect();
+    println!(
+        "State:       {}",
+        if state.is_enabled(id) {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+    println!(
+        "Commands:    {}",
+        if manifest.commands.is_empty() {
+            "(none)".into()
+        } else {
+            manifest.commands.join(", ")
+        }
+    );
+    println!(
+        "Events:      {}",
+        if manifest.events.is_empty() {
+            "(none)".into()
+        } else {
+            manifest.events.join(", ")
+        }
+    );
+    let requested: Vec<&str> = manifest
+        .requested_capabilities
+        .iter()
+        .map(|cap| cap.as_str())
+        .collect();
     let granted = state.granted_capabilities(id, &manifest.requested_capabilities);
     let granted_names: Vec<&str> = granted.iter().map(|cap| cap.as_str()).collect();
-    println!("Requested:   {}", if requested.is_empty() { "(none)".into() } else { requested.join(", ") });
-    println!("Granted:     {}", if granted_names.is_empty() { "(none)".into() } else { granted_names.join(", ") });
+    println!(
+        "Requested:   {}",
+        if requested.is_empty() {
+            "(none)".into()
+        } else {
+            requested.join(", ")
+        }
+    );
+    println!(
+        "Granted:     {}",
+        if granted_names.is_empty() {
+            "(none)".into()
+        } else {
+            granted_names.join(", ")
+        }
+    );
     if !found.approved_for_root {
         println!("Note:        non-system plugin; root execution requires root-owned, non-writable paths");
     }
@@ -105,7 +154,7 @@ pub(crate) fn cmd_plugin_info(ctx: &Ctx, id: &str) -> Result<()> {
 
 /// Enable/disable is a project preference. A system-wide disable wins.
 pub(crate) fn cmd_plugin_enable(ctx: &Ctx, id: &str, enable: bool) -> Result<()> {
-    let found = plugins::discovery::discover(crate::diag::is_root())?
+    let found = plugins::discovery::discover(crate::presentation::diag::is_root())?
         .into_iter()
         .find(|plugin| plugin.manifest.id == id && plugin.error.is_none())
         .ok_or_else(|| anyhow::anyhow!("no usable plugin {id:?} discovered"))?;
@@ -126,7 +175,10 @@ pub(crate) fn cmd_plugin_enable(ctx: &Ctx, id: &str, enable: bool) -> Result<()>
     crate::nawa_info!(
         "plugin {id} {} (recorded in {})",
         if enable { "enabled" } else { "disabled" },
-        ctx.cfg.file.as_deref().map(|path| path.display().to_string())
+        ctx.cfg
+            .file
+            .as_deref()
+            .map(|path| path.display().to_string())
             .unwrap_or_else(|| "(no project config)".into()),
     );
     Ok(())
@@ -140,7 +192,7 @@ pub(crate) fn cmd_plugin_grant(
     capability_name: &str,
     grant: bool,
 ) -> Result<()> {
-    if !crate::diag::is_root() {
+    if !crate::presentation::diag::is_root() {
         bail!("plugin capabilities are administrator policy; run this command as root");
     }
     let capability = plugins::manifest::Capability::parse(capability_name)
@@ -150,13 +202,19 @@ pub(crate) fn cmd_plugin_grant(
     }
     let plugin = plugins::discovery::discover(true)?
         .into_iter()
-        .find(|plugin| plugin.manifest.id == id && plugin.error.is_none() && plugin.approved_for_root)
+        .find(|plugin| {
+            plugin.manifest.id == id && plugin.error.is_none() && plugin.approved_for_root
+        })
         .ok_or_else(|| anyhow::anyhow!("no usable system plugin {id:?} discovered"))?;
     if !plugin.manifest.requested_capabilities.contains(&capability) {
         bail!("plugin {id} did not request {}", capability.as_str());
     }
 
-    let system_file = ctx.cfg.system_file.clone().unwrap_or_else(config::system_file);
+    let system_file = ctx
+        .cfg
+        .system_file
+        .clone()
+        .unwrap_or_else(config::system_file);
     if !plugins::discovery::secure_admin_config(&system_file) {
         bail!(
             "system config {} is missing or insecure; create it with nawa init --system and keep it root-owned",
@@ -182,7 +240,7 @@ pub(crate) fn cmd_plugin_grant(
 /// selected the plugin and command. The plugin still gets only granted APIs.
 pub(crate) fn cmd_plugin_run(ctx: &Ctx, id: &str, command: &str, args: &[String]) -> Result<()> {
     let state = effective_state(ctx);
-    let found = plugins::discovery::discover(crate::diag::is_root())?
+    let found = plugins::discovery::discover(crate::presentation::diag::is_root())?
         .into_iter()
         .find(|plugin| plugin.manifest.id == id)
         .ok_or_else(|| anyhow::anyhow!("no plugin {id:?} discovered"))?;
@@ -211,32 +269,38 @@ pub(crate) fn cmd_plugin_run(ctx: &Ctx, id: &str, command: &str, args: &[String]
 /// registered it and the administrator granted command.register.
 pub(crate) fn cmd_plugin_dispatch(ctx: &Ctx, command: &str, args: &[String]) -> Result<()> {
     let state = effective_state(ctx);
-    let found = plugins::discovery::discover(crate::diag::is_root())?;
-    let mut candidates: Vec<_> = found.into_iter().filter(|plugin| {
-        plugin.error.is_none()
-            && state.is_enabled(&plugin.manifest.id)
-            && plugin.manifest.requested_capabilities.contains(
-                &plugins::manifest::Capability::CommandRegister,
-            )
-            && state.has_grant(
-                &plugin.manifest.id,
-                plugins::manifest::Capability::CommandRegister,
-            )
-            && plugin.manifest.commands.iter().any(|name| name == command)
-    }).collect();
+    let found = plugins::discovery::discover(crate::presentation::diag::is_root())?;
+    let mut candidates: Vec<_> = found
+        .into_iter()
+        .filter(|plugin| {
+            plugin.error.is_none()
+                && state.is_enabled(&plugin.manifest.id)
+                && plugin
+                    .manifest
+                    .requested_capabilities
+                    .contains(&plugins::manifest::Capability::CommandRegister)
+                && state.has_grant(
+                    &plugin.manifest.id,
+                    plugins::manifest::Capability::CommandRegister,
+                )
+                && plugin.manifest.commands.iter().any(|name| name == command)
+        })
+        .collect();
 
     if candidates.is_empty() {
         bail!("unknown command {command:?}; no enabled plugin has an administrator command.register grant");
     }
     if candidates.len() > 1 {
-        let ids = candidates.iter().map(|plugin| plugin.manifest.id.as_str()).collect::<Vec<_>>().join(", ");
+        let ids = candidates
+            .iter()
+            .map(|plugin| plugin.manifest.id.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
         bail!("plugin command {command:?} is ambiguous; registered by: {ids}");
     }
     let plugin = candidates.remove(0);
-    let granted = state.granted_capabilities(
-        &plugin.manifest.id,
-        &plugin.manifest.requested_capabilities,
-    );
+    let granted =
+        state.granted_capabilities(&plugin.manifest.id, &plugin.manifest.requested_capabilities);
     let mut process = plugins::runner::PluginProcess::start_with_policy(
         &plugin.manifest,
         &granted,
@@ -251,13 +315,17 @@ pub(crate) fn cmd_plugin_dispatch(ctx: &Ctx, command: &str, args: &[String]) -> 
 /// `nawa <external>`: an unknown subcommand is a plugin command.
 pub(crate) fn cmd_plugin_external(ctx: &Ctx, values: Vec<std::ffi::OsString>) -> Result<()> {
     let mut values = values.into_iter();
-    let command = values.next()
+    let command = values
+        .next()
         .ok_or_else(|| anyhow::anyhow!("missing plugin command name"))?
         .into_string()
         .map_err(|_| anyhow::anyhow!("plugin command name is not valid UTF-8"))?;
     let args: Result<Vec<String>> = values
-        .map(|value| value.into_string().map_err(|_| anyhow::anyhow!("plugin arguments must be valid UTF-8 for JSONL")))
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("plugin arguments must be valid UTF-8 for JSONL"))
+        })
         .collect();
     cmd_plugin_dispatch(ctx, &command, &args?)
-
 }

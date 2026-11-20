@@ -10,8 +10,8 @@
 
 use std::fs;
 use std::io::Write as _;
-use std::os::unix::fs::PermissionsExt;
 use std::net::TcpListener;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -25,16 +25,28 @@ fn nawa_bin() -> PathBuf {
 fn nawa() -> Command {
     let mut c = Command::new(nawa_bin());
     for k in [
-        "NAWA_CONFIG", "NAWA_ROOT", "NAWA_RECIPES", "NAWA_BUILDDIR",
-        "NAWA_PROFILES", "NAWA_JOBS", "NAWA_REPO", "NAWA_INSTALL_MODE",
-        "NAWA_OFFLINE", "NAWA_SRCCACHE", "NAWA_SOURCE_DATE_EPOCH",
+        "NAWA_CONFIG",
+        "NAWA_ROOT",
+        "NAWA_RECIPES",
+        "NAWA_BUILDDIR",
+        "NAWA_PROFILES",
+        "NAWA_JOBS",
+        "NAWA_REPO",
+        "NAWA_INSTALL_MODE",
+        "NAWA_OFFLINE",
+        "NAWA_SRCCACHE",
+        "NAWA_SOURCE_DATE_EPOCH",
         // the new names must come from the staging engine, never from the
         // ambient environment of whatever machine runs the tests
-        "NAWA_SRCROOT", "NAWA_ASSETSDIR",
+        "NAWA_SRCROOT",
+        "NAWA_ASSETSDIR",
     ] {
         c.env_remove(k);
     }
-    c.env("NAWA_SYSCONFDIR", std::env::temp_dir().join("nawa-test-no-sysconf"));
+    c.env(
+        "NAWA_SYSCONFDIR",
+        std::env::temp_dir().join("nawa-test-no-sysconf"),
+    );
     c.env("NAWA_INSTALL_MODE", "build");
     c.current_dir(std::env::temp_dir());
     c
@@ -72,7 +84,8 @@ fn fixture_tar_gz(top: &str, files: &[(&str, &[u8])]) -> Vec<u8> {
             h.set_mode(0o644);
             h.set_mtime(500_000);
             h.set_cksum();
-            b.append_data(&mut h, format!("{top}/{name}"), &data[..]).unwrap();
+            b.append_data(&mut h, format!("{top}/{name}"), &data[..])
+                .unwrap();
         }
         b.finish().unwrap();
     }
@@ -85,9 +98,7 @@ fn fixture_tar_gz(top: &str, files: &[(&str, &[u8])]) -> Vec<u8> {
 
 /// Serve a fixed route table: `path → None` answers 404, `path → Some(body)`
 /// answers 200 with those bytes; accepted connections are counted.
-fn route_server(
-    routes: Vec<(&'static str, Option<Vec<u8>>)>,
-) -> (String, Arc<AtomicUsize>) {
+fn route_server(routes: Vec<(&'static str, Option<Vec<u8>>)>) -> (String, Arc<AtomicUsize>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let count = Arc::new(AtomicUsize::new(0));
@@ -98,7 +109,9 @@ fn route_server(
         .collect();
     let counter = count.clone();
     std::thread::spawn(move || loop {
-        let Ok((mut sock, _)) = l2.accept() else { break };
+        let Ok((mut sock, _)) = l2.accept() else {
+            break;
+        };
         counter.fetch_add(1, Ordering::SeqCst);
         let mut buf = [0u8; 4096];
         let n = std::io::Read::read(&mut sock, &mut buf).unwrap_or(0);
@@ -120,7 +133,12 @@ fn route_server(
 }
 
 /// Build `name` with the given extra args; returns stdout/stderr/ok.
-fn run_build(recipes: &Path, builddir: &Path, extra: &[&str], name: &str) -> (String, String, bool) {
+fn run_build(
+    recipes: &Path,
+    builddir: &Path,
+    extra: &[&str],
+    name: &str,
+) -> (String, String, bool) {
     let out = nawa()
         .args([
             "--recipes",
@@ -155,8 +173,11 @@ fn kernel_style_assets(recipes: &Path, name: &str) -> PathBuf {
     fs::write(r.join("files/patches/0001-fix.patch"), b"-- the fix\n").unwrap();
     fs::write(r.join("files/config/x86_64.fragment"), b"CONFIG_A=y\n").unwrap();
     fs::write(r.join("files/config/extra.fragment"), b"CONFIG_B=y\n").unwrap();
-    fs::write(r.join("files/scripts/configure-kernel.sh"), b"#!/bin/sh\necho assets-ok\n")
-        .unwrap();
+    fs::write(
+        r.join("files/scripts/configure-kernel.sh"),
+        b"#!/bin/sh\necho assets-ok\n",
+    )
+    .unwrap();
     // the script carries the owner-exec bit: §5.3.2 round-trips exactly that
     fs::set_permissions(
         r.join("files/scripts/configure-kernel.sh"),
@@ -241,7 +262,10 @@ cp "%{assetsdir}/files/config/x86_64.fragment" "%{pkgdir}/usr/share/boot/"
     .unwrap();
 
     let (stdout, stderr, ok) = run_build(&recipes, &s.join("build"), &[], "staged");
-    assert!(ok, "assets-only build failed:\n{stdout}\n--- stderr ---\n{stderr}");
+    assert!(
+        ok,
+        "assets-only build failed:\n{stdout}\n--- stderr ---\n{stderr}"
+    );
     let _ = fs::remove_dir_all(&s);
 }
 
@@ -289,8 +313,11 @@ fn missing_or_broken_assets_fail_before_any_download() {
 
     // (b) a symlink INSIDE a declared tree — same pre-download refusal
     kernel_style_assets(&recipes, "badsymlink");
-    std::os::unix::fs::symlink("0001-fix.patch", recipes.join("badsymlink/files/patches/evil.link"))
-        .unwrap();
+    std::os::unix::fs::symlink(
+        "0001-fix.patch",
+        recipes.join("badsymlink/files/patches/evil.link"),
+    )
+    .unwrap();
     fs::write(
         recipes.join("badsymlink/recipe.toml"),
         assets_only_recipe(
@@ -335,7 +362,10 @@ cp "%{assetsdir}/files/config/x86_64.fragment" "%{pkgdir}/usr/share/boot/"
     )
     .unwrap();
     let (stdout, stderr, ok) = run_build(&recipes, &s.join("build"), &[], "buid");
-    assert!(ok, "first build failed:\n{stdout}\n--- stderr ---\n{stderr}");
+    assert!(
+        ok,
+        "first build failed:\n{stdout}\n--- stderr ---\n{stderr}"
+    );
 
     // digest converged: the recorded (snapshot) id and the probed
     // (checkout) id agree on unchanged inputs → --use-cache is a hit
@@ -415,7 +445,10 @@ cp "%{assetsdir}/files/config/x86_64.fragment" "%{pkgdir}/usr/share/boot/"
     fs::write(s.join("go.signal"), b"go\n").unwrap();
 
     let (stdout, stderr, ok) = runner.join().unwrap();
-    assert!(ok, "mid-build race build failed:\n{stdout}\n--- stderr ---\n{stderr}");
+    assert!(
+        ok,
+        "mid-build race build failed:\n{stdout}\n--- stderr ---\n{stderr}"
+    );
     let product =
         fs::read(s.join("build/sealed-1.0-1/pkg/usr/share/boot/x86_64.fragment")).unwrap();
     assert_eq!(
@@ -454,10 +487,7 @@ install = "echo %{assetsdir}"
     )
     .unwrap();
     let (_stdout, stderr, ok) = run_build(&recipes, &s.join("build"), &[], "pctassets");
-    assert!(
-        !ok,
-        "a recipe without [assets] must not use %{{assetsdir}}"
-    );
+    assert!(!ok, "a recipe without [assets] must not use %{{assetsdir}}");
     assert!(
         stderr.contains("[assets]"),
         "the §14C error must name the fix (declare [assets]): {stderr}"

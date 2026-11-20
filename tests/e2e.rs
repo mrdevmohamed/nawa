@@ -16,14 +16,23 @@ fn nawa_bin() -> PathBuf {
 fn nawa() -> Command {
     let mut c = Command::new(nawa_bin());
     for k in [
-        "NAWA_CONFIG", "NAWA_ROOT", "NAWA_RECIPES", "NAWA_BUILDDIR",
-        "NAWA_PROFILES", "NAWA_JOBS", "NAWA_REPO", "NAWA_INSTALL_MODE",
+        "NAWA_CONFIG",
+        "NAWA_ROOT",
+        "NAWA_RECIPES",
+        "NAWA_BUILDDIR",
+        "NAWA_PROFILES",
+        "NAWA_JOBS",
+        "NAWA_REPO",
+        "NAWA_INSTALL_MODE",
     ] {
         c.env_remove(k);
     }
     // never read the host's /etc/nawa/nawa.toml, and keep installs by name
     // deterministic (no network): these tests exercise the build path
-    c.env("NAWA_SYSCONFDIR", std::env::temp_dir().join("nawa-test-no-sysconf"));
+    c.env(
+        "NAWA_SYSCONFDIR",
+        std::env::temp_dir().join("nawa-test-no-sysconf"),
+    );
     c.env("NAWA_INSTALL_MODE", "build");
     c.current_dir(std::env::temp_dir());
     c
@@ -62,9 +71,12 @@ chmod +x %{pkgdir}/usr/bin/hello
     // build
     let out = nawa()
         .args([
-            "--recipes", recipes.parent().unwrap().to_str().unwrap(),
-            "--builddir", scratch.join("build").to_str().unwrap(),
-            "build", "hello",
+            "--recipes",
+            recipes.parent().unwrap().to_str().unwrap(),
+            "--builddir",
+            scratch.join("build").to_str().unwrap(),
+            "build",
+            "hello",
         ])
         .output()
         .unwrap();
@@ -81,8 +93,10 @@ chmod +x %{pkgdir}/usr/bin/hello
     // install
     let out = nawa()
         .args([
-            "--root", root.to_str().unwrap(),
-            "install", archive.to_str().unwrap(),
+            "--root",
+            root.to_str().unwrap(),
+            "install",
+            archive.to_str().unwrap(),
         ])
         .output()
         .unwrap();
@@ -104,10 +118,7 @@ chmod +x %{pkgdir}/usr/bin/hello
 
     // owner
     let out = nawa()
-        .args([
-            "--root", root.to_str().unwrap(),
-            "owner", "/usr/bin/hello",
-        ])
+        .args(["--root", root.to_str().unwrap(), "owner", "/usr/bin/hello"])
         .output()
         .unwrap();
     assert!(String::from_utf8_lossy(&out.stdout).contains("hello"));
@@ -135,13 +146,21 @@ fn remove_refuses_non_interactive_without_yes() {
     let archive = build_hello_meta(&scratch);
     let root = scratch.join("rootfs");
     fs::create_dir_all(&root).unwrap();
-    run(["--root", root.to_str().unwrap(), "install", archive.to_str().unwrap()]);
+    run([
+        "--root",
+        root.to_str().unwrap(),
+        "install",
+        archive.to_str().unwrap(),
+    ]);
 
     // the refusal names --yes and nothing was removed
     let out = run_raw(["--root", root.to_str().unwrap(), "remove", "hello"]);
     assert!(!out.status.success(), "must refuse without --yes");
     assert!(String::from_utf8_lossy(&out.stderr).contains("--yes"));
-    assert!(root.join("usr/bin/hello").exists(), "nothing may be removed");
+    assert!(
+        root.join("usr/bin/hello").exists(),
+        "nothing may be removed"
+    );
 
     // --yes performs the removal
     run(["--root", root.to_str().unwrap(), "remove", "--yes", "hello"]);
@@ -165,7 +184,11 @@ fn ux_search_info_why_and_flags_anywhere() {
 
     // global flag AFTER the subcommand (new in v0.7)
     let out = run_raw(["search", "--recipes", &r, "hello"]);
-    assert!(out.status.success(), "search failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "search failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(String::from_utf8_lossy(&out.stdout).contains("hello meta package"));
 
     // search --glob matches the name only
@@ -175,7 +198,11 @@ fn ux_search_info_why_and_flags_anywhere() {
 
     // info before install: "not installed"
     let out = run_raw(["info", "--recipes", &r, "hello"]);
-    assert!(out.status.success(), "info failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "info failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("not installed"));
     assert!(text.contains("hello meta package"));
@@ -186,14 +213,27 @@ fn ux_search_info_why_and_flags_anywhere() {
     assert!(String::from_utf8_lossy(&out.stdout).contains("not installed"));
 
     // build --install: one step instead of three
-    let out = run_raw(["--recipes", &r, "--builddir", &b, "build", "--install", "hello", "--root", &rt]);
+    let out = run_raw([
+        "--recipes",
+        &r,
+        "--builddir",
+        &b,
+        "build",
+        "--install",
+        "hello",
+        "--root",
+        &rt,
+    ]);
     assert!(
         out.status.success(),
         "build --install failed:\n{}\n{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(root.join("usr/bin/hello").exists(), "archive was not installed by build --install");
+    assert!(
+        root.join("usr/bin/hello").exists(),
+        "archive was not installed by build --install"
+    );
 
     // list (query alias) with a pattern filter
     let out = run_raw(["list", "--root", &rt, "hel"]);
@@ -245,9 +285,12 @@ chmod +x %{pkgdir}/usr/bin/hello
     .unwrap();
 
     run([
-        "--recipes", scratch.join("recipes").to_str().unwrap(),
-        "--builddir", scratch.join("build").to_str().unwrap(),
-        "build", "hello",
+        "--recipes",
+        scratch.join("recipes").to_str().unwrap(),
+        "--builddir",
+        scratch.join("build").to_str().unwrap(),
+        "build",
+        "hello",
     ]);
     let archive = scratch.join("build/out/hello-1.0-1.nawa.tar.zst");
     assert!(archive.exists(), "archive missing: {}", archive.display());
@@ -267,10 +310,7 @@ fn run<'a>(args: impl IntoIterator<Item = &'a str>) -> std::process::Output {
 }
 
 fn run_raw<'a>(args: impl IntoIterator<Item = &'a str>) -> std::process::Output {
-    nawa()
-        .args(args)
-        .output()
-        .unwrap()
+    nawa().args(args).output().unwrap()
 }
 
 #[test]
@@ -301,9 +341,12 @@ fn deps_all_skips_installed_unless_include_installed() {
     // build + install "hello" so the db records it
     let out = nawa()
         .args([
-            "--recipes", recipes.to_str().unwrap(),
-            "--builddir", scratch.join("build").to_str().unwrap(),
-            "build", "hello",
+            "--recipes",
+            recipes.to_str().unwrap(),
+            "--builddir",
+            scratch.join("build").to_str().unwrap(),
+            "build",
+            "hello",
         ])
         .output()
         .unwrap();
@@ -314,24 +357,46 @@ fn deps_all_skips_installed_unless_include_installed() {
     );
     let archive = scratch.join("build/out/hello-1.0-1.nawa.tar.zst");
     let out = nawa()
-        .args(["--root", root.to_str().unwrap(), "install", archive.to_str().unwrap()])
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "install",
+            archive.to_str().unwrap(),
+        ])
         .output()
         .unwrap();
     assert!(out.status.success());
 
     let deps_all = |extra: &str| {
         let out = nawa()
-            .args(["--root", root.to_str().unwrap(), "--recipes", recipes.to_str().unwrap()])
+            .args([
+                "--root",
+                root.to_str().unwrap(),
+                "--recipes",
+                recipes.to_str().unwrap(),
+            ])
             .args(["deps-all"])
-            .args(if extra.is_empty() { vec![] } else { vec![extra] })
+            .args(if extra.is_empty() {
+                vec![]
+            } else {
+                vec![extra]
+            })
             .output()
             .unwrap();
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     };
 
     // default: the installed "hello" is skipped
-    assert_eq!(deps_all(""), "zzz", "installed packages must be skipped by default");
+    assert_eq!(
+        deps_all(""),
+        "zzz",
+        "installed packages must be skipped by default"
+    );
     // --include-installed: every recipe is listed
     assert_eq!(deps_all("--include-installed"), "hello\nzzz");
     let _ = fs::remove_dir_all(&scratch);
@@ -361,10 +426,16 @@ fn build_install_rebuilds_instead_of_reusing_a_stale_archive() {
     let go = || {
         let o = nawa()
             .args([
-                "build", "--install", "demo", "--force",
-                "--recipes", scratch.join("recipes").to_str().unwrap(),
-                "--builddir", scratch.join("build").to_str().unwrap(),
-                "--root", root.to_str().unwrap(),
+                "build",
+                "--install",
+                "demo",
+                "--force",
+                "--recipes",
+                scratch.join("recipes").to_str().unwrap(),
+                "--builddir",
+                scratch.join("build").to_str().unwrap(),
+                "--root",
+                root.to_str().unwrap(),
             ])
             .output()
             .unwrap();
@@ -372,11 +443,18 @@ fn build_install_rebuilds_instead_of_reusing_a_stale_archive() {
     };
     write_recipe("first");
     go();
-    assert_eq!(fs::read_to_string(root.join("usr/bin/demo")).unwrap().trim(), "first");
+    assert_eq!(
+        fs::read_to_string(root.join("usr/bin/demo"))
+            .unwrap()
+            .trim(),
+        "first"
+    );
     write_recipe("second");
     go();
     assert_eq!(
-        fs::read_to_string(root.join("usr/bin/demo")).unwrap().trim(),
+        fs::read_to_string(root.join("usr/bin/demo"))
+            .unwrap()
+            .trim(),
         "second",
         "build --install installed a stale archive"
     );
@@ -393,14 +471,24 @@ fn install_missing_archive_suggests_the_near_miss() {
     fs::write(scratch.join("out/demo-1.0-1.nawa.tar.zst"), b"x").unwrap();
     let root = scratch.join("rootfs");
     let o = nawa()
-        .args(["install", "--root", root.to_str().unwrap(), "out/demo-1.0-2.nawa.tar.zst"])
+        .args([
+            "install",
+            "--root",
+            root.to_str().unwrap(),
+            "out/demo-1.0-2.nawa.tar.zst",
+        ])
         .current_dir(&scratch)
         .output()
         .unwrap();
     assert!(!o.status.success());
     assert!(String::from_utf8_lossy(&o.stderr).contains("did you mean `demo-1.0-1.nawa.tar.zst`"));
     let o = nawa()
-        .args(["install", "--root", root.to_str().unwrap(), "demo-1.0-2.nawa.tar.zst"])
+        .args([
+            "install",
+            "--root",
+            root.to_str().unwrap(),
+            "demo-1.0-2.nawa.tar.zst",
+        ])
         .current_dir(scratch.join("out"))
         .output()
         .unwrap();
@@ -421,7 +509,6 @@ fn config_show_reports_flag_as_the_source() {
     let line = out.lines().find(|l| l.contains("/xyz")).expect("root line");
     assert!(line.contains("(flag)"), "got: {line}");
 }
-
 
 /// Repository-backed update must use the binary archive, and strict repo
 /// mode must refuse a stale repository version without changing the system.
@@ -454,9 +541,12 @@ fn update_from_repo_uses_binary_archive_and_rejects_stale_repo_versions() {
     let build_demo = || {
         let out = nawa()
             .args([
-                "--recipes", recipes.to_str().unwrap(),
-                "--builddir", builddir.to_str().unwrap(),
-                "build", "demo",
+                "--recipes",
+                recipes.to_str().unwrap(),
+                "--builddir",
+                builddir.to_str().unwrap(),
+                "build",
+                "demo",
             ])
             .output()
             .unwrap();
@@ -475,8 +565,10 @@ fn update_from_repo_uses_binary_archive_and_rejects_stale_repo_versions() {
     assert!(v1_archive.is_file());
     let installed = nawa()
         .args([
-            "--root", root.to_str().unwrap(),
-            "install", v1_archive.to_str().unwrap(),
+            "--root",
+            root.to_str().unwrap(),
+            "install",
+            v1_archive.to_str().unwrap(),
         ])
         .output()
         .unwrap();
@@ -494,31 +586,49 @@ fn update_from_repo_uses_binary_archive_and_rejects_stale_repo_versions() {
     // A stale repo must be rejected before any package is touched.
     let stale_repo = scratch.join("stale-repo");
     fs::create_dir_all(&stale_repo).unwrap();
-    fs::copy(&v1_archive, stale_repo.join(v1_archive.file_name().unwrap())).unwrap();
+    fs::copy(
+        &v1_archive,
+        stale_repo.join(v1_archive.file_name().unwrap()),
+    )
+    .unwrap();
     let indexed = nawa()
         .args(["repo-create", stale_repo.to_str().unwrap()])
         .output()
         .unwrap();
-    assert!(indexed.status.success(), "repo-create failed: {}", String::from_utf8_lossy(&indexed.stderr));
+    assert!(
+        indexed.status.success(),
+        "repo-create failed: {}",
+        String::from_utf8_lossy(&indexed.stderr)
+    );
 
     let stale = nawa()
         .args([
-            "--root", root.to_str().unwrap(),
-            "--recipes", recipes.to_str().unwrap(),
-            "update", "--from", "repo",
-            "--repo", stale_repo.to_str().unwrap(),
+            "--root",
+            root.to_str().unwrap(),
+            "--recipes",
+            recipes.to_str().unwrap(),
+            "update",
+            "--from",
+            "repo",
+            "--repo",
+            stale_repo.to_str().unwrap(),
             "--yes",
         ])
         .output()
         .unwrap();
-    assert!(!stale.status.success(), "strict repo mode must reject the stale package");
+    assert!(
+        !stale.status.success(),
+        "strict repo mode must reject the stale package"
+    );
     assert!(
         String::from_utf8_lossy(&stale.stderr).contains("recipe requires"),
         "unexpected error: {}",
         String::from_utf8_lossy(&stale.stderr)
     );
     assert_eq!(
-        fs::read_to_string(root.join("usr/share/demo-version")).unwrap().trim(),
+        fs::read_to_string(root.join("usr/share/demo-version"))
+            .unwrap()
+            .trim(),
         "v1",
         "a rejected plan must leave the installed package untouched"
     );
@@ -527,19 +637,32 @@ fn update_from_repo_uses_binary_archive_and_rejects_stale_repo_versions() {
     // source build is needed for this invocation.
     let current_repo = scratch.join("current-repo");
     fs::create_dir_all(&current_repo).unwrap();
-    fs::copy(&v2_archive, current_repo.join(v2_archive.file_name().unwrap())).unwrap();
+    fs::copy(
+        &v2_archive,
+        current_repo.join(v2_archive.file_name().unwrap()),
+    )
+    .unwrap();
     let indexed = nawa()
         .args(["repo-create", current_repo.to_str().unwrap()])
         .output()
         .unwrap();
-    assert!(indexed.status.success(), "repo-create failed: {}", String::from_utf8_lossy(&indexed.stderr));
+    assert!(
+        indexed.status.success(),
+        "repo-create failed: {}",
+        String::from_utf8_lossy(&indexed.stderr)
+    );
 
     let updated = nawa()
         .args([
-            "--root", root.to_str().unwrap(),
-            "--recipes", recipes.to_str().unwrap(),
-            "update", "--from", "repo",
-            "--repo", current_repo.to_str().unwrap(),
+            "--root",
+            root.to_str().unwrap(),
+            "--recipes",
+            recipes.to_str().unwrap(),
+            "update",
+            "--from",
+            "repo",
+            "--repo",
+            current_repo.to_str().unwrap(),
             "--yes",
         ])
         .output()
@@ -551,10 +674,18 @@ fn update_from_repo_uses_binary_archive_and_rejects_stale_repo_versions() {
         String::from_utf8_lossy(&updated.stderr)
     );
     let stdout = String::from_utf8_lossy(&updated.stdout);
-    assert!(stdout.contains("fetching demo-2.0-1 from the repository"), "{stdout}");
-    assert!(!stdout.contains("building demo"), "repo mode unexpectedly built from source: {stdout}");
+    assert!(
+        stdout.contains("fetching demo-2.0-1 from the repository"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("building demo"),
+        "repo mode unexpectedly built from source: {stdout}"
+    );
     assert_eq!(
-        fs::read_to_string(root.join("usr/share/demo-version")).unwrap().trim(),
+        fs::read_to_string(root.join("usr/share/demo-version"))
+            .unwrap()
+            .trim(),
         "v2"
     );
 

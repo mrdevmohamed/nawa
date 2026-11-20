@@ -99,7 +99,7 @@ See [Build and fetch](build-and-fetch.md) for offline workflows.
 | nawa trust KEYFILE | Add a public key to the target root's trust store. |
 | nawa clean CATEGORY | Remove selected cache data; categories are metadata, packages, sources, layers, and all. |
 
-Repository creation has schema-specific requirements. Index schema v2 and later must be signed; schema v3 also requires a locations manifest. Read [Repositories and security](repositories-and-security.md) before publishing an index.
+Repository creation has schema-specific requirements. Index schema v2 and later must be signed; schemas v3 and v4 also require a locations manifest. Schema v4 is opt-in (`--index-version 4`) and additionally requires each archive to declare `[capabilities] provides` in its `.PKGINFO` (an empty table is allowed): the signed index duplicates `rundeps`/`provides` so binary-only solving can select providers, and the archive's fields are compared against the index after digest verification. Legacy v1–v3 indexes remain readable (their metadata is *unknown*, never empty). Read [Repositories and security](repositories-and-security.md) before publishing an index.
 
 ## System and maintenance commands
 
@@ -108,11 +108,6 @@ Repository creation has schema-specific requirements. Index schema v2 and later 
 | nawa history | List recent package transactions. |
 | nawa history info ID | Show a transaction record. |
 | nawa history undo ID | Create a compensating transaction for a prior transaction. |
-| nawa service list | List available runit services and enabled state. |
-| nawa service status [NAME] | Show static and, when available, live service status. |
-| nawa service enable NAME [--now] | Enable a runit service; optionally start it immediately. |
-| nawa service disable NAME [--now] | Disable a service; optionally stop it first. |
-| nawa service start, stop, or restart NAME | Control an enabled service. |
 | nawa plugin list | List discovered plugins. |
 | nawa plugin info ID | Show plugin manifest details. |
 | nawa plugin enable or disable ID | Change plugin state. |
@@ -124,9 +119,35 @@ Repository creation has schema-specific requirements. Index schema v2 and later 
 | nawa config show | Show effective configuration and where each value came from. |
 | nawa init | Write a project configuration template. |
 | nawa init --system | Write the system-wide configuration template. |
+| nawa system status | Show observed runtime PID 1, installed init candidates and desired init profile as separate facts. |
+| nawa system profile show | Show the merged system profile and the source file for each provider declaration. |
+| nawa system plan | Compare the observed init with the desired provider; read-only and explicitly unresolved when evidence is missing. |
+| nawa system explain init-system | Explain runtime, installed, desired and authenticated package-metadata sources for the init-system role. |
+| nawa system migrate list | List system migration records in deterministic order; never mutates anything. |
+| nawa system migrate show ID | Show one migration record in full, including every step's intent and outcome. |
+| nawa system migrate status | Show whether the mutation gate is held and which migrations are in progress. |
+| nawa system migrate plan ID | Show the read-only plan for a built-in migration (works on an offline root; persists nothing). |
+| nawa system migrate apply ID --plan-id sp-HASH --from CAP --to CAP --acknowledge-reboot --acknowledge-recovery | Approve the exact displayed SystemPlan: live host only (a generic `--yes` is never enough). Currently refuses at the boot-handler boundary with exit 1 until external Faseela/SAQ acceptance is proven. |
+| nawa system migrate resume | Reconcile an interrupted migration and, after reboot, verify the target init and finalize the record (live host only). |
 | nawa completions SHELL | Print shell completion scripts for bash, zsh, or fish. |
 
 **Group installation status:** the command exists, but currently refuses to install a group until signed group metadata is published by a repository. See the [implementation status](design/IMPLEMENTATION-STATUS.md).
+
+**System inspection commands:** `system status`, `system profile show`, `system plan` and `system explain init-system` are read-only. They keep runtime PID 1, installed target-root candidates and the desired profile separate. Offline roots never inherit the host's PID 1; a missing or invalid profile is reported rather than guessed. `system plan` is an inspection/reconciliation preview, not a package transaction plan.
+
+**Upgrade/system-transition behavior:** `nawa upgrade` can display a separate migration candidate only when the running PID 1 is proven, the effective target profile declares a different supported init, and a trusted schema-v5 repository has exact relations and identifies one provider. It shows the provider package and the shared resolver's authenticated runtime-dependency closure. This is a preview, not an executable migration transaction. Ordinary `upgrade` and `--yes` never apply the transition, remove the current init provider, or change boot configuration. The migration still requires its own plan-bound approval and the external Faseela/SAQ boot and recovery contracts.
+
+**Migration commands:** `list`, `show`, `status` and `plan` are read-only (a shared lock gives one coherent snapshot; offline roots are supported) and never create records, change migration state, or run handlers. `apply` and `resume` are live-host only: they reject offline roots, chroots, containers and unverified hosts. `apply` requires the exact displayed SystemPlan identity, migration id, source/target capabilities, and explicit acknowledgements of the reboot and recovery requirements. Exact signed archives stage before the lock; production apply remains blocked on external Faseela/SAQ boot and rescue acceptance. A refusal exits 1 and never claims completion. `resume` reconciles interrupted records and requires approved inventory, retained snapshot/provenance, proven PID 1, effective target profile and boot evidence; unresolved evidence keeps the gate and exits 1.
+
+Copy `Plan identity: sp-…` from `system plan` or `system migrate plan ID` into
+`apply --plan-id`. Both display the same approval identity. Changed observations,
+inventory digests/reasons, source, index, signer, archive identity or action order
+require a newly reviewed plan. Staging and package execution never solve again.
+Refused/blocked apply and unresolved resume return **exit 1**, Nawa's normal
+operation-error status. Inspection commands keep their documented report-only
+status. Resume cannot complete a legacy unpinned record or an operation without
+verified snapshot, package, firmware/initramfs and rescue evidence. A pending
+reboot is also not a completed migration; Nawa never reboots automatically.
 
 ## Common examples
 

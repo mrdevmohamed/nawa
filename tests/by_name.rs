@@ -2,6 +2,7 @@
 //! against meta recipes (no downloads) and a throwaway root.
 
 use std::fs;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -10,7 +11,12 @@ fn nawa_bin() -> PathBuf {
 }
 
 fn recipe(dir: &Path, name: &str, version: &str, build: &[&str], run: &[&str]) {
-    let q = |l: &[&str]| l.iter().map(|d| format!("{d:?}")).collect::<Vec<_>>().join(", ");
+    let q = |l: &[&str]| {
+        l.iter()
+            .map(|d| format!("{d:?}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     let r = dir.join("recipes").join(name);
     fs::create_dir_all(&r).unwrap();
     fs::write(
@@ -32,7 +38,10 @@ fn nawa(dir: &Path, args: &[&str]) -> Output {
         .env_remove("NAWA_REPO")
         // never read the host's /etc/nawa/nawa.toml; these tests cover the
         // build path (the repository path lives in tests/repo_install.rs)
-        .env("NAWA_SYSCONFDIR", std::env::temp_dir().join("nawa-test-no-sysconf"))
+        .env(
+            "NAWA_SYSCONFDIR",
+            std::env::temp_dir().join("nawa-test-no-sysconf"),
+        )
         .env("NAWA_INSTALL_MODE", "build")
         .env("NO_COLOR", "1")
         .current_dir(dir)
@@ -90,14 +99,23 @@ fn install_by_name_builds_dependencies_first() {
     let out = ok(&nawa(&d, &["install", "--yes", "app"]));
     assert!(out.contains("[3/3] installing app-1-1"), "{out}");
     for f in ["libc0", "libfoo", "app"] {
-        assert!(d.join("root/usr/share").join(f).exists(), "{f} not installed");
+        assert!(
+            d.join("root/usr/share").join(f).exists(),
+            "{f} not installed"
+        );
     }
 
     // reasons: the named package is explicit, the rest are dependencies
     let explicit = ok(&nawa(&d, &["list", "--explicit"]));
-    assert!(explicit.contains("app") && !explicit.contains("libfoo"), "{explicit}");
+    assert!(
+        explicit.contains("app") && !explicit.contains("libfoo"),
+        "{explicit}"
+    );
     let deps = ok(&nawa(&d, &["list", "--deps"]));
-    assert!(deps.contains("libfoo") && deps.contains("libc0") && !deps.contains("app"), "{deps}");
+    assert!(
+        deps.contains("libfoo") && deps.contains("libc0") && !deps.contains("app"),
+        "{deps}"
+    );
 
     // asking again is a no-op, not a rebuild
     let out = ok(&nawa(&d, &["install", "--yes", "app"]));
@@ -121,7 +139,11 @@ fn install_recovers_a_crashed_transaction_before_opening_its_own() {
     // and the transaction record is still "preparing".
     let history = d.join("root/var/lib/nawa/history");
     let ghost = d.join("root/var/lib/nawa/local/ghost");
-    fs::create_dir_all(&ghost).unwrap();
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o755)
+        .create(&ghost)
+        .unwrap();
     fs::write(
         ghost.join("desc"),
         "name = \"ghost\"\nversion = \"1\"\nrel = 1\narch = \"x86_64\"\n\
@@ -166,7 +188,10 @@ fn install_recovers_a_crashed_transaction_before_opening_its_own() {
     let out = nawa(&d, &["history", "info", "1"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "history failed:\n{stderr}");
-    assert!(!stderr.contains("recovered:"), "history had to reconcile again:\n{stderr}");
+    assert!(
+        !stderr.contains("recovered:"),
+        "history had to reconcile again:\n{stderr}"
+    );
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("Status:    partial"), "{text}");
     assert!(text.contains("ghost: install (committed)"), "{text}");
@@ -188,13 +213,27 @@ fn outdated_update_and_autoremove() {
     // a new recipe version appears
     recipe(&d, "libfoo", "2", &[], &[]);
     let out = ok(&nawa(&d, &["outdated"]));
-    assert!(out.contains("libfoo") && out.contains("1-1") && out.contains("2-1"), "{out}");
+    assert!(
+        out.contains("libfoo") && out.contains("1-1") && out.contains("2-1"),
+        "{out}"
+    );
 
     // update only touches what is outdated and keeps the install reason
     let out = ok(&nawa(&d, &["update", "--yes"]));
-    assert!(out.contains("1 package(s)") && out.contains("libfoo-2-1"), "{out}");
-    assert_eq!(fs::read_to_string(d.join("root/usr/share/libfoo")).unwrap().trim(), "libfoo-2");
-    assert!(ok(&nawa(&d, &["list", "--deps"])).contains("libfoo"), "reason must survive an update");
+    assert!(
+        out.contains("1 package(s)") && out.contains("libfoo-2-1"),
+        "{out}"
+    );
+    assert_eq!(
+        fs::read_to_string(d.join("root/usr/share/libfoo"))
+            .unwrap()
+            .trim(),
+        "libfoo-2"
+    );
+    assert!(
+        ok(&nawa(&d, &["list", "--deps"])).contains("libfoo"),
+        "reason must survive an update"
+    );
     assert!(ok(&nawa(&d, &["update", "--yes"])).contains("up to date"));
 
     // nothing is orphaned while `app` needs libfoo and `tool` needs gcc0

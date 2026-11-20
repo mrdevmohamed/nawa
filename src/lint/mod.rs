@@ -26,7 +26,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 /// Top-level trees a package may install files into.
-pub(crate) const ALLOWED_TOP: &[&str] = &["bin", "boot", "etc", "lib", "lib64", "opt", "run", "sbin", "srv", "usr", "var"];
+pub(crate) const ALLOWED_TOP: &[&str] = &[
+    "bin", "boot", "etc", "lib", "lib64", "opt", "run", "sbin", "srv", "usr", "var",
+];
 
 /// Top-level dirs a package may stage as bare mount points only — the FHS
 /// skeleton owned by `base-files`. Content under them is an error:
@@ -34,7 +36,8 @@ pub(crate) const ALLOWED_TOP: &[&str] = &["bin", "boot", "etc", "lib", "lib64", 
 /// `home`, `media`, `mnt` stay empty for the site. The one documented
 /// exception is the root account's shell rc file (`root/.bashrc`), which
 /// ships with the skeleton.
-pub(crate) const SKELETON_TOP: &[&str] = &["dev", "home", "media", "mnt", "proc", "root", "sys", "tmp"];
+pub(crate) const SKELETON_TOP: &[&str] =
+    &["dev", "home", "media", "mnt", "proc", "root", "sys", "tmp"];
 
 /// Skeleton trees where not even a subdirectory may be staged — the kernel
 /// owns everything below them at runtime.
@@ -73,7 +76,7 @@ pub(crate) struct LintCtx<'a> {
 
 pub(crate) fn run(ctx: &LintCtx) -> LintReport {
     let mut rep = LintReport::default();
-    for e in crate::fswalk::entries_sorted_ok(ctx.pkgdir) {
+    for e in crate::adapters::fswalk::entries_sorted_ok(ctx.pkgdir) {
         let rel = match e.path().strip_prefix(ctx.pkgdir) {
             Ok(r) if !r.as_os_str().is_empty() => r.to_path_buf(),
             _ => continue,
@@ -109,9 +112,9 @@ pub(crate) fn run(ctx: &LintCtx) -> LintReport {
                     check_elf(&rel_s, &info, ctx, &mut rep);
                 }
                 Ok(None) => {}
-                Err(err) => rep.warnings.push(format!(
-                    "{rel_s}: not a parseable ELF ({err}) — skipped"
-                )),
+                Err(err) => rep
+                    .warnings
+                    .push(format!("{rel_s}: not a parseable ELF ({err}) — skipped")),
             }
         } else if looks_texty(&data) {
             check_text_leaks(&rel_s, &data, ctx, &mut rep);
@@ -133,7 +136,13 @@ pub(crate) fn build_id(
     closure_archives: &[std::path::PathBuf],
     profile_flags: &str,
 ) -> String {
-    build_id_with(recipe_bytes, source_sha256, closure_archives, profile_flags, &[])
+    build_id_with(
+        recipe_bytes,
+        source_sha256,
+        closure_archives,
+        profile_flags,
+        &[],
+    )
 }
 
 /// [`build_id`] with post-flag inputs appended, one `\0label=value` segment
@@ -178,11 +187,10 @@ pub(crate) fn build_id_with(
     hex::encode(h.finalize())
 }
 
-
 pub mod elf;
 pub mod layout;
 
-pub(crate) use elf::{parse_elf, ElfInfo, LintRead, MAX_ELF_SCAN_MIB, read_for_lint, looks_texty};
+pub(crate) use elf::{looks_texty, parse_elf, read_for_lint, ElfInfo, LintRead, MAX_ELF_SCAN_MIB};
 pub(crate) use layout::{check_elf, check_layout, check_text_leaks};
 
 #[cfg(test)]
@@ -207,8 +215,14 @@ mod tests {
         let b1 = build_id(b"recipe", "abc", &[a1.clone(), a2.clone()], "-O2");
         let b2 = build_id(b"recipe", "abc", &[a2.clone(), a1.clone()], "-O2");
         assert_eq!(b1, b2, "archive order must not matter");
-        assert_ne!(b1, build_id(b"recipe2", "abc", &[a1.clone(), a2.clone()], "-O2"));
-        assert_ne!(b1, build_id(b"recipe", "abd", std::slice::from_ref(&a2), "-O2"));
+        assert_ne!(
+            b1,
+            build_id(b"recipe2", "abc", &[a1.clone(), a2.clone()], "-O2")
+        );
+        assert_ne!(
+            b1,
+            build_id(b"recipe", "abd", std::slice::from_ref(&a2), "-O2")
+        );
         assert_ne!(b1, build_id(b"recipe", "abc", &[a1, a2], "-O3"));
     }
 
@@ -245,13 +259,31 @@ mod tests {
         // (3) any extra changes the id, so a new-schema recipe cannot
         // collide with a legacy one that differs only in those tables
         assert_ne!(
-            build_id_with(recipe, sha, &archives, "-O2 slim=1", &[("assets", "digest")]),
+            build_id_with(
+                recipe,
+                sha,
+                &archives,
+                "-O2 slim=1",
+                &[("assets", "digest")]
+            ),
             GOLDEN
         );
         // a different extra value is a different id
         assert_ne!(
-            build_id_with(recipe, sha, &archives, "-O2 slim=1", &[("assets", "digest2")]),
-            build_id_with(recipe, sha, &archives, "-O2 slim=1", &[("assets", "digest")])
+            build_id_with(
+                recipe,
+                sha,
+                &archives,
+                "-O2 slim=1",
+                &[("assets", "digest2")]
+            ),
+            build_id_with(
+                recipe,
+                sha,
+                &archives,
+                "-O2 slim=1",
+                &[("assets", "digest")]
+            )
         );
         // extras are appended in the given order — fixed order, not a set
         assert_ne!(
@@ -296,13 +328,13 @@ mod tests {
 
         // ... but ANY content under a mount point is an error
         let mut rep = LintReport::default();
-        check_layout("tmp/stray", &fake_md(0o755), &mut rep);        // leftover file
-        check_layout("dev/rule", &fake_md(0o644), &mut rep);         // udev rule
-        check_layout("proc/self", &fake_dir_md(0o555), &mut rep);    // even a dir
-        check_layout("home/user", &fake_md(0o644), &mut rep);        // site user
-        check_layout("mnt/out", &fake_dir_md(0o755), &mut rep);      // nested mount
-        check_layout("root/notes", &fake_md(0o644), &mut rep);       // non-dotfile
-        check_layout("root/.ssh", &fake_dir_md(0o700), &mut rep);    // dot dir
+        check_layout("tmp/stray", &fake_md(0o755), &mut rep); // leftover file
+        check_layout("dev/rule", &fake_md(0o644), &mut rep); // udev rule
+        check_layout("proc/self", &fake_dir_md(0o555), &mut rep); // even a dir
+        check_layout("home/user", &fake_md(0o644), &mut rep); // site user
+        check_layout("mnt/out", &fake_dir_md(0o755), &mut rep); // nested mount
+        check_layout("root/notes", &fake_md(0o644), &mut rep); // non-dotfile
+        check_layout("root/.ssh", &fake_dir_md(0o700), &mut rep); // dot dir
         check_layout("usr/local/bin/tool", &fake_md(0o755), &mut rep); // content
         for e in &rep.errors {
             assert!(
@@ -312,7 +344,12 @@ mod tests {
                 "unexpected: {e}"
             );
         }
-        assert_eq!(rep.errors.len(), 8, "all eight are errors: {:?}", rep.errors);
+        assert_eq!(
+            rep.errors.len(),
+            8,
+            "all eight are errors: {:?}",
+            rep.errors
+        );
 
         // an unknown top-level tree still fails with both lists in the msg
         let mut rep = LintReport::default();
@@ -373,13 +410,25 @@ mod tests {
     }
     impl Endian {
         fn u16(&self, v: u16) -> Vec<u8> {
-            if self.le { v.to_le_bytes().to_vec() } else { v.to_be_bytes().to_vec() }
+            if self.le {
+                v.to_le_bytes().to_vec()
+            } else {
+                v.to_be_bytes().to_vec()
+            }
         }
         fn u32(&self, v: u32) -> Vec<u8> {
-            if self.le { v.to_le_bytes().to_vec() } else { v.to_be_bytes().to_vec() }
+            if self.le {
+                v.to_le_bytes().to_vec()
+            } else {
+                v.to_be_bytes().to_vec()
+            }
         }
         fn u64(&self, v: u64) -> Vec<u8> {
-            if self.le { v.to_le_bytes().to_vec() } else { v.to_be_bytes().to_vec() }
+            if self.le {
+                v.to_le_bytes().to_vec()
+            } else {
+                v.to_be_bytes().to_vec()
+            }
         }
     }
 
@@ -389,8 +438,8 @@ mod tests {
     /// vaddr→offset translation is the identity — exactly enough for any ELF
     /// reader to find DT_NEEDED etc.
     fn elf_fixture(
-        class: u8,  // 1 = ELF32, 2 = ELF64
-        data: u8,   // 1 = little endian, 2 = big endian
+        class: u8, // 1 = ELF32, 2 = ELF64
+        data: u8,  // 1 = little endian, 2 = big endian
         needed: &[&str],
         runpath: Option<&str>,
         rpath: Option<&str>,
@@ -424,8 +473,11 @@ mod tests {
         let soname_off = soname.map(&mut add);
 
         // 2) dynamic section: NEEDED* [RUNPATH] [RPATH] [SONAME] STRTAB STRSZ NULL
-        let n_dyn =
-            needed.len() + runpath.is_some() as usize + rpath.is_some() as usize + soname.is_some() as usize + 3;
+        let n_dyn = needed.len()
+            + runpath.is_some() as usize
+            + rpath.is_some() as usize
+            + soname.is_some() as usize
+            + 3;
         let dyn_len = n_dyn * dyn_entry_len;
         // identity mapping: vaddr == file offset in this fixture
         let strtab_off: u64 = (eh_len + 2 * ph_len + dyn_len) as u64;
@@ -465,7 +517,11 @@ mod tests {
         v[5] = data; // data encoding
         v[6] = 1; // version
         v[16..18].copy_from_slice(&e.u16(3 /* ET_DYN */));
-        let machine = if is64 { e.u16(62 /* EM_X86_64 */) } else { e.u16(3 /* EM_386 */) };
+        let machine = if is64 {
+            e.u16(62 /* EM_X86_64 */)
+        } else {
+            e.u16(3 /* EM_386 */)
+        };
         v[18..20].copy_from_slice(&machine);
         if is64 {
             v[32..40].copy_from_slice(&e.u64(eh_len as u64)); // e_phoff
@@ -593,7 +649,10 @@ mod tests {
             report.warnings
         );
         assert!(
-            !report.warnings.iter().any(|warning| warning.contains("not a parseable ELF")),
+            !report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("not a parseable ELF")),
             "oversized ELF must not be mislabeled as malformed: {:?}",
             report.warnings
         );
@@ -688,7 +747,7 @@ mod tests {
     fn dangling_string_offsets_do_not_panic() {
         let good = elf64_fixture(&["libc.so.6"], Some("/r"), None);
         let dyn_off = 64 + 2 * 56; // fixture layout: dyn section right after both phdrs
-        // DT_STRTAB holds the vaddr; point it far out of bounds
+                                   // DT_STRTAB holds the vaddr; point it far out of bounds
         let mut m = good.clone();
         m[dyn_off + 8..dyn_off + 16].copy_from_slice(&0xffff_ffff_u64.to_le_bytes());
         let _ = parse_elf(&m);
@@ -747,7 +806,9 @@ mod tests {
 
         let rep = run(&ctx);
         assert!(
-            rep.warnings.iter().any(|w| w.contains("libz.so.1") && w.contains("zlib")),
+            rep.warnings
+                .iter()
+                .any(|w| w.contains("libz.so.1") && w.contains("zlib")),
             "missing rundep warning: {:?}",
             rep.warnings
         );

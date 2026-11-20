@@ -143,7 +143,10 @@ printf '{"protocol":"nawa-plugin","protocol_version":1,"request_id":"%s","ok":tr
     let out = ok(run(&dir, &["plugin", "run", "good", "hello-cmd"]));
     assert!(out.contains("from-plugin"), "{out}");
     // argv is preserved (never a shell string)
-    let out = ok(run(&dir, &["plugin", "run", "good", "hello-cmd", "a;rm", "b c"]));
+    let out = ok(run(
+        &dir,
+        &["plugin", "run", "good", "hello-cmd", "a;rm", "b c"],
+    ));
     assert!(out.contains("from-plugin"), "{out}");
     let _ = fs::remove_dir_all(&dir);
 }
@@ -154,7 +157,10 @@ fn wrong_request_id_is_an_error() {
     let smart = WRONG_ID_PLUGIN;
     install_plugin(&dir, "wrongid", smart, "\"x\"");
     let out = run(&dir, &["plugin", "run", "wrongid", "x"]);
-    assert!(!out.status.success(), "a mismatched request id must fail the run");
+    assert!(
+        !out.status.success(),
+        "a mismatched request id must fail the run"
+    );
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("answered request"), "{err}");
     assert!(err.contains("someone-else"), "{err}");
@@ -187,7 +193,11 @@ fn broken_plugins_do_not_crash_list_or_run() {
     // incompatible API version
     install_plugin(&dir, "oldapi", GOOD_PLUGIN, "\"x\"");
     let raw = fs::read_to_string(pdir2(&dir, "oldapi").join("nawa-plugin.toml")).unwrap();
-    fs::write(pdir2(&dir, "oldapi").join("nawa-plugin.toml"), raw.replace("api_version = \"1\"", "api_version = \"9\"")).unwrap();
+    fs::write(
+        pdir2(&dir, "oldapi").join("nawa-plugin.toml"),
+        raw.replace("api_version = \"1\"", "api_version = \"9\""),
+    )
+    .unwrap();
 
     // listing reports them without executing anything
     let out = ok(run(&dir, &["plugin", "list"]));
@@ -243,7 +253,10 @@ printf '{"protocol":"nawa-plugin","protocol_version":1,"request_id":"%s","ok":tr
     fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
 
     let denied = run(&dir, &["hello-cmd", "before-grant"]);
-    assert!(!denied.status.success(), "command.register must not be implicit");
+    assert!(
+        !denied.status.success(),
+        "command.register must not be implicit"
+    );
     assert!(
         String::from_utf8_lossy(&denied.stderr)
             .contains("no enabled plugin has an administrator command.register grant"),
@@ -266,7 +279,10 @@ printf '{"protocol":"nawa-plugin","protocol_version":1,"request_id":"%s","ok":tr
     let output = ok(run(&dir, &["hello-cmd", "after-grant"]));
     assert!(output.contains("automatically_dispatched"), "{output}");
 
-    let revoke = run(&dir, &["plugin", "revoke", "registered", "command.register"]);
+    let revoke = run(
+        &dir,
+        &["plugin", "revoke", "registered", "command.register"],
+    );
     assert!(
         revoke.status.success(),
         "revoke failed: {}",
@@ -290,7 +306,10 @@ printf '{"protocol":"nawa-plugin","protocol_version":1,"request_id":"%s","ok":tr
 fn unknown_top_level_command_is_routed_through_plugin_dispatch() {
     let dir = scratch("external");
     let out = run(&dir, &["plugin-only-command", "one", "two words"]);
-    assert!(!out.status.success(), "an unregistered dynamic command must fail");
+    assert!(
+        !out.status.success(),
+        "an unregistered dynamic command must fail"
+    );
     let error = String::from_utf8_lossy(&out.stderr);
     assert!(
         error.contains("no enabled plugin has an administrator command.register grant"),

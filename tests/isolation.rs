@@ -98,13 +98,19 @@ printf '%s|%s|%s' "$CFLAGS" "$LC_ALL" "$NAWA_JOBS" > %{pkgdir}/usr/bin/seen
     assert!(so.contains("home=/build/home"), "{so}");
     assert!(so.contains("lc=C"), "{so}");
     assert!(so.contains("tz=UTC"), "{so}");
-    assert!(so.contains("sde=1\n") || so.contains("sde=1"), "meta packages fall back to SDE=1: {so}");
+    assert!(
+        so.contains("sde=1\n") || so.contains("sde=1"),
+        "meta packages fall back to SDE=1: {so}"
+    );
 
     let seen = fs::read_to_string(d.join("build/probe-1.0-1/pkg/usr/bin/seen")).unwrap();
     assert_eq!(seen, "|C|5");
 
     let pkginfo = pkginfo_of(&d);
-    assert!(!pkginfo.contains("build_date"), "no wall clock at env+: {pkginfo}");
+    assert!(
+        !pkginfo.contains("build_date"),
+        "no wall clock at env+: {pkginfo}"
+    );
     assert!(pkginfo.contains("source_date_epoch = "), "{pkginfo}");
     assert!(pkginfo.contains("build_id = "), "{pkginfo}");
     let _ = fs::remove_dir_all(&d);
@@ -158,11 +164,17 @@ printf 'x' > %{pkgdir}/tmp/stray
 "#,
     );
     let o = build(&d, &[], &["--isolation", "env"]);
-    assert!(!o.status.success(), "leaked paths and stray /tmp must fail the build");
+    assert!(
+        !o.status.success(),
+        "leaked paths and stray /tmp must fail the build"
+    );
     let se = String::from_utf8_lossy(&o.stderr);
     assert!(se.contains("/build/src"), "{se}");
     assert!(se.contains("lint"), "{se}");
-    assert!(!d.join("build/out/probe-1.0-1.nawa.tar.zst").exists(), "no archive on lint failure");
+    assert!(
+        !d.join("build/out/probe-1.0-1.nawa.tar.zst").exists(),
+        "no archive on lint failure"
+    );
     let _ = fs::remove_dir_all(&d);
 }
 
@@ -235,7 +247,10 @@ echo x > %{pkgdir}/usr/bin/probe
     }
     assert!(o.status.success(), "{}", out_str(&o));
     let so = String::from_utf8_lossy(&o.stdout);
-    assert!(so.contains("uid=0"), "the build must run as root inside: {so}");
+    assert!(
+        so.contains("uid=0"),
+        "the build must run as root inside: {so}"
+    );
     assert!(
         so.contains("home=/build/home") || so.contains("home=/tmp/.nawa-sandbox/home"),
         "HOME must be the sandbox home: {so}"
@@ -345,7 +360,9 @@ printf 'fake lib for the soname index\n' > %{pkgdir}/usr/lib/libdeptool.so
     // build both dependencies first (env level: fast, no sandbox needed)
     for pkg in ["base-devel", "deptool"] {
         let mut c = nawa();
-        c.env_remove("CFLAGS").env_remove("CXXFLAGS").env_remove("LDFLAGS")
+        c.env_remove("CFLAGS")
+            .env_remove("CXXFLAGS")
+            .env_remove("LDFLAGS")
             .args(["--root", d.join("target-root").to_str().unwrap()])
             .args(["--recipes", d.join("recipes").to_str().unwrap()])
             .args(["--builddir", d.join("build").to_str().unwrap()])
@@ -383,7 +400,9 @@ echo x > %{pkgdir}/usr/bin/probe
     );
 
     let o = build(&d, &[], &["--isolation", "closure", "--allow-degraded"]);
-    if !o.status.success() && String::from_utf8_lossy(&o.stderr).contains("cannot create a user namespace") {
+    if !o.status.success()
+        && String::from_utf8_lossy(&o.stderr).contains("cannot create a user namespace")
+    {
         eprintln!("SKIP: user namespaces turned off mid-run");
         return;
     }
@@ -454,7 +473,9 @@ echo x > %{pkgdir}/usr/bin/probe
     // build base-devel first, then the probe against it with the layer
     // cache redirected into the scratch dir (NAWA_LAYER_CACHE)
     let mut c = nawa();
-    c.env_remove("CFLAGS").env_remove("CXXFLAGS").env_remove("LDFLAGS")
+    c.env_remove("CFLAGS")
+        .env_remove("CXXFLAGS")
+        .env_remove("LDFLAGS")
         .args(["--root", d.join("target-root").to_str().unwrap()])
         .args(["--recipes", d.join("recipes").to_str().unwrap()])
         .args(["--builddir", d.join("build").to_str().unwrap()])
@@ -464,13 +485,21 @@ echo x > %{pkgdir}/usr/bin/probe
     assert!(o.status.success(), "{}", out_str(&o));
 
     let mut c = nawa();
-    c.env_remove("CFLAGS").env_remove("CXXFLAGS").env_remove("LDFLAGS")
+    c.env_remove("CFLAGS")
+        .env_remove("CXXFLAGS")
+        .env_remove("LDFLAGS")
         .env("NAWA_LAYER_CACHE", d.join("layers").to_str().unwrap())
         .args(["--root", d.join("target-root").to_str().unwrap()])
         .args(["--recipes", d.join("recipes").to_str().unwrap()])
         .args(["--builddir", d.join("build").to_str().unwrap()])
         .args(["--profiles", d.join("profiles").to_str().unwrap()])
-        .args(["build", "probe", "--isolation", "closure", "--allow-degraded"]);
+        .args([
+            "build",
+            "probe",
+            "--isolation",
+            "closure",
+            "--allow-degraded",
+        ]);
     let o = c.output().unwrap();
     if !o.status.success()
         && String::from_utf8_lossy(&o.stderr).contains("cannot create a user namespace")
@@ -514,13 +543,21 @@ echo x > %{pkgdir}/usr/bin/probe
         .unwrap();
         // second build: the layer is already cached
         let o = nawa()
-            .env_remove("CFLAGS").env_remove("CXXFLAGS").env_remove("LDFLAGS")
+            .env_remove("CFLAGS")
+            .env_remove("CXXFLAGS")
+            .env_remove("LDFLAGS")
             .env("NAWA_LAYER_CACHE", d.join("layers").to_str().unwrap())
             .args(["--root", d.join("target-root").to_str().unwrap()])
             .args(["--recipes", d.join("recipes").to_str().unwrap()])
             .args(["--builddir", d.join("build2").to_str().unwrap()])
             .args(["--profiles", d.join("profiles").to_str().unwrap()])
-            .args(["build", "probe", "--isolation", "closure", "--allow-degraded"])
+            .args([
+                "build",
+                "probe",
+                "--isolation",
+                "closure",
+                "--allow-degraded",
+            ])
             .output()
             .unwrap();
         assert!(o.status.success(), "{}", out_str(&o));
@@ -568,7 +605,9 @@ echo x > %{pkgdir}/usr/bin/probe
     );
     let build = |d: &Path| {
         nawa()
-            .env_remove("CFLAGS").env_remove("CXXFLAGS").env_remove("LDFLAGS")
+            .env_remove("CFLAGS")
+            .env_remove("CXXFLAGS")
+            .env_remove("LDFLAGS")
             .args(["--root", d.join("target-root").to_str().unwrap()])
             .args(["--recipes", d.join("recipes").to_str().unwrap()])
             .args(["--builddir", d.join("build").to_str().unwrap()])
@@ -580,13 +619,22 @@ echo x > %{pkgdir}/usr/bin/probe
     let o1 = build(&d);
     assert!(o1.status.success(), "{}", out_str(&o1));
     let so1 = String::from_utf8_lossy(&o1.stdout);
-    assert!(so1.contains("BUILDING-NOW"), "first build really builds: {so1}");
-    assert!(!so1.contains("nothing to do"), "no hit on the first build: {so1}");
+    assert!(
+        so1.contains("BUILDING-NOW"),
+        "first build really builds: {so1}"
+    );
+    assert!(
+        !so1.contains("nothing to do"),
+        "no hit on the first build: {so1}"
+    );
 
     let o2 = build(&d);
     assert!(o2.status.success(), "{}", out_str(&o2));
     let so2 = String::from_utf8_lossy(&o2.stdout);
-    assert!(so2.contains("build cache hit"), "second build must hit: {so2}");
+    assert!(
+        so2.contains("build cache hit"),
+        "second build must hit: {so2}"
+    );
     assert!(
         !so2.contains("BUILDING-NOW"),
         "a cache hit must not run any build section: {so2}"
@@ -612,7 +660,10 @@ echo x > %{pkgdir}/usr/bin/probe
         "the old sidecar must be reported as a mismatch: {so_legacy}"
     );
     assert!(
-        fs::read_to_string(&sidecar).unwrap().trim().starts_with("v2:"),
+        fs::read_to_string(&sidecar)
+            .unwrap()
+            .trim()
+            .starts_with("v2:"),
         "the rebuild must record a versioned cache id"
     );
     let o_v2 = build(&d);
@@ -632,6 +683,9 @@ echo x > %{pkgdir}/usr/bin/probe
     let o3 = build(&d);
     assert!(o3.status.success(), "{}", out_str(&o3));
     let so3 = String::from_utf8_lossy(&o3.stdout);
-    assert!(so3.contains("BUILDING-NOW"), "changed inputs must rebuild: {so3}");
+    assert!(
+        so3.contains("BUILDING-NOW"),
+        "changed inputs must rebuild: {so3}"
+    );
     let _ = fs::remove_dir_all(&d);
 }

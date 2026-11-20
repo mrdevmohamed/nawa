@@ -110,7 +110,9 @@ echo x > %{pkgdir}/usr/bin/probe
 fn run_full_closure_dance(d: &Path, runner: &mut dyn FnMut(&mut Command) -> Output) {
     for pkg in ["base-devel", "deptool"] {
         let mut c = Command::new(nawa_path());
-        c.env_remove("CFLAGS").env_remove("CXXFLAGS").env_remove("LDFLAGS")
+        c.env_remove("CFLAGS")
+            .env_remove("CXXFLAGS")
+            .env_remove("LDFLAGS")
             .args(["--root", d.join("target-root").to_str().unwrap()])
             .args(["--recipes", d.join("recipes").to_str().unwrap()])
             .args(["--builddir", d.join("build").to_str().unwrap()])
@@ -121,14 +123,18 @@ fn run_full_closure_dance(d: &Path, runner: &mut dyn FnMut(&mut Command) -> Outp
     }
 
     let mut c = Command::new(nawa_path());
-    c.env_remove("CFLAGS").env_remove("CXXFLAGS").env_remove("LDFLAGS")
+    c.env_remove("CFLAGS")
+        .env_remove("CXXFLAGS")
+        .env_remove("LDFLAGS")
         .args(["--root", d.join("target-root").to_str().unwrap()])
         .args(["--recipes", d.join("recipes").to_str().unwrap()])
         .args(["--builddir", d.join("build").to_str().unwrap()])
         .args(["--profiles", d.join("profiles").to_str().unwrap()])
         .args([
-            "build", "probe",
-            "--isolation", "closure",
+            "build",
+            "probe",
+            "--isolation",
+            "closure",
             // restricted containers (no fresh /proc) need this; a full host
             // ignores it
             "--allow-degraded",
@@ -143,7 +149,10 @@ fn run_full_closure_dance(d: &Path, runner: &mut dyn FnMut(&mut Command) -> Outp
     assert!(o.status.success(), "{}", out_str(&o));
     let so = String::from_utf8_lossy(&o.stdout);
     assert!(so.contains("bash=/usr/bin/bash"), "{so}");
-    assert!(so.contains("uid-inside=0"), "the build runs as (fake) root inside: {so}");
+    assert!(
+        so.contains("uid-inside=0"),
+        "the build runs as (fake) root inside: {so}"
+    );
     assert!(so.contains("deptool-lib=/usr/lib/libdeptool.so"), "{so}");
     assert!(
         !so.contains("GCCC-PRESENT-IN-CLOSURE"),

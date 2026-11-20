@@ -11,15 +11,52 @@ use super::pack::validate_rev;
 /// Load and validate an index. An index without [repository] remains legacy v1.
 #[cfg(test)]
 pub(crate) fn load_index(path: &Path) -> Result<Index> {
-    let raw = std::fs::read(path)
-        .with_context(|| format!("read index {}", path.display()))?;
+    let raw = std::fs::read(path).with_context(|| format!("read index {}", path.display()))?;
     load_index_bytes(&raw).with_context(|| format!("parse index {}", path.display()))
+}
+
+/// A strict schema-v4/v5 index document. The loose [`Index`] parser stays the
+/// compatibility reader for v1–v3; for v4/v5 the entries are parsed through the
+/// domain model's `IndexEntryV4` so unknown fields are rejected
+/// (`deny_unknown_fields`) and `rundeps`/`provides` are mandatory.
+// The fields exist only so the strict parse accepts everything the loose
+// parser accepts; the values themselves are validated through `Index`.
+#[allow(dead_code)]
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictIndexV4 {
+    #[serde(default)]
+    generated: Option<u64>,
+    #[serde(default)]
+    expires: Option<u64>,
+    repository: RepositoryMeta,
+    #[serde(default)]
+    recipes: Option<RecipesEntry>,
+    #[serde(default)]
+    groups: Option<GroupsEntry>,
+    #[serde(rename = "package")]
+    packages: Vec<crate::domain::package::metadata::IndexEntryV4>,
 }
 
 /// Parse and validate exactly the byte sequence whose signature was checked.
 pub(crate) fn load_index_bytes(raw: &[u8]) -> Result<Index> {
     let text = std::str::from_utf8(raw).context("repository index is not valid UTF-8")?;
     let idx: Index = toml::from_str(text).context("parse repository index TOML")?;
+    if idx
+        .repository
+        .as_ref()
+        .is_some_and(|m| matches!(m.schema, INDEX_SCHEMA_V4 | INDEX_SCHEMA_V5))
+    {
+        let strict: StrictIndexV4 =
+            toml::from_str(text).context("parse strict schema-v4/v5 repository index TOML")?;
+        for entry in &strict.packages {
+            // Both the entry rules and the normalized metadata must parse:
+            // a v4 reader must be able to solve from these fields alone.
+            entry
+                .metadata()
+                .map_err(|e| anyhow::anyhow!("schema-v4 package {}: {e}", entry.name))?;
+        }
+    }
     idx.validate()?;
     Ok(idx)
 }
@@ -31,6 +68,11 @@ impl Index {
 
     /// Validate schema and the stronger invariants required by v2.
     pub fn validate(&self) -> Result<()> {
+        if self.repository.as_ref().map(|m| m.schema) != Some(INDEX_SCHEMA_V5)
+            && self.packages.iter().any(|p| p.relations.is_some())
+        {
+            bail!("package relations require signed index schema-v5");
+        }
         let meta = match &self.repository {
             None => {
                 if self.groups.is_some() {
@@ -40,10 +82,16 @@ impl Index {
             }
             Some(meta) => meta,
         };
-        if !matches!(meta.schema, INDEX_SCHEMA_V2 | INDEX_SCHEMA_V3) {
-            bail!("unsupported repository index schema {}; this Nawa supports schemas 2 and 3", meta.schema);
+        if !matches!(
+            meta.schema,
+            INDEX_SCHEMA_V2 | INDEX_SCHEMA_V3 | INDEX_SCHEMA_V4 | INDEX_SCHEMA_V5
+        ) {
+            bail!(
+                "unsupported repository index schema {}; this Nawa supports schemas 2 through 5",
+                meta.schema
+            );
         }
-        let per_package_url = meta.schema == INDEX_SCHEMA_V3;
+        let per_package_url = meta.schema >= INDEX_SCHEMA_V3;
         let expected_location = if per_package_url {
             ARCHIVE_LOCATION_PER_PACKAGE_URL
         } else {
@@ -52,20 +100,34 @@ impl Index {
         if meta.archive_location != expected_location {
             bail!(
                 "schema-v{} archive_location {:?} is unsupported; expected {:?}",
-                meta.schema, meta.archive_location, expected_location
+                meta.schema,
+                meta.archive_location,
+                expected_location
             );
         }
         if meta.archive_auth != ARCHIVE_AUTH_SIGNED_INDEX {
-            bail!("unsupported repository archive_auth {:?}; expected {:?}", meta.archive_auth, ARCHIVE_AUTH_SIGNED_INDEX);
+            bail!(
+                "unsupported repository archive_auth {:?}; expected {:?}",
+                meta.archive_auth,
+                ARCHIVE_AUTH_SIGNED_INDEX
+            );
         }
         if meta.hash_algorithm != HASH_ALGORITHM_SHA256 {
-            bail!("unsupported repository hash_algorithm {:?}; expected sha256", meta.hash_algorithm);
+            bail!(
+                "unsupported repository hash_algorithm {:?}; expected sha256",
+                meta.hash_algorithm
+            );
         }
         if meta.index_signature != INDEX_SIGNATURE_NAWA_SIG_V1 {
-            bail!("unsupported repository index_signature {:?}; expected nawa-sig-v1", meta.index_signature);
+            bail!(
+                "unsupported repository index_signature {:?}; expected nawa-sig-v1",
+                meta.index_signature
+            );
         }
 
-        let generated = self.generated.context("schema-v2 index is missing generated")?;
+        let generated = self
+            .generated
+            .context("schema-v2 index is missing generated")?;
         let expires = self.expires.context("schema-v2 index is missing expires")?;
         if generated == 0 || expires <= generated {
             bail!("schema-v2 index has invalid generated/expires timestamps");
@@ -73,7 +135,10 @@ impl Index {
 
         if let Some(groups) = &self.groups {
             if groups.schema != 1 {
-                bail!("unsupported group catalog schema {}; expected 1", groups.schema);
+                bail!(
+                    "unsupported group catalog schema {}; expected 1",
+                    groups.schema
+                );
             }
             validate_plain_filename(&groups.file)?;
             if !groups.file.ends_with(".toml") {
@@ -97,31 +162,74 @@ impl Index {
             validate_archive_filename(&p.file)?;
             validate_sha256(&p.sha256, &format!("package {}", p.name))?;
             if p.size == 0 {
-                bail!("schema-v{} package {} has no archive size", meta.schema, p.name);
+                bail!(
+                    "schema-v{} package {} has no archive size",
+                    meta.schema,
+                    p.name
+                );
             }
             if per_package_url {
-                let url = p.download_url.as_deref().with_context(|| {
-                    format!("schema-v3 package {} has no download_url", p.name)
-                })?;
+                let url = p
+                    .download_url
+                    .as_deref()
+                    .with_context(|| format!("schema-v3 package {} has no download_url", p.name))?;
                 validate_download_url(url, &format!("package {}", p.name))?;
             } else if p.download_url.is_some() {
                 bail!("schema-v2 package {} unexpectedly has download_url", p.name);
             }
             if !names.insert(p.name.as_str()) {
-                bail!("schema-v2/v3 index contains duplicate package name {:?}", p.name);
+                bail!(
+                    "schema-v2/v3 index contains duplicate package name {:?}",
+                    p.name
+                );
             }
             if !files.insert(p.file.as_str()) {
-                bail!("schema-v2/v3 index contains duplicate archive filename {:?}", p.file);
+                bail!(
+                    "schema-v2/v3 index contains duplicate archive filename {:?}",
+                    p.file
+                );
+            }
+            if meta.schema >= INDEX_SCHEMA_V4 {
+                // B3 chain §5: both solving fields are mandatory in v4; a
+                // missing field is a parse error, never "unknown".
+                let rundeps = p.rundeps.as_ref().with_context(|| {
+                    format!("schema-v4 package {} has no rundeps field", p.name)
+                })?;
+                let provides = p.provides.as_ref().with_context(|| {
+                    format!("schema-v4 package {} has no provides field", p.name)
+                })?;
+                crate::domain::package::metadata::normalize_rundeps(rundeps)
+                    .map_err(|e| anyhow::anyhow!("schema-v4 package {}: {e}", p.name))?;
+                crate::domain::package::metadata::normalize_provides(provides)
+                    .map_err(|e| anyhow::anyhow!("schema-v4 package {}: {e}", p.name))?;
+                if meta.schema == INDEX_SCHEMA_V4 && p.relations.is_some() {
+                    bail!("schema-v4 cannot declare package relations; publish schema-v5");
+                }
+                if meta.schema == INDEX_SCHEMA_V5 && p.relations.is_none() {
+                    bail!("schema-v5 package {} has unknown package relations", p.name);
+                }
+                crate::domain::package::metadata::metadata_from_repository(
+                    Some(rundeps),
+                    Some(provides),
+                    p.relations.as_ref(),
+                )
+                .map_err(anyhow::Error::msg)?;
             }
         }
         if let Some(r) = &self.recipes {
             validate_plain_filename(&r.file)?;
             if !r.file.ends_with(RECIPES_SUFFIX) {
-                bail!("schema-v2/v3 recipe archive has an unexpected filename {:?}", r.file);
+                bail!(
+                    "schema-v2/v3 recipe archive has an unexpected filename {:?}",
+                    r.file
+                );
             }
             validate_sha256(&r.sha256, "recipes archive")?;
             if per_package_url {
-                let url = r.download_url.as_deref().context("schema-v3 recipes entry has no download_url")?;
+                let url = r
+                    .download_url
+                    .as_deref()
+                    .context("schema-v3 recipes entry has no download_url")?;
                 validate_download_url(url, "recipes archive")?;
             } else if r.download_url.is_some() {
                 bail!("schema-v2/v3 recipes entry unexpectedly has download_url");
@@ -133,8 +241,8 @@ impl Index {
 }
 
 pub(crate) fn validate_download_url(value: &str, what: &str) -> Result<()> {
-    let parsed = url::Url::parse(value)
-        .with_context(|| format!("{what} has an invalid download_url"))?;
+    let parsed =
+        url::Url::parse(value).with_context(|| format!("{what} has an invalid download_url"))?;
     if parsed.scheme() != "https"
         || parsed.host_str().is_none()
         || !parsed.username().is_empty()
@@ -172,4 +280,3 @@ pub(crate) fn validate_archive_filename(file: &str) -> Result<()> {
     }
     Ok(())
 }
-

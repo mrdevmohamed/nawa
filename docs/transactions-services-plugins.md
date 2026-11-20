@@ -34,41 +34,14 @@ Undo is a new compensating transaction, not deletion of the original history rec
 
 The separate nawa rollback NAME command restores a package version recorded by its package rollback state.
 
-## runit services
+## Services
 
-Nawa's service integration targets **runit**. It reads service definitions from:
-
-~~~text
-/etc/sv/
-/etc/runit/runsvdir/default/
-~~~
-
-List available services and their enabled state:
-
-~~~sh
-nawa service list
-nawa service status
-~~~
-
-Enable and immediately start a service:
-
-~~~sh
-nawa service enable dbus --now
-~~~
-
-Stop a service but leave it enabled for the next supervision start:
-
-~~~sh
-nawa service stop dbus
-~~~
-
-Disable and stop a service:
-
-~~~sh
-nawa service disable dbus --now
-~~~
-
-The --root option scopes service paths to another root filesystem. Live status is available when the sv command is present and the service is actually supervised; otherwise Nawa reports the static enabled state.
+Service management is out of scope for the package manager: the distribution
+ships its service enablement policy (systemd presets), and runtime control
+belongs to the init system's own tooling (`systemctl` on Faseela). Earlier
+releases offered `nawa service` for runit; that subsystem has been removed,
+and package installs no longer consult `/etc/runit/disabled` markers.
+Existing marker files, if any, are never touched or deleted by Nawa.
 
 ## Reverse shared-library dependencies
 

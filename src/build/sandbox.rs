@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::BuildOpts;
-use crate::recipe::Recipe;
-use crate::buildenv::Isolation;
+use crate::build::buildenv::Isolation;
 use crate::build::cache::fetch_ecosystems;
+use crate::recipe::Recipe;
 
 /// The layer cache root (§5.3 v2): `NAWA_LAYER_CACHE` or `<root>/var/cache/nawa`;
 /// one extracted directory per archive goes under it at `<cache>/layers/<sha>`
@@ -18,10 +18,16 @@ pub(crate) fn layer_cache_dir(opts: &BuildOpts) -> Option<PathBuf> {
     if std::env::var_os("NAWA_NO_LAYER_CACHE").is_some() {
         return None;
     }
-    let dir = std::env::var_os("NAWA_LAYER_CACHE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| opts.root.join("var/cache/nawa"));
-    match std::fs::create_dir_all(&dir) {
+    let (dir, created) = if let Some(cache) = std::env::var_os("NAWA_LAYER_CACHE") {
+        let dir = PathBuf::from(cache);
+        let created = std::fs::create_dir_all(&dir);
+        (dir, created)
+    } else {
+        let dir = opts.root.join("var/cache/nawa");
+        let created = crate::adapters::pathutil::create_managed_dirs(&dir);
+        (dir, created)
+    };
+    match created {
         Ok(()) => Some(dir),
         Err(e) => {
             eprintln!(
@@ -33,7 +39,6 @@ pub(crate) fn layer_cache_dir(opts: &BuildOpts) -> Option<PathBuf> {
         }
     }
 }
-
 
 /// overlayfs data strings cannot escape ',' and ':' — every path that goes
 /// into the mount (layers, scratch, root) must be free of them.
@@ -60,7 +65,10 @@ pub(crate) fn layer_paths_are_mountable(
     }
     for m in members {
         if let Some(r) = known.get(m) {
-            if !bad(&crate::closure::archive_for(r, outdir), "a closure archive") {
+            if !bad(
+                &crate::build::closure::archive_for(r, outdir),
+                "a closure archive",
+            ) {
                 return false;
             }
         }
@@ -68,26 +76,28 @@ pub(crate) fn layer_paths_are_mountable(
     true
 }
 
-
 /// Does this kernel allow overlayfs inside a user namespace (Phase 5)?
 /// Asked in a subprocess (`nawa sandbox-probe overlay`): the probe creates
 /// namespaces, and nesting them in this process would corrupt later
 /// sandbox spawns.
 pub(crate) fn overlay_probe_ok() -> bool {
-    let Ok(exe) = std::env::current_exe() else { return false };
-    let Ok(out) = Command::new(exe).args(["sandbox-probe", "overlay"]).output() else {
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let Ok(out) = Command::new(exe)
+        .args(["sandbox-probe", "overlay"])
+        .output()
+    else {
         return false;
     };
     out.status.success()
 }
-
 
 /// Everything the sandbox needs for one build, prepared once.
 pub(crate) struct SandboxCfg {
     pub(crate) spec_path: PathBuf,
     pub(crate) base: crate::sandbox::SandboxSpec,
 }
-
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_sandbox(
@@ -206,4 +216,3 @@ pub(crate) fn prepare_sandbox(
     let spec_path = work.join("sandbox-spec.toml");
     Ok(SandboxCfg { spec_path, base })
 }
-
