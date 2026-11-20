@@ -279,7 +279,7 @@ The sequence is dependency-driven; a later stage must not be marked complete mer
 | G — Migration recovery | Snapshot, coordinator wiring, recovery and post-boot finalizer | Interrupted, failed-boot and restore scenarios pass in disposable VMs |
 | H — Distribution acceptance | Faseela/SAQ boot, initramfs, BIOS/UEFI and rescue integration | Current release ISO boots installed disk in BIOS and UEFI; rescue/rollback evidence retained |
 
-## 10. Current implementation boundary (2026-11-18)
+## 10. Current implementation boundary (2026-11-20)
 
 Implemented or substantially present:
 - Feature-Oriented Hexagonal Architecture and Functional Core / Imperative Shell baseline;
@@ -290,22 +290,22 @@ Implemented or substantially present:
 - read-only system status/profile/plan/explain CLI;
 - authenticated repository transition preview integration;
 - migration domain state machine, durable journal, mutation gate, coordinator preparation path and recovery inspection;
-- typed legacy init ownership handoff;
-- durable boot snapshot adapter with manifest/hash validation and initial restore tests.
+- typed legacy init ownership handoff and exact signed-artifact/source pinning through approval and the existing installer;
+- schema-3 boot snapshot capture integrated before package mutation, bound to the selected root and migration record, with manifest/hash validation and recursive capture of the runit service tree at `/etc/runit/runsvdir/default`;
+- post-reboot verification of proven PID 1, the effective required profile, retained signed evidence, exact installed identities and explicit init entry points; successful verification finalizes the migration record and clears its gate while deliberately retaining the old provider.
 
 Still incomplete:
 - a fully generic capability model beyond the init-system vertical slice;
-- complete dependency solver semantics (version ranges, conflicts, replacements);
-- exact artifact/source pinning across system-plan approval and execution; normal package auto/ask source pinning has landed, but system-plan identity must be carried through approval;
-- a single fully connected observation-to-policy-to-solver-to-typed-SystemPlan application flow;
-- actionable policy semantics for capability domains beyond the init-system vertical slice;
-- migration record store ancestor path hardening and race-resistant filesystem access;
-- snapshot integration with coordinator and recovery;
-- safe runit service-tree capture and restore;
-- BIOS raw-sector and EFI NVRAM recovery contracts;
-- post-boot verification/finalization and old-provider removal sequencing;
-- interrupted-install, failed-boot, rescue and rollback VM acceptance;
-- real current-ISO BIOS and UEFI installed-disk evidence.
+- a fully generic capability model and actionable provider-policy semantics beyond the init-system vertical slice;
+- completion of the observation-to-policy-to-solver-to-SystemPlan flow for capability domains beyond init-system;
+- migration record-store ancestor path hardening and race-resistant filesystem access;
+- production wiring of the validated `restore_pinned` snapshot operation into an explicitly authorized external rescue/recovery procedure; adapter-level capture/restore tests do not constitute a production rollback contract;
+- BIOS raw-sector and EFI NVRAM backup/restore, SAQ initramfs reconstruction, and a verified external Live-ISO rescue route;
+- explicit firmware/bootloader/initramfs preparation steps for the installed-disk migration handler;
+- a separate reviewed package plan for retiring the old runit provider after successful post-boot verification;
+- interrupted-install, failed-boot, rescue and restore acceptance in disposable VMs;
+- real installed-disk BIOS and UEFI boot evidence from an ISO built after the merged Faseela/SAQ integration changes;
+- a complete schema-v5 package build-to-publisher pipeline, full declaration audit and matching signed archive set required by migration approval.
 
 ## 11. Definition of done
 
