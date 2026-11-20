@@ -860,6 +860,10 @@ fn render_plan(plan: &apply_use::MigrationPlan) -> Vec<String> {
     for limit in &plan.rollback_limits {
         lines.push(format!("    - {limit}"));
     }
+    lines.push("  Apply blockers (the handler remains fail-closed):".to_string());
+    for blocker in apply_use::handler_blockers() {
+        lines.push(format!("    - {blocker}"));
+    }
     lines
 }
 
@@ -952,6 +956,27 @@ mod tests {
 
     fn joined(lines: &[String]) -> String {
         lines.join("\n")
+    }
+
+    #[test]
+    fn migration_plan_discloses_the_full_fail_closed_handler_blocker_ledger() {
+        let root = std::env::temp_dir().join("nawa-migration-plan-blockers");
+        let plan = apply_use::plan(&root, Path::new("/proc"));
+        let rendered = joined(&render_plan(&plan));
+
+        assert!(rendered.contains("Boot/init actions:"), "{rendered}");
+        assert!(
+            rendered.contains("Apply blockers (the handler remains fail-closed):"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("B1:"), "{rendered}");
+        assert!(rendered.contains("B2:"), "{rendered}");
+        assert!(rendered.contains("B4:"), "{rendered}");
+        assert!(rendered.contains("B5:"), "{rendered}");
+        assert!(rendered.contains("B6:"), "{rendered}");
+        assert!(rendered.contains("B7:"), "{rendered}");
+        assert!(rendered.contains("B8:"), "{rendered}");
+        assert!(rendered.contains("schema-v5"), "{rendered}");
     }
 
     #[test]
