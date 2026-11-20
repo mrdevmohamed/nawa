@@ -60,13 +60,14 @@ pub(crate) fn plan(root: &Path, proc: &Path) -> MigrationPlan {
         definition,
         observed,
         boot_actions: vec![
-            "retain the old init provider and boot artifacts until verification".to_string(),
-            "prepare boot/initramfs so the target init is selected explicitly".to_string(),
+            "build a current Faseela release ISO and prove a fresh installed-disk boot with PID 1=systemd in both BIOS and UEFI".to_string(),
+            "the current coordinator stages approved packages and captures a schema-3 filesystem snapshot; it does not yet switch an installed disk's firmware boot path or rebuild the SAQ initramfs".to_string(),
+            "retain runit and the previous boot route until post-boot verification and a separately approved provider-retirement plan".to_string(),
             "reboot required — Nawa never reboots automatically".to_string(),
         ],
         rollback_limits: vec![
-            "package-level rollback may restore installed packages; boot/initramfs changes need a documented recovery route".to_string(),
-            "no automatic rollback of arbitrary root filesystem changes is promised".to_string(),
+            "the schema-3 snapshot preserves selected boot files and the runit service tree, but filesystem restore is not a substitute for BIOS-sector, EFI-NVRAM or bootable-initramfs recovery".to_string(),
+            "a tested external Live-ISO rescue route and failed-boot restore acceptance are still required; no automatic rollback of arbitrary root filesystem changes is promised".to_string(),
         ],
     }
 }
@@ -208,12 +209,13 @@ impl MigrationApproval {
 /// are merged; installed-root and real disk-boot acceptance remain separate
 /// requirements and are not inferred from successful CI.
 const HANDLER_BLOCKERS: &[&str] = &[
-    "B1: Faseela PR #59 and SAQ PR #4 are merged; PR #60 adds the installed-disk BIOS+UEFI harness and release-workflow integration, but a real release-ISO run with both firmware logs proving /proc/1/comm=systemd is still required",
-    "B2: exact /usr/bin/init co-ownership is migration-scoped and tested; retain runit-services through reboot and remove it only after verified completion. The post-boot finalizer and package-removal step are not wired",
-    "B4: Faseela Repo PR #203 is merged and base-files ships /usr/share/nawa/system-profile.toml; loader/default and administrator override tests pass, but installed BIOS/UEFI image acceptance remains pending",
-    "B5: schema-3 filesystem snapshot capture is bound to the migration record/root and recovery verifies its exact manifest and payloads; filesystem restore is test-covered but is not an approved production compensation. BIOS raw sectors, EFI NVRAM, initramfs reconstruction and the external Live-ISO rescue contract remain unresolved",
-    "B6: Faseela PR #60 adds the BIOS+UEFI installed-disk harness and release-workflow integration, with dry-run/installer-guard CI tests. Real release-ISO execution and snapshot-driven interrupted-install, failed-boot and restore acceptance remain pending",
-    "B7: Faseela Repo PR #203 is merged; recipe CI rejects direct service-state mutations in privileged hooks and transaction-trigger sources, and Faseela applies vendor presets during image provisioning. Installed-package runtime acceptance remains required; the static guard is not a shell sandbox",
+    "B1: Faseela PRs #59, #60 and #61 and SAQ PR #4 are merged. Faseela push CI run 44651808038 passed its scripts/recipes checks, but it did not build a release ISO or execute the installed-disk QEMU test. A current release ISO must produce fresh BIOS and UEFI installed-disk logs proving /proc/1/comm=systemd and the effective system profile",
+    "B2: exact /usr/bin/init co-ownership is migration-scoped and tested. The resume path already verifies proven target PID 1, the effective profile, retained signed artifacts, installed identities and boot postconditions before completing the record and clearing the gate. Old runit-provider package removal is deliberately not wired; it needs a separate approved removal and recovery plan after verified boot",
+    "B4: Faseela Repo PR #203 and isolated publisher PR #204 are merged. base-files ships /usr/share/nawa/system-profile.toml and profile loading/administrator override tests exist. The systemd declaration is a required migration target, not proof of the running PID 1; installed BIOS/UEFI image acceptance remains pending",
+    "B5: schema-3 snapshot capture is wired before package mutation, bound to the target root and pinned manifest, and captures the boot/init files plus the /etc/runit/runsvdir/default service tree without following symlinked directories. restore_pinned validates retained evidence and has adapter-level tests, but it is not wired into production rescue/recovery. BIOS raw-sector recovery, EFI NVRAM recovery, SAQ initramfs reconstruction and a verified external Live-ISO rescue route remain unresolved; filesystem restore alone is not approved boot compensation",
+    "B6: Faseela PRs #60 and #61 provide and harden the BIOS+UEFI installed-disk harness. The post-merge CI run covers harness dry-runs and installer mocks, not a real QEMU install/boot. A current release ISO must pass both fresh installed-disk firmware runs; interrupted-install, failed-boot and restore acceptance must also pass in disposable VMs",
+    "B7: Faseela Repo PR #203 moved vendor preset application to image provisioning and added static checks against service-state changes in privileged hooks and transaction triggers. The guard is not a shell sandbox; runtime acceptance from an installed image is still required",
+    "B8: migration approval requires a trusted signed schema-v5 index and exact matching package archives. The current faseela-repo schema-v5 publisher is an index publisher, not a complete package builder; the full declaration audit and build-to-publisher archive pipeline are not yet accepted. Do not publish/switch stable-v5 or authorize migration until the complete signed package set is available",
 ];
 
 pub(super) fn handler_blockers() -> &'static [&'static str] {
@@ -456,6 +458,11 @@ mod tests {
                 assert!(blockers
                     .iter()
                     .any(|b| { b.contains("B7") && b.contains("not a shell sandbox") }));
+                assert!(blockers.iter().any(|b| {
+                    b.contains("B8")
+                        && b.contains("schema-v5")
+                        && b.contains("complete signed package set")
+                }));
             }
         }
         assert!(
