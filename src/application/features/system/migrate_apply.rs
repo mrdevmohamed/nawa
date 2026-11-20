@@ -218,7 +218,7 @@ const HANDLER_BLOCKERS: &[&str] = &[
     "B8: migration approval requires a trusted signed schema-v5 index and exact matching package archives. The current faseela-repo schema-v5 publisher is an index publisher, not a complete package builder; the full declaration audit and build-to-publisher archive pipeline are not yet accepted. Do not publish/switch stable-v5 or authorize migration until the complete signed package set is available",
 ];
 
-pub(super) fn handler_blockers() -> &'static [&'static str] {
+pub(crate) fn handler_blockers() -> &'static [&'static str] {
     HANDLER_BLOCKERS
 }
 
