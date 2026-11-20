@@ -14,10 +14,51 @@
 | 2 — Init identity & capability foundation | **GENERIC DECLARATION LOOKUP + INIT-SYSTEM POLICY** (the pure planner now finds providers by arbitrary normalized capability domain and preserves ambiguous/unknown candidates; only init-system has actionable policy and migration semantics) |
 | 3 — Metadata & capability resolution | **PACKAGE RELATIONS SCHEMA 1 / INDEX V5 IMPLEMENTED** (the existing shared solver now handles normalized runtime version requirements, conflicts and explicit replacement actions. v1-v4 relation metadata remains unknown; broader virtual-capability version semantics remain open.) |
 | 4 — System profiles & planning | **PINNED TRANSACTION INTEGRATION IMPLEMENTED**: one explicit approval, v2 ordered evidence identity, exact staging, signed-index proof retained by the existing installer, inventory revalidated under the coordinator lock. Non-init policy semantics remain open. |
-| 5 — Migration engine | **INTEGRATED; PRODUCTION BOOT EXECUTION BLOCKED**: schema-2 pinned records, pre-package write-ahead snapshot capture, manifest/root binding and recovery evidence checks are implemented. Firmware/initramfs preparation and rescue acceptance remain blocked; apply and resume fail closed. |
-| 6 — Faseela runit→systemd migration | **BLOCKED** (current Faseela HEAD already uses systemd; the legacy runit migration is for older installations. Real BIOS/UEFI boot acceptance and rescue/recovery contracts remain open.) |
+| 5 — Migration engine | **INTEGRATED; PRODUCTION BOOT EXECUTION BLOCKED**: schema-2 pinned records, schema-3 pre-package filesystem snapshot capture (including the runit service tree), package WAL integration, and post-boot PID 1/profile/package verification are implemented. The firmware/initramfs handler, production rescue/restore wiring, and external recovery acceptance remain blocked; apply and resume fail closed. |
+| 6 — Faseela runit→systemd migration | **BLOCKED FOR LEGACY INSTALLATIONS**: Faseela PRs #59/#60/#61 and SAQ PR #4 are merged. The post-merge Faseela script/recipe CI passed in run [44651808038](https://github.com/mrdevmohamed/faseela/actions/runs/44651808038), but no current release ISO has passed real installed-disk BIOS+UEFI boots. The full signed schema-v5 package set and rescue/rollback acceptance also remain open. |
 | 7 — Platform verification | **LOCAL CHECKS PASSED UNDER `umask 0002`** for the fresh-root permissions fix. The schema-v5 milestone passed all 11 CI jobs on `7af3a03`. [CI run #44453182797](https://github.com/mrdevmohamed/nawa/actions/runs/44453182797) |
 | System Intelligence platform | **IN PROGRESS** — accepted direction: System Intelligence is the umbrella; migration is one high-risk feature within it. |
+
+## Migration blocker reconciliation (2026-11-20)
+
+* **Merged distribution changes:** Faseela PR #59 (offline vendor presets and
+  explicit installed-disk init selection), PR #60 (real installed-disk BIOS /
+  UEFI QEMU harness), PR #61 (installer and boot-probe hardening), SAQ PR #4
+  (the `init=` precedence contract), and faseela-repo PR #203 (profile and
+  hook policy) are merged. Faseela-repo PR #204 adds the isolated schema-v5
+  index publisher.
+* **What the post-merge CI proves:** Faseela push CI run
+  [44651808038](https://github.com/mrdevmohamed/faseela/actions/runs/44651808038)
+  passed its script/recipe checks. Its installed-disk workflow test is a
+  dry-run/mock test; it did not build a current ISO or run QEMU against a
+  newly installed disk. The latest published Faseela ISO predates these
+  merged changes. Therefore BIOS/UEFI acceptance remains open.
+* **Post-boot lifecycle correction:** `migrate_recover::resume_inner` already
+  verifies proven PID 1, the effective required profile, retained signed
+  artifact/snapshot evidence, exact installed package identities and explicit
+  init-entry-point postconditions. On success it reconciles package history,
+  marks the migration completed and clears the mutation gate. The old runit
+  provider is intentionally retained; package retirement is not implemented
+  and must be a separate reviewed operation after verified boot. The former
+  blocker wording that said the post-boot verifier/finalizer was wholly absent
+  was stale.
+* **Snapshot boundary:** schema-3 capture is integrated before package
+  mutation and recursively records `/etc/runit/runsvdir/default` without
+  traversing symlinked directories. `restore_pinned` validates the retained
+  manifest and payloads and is covered at adapter level, but it is not wired
+  into a production external-rescue/recovery flow. Filesystem restore cannot
+  restore BIOS raw sectors or EFI NVRAM, and does not by itself prove that
+  SAQ/initramfs or firmware will boot. Those recovery contracts remain open.
+* **Schema-v5 dependency:** the current faseela-repo schema-v5 workflow is an
+  index publisher, not a complete package-build pipeline. Its documentation
+  still requires a complete declaration audit and matching v5 archive set.
+  Migration approval remains unavailable until that end-to-end signed package
+  set is built, published and verified. Do not publish `stable-v5`, switch
+  repository defaults, or weaken trust/metadata checks to bypass this blocker.
+* The migration handler remains deliberately fail-closed. The blocker list in
+  `migrate_apply.rs` is updated to distinguish completed merged work from
+  missing installed-disk, firmware, rescue, provider-retirement and schema-v5
+  acceptance. No claim of production migration readiness is made.
 
 ## Accepted platform direction (2026-11-18)
 
