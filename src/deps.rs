@@ -1,9 +1,16 @@
 //! Dependency resolution: DFS over the recipe graph with topological
 //! ordering and cycle detection.
+//!
+//! The order is the order packages must be *installed* in, so a package's
+//! runtime requirements come before it as well as its build dependencies:
+//! archives that declare relations (schema 5) are verified against the
+//! installed state when they are installed, and `rust` cannot be installed
+//! before the `gcc` it requires at run time.
 
 use anyhow::{bail, Result};
 use std::collections::{BTreeMap, HashSet};
 
+use crate::domain::package::relations::Requirement;
 use crate::recipe::Recipe;
 
 /// Resolve build order for `targets` given the set of installed packages.
@@ -55,6 +62,25 @@ fn visit(
     for dep in rec.build_deps() {
         visit(&dep, known, done, visiting, order)?;
     }
+    // Runtime requirements are ordered, never enforced as a graph property:
+    // a name without a recipe (external, virtual) has nothing to build, and a
+    // run-time cycle is not an error (build-time cycles above still are) — the
+    // edge that would close it is dropped so a mutual runtime pair keeps
+    // resolving exactly as it did before run dependencies were ordered.
+    for raw in &rec.depends.run {
+        let Ok(requirement) = Requirement::parse(raw) else {
+            continue;
+        };
+        let dep = requirement.name;
+        if dep == name
+            || done.contains(&dep)
+            || visiting.contains(&dep)
+            || !known.contains_key(&dep)
+        {
+            continue;
+        }
+        visit(&dep, known, done, visiting, order)?;
+    }
     visiting.remove(name);
     done.insert(name.to_string());
     order.push(rec.clone());
@@ -89,6 +115,19 @@ pub(crate) fn resolve_target(
     let mut done: HashSet<String> = installed.clone();
     for dep in rec.build_deps() {
         visit(&dep, known, &mut done, &mut visiting, &mut order)?;
+    }
+    for raw in &rec.depends.run {
+        if let Ok(requirement) = Requirement::parse(raw) {
+            if requirement.name != name && known.contains_key(&requirement.name) {
+                visit(
+                    &requirement.name,
+                    known,
+                    &mut done,
+                    &mut visiting,
+                    &mut order,
+                )?;
+            }
+        }
     }
     order.push(rec.clone());
     Ok(order)
@@ -136,6 +175,118 @@ mod tests {
         let order = resolve(&["gcc".to_string()], &HashSet::new(), &known).unwrap();
         let names: Vec<&str> = order.iter().map(|r| r.package.name.as_str()).collect();
         assert_eq!(names, vec!["gmp", "mpfr", "gcc"]);
+    }
+
+    fn rec_with_run(name: &str, build: &[&str], run: &[&str]) -> Recipe {
+        let list = |items: &[&str]| {
+            items
+                .iter()
+                .map(|d| format!("{:?}", d))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        toml::from_str(&format!(
+            r#"
+            [package]
+            name = "{name}"
+            version = "1.0"
+
+            [depends]
+            build = [{}]
+            run = [{}]
+
+            [build]
+            install = "true"
+            "#,
+            list(build),
+            list(run)
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn orders_runtime_requirements_before_the_package() {
+        // rust has no build dependencies but needs gcc and glibc at run time:
+        // a package that declares relations is verified on install, so gcc
+        // must already be installed. Alphabetical/BTree order alone puts rust
+        // first.
+        let known: BTreeMap<String, Recipe> = [
+            ("glibc", rec_with_run("glibc", &[], &[])),
+            ("gcc", rec_with_run("gcc", &["glibc"], &["glibc"])),
+            ("rust", rec_with_run("rust", &[], &["gcc", "glibc"])),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        let targets: Vec<String> = known.keys().cloned().collect();
+        let order = resolve(&targets, &HashSet::new(), &known).unwrap();
+        assert_eq!(names(&order), vec!["glibc", "gcc", "rust"]);
+    }
+
+    #[test]
+    fn runtime_requirements_accept_version_constraints() {
+        let known: BTreeMap<String, Recipe> = [
+            ("base-files", rec_with_run("base-files", &[], &[])),
+            ("app", rec_with_run("app", &[], &["base-files >= 0.4-12"])),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        let order = resolve(&["app".to_string()], &HashSet::new(), &known).unwrap();
+        assert_eq!(names(&order), vec!["base-files", "app"]);
+    }
+
+    #[test]
+    fn unknown_runtime_names_are_not_errors() {
+        // an external or virtual requirement has no recipe: nothing to order
+        let known: BTreeMap<String, Recipe> =
+            [("app", rec_with_run("app", &[], &["not-a-recipe"]))]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect();
+        let order = resolve(&["app".to_string()], &HashSet::new(), &known).unwrap();
+        assert_eq!(names(&order), vec!["app"]);
+    }
+
+    #[test]
+    fn runtime_cycles_are_tolerated_but_build_cycles_still_fail() {
+        let runtime: BTreeMap<String, Recipe> = [
+            ("a", rec_with_run("a", &[], &["b"])),
+            ("b", rec_with_run("b", &[], &["a"])),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        let order = resolve(
+            &["a".to_string(), "b".to_string()],
+            &HashSet::new(),
+            &runtime,
+        )
+        .unwrap();
+        assert_eq!(order.len(), 2);
+
+        let build: BTreeMap<String, Recipe> = [
+            ("a", rec_with_run("a", &["b"], &[])),
+            ("b", rec_with_run("b", &["a"], &[])),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        assert!(resolve(&["a".to_string()], &HashSet::new(), &build).is_err());
+    }
+
+    #[test]
+    fn installed_runtime_requirements_are_not_rebuilt() {
+        let known: BTreeMap<String, Recipe> = [
+            ("gcc", rec_with_run("gcc", &[], &[])),
+            ("rust", rec_with_run("rust", &[], &["gcc"])),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        let installed: HashSet<String> = ["gcc".to_string()].into_iter().collect();
+        let order = resolve(&["rust".to_string()], &installed, &known).unwrap();
+        assert_eq!(names(&order), vec!["rust"]);
     }
 
     #[test]

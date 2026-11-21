@@ -2,6 +2,12 @@
 
 ## Unreleased — pinned SystemPlan transaction and recovery integration
 
+- `deps-all` and the upgrade order now place a package's runtime requirements
+  before the package (in addition to its build dependencies). Archives that
+  declare relations are verified against the installed state, so installing
+  `rust` before the `gcc` it requires failed once every recipe carried
+  `[relations]`. Requirements without a recipe are ignored and a runtime-only
+  cycle is tolerated; build-time cycles are still errors.
 - Bind explicit migration approval to definition, source/target, observation,
   installed identities and ordered signed archive pins, including install reasons.
 - Stage exact archives before the coordinator acquires the package lock. Reuse
