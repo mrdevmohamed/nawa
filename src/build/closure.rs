@@ -64,6 +64,75 @@ pub(crate) fn closure_of(
     Ok(out.into_iter().collect())
 }
 
+/// Return the exact build-root members in dependency-first order.
+///
+/// Unlike `deps::resolve_target`, a build root also contains the transitive
+/// runtime dependencies of every build dependency (see `buildroot` below).
+/// The order matters to callers that import these archives one by one: a
+/// package's run requirements must be installed before the package itself.
+pub(crate) fn buildroot_order(
+    target: &Recipe,
+    known: &BTreeMap<String, Recipe>,
+    with_check: bool,
+) -> Result<Vec<String>> {
+    let mut seeds = Vec::new();
+    if target.package.name == BASE_DEVEL {
+        // base-devel defines the bootstrap base and cannot depend on itself.
+        seeds.extend(target.depends.run.iter().cloned());
+    } else {
+        seeds.push(BASE_DEVEL.to_string());
+    }
+    seeds.extend(target.build_deps());
+    if with_check {
+        seeds.extend(target.depends.check.iter().cloned());
+    }
+
+    let mut done = BTreeSet::new();
+    let mut visiting = BTreeSet::new();
+    let mut order = Vec::new();
+    for seed in &seeds {
+        visit_runtime_dependency(seed, known, &mut done, &mut visiting, &mut order)?;
+    }
+    Ok(order)
+}
+
+fn visit_runtime_dependency(
+    raw: &str,
+    known: &BTreeMap<String, Recipe>,
+    done: &mut BTreeSet<String>,
+    visiting: &mut BTreeSet<String>,
+    order: &mut Vec<String>,
+) -> Result<()> {
+    let requirement = crate::domain::package::relations::Requirement::parse(raw)
+        .map_err(anyhow::Error::msg)?;
+    let name = requirement.name.clone();
+    let candidate = known
+        .get(&name)
+        .with_context(|| format!("build closure member `{name}` has no recipe"))?;
+    if !requirement.matches(&format!(
+        "{}-{}",
+        candidate.package.version, candidate.package.rel
+    )) {
+        bail!(
+            "build closure candidate does not satisfy {}",
+            requirement.canonical()
+        );
+    }
+    if done.contains(&name) {
+        return Ok(());
+    }
+    if !visiting.insert(name.clone()) {
+        bail!("circular runtime dependency detected in build closure at `{name}`");
+    }
+    for dep in &candidate.depends.run {
+        visit_runtime_dependency(dep, known, done, visiting, order)?;
+    }
+    visiting.remove(&name);
+    done.insert(name.clone());
+    order.push(name);
+    Ok(())
+}
+
 /// The packages whose archives make up the build root for `target`
 /// (§5.1). `with_check` adds `depends.check` (built with `--check`).
 pub(crate) fn buildroot(
@@ -402,6 +471,34 @@ mod tests {
         // closure({base-devel}) = base-devel + its run deps, transitively
         let c = closure_of(&["base-devel".to_string()], &known).unwrap();
         assert_eq!(c, vec!["base-devel", "gcc", "gmp", "mpfr", "zlib"]);
+    }
+
+    #[test]
+    fn buildroot_order_includes_runtime_closure_before_build_dependencies() {
+        let target = rec("consumer", &["provider"], &[]);
+        let known = map(vec![
+            rec("base-devel", &[], &[]),
+            rec("libstd", &[], &[]),
+            rec("service", &[], &["libstd"]),
+            rec("provider", &[], &["service"]),
+        ]);
+        let order = buildroot_order(&target, &known, false).unwrap();
+        assert_eq!(
+            order,
+            vec!["base-devel", "libstd", "service", "provider"]
+        );
+    }
+
+    #[test]
+    fn base_devel_order_uses_its_run_dependencies_without_self() {
+        let target = rec("base-devel", &[], &["compiler"]);
+        let known = map(vec![
+            rec("base-devel", &[], &["compiler"]),
+            rec("runtime", &[], &[]),
+            rec("compiler", &[], &["runtime"]),
+        ]);
+        let order = buildroot_order(&target, &known, false).unwrap();
+        assert_eq!(order, vec!["runtime", "compiler"]);
     }
 
     #[test]
