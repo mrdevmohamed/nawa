@@ -71,6 +71,7 @@ fn visit(
 /// Here the target stays in `done` while its dependencies are visited — a
 /// dependency that leads back to it counts as satisfied instead of a cycle —
 /// and it is listed last, like any other target.
+#[cfg(test)]
 pub(crate) fn resolve_target(
     name: &str,
     installed: &HashSet<String>,

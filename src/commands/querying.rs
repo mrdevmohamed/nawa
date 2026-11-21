@@ -192,14 +192,36 @@ pub(crate) fn cmd_deps(ctx: &Ctx, name: &str) -> Result<()> {
     let db = db::Db::new(&ctx.root);
     let installed: HashSet<String> = db.installed()?.into_iter().map(|e| e.name).collect();
     let known = ctx.load_all()?;
-    let order = deps::resolve_target(name, &installed, &known)?;
+    let Some(target) = known.get(name) else {
+        if installed.contains(name) {
+            return Ok(());
+        }
+        bail!(
+            "unknown package: `{name}`{}",
+            crate::suggest::hint(name, &known.keys().cloned().collect::<Vec<_>>())
+        );
+    };
+
+    // Report the same members that buildroot() will assemble: base-devel,
+    // build dependencies, and each member's transitive runtime dependencies.
+    // Keep dependency-first order so callers that import the archives one
+    // by one never install a package before its run requirements.
+    let mut names = crate::build::closure::buildroot_order(target, &known, false)?;
+    names.retain(|dependency| !installed.contains(dependency));
+    if !names.iter().any(|dependency| dependency == name) {
+        names.push(name.to_string());
+    }
+
     let pal = Palette::auto(Stream::Stdout);
-    for (i, r) in order.iter().enumerate() {
-        let bdeps = r.build_deps();
+    for (i, package_name) in names.iter().enumerate() {
+        let recipe = known
+            .get(package_name)
+            .ok_or_else(|| anyhow::anyhow!("build dependency recipe disappeared: {package_name}"))?;
+        let bdeps = recipe.build_deps();
         println!(
             "{:>3}. {} (build deps: {})",
             i + 1,
-            pal.ver(&r.id()),
+            pal.ver(&recipe.id()),
             pal.dim(&if bdeps.is_empty() {
                 "-".into()
             } else {
