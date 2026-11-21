@@ -214,9 +214,9 @@ pub(crate) fn cmd_deps(ctx: &Ctx, name: &str) -> Result<()> {
 
     let pal = Palette::auto(Stream::Stdout);
     for (i, package_name) in names.iter().enumerate() {
-        let recipe = known
-            .get(package_name)
-            .ok_or_else(|| anyhow::anyhow!("build dependency recipe disappeared: {package_name}"))?;
+        let recipe = known.get(package_name).ok_or_else(|| {
+            anyhow::anyhow!("build dependency recipe disappeared: {package_name}")
+        })?;
         let bdeps = recipe.build_deps();
         println!(
             "{:>3}. {} (build deps: {})",

@@ -103,8 +103,8 @@ fn visit_runtime_dependency(
     visiting: &mut BTreeSet<String>,
     order: &mut Vec<String>,
 ) -> Result<()> {
-    let requirement = crate::domain::package::relations::Requirement::parse(raw)
-        .map_err(anyhow::Error::msg)?;
+    let requirement =
+        crate::domain::package::relations::Requirement::parse(raw).map_err(anyhow::Error::msg)?;
     let name = requirement.name.clone();
     let candidate = known
         .get(&name)
@@ -483,10 +483,7 @@ mod tests {
             rec("provider", &[], &["service"]),
         ]);
         let order = buildroot_order(&target, &known, false).unwrap();
-        assert_eq!(
-            order,
-            vec!["base-devel", "libstd", "service", "provider"]
-        );
+        assert_eq!(order, vec!["base-devel", "libstd", "service", "provider"]);
     }
 
     #[test]
