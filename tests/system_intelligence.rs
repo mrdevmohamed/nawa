@@ -291,11 +291,15 @@ fn shared_assessment_reports_legacy_installed_declarations_as_unknown() {
         "{plan}"
     );
     assert!(
-        plan.contains("unknown: legacy-consumer: runtime dependencies are unknown"),
+        plan.contains(
+            "unknown: 1 unchanged package(s) (legacy-consumer): runtime dependencies are unknown"
+        ),
         "{plan}"
     );
     assert!(
-        plan.contains("unknown: legacy-consumer: package relations are unknown"),
+        plan.contains(
+            "unknown: 1 unchanged package(s) (legacy-consumer): package relations are unknown"
+        ),
         "{plan}"
     );
     assert!(

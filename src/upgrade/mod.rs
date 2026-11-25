@@ -124,7 +124,8 @@ struct UpgradePlan<'a> {
 
 fn build_plan<'a>(root: &Path, index: &'a repo::Index, recipes: &Path) -> Result<UpgradePlan<'a>> {
     let entries = Db::new(root).installed()?;
-    let states = crate::adapters::installed_metadata::capture(root, &entries);
+    let mut states = crate::adapters::installed_metadata::capture(root, &entries);
+    crate::adapters::installed_metadata::backfill_from_index(&mut states, &entries, index);
     let installed_map = entries.into_iter().map(|e| (e.name.clone(), e)).collect();
     let selection = select_package_upgrades(index, &states, recipes)?;
     let assessment = assess_selection(&selection, &states)?;

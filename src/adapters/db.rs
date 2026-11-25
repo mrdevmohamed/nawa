@@ -291,6 +291,21 @@ impl Db {
         Ok(())
     }
 
+    /// The `.PKGINFO` the package was installed with, verbatim. The package
+    /// cache under `var/cache` may be emptied at any time (the live images do
+    /// exactly that), so what a package declares about its runtime
+    /// dependencies, provides, conflicts and replacements has to live with the
+    /// rest of its database entry.
+    pub fn save_pkginfo(&self, name: &str, raw: &str) -> Result<()> {
+        let dir = self.checked_dir(name)?;
+        crate::adapters::atomic::write_atomic(&dir.join("pkginfo"), raw.as_bytes(), 0o644)
+    }
+
+    /// `None` for entries installed before the copy was kept.
+    pub fn pkginfo(&self, name: &str) -> Option<String> {
+        std::fs::read_to_string(self.checked_dir(name).ok()?.join("pkginfo")).ok()
+    }
+
     pub fn remove(&self, name: &str) -> Result<()> {
         let dir = self.checked_dir(name)?;
         if dir.exists() {
