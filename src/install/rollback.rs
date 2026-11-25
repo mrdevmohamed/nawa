@@ -328,28 +328,6 @@ pub(crate) fn remove_with_linked(
     force: bool,
     file_journal: Option<FileJournalId>,
 ) -> Result<()> {
-    remove_with_linked_policy(name, root, force, file_journal, false)
-}
-
-/// Remove an old package only as part of a solver-approved replacement plan.
-/// This narrow path permits upgrading a protected core package, while ordinary
-/// remove, autoremove and group removal remain unable to delete it.
-pub(crate) fn remove_for_replacement_with_linked(
-    name: &str,
-    root: &Path,
-    force: bool,
-    file_journal: Option<FileJournalId>,
-) -> Result<()> {
-    remove_with_linked_policy(name, root, force, file_journal, true)
-}
-
-fn remove_with_linked_policy(
-    name: &str,
-    root: &Path,
-    force: bool,
-    file_journal: Option<FileJournalId>,
-    allow_protected_replacement: bool,
-) -> Result<()> {
     let db = Db::new(root);
     let _interrupts = interrupt::Guard::new();
     // Crash repair is the caller's responsibility: it runs before
@@ -360,11 +338,9 @@ fn remove_with_linked_policy(
         None => bail!("`{name}` is not installed"),
     };
 
-    if !allow_protected_replacement
-        && crate::domain::planning::removal::is_protected_package(name)
-    {
+    if crate::domain::planning::removal::is_protected_package(name) {
         bail!(
-            "cannot remove protected core package `{name}`; only an approved package replacement may replace it"
+            "cannot remove protected core package `{name}`; this protection cannot be bypassed with --force"
         );
     }
 
