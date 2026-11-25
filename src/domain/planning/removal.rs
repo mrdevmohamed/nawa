@@ -6,6 +6,14 @@
 use crate::domain::package::relations::Requirement;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+/// Core packages that must remain installed for Nawa and the target system to work.
+///
+/// This is deliberately independent of installed dependency metadata: old or
+/// incomplete package records must not make these packages look removable.
+pub(crate) fn is_protected_package(name: &str) -> bool {
+    matches!(name, "nawa" | "glibc")
+}
+
 /// One installed package as the removal planner sees it.
 #[derive(Debug, Clone)]
 pub(crate) struct InstalledPkg {
@@ -74,7 +82,11 @@ pub(crate) fn orphans(
     }
     installed
         .iter()
-        .filter(|e| e.is_dependency && !keep.contains(&e.name))
+        .filter(|e| {
+            e.is_dependency
+                && !keep.contains(&e.name)
+                && !is_protected_package(&e.name)
+        })
         .map(|e| e.name.clone())
         .collect()
 }
@@ -178,6 +190,20 @@ mod tests {
             orphans(&have, &known, true),
             ["gcc", "stale"],
             "--build-deps frees them"
+        );
+    }
+
+    #[test]
+    fn autoremove_never_selects_protected_core_packages() {
+        let have = installed(vec![
+            pkg("nawa", true, &[]),
+            pkg("glibc", true, &[]),
+            pkg("stale", true, &[]),
+        ]);
+        assert_eq!(
+            orphans(&have, &BTreeMap::new(), false),
+            ["stale"],
+            "core packages stay protected even when their dependency records are empty"
         );
     }
 
