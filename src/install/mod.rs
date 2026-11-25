@@ -360,7 +360,8 @@ pub(crate) use hooks::{exists_in_root, hook_needs_retry, resolve_in_root, retry_
 pub(crate) use journal::FileJournalId;
 pub(crate) use payload::install_archive_payload;
 pub(crate) use rollback::{
-    remove_with_linked, rollback, verify_retained_detached_proof, verify_retained_index_proof,
+    remove_for_replacement_with_linked, remove_with_linked, rollback,
+    verify_retained_detached_proof, verify_retained_index_proof,
 };
 pub(crate) use step::{record_install_outcome, record_remove_outcome};
 
@@ -393,6 +394,45 @@ mod tests {
         let out = dir.join(format!("{name}-{version}-1.nawa.tar.zst"));
         archive::create(&staging, &pkginfo, &out).unwrap();
         out
+    }
+
+    #[test]
+    fn protected_core_packages_cannot_be_removed_even_with_force() {
+        let base = tmpdir("protected-core-removal");
+        let root = base.join("root");
+
+        for name in ["nawa", "glibc"] {
+            let owned_file = format!("/usr/bin/{name}");
+            let package = make_pkg(
+                &base,
+                name,
+                "1.0",
+                &[(owned_file.as_str(), b"protected")],
+            );
+            install_archive(
+                &package,
+                &root,
+                false,
+                false,
+                None,
+                crate::adapters::db::InstallReason::Explicit,
+            )
+            .unwrap();
+
+            let error = remove_with(name, &root, true).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("protected core package"),
+                "{name}: {error:#}"
+            );
+            assert!(Db::new(&root).entry(name).unwrap().is_some());
+            assert!(root.join(owned_file.trim_start_matches('/')).is_file());
+
+            // Updates are still possible through the solver-approved replacement path.
+            rollback::remove_for_replacement_with_linked(name, &root, false, None).unwrap();
+            assert!(Db::new(&root).entry(name).unwrap().is_none());
+        }
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
