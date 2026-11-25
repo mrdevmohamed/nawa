@@ -249,6 +249,13 @@ pub(crate) fn install_archive_payload(
         tx.rollback();
         return Err(e);
     }
+    // The declared metadata is part of the entry too (see Db::save_pkginfo).
+    if let Err(e) = archive::read_pkginfo(archive_path)
+        .and_then(|raw| db.save_pkginfo(&name, &raw))
+    {
+        tx.rollback();
+        return Err(e).context(format!("could not record the metadata of {name}"));
+    }
     // Hooks are part of the package's recoverable db state. Persist them
     // before commit so a failure rolls the payload and db back together.
     if let Err(e) = save_hooks(&db, &name, &hooks) {
