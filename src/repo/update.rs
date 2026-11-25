@@ -7,7 +7,7 @@ use std::path::Path;
 
 use super::create::write_index_atomic;
 use super::model::*;
-use super::pack::pack_recipes;
+use super::pack::{pack_groups, pack_recipes};
 use super::validate::*;
 
 /// What changed since a base index (see `update_index`).
@@ -151,6 +151,8 @@ pub(crate) struct UpdateIndexFilesInputs<'a> {
     pub drop_packages: Vec<String>,
     pub locations_path: Option<&'a Path>,
     pub recipes: Option<(&'a Path, &'a str)>,
+    /// A group catalog to publish; without it the base groups entry is kept.
+    pub groups: Option<&'a Path>,
 }
 
 /// File-level `repo-update`: read the delta inputs, apply `update_index`, and
@@ -169,6 +171,7 @@ pub(crate) fn update_index_files(
         drop_packages,
         locations_path,
         recipes,
+        groups,
     } = inputs;
     let schema = base.repository.as_ref().map(|m| m.schema).unwrap_or(1);
     if schema < INDEX_SCHEMA_V3 && locations_path.is_some() {
@@ -202,11 +205,12 @@ pub(crate) fn update_index_files(
     if let (Some(entry), Some(loc)) = (&mut recipes_entry, &locations) {
         entry.download_url = loc.recipe_urls.get(&entry.file).cloned();
     }
+    let groups_entry = groups.map(|path| pack_groups(path, dir)).transpose()?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let index = update_index(
+    let mut index = update_index(
         base,
         IndexDelta {
             add,
@@ -216,6 +220,10 @@ pub(crate) fn update_index_files(
         recipes_entry,
         now,
     )?;
+    if groups_entry.is_some() {
+        index.groups = groups_entry;
+        index.validate()?;
+    }
     write_index_atomic(&index, out)?;
     crate::nawa_info!(
         "wrote index {} ({} packages, schema v{})",

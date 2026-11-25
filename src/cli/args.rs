@@ -340,6 +340,10 @@ pub(crate) enum Cmd {
         /// Revision recorded for --recipes (commit sha or tag)
         #[arg(long, requires = "recipes")]
         recipes_rev: Option<String>,
+        /// Publish this validated group catalog as signed index metadata
+        /// (without it the base index keeps its groups entry)
+        #[arg(long)]
+        groups: Option<PathBuf>,
         /// Signing key; the updated index is always signed
         #[arg(long)]
         key: Option<PathBuf>,
