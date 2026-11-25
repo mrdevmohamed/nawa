@@ -809,6 +809,74 @@ mod tests {
     }
 
     #[test]
+    fn upgrade_keeps_a_modified_etc_file_the_new_version_dropped() {
+        let base = tmpdir("etcdropkeep");
+        let root = base.join("root");
+        let v1 = make_pkg(
+            &base,
+            "srv",
+            "1.0",
+            &[("/etc/state.conf", b"placeholder\n"), ("/usr/bin/srv", b"bin1")],
+        );
+        let v2 = make_pkg(&base, "srv", "2.0", &[("/usr/bin/srv", b"bin2")]);
+        install_archive(
+            &v1,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
+        // the machine (or the administrator) replaced the file
+        std::fs::write(root.join("etc/state.conf"), b"machine state\n").unwrap();
+        install_archive(
+            &v2,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(root.join("etc/state.conf")).unwrap(),
+            b"machine state\n"
+        );
+        // the rest of the upgrade went through
+        assert_eq!(std::fs::read(root.join("usr/bin/srv")).unwrap(), b"bin2");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn upgrade_removes_an_untouched_etc_file_the_new_version_dropped() {
+        let base = tmpdir("etcdropgone");
+        let root = base.join("root");
+        let v1 = make_pkg(&base, "srv", "1.0", &[("/etc/old.conf", b"shipped\n")]);
+        let v2 = make_pkg(&base, "srv", "2.0", &[("/usr/bin/srv", b"bin2")]);
+        install_archive(
+            &v1,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
+        install_archive(
+            &v2,
+            &root,
+            false,
+            true,
+            None,
+            crate::adapters::db::InstallReason::Explicit,
+        )
+        .unwrap();
+        assert!(!root.join("etc/old.conf").exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn unmodified_etc_files_upgrade_in_place() {
         let base = tmpdir("etcsame");
         let root = base.join("root");

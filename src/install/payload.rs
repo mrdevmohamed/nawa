@@ -202,6 +202,7 @@ pub(crate) fn install_archive_payload(
         &old_files,
         &staged_files,
         &owners,
+        &old_hashes,
     )?;
 
     // last point where backing out is safe: the files are in place but the
@@ -518,6 +519,13 @@ fn record_artifact(
 /// Move the files a previous version owned and the new one dropped into the
 /// undo journal; returns the now-obsolete directories, removed after commit.
 /// Never touches a path another installed package also lists.
+///
+/// Config protection applies here as it does to files that change: a file
+/// under `<root>/etc` that the new version no longer ships is only removed
+/// when the on-disk copy still matches the hash recorded at install time. A
+/// copy the administrator or the machine changed (or one with no recorded
+/// baseline) is left in place, now owned by nobody.
+#[allow(clippy::too_many_arguments)]
 fn retire_obsolete_files(
     db: &Db,
     tx: &mut Tx,
@@ -526,6 +534,7 @@ fn retire_obsolete_files(
     old_files: &[String],
     staged_files: &[String],
     owners: &std::collections::HashMap<String, String>,
+    old_hashes: &std::collections::HashMap<String, String>,
 ) -> Result<Vec<PathBuf>> {
     let mut obsolete_dirs: Vec<PathBuf> = Vec::new();
     if !old_files.is_empty() {
@@ -544,6 +553,14 @@ fn retire_obsolete_files(
             match std::fs::symlink_metadata(&p) {
                 // directories are removed after the commit (only if empty)
                 Ok(md) if md.is_dir() => obsolete_dirs.push(p),
+                // a config file nobody touched goes with the package; one that
+                // was changed locally stays
+                Ok(_) if is_under_etc(&p, root) && changed_since_install(&p, f, old_hashes) => {
+                    crate::nawa_note!(
+                        "kept {} (no longer shipped by {name}, but changed locally)",
+                        p.display()
+                    );
+                }
                 // files are moved into the undo journal, not deleted yet
                 Ok(_) => {
                     let _ = tx.remove(&p);
@@ -767,6 +784,20 @@ pub(crate) fn is_under_etc(p: &Path, root: &Path) -> bool {
             .map(|c| c.as_os_str() == "etc")
             .unwrap_or(false),
         Err(_) => false,
+    }
+}
+
+/// Whether an `/etc` file differs from what its package installed. Without a
+/// recorded baseline (an entry from before hashes were kept) the answer is
+/// yes: keeping a file is the safe mistake, deleting one is not.
+fn changed_since_install(
+    path: &Path,
+    pkgpath: &str,
+    old_hashes: &std::collections::HashMap<String, String>,
+) -> bool {
+    match old_hashes.get(pkgpath) {
+        Some(h) => path_hash(path).as_deref() != Some(h.as_str()),
+        None => true,
     }
 }
 
