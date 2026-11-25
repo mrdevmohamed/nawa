@@ -554,7 +554,7 @@ fn install_one(
                     .unwrap_or(""),
             )?;
             let journal = install::FileJournalId::for_step(recorder.tx(), number);
-            let result = install::remove_for_replacement_with_linked(&replacement.name, &ctx.root, false, journal)
+            let result = install::remove_with_linked(&replacement.name, &ctx.root, false, journal)
                 .and_then(|()| {
                     if db.entry(&replacement.name)?.is_some() {
                         bail!("replacement removal failed its database postcondition");
