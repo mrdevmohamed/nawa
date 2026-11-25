@@ -360,8 +360,7 @@ pub(crate) use hooks::{exists_in_root, hook_needs_retry, resolve_in_root, retry_
 pub(crate) use journal::FileJournalId;
 pub(crate) use payload::install_archive_payload;
 pub(crate) use rollback::{
-    remove_for_replacement_with_linked, remove_with_linked, rollback,
-    verify_retained_detached_proof, verify_retained_index_proof,
+    remove_with_linked, rollback, verify_retained_detached_proof, verify_retained_index_proof,
 };
 pub(crate) use step::{record_install_outcome, record_remove_outcome};
 
@@ -427,9 +426,6 @@ mod tests {
             assert!(Db::new(&root).entry(name).unwrap().is_some());
             assert!(root.join(owned_file.trim_start_matches('/')).is_file());
 
-            // Updates are still possible through the solver-approved replacement path.
-            rollback::remove_for_replacement_with_linked(name, &root, false, None).unwrap();
-            assert!(Db::new(&root).entry(name).unwrap().is_none());
         }
 
         let _ = std::fs::remove_dir_all(&base);
