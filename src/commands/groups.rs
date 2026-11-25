@@ -175,6 +175,7 @@ pub(crate) fn cmd_group_remove(ctx: &Ctx, id: &str, yes: bool) -> Result<()> {
         .iter()
         .filter(|name| installed_names.contains(*name))
         .filter(|name| !other_groups.contains(*name) && !explicit.contains(name.as_str()))
+        .filter(|name| !crate::domain::planning::removal::is_protected_package(*name))
         .cloned()
         .collect();
     candidates = plan::removal_order(&candidates, &installed);
