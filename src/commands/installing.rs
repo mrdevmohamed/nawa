@@ -721,6 +721,9 @@ pub(crate) fn cmd_remove(ctx: &Ctx, name: &str, force: bool, yes: bool) -> Resul
         Some(e) => e,
         None => bail!("`{name}` is not installed"),
     };
+    if crate::domain::planning::removal::is_protected_package(name) {
+        bail!("cannot remove protected core package `{name}`; it is required for a usable Faseela system");
+    }
     let dependents: Vec<String> = db
         .installed()?
         .into_iter()

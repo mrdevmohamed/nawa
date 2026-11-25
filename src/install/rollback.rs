@@ -338,6 +338,12 @@ pub(crate) fn remove_with_linked(
         None => bail!("`{name}` is not installed"),
     };
 
+    if crate::domain::planning::removal::is_protected_package(name) {
+        bail!(
+            "cannot remove protected core package `{name}`; this protection cannot be bypassed with --force"
+        );
+    }
+
     if !force {
         let dependents: Vec<String> = db
             .installed()?
