@@ -342,7 +342,7 @@ fn config_show_lists_repo_install_mode_and_system_file() {
     let out = ok(&o);
     // built-in default repository, install_mode from the system file
     assert!(
-        out.contains("mrdevmohamed/faseela-repo/releases/download/stable"),
+        out.contains("mrdevmohamed/faseela-repo/releases/download/stable-v5"),
         "{out}"
     );
     let line = out

@@ -36,7 +36,7 @@ pub(crate) const SYSCONF_DIR: &str = "/etc/nawa";
 /// optional `index.toml.sig` and the `*.nawa.tar.zst` archives are expected
 /// directly under this URL.
 pub(crate) const DEFAULT_REPO: &str =
-    "https://github.com/mrdevmohamed/faseela-repo/releases/download/stable";
+    "https://github.com/mrdevmohamed/faseela-repo/releases/download/stable-v5";
 
 /// Default parallel download workers (roadmap §7.2: conservative default,
 /// clamped to 1..=64 from all sources).
