@@ -89,6 +89,12 @@ fn upgrade_inner(
     print_plan(&plan);
 
     if plan.assessment.blocked() {
+        let replacement = plan.assessment.findings.iter().any(|f| {
+            f.package == "resolution" && f.detail.contains("must be an explicitly requested target")
+        });
+        if replacement {
+            anyhow::bail!("package upgrade assessment found incompatible state: the upgrade would pull in a package that replaces an installed one, which an upgrade never does on its own; install it explicitly, or for an init change review `nawa system plan` and `nawa system migrate plan`");
+        }
         anyhow::bail!("package upgrade assessment found incompatible state; review the reported dependencies, conflicts or replacements before retrying");
     }
 

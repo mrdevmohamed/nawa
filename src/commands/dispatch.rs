@@ -272,6 +272,7 @@ fn run_command(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             locations,
             recipes,
             recipes_rev,
+            groups,
             key,
         } => cmd_repo_update(
             &dir,
@@ -284,6 +285,7 @@ fn run_command(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             locations.as_deref(),
             recipes.as_deref(),
             recipes_rev.as_deref(),
+            groups.as_deref(),
             key.as_deref(),
         ),
         Cmd::Keygen { out } => cmd_keygen(out),

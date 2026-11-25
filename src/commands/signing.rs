@@ -82,6 +82,7 @@ pub(crate) fn cmd_repo_update(
     locations: Option<&Path>,
     recipes: Option<&Path>,
     recipes_rev: Option<&str>,
+    groups: Option<&Path>,
     key: Option<&Path>,
 ) -> Result<()> {
     // Resolve the signing key first: an update is always signed, and a
@@ -123,6 +124,7 @@ pub(crate) fn cmd_repo_update(
             drop_packages: drop,
             locations_path: locations,
             recipes: tree,
+            groups,
         },
     )?;
     let sp = sign::sign(&out, &signing_key)?;

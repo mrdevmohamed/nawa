@@ -602,6 +602,76 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    #[test]
+    fn repo_update_publishes_a_group_catalog_and_keeps_it_otherwise() {
+        let base = scratch("groups");
+        let a = base.join("a");
+        std::fs::create_dir_all(&a).unwrap();
+        mk_archive(&base, &a, "demo", "1.0", 1);
+        let loc = base.join("loc.toml");
+        std::fs::write(&loc, "schema = 1\n[package_urls]\n\"demo-1.0-1.nawa.tar.zst\" = \"https://github.com/e/r/releases/download/packages-0001/demo.nawa.tar.zst\"\n").unwrap();
+        let idx = create_index_with_locations(
+            &a,
+            &base.join("a.toml"),
+            None,
+            INDEX_SCHEMA_V3,
+            Some(&loc),
+        )
+        .unwrap();
+        assert!(idx.groups.is_none());
+
+        let catalog = base.join("catalog-source.toml");
+        std::fs::write(
+            &catalog,
+            "[[group]]\nschema = 1\nid = \"dev\"\nname = \"Development\"\nmandatory = [\"demo\"]\n",
+        )
+        .unwrap();
+        let out_dir = base.join("out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let out = out_dir.join("index.toml");
+        let updated = update_index_files(
+            &idx,
+            &out_dir,
+            &out,
+            UpdateIndexFilesInputs {
+                groups: Some(&catalog),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let entry = updated.groups.as_ref().expect("groups entry");
+        assert_eq!(entry.file, "groups.toml");
+        assert_eq!(
+            entry.sha256,
+            crate::fetch::sha256_of_file(&out_dir.join("groups.toml")).unwrap()
+        );
+        assert_eq!(
+            load_index(&out).unwrap().groups.unwrap().sha256,
+            entry.sha256
+        );
+
+        // a later update without --groups keeps the entry the base carries
+        let out2 = out_dir.join("index2.toml");
+        let kept = update_index_files(&updated, &out_dir, &out2, UpdateIndexFilesInputs::default())
+            .unwrap();
+        assert_eq!(kept.groups.unwrap().sha256, entry.sha256);
+
+        // an invalid catalog is refused before anything is published
+        let bad = base.join("bad.toml");
+        std::fs::write(&bad, "# no groups\n").unwrap();
+        assert!(update_index_files(
+            &idx,
+            &out_dir,
+            &out2,
+            UpdateIndexFilesInputs {
+                groups: Some(&bad),
+                ..Default::default()
+            },
+        )
+        .is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     // ---- B3 chain: schema-v4 indexes --------------------------------------
 
     #[test]

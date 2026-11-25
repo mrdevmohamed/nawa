@@ -169,6 +169,10 @@ pub(crate) fn assess(
             }
         }
     }
+    // When the resolver could not build a consistent target set, `final_state`
+    // is only the proposed upgrades without the dependencies it would have
+    // added, so every unmet requirement would just repeat the resolution error
+    // once per package. That error is the finding; the rest is not evidence.
     if !report.changes.is_empty() || !removals.is_empty() {
         for (name, state) in &final_state {
             match &state.metadata.rundeps {
@@ -178,7 +182,7 @@ pub(crate) fn assess(
                         Ok(requirement) => {
                             let satisfied = final_state.get(&requirement.name).is_some_and(|p| requirement.matches(&p.version));
                             // Assess all new requirements and only affected retained edges.
-                            if !satisfied && (changed.contains(name.as_str()) || changed.contains(requirement.name.as_str()) || removals.contains(&requirement.name)) {
+                            if !satisfied && resolution_error.is_none() && (changed.contains(name.as_str()) || changed.contains(requirement.name.as_str()) || removals.contains(&requirement.name)) {
                                 add(Severity::Incompatible, name, format!("resulting package set does not satisfy runtime requirement {}", requirement.canonical()));
                             }
                         }
@@ -342,5 +346,29 @@ mod tests {
         );
         assert!(report.blocked());
         assert_eq!(report.findings.len(), 2);
+    }
+    #[test]
+    fn a_failed_resolution_is_not_repeated_once_per_unmet_requirement() {
+        let installed: BTreeMap<_, _> = [
+            ("app".to_string(), state("1-1", &["libfoo"])),
+            ("tool".to_string(), state("1-1", &["libfoo"])),
+        ]
+        .into();
+        let changes = vec![change("app", state("1-2", &["libfoo"]))];
+        let failed = assess(&installed, changes.clone(), &[], Some("replacement by x"));
+        assert!(
+            failed
+                .findings
+                .iter()
+                .all(|f| !f.detail.contains("does not satisfy")),
+            "{:#?}",
+            failed.findings
+        );
+        assert!(failed.blocked());
+        // the same plan without a resolution failure still reports the unmet edge
+        let resolved = assess(&installed, changes, &[], None);
+        assert!(resolved.findings.iter().any(|f| f
+            .detail
+            .contains("does not satisfy runtime requirement libfoo")));
     }
 }
